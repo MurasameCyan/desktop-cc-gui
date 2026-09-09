@@ -137,18 +137,9 @@ pub fn file_tree_colors(
     path: &str,
     files: &[String],
 ) -> HashMap<String, &'static str> {
-    let Some(root) = std::fs::canonicalize(std::path::Path::new(path)).ok() else {
+    let Some(repo) = open_exact_repo(std::path::Path::new(path)) else {
         return HashMap::new();
     };
-    let Ok(repo) = Repository::open(&root) else {
-        return HashMap::new();
-    };
-    let Some(workdir) = repo.workdir() else {
-        return HashMap::new();
-    };
-    if std::fs::canonicalize(workdir).ok().as_deref() != Some(root.as_path()) {
-        return HashMap::new();
-    }
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(false);
     let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
