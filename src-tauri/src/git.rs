@@ -167,9 +167,10 @@ pub fn file_tree_colors(
                 if files.iter().any(|f| f == rel_file) {
                     out.insert(rel_file.to_string(), color);
                 }
-                // …and ancestor aggregation: a directory inherits the worst
-                // state of anything under it (untracked beats modified), so
-                // parents light up without being expanded.
+                // …and ancestor aggregation: a directory inherits the state
+                // of anything under it so parents light up without being
+                // expanded. Modified (uncommitted) wins over untracked — a
+                // folder holding both paints orange, per the tree spec.
                 let mut dir = Path::new(rel_file);
                 while let Some(parent) = dir.parent() {
                     if parent.as_os_str().is_empty() {
@@ -178,7 +179,7 @@ pub fn file_tree_colors(
                     let key = parent.to_string_lossy().into_owned();
                     if files.iter().any(|f| f == &key) {
                         let next = match out.get(&key).copied() {
-                            Some("untracked") => "untracked",
+                            Some("modified") => "modified",
                             _ => color,
                         };
                         out.insert(key, next);
@@ -203,13 +204,13 @@ pub fn file_tree_colors(
         if summary.changed + summary.untracked == 0 {
             continue;
         }
-        let color = if summary.untracked > 0 {
-            "untracked"
-        } else {
+        let color = if summary.changed > 0 {
             "modified"
+        } else {
+            "untracked"
         };
         let next = match out.get(name.as_str()).copied() {
-            Some("untracked") => "untracked",
+            Some("modified") => "modified",
             _ => color,
         };
         out.insert(name.clone(), next);
@@ -904,6 +905,10 @@ mod tests {
         commit_file(&repo, "clean.txt", "clean\n");
         std::fs::create_dir_all(repo_root.join("sub/deep")).unwrap();
         std::fs::write(repo_root.join("sub/deep/new.txt"), "x\n").unwrap();
+        std::fs::create_dir_all(repo_root.join("mixed")).unwrap();
+        commit_file(&repo, "mixed/tracked.txt", "clean\n");
+        std::fs::write(repo_root.join("mixed/tracked.txt"), "dirty\n").unwrap();
+        std::fs::write(repo_root.join("mixed/extra.txt"), "new\n").unwrap();
         std::fs::create_dir(repo_root.join("edited")).unwrap();
         commit_file(&repo, "edited/file.txt", "clean\n");
         std::fs::write(repo_root.join("edited/file.txt"), "dirty\n").unwrap();
@@ -913,14 +918,18 @@ mod tests {
             &[
                 "clean.txt".to_string(),
                 "sub".to_string(),
+                "mixed".to_string(),
                 "edited".to_string(),
             ],
         );
 
         assert_eq!(colors.get("clean.txt"), None, "colors={colors:?}");
-        // `sub` holds an untracked file three levels down: untracked wins.
+        // `sub` holds only an untracked file deep down: untracked (green).
         assert_eq!(colors.get("sub"), Some(&"untracked"), "colors={colors:?}");
-        // `edited` holds a modified file: modified.
+        // `mixed` holds a modified AND an untracked file: modified (orange)
+        // wins, per the tree color spec.
+        assert_eq!(colors.get("mixed"), Some(&"modified"), "colors={colors:?}");
+        // `edited` holds only a modified file: modified.
         assert_eq!(colors.get("edited"), Some(&"modified"), "colors={colors:?}");
     }
 
@@ -970,9 +979,11 @@ mod tests {
             &["inner-repo".to_string()],
         );
 
+        // Both a modified and an untracked file: modified (orange) wins per
+        // the tree color spec.
         assert_eq!(
             colors.get("inner-repo"),
-            Some(&"untracked"),
+            Some(&"modified"),
             "colors={colors:?}"
         );
     }

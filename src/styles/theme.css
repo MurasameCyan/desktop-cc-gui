@@ -282,10 +282,10 @@
   --color-status-rose-text:         var(--color-rose-800);
   --color-status-cyan-background:   var(--color-cyan-200);
   --color-status-cyan-text:         var(--color-cyan-800);
+  --color-status-green-background:  var(--color-green-200);
+  --color-status-green-text:        var(--color-green-600);
   --color-status-blue-background:   var(--color-blue-200);
   --color-status-blue-text:         var(--color-blue-800);
-  --color-status-purple-background: var(--color-purple-100);
-  --color-status-purple-text:       var(--color-purple-600);
 
   /* Placeholder colors that don't map cleanly to existing text tokens */
   --color-text-error-placeholder: var(--color-red-400);
@@ -473,10 +473,10 @@
   --color-status-rose-text:         var(--color-rose-500);
   --color-status-cyan-background:   color-mix(in srgb, var(--color-cyan-950) 60%, transparent);
   --color-status-cyan-text:         var(--color-cyan-400);
+  --color-status-green-background:  color-mix(in srgb, var(--color-green-950) 60%, transparent);
+  --color-status-green-text:        var(--color-green-400);
   --color-status-blue-background:   color-mix(in srgb, var(--color-blue-950) 60%, transparent);
   --color-status-blue-text:         var(--color-blue-300);
-  --color-status-purple-background: color-mix(in srgb, var(--color-purple-900) 50%, transparent);
-  --color-status-purple-text:       var(--color-purple-300);
 
   --color-pill-tab-blue-selected-background: color-mix(in srgb, var(--color-accent-950) 60%, transparent);
   --color-pill-tab-blue-hover-background: var(--color-neutral-800);
@@ -594,10 +594,10 @@
   --color-status-rose-text:         var(--color-status-rose-text);
   --color-status-cyan-background:   var(--color-status-cyan-background);
   --color-status-cyan-text:         var(--color-status-cyan-text);
+  --color-status-green-background:  var(--color-status-green-background);
+  --color-status-green-text:        var(--color-status-green-text);
   --color-status-blue-background:   var(--color-status-blue-background);
   --color-status-blue-text:         var(--color-status-blue-text);
-  --color-status-purple-background: var(--color-status-purple-background);
-  --color-status-purple-text:       var(--color-status-purple-text);
 
   --color-text-error-placeholder: var(--color-text-error-placeholder);
 

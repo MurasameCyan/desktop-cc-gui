@@ -101,8 +101,10 @@ const TreeRow = memo(function TreeRow({
         <span
           className={cx(
             "min-w-0 truncate",
-            node.color === "untracked" && "text-state-success-text",
-            node.color === "modified" && "text-status-yellow-text",
+            // Spec: untracked → green, modified → orange, dirty repo root →
+            // blue (folder containing both kinds takes modified's orange).
+            node.color === "untracked" && "text-status-green-text",
+            node.color === "modified" && "text-text-warning-primary",
             node.color === "dirtyRepository" && "text-status-blue-text",
           )}
         >
