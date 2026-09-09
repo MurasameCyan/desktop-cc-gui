@@ -104,11 +104,12 @@ const TreeRow = memo(function TreeRow({
             // natural width (truncating only when it alone overflows the
             // row), so the badge below yields space instead.
             "min-w-0 max-w-full shrink-0 truncate",
-            // Spec: untracked → green, modified → orange, dirty repo root →
-            // blue (folder containing both kinds takes modified's orange).
+            // Spec: untracked files → green, modified files → orange, and
+            // repo-root rows (workspace repo root + nested repos) → blue.
+            // Plain folders never carry color.
             node.color === "untracked" && "text-status-green-text",
             node.color === "modified" && "text-text-warning-primary",
-            node.color === "dirtyRepository" && "text-status-blue-text",
+            node.color === "repository" && "text-status-blue-text",
           )}
         >
           {node.name}
@@ -200,13 +201,9 @@ export function FileTree() {
         expanded: !!expanded[root],
         loading: !!loadingDirs[root],
         repository: repositories[root],
-        // The 0.9.x tree tinted a dirty workspace-repo folder name; mirror
-        // that with blue whenever the root repository has uncommitted work.
-        color:
-          repositories[root] &&
-          repositories[root].changed + repositories[root].untracked > 0
-            ? "dirtyRepository"
-            : undefined,
+        // Repo-root rows are blue (the workspace repo root row here; nested
+        // repo dirs get theirs from the backend color pass).
+        color: repositories[root] ? "repository" : undefined,
       });
     }
     const walk = (dirPath: string, depth: number) => {

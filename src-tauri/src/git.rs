@@ -180,28 +180,15 @@ pub fn file_tree_colors(
         let _ = walk_ok;
     }
 
-    // Nested repo roots among the requested names: their own status wins.
+    // Repo-root directories among the requested names paint blue — the tree
+    // marks repository boundaries (nested repos like `CialloAssist` next to
+    // plain folders like `ai-client-integration`), independent of their own
+    // dirty state: the branch badge already carries that.
     for name in files {
         let dir = listed.join(name);
-        if !dir.join(".git").exists() {
-            continue;
+        if dir.join(".git").exists() && exact_repository_summary(&dir).is_some() {
+            out.insert(name.clone(), "repository");
         }
-        let Some(summary) = exact_repository_summary(&dir) else {
-            continue;
-        };
-        if summary.changed + summary.untracked == 0 {
-            continue;
-        }
-        let color = if summary.changed > 0 {
-            "modified"
-        } else {
-            "untracked"
-        };
-        let next = match out.get(name.as_str()).copied() {
-            Some("modified") => "modified",
-            _ => color,
-        };
-        out.insert(name.clone(), next);
     }
     out
 }
@@ -965,11 +952,10 @@ mod tests {
             &["inner-repo".to_string()],
         );
 
-        // Both a modified and an untracked file: modified (orange) wins per
-        // the tree color spec.
+        // Repo roots are blue regardless of their internal state.
         assert_eq!(
             colors.get("inner-repo"),
-            Some(&"modified"),
+            Some(&"repository"),
             "colors={colors:?}"
         );
     }
