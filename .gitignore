@@ -26,4 +26,7 @@ Thumbs.db
 .vscode/
 skills-lock.json
 boardui.dev.env
-CLAUDE.md
+CLAUDE.mdartifacts/
+artifact.zip
+smoke*.png
+rust-test.log
