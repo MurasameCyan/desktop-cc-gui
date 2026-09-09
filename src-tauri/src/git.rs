@@ -141,32 +141,54 @@ pub fn file_tree_colors(
         return HashMap::new();
     };
     let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(false);
+    opts.include_untracked(true)
+        // Untracked directories collapse to `dir/` in the status list; with
+        // recursion the entries expand, but `recurse_untracked_dirs(false)`
+        // keeps the walk cheap — expand the collapsed form manually below.
+        .recurse_untracked_dirs(false);
     let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
         return HashMap::new();
     };
-    let wanted: std::collections::HashSet<&str> =
-        files.iter().map(String::as_str).collect();
-    let mut out = HashMap::new();
+    let mut out: HashMap<String, &'static str> = HashMap::new();
     for entry in statuses.iter() {
-        let Some(file) = entry.path().filter(|file| !file.is_empty()) else {
+        let Some(raw) = entry.path().filter(|file| !file.is_empty()) else {
             continue;
         };
-        if !wanted.contains(file) {
-            continue;
-        }
+        // A collapsed untracked directory (`sub/`) must still color every
+        // ancestor the tree asks about, so strip the trailing slash before
+        // the direct-hit and prefix-aggregation passes.
+        let file = raw.strip_suffix('/').unwrap_or(raw);
         let status = entry.status();
         // INDEX_NEW is "added" (a new file staged but never committed) — its
         // worktree side is a plain untracked file, so treat it as untracked.
-        let color = if status.intersects(
-            git2::Status::INDEX_NEW
-                | git2::Status::WT_NEW,
-        ) {
+        let color = if status.intersects(git2::Status::INDEX_NEW | git2::Status::WT_NEW) {
             "untracked"
         } else {
             "modified"
         };
-        out.insert(file.to_string(), color);
+        // Direct hits for files asked for at this level…
+        if files.iter().any(|f| f == file) {
+            out.insert(file.to_string(), color);
+        }
+        // …and prefix aggregation: a directory inherits the "worst" state of
+        // anything under it, so parents light up without expanding. Untracked
+        // wins over modified (the tree shows both as distinct colors and a
+        // parent containing new files is most interesting).
+        let mut dir = Path::new(file);
+        while let Some(parent) = dir.parent() {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            let key = parent.to_string_lossy().into_owned();
+            if files.iter().any(|f| f == &key) {
+                let next = match out.get(&key).copied() {
+                    Some("untracked") => "untracked",
+                    _ => color,
+                };
+                out.insert(key, next);
+            }
+            dir = parent;
+        }
     }
     out
 }
@@ -848,5 +870,33 @@ mod tests {
         );
 
         assert!(colors.is_empty());
+    }
+
+    #[test]
+    fn colors_aggregate_up_through_parent_directories() {
+        let scratch = Scratch::new();
+        let repo_root = scratch.0.join("repo");
+        let repo = Repository::init(&repo_root).unwrap();
+        commit_file(&repo, "clean.txt", "clean\n");
+        std::fs::create_dir_all(repo_root.join("sub/deep")).unwrap();
+        std::fs::write(repo_root.join("sub/deep/new.txt"), "x\n").unwrap();
+        std::fs::create_dir(repo_root.join("edited")).unwrap();
+        commit_file(&repo, "edited/file.txt", "clean\n");
+        std::fs::write(repo_root.join("edited/file.txt"), "dirty\n").unwrap();
+
+        let colors = file_tree_colors(
+            &repo_root.to_string_lossy(),
+            &[
+                "clean.txt".to_string(),
+                "sub".to_string(),
+                "edited".to_string(),
+            ],
+        );
+
+        assert_eq!(colors.get("clean.txt"), None, "colors={colors:?}");
+        // `sub` holds an untracked file three levels down: untracked wins.
+        assert_eq!(colors.get("sub"), Some(&"untracked"), "colors={colors:?}");
+        // `edited` holds a modified file: modified.
+        assert_eq!(colors.get("edited"), Some(&"modified"), "colors={colors:?}");
     }
 }

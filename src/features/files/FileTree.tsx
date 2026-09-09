@@ -166,13 +166,34 @@ export function FileTree() {
   const repositories = useFilesStore((s) => s.repositories);
   const fileColors = useFilesStore((s) => s.fileColors);
 
-  // Load the root level whenever it changes and hasn't been fetched yet.
+  // Load the root level and keep the synthetic root row expanded: the tree
+  // roots at the workspace, so its children are always the first content.
   useEffect(() => {
-    if (root) void ensureDir(root);
-  }, [root, ensureDir]);
+    if (root) {
+      void ensureDir(root);
+      if (!useFilesStore.getState().expanded[root]) void toggleDir(root);
+    }
+  }, [root, ensureDir, toggleDir]);
 
   const visible = useMemo<VisibleNode[]>(() => {
     const out: VisibleNode[] = [];
+    // Synthetic root row: the 截图 design shows the workspace root itself as
+    // the first tree row with its repository badge (`open-reverselab main
+    // M1 ?12`), clicking it expands the tree below it.
+    if (root) {
+      out.push({
+        name: fileName(root),
+        isDir: true,
+        size: 0,
+        mtimeMs: 0,
+        path: root,
+        depth: 0,
+        expanded: !!expanded[root],
+        loading: !!loadingDirs[root],
+        repository: repositories[root],
+        color: undefined,
+      });
+    }
     const walk = (dirPath: string, depth: number) => {
       const entries = children[dirPath];
       if (!entries) return;
@@ -185,14 +206,14 @@ export function FileTree() {
           expanded: e.isDir && !!expanded[path],
           loading: e.isDir && !!loadingDirs[path],
           repository: e.isDir ? repositories[path] : undefined,
-          color: e.isDir ? undefined : fileColors[dirPath]?.[e.name],
+          color: fileColors[dirPath]?.[e.name],
         });
         // Only already-expanded levels are walked — the tree never loads
         // recursively; each expansion triggers exactly one listDir call.
         if (e.isDir && expanded[path]) walk(path, depth + 1);
       }
     };
-    if (root) walk(root, 0);
+    if (root && expanded[root]) walk(root, 1);
     return out;
   }, [children, expanded, loadingDirs, repositories, fileColors, root]);
 
