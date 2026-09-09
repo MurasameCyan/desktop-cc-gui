@@ -237,19 +237,6 @@ export function FileTree() {
       }
     };
     if (root && expanded[root]) walk(root, 1);
-    // Bottom-up propagation (0.9.x behavior): a dirty repository lights up
-    // every loaded ancestor folder, so `Project` tints when the nested repo
-    // under it has uncommitted work. Backend-derived colors win.
-    for (let i = out.length - 1; i >= 0; i--) {
-      const node = out[i];
-      if (node.color !== "dirtyRepository" || !node.isDir) continue;
-      for (let j = i - 1; j >= 0; j--) {
-        const ancestor = out[j];
-        if (ancestor.isDir && !ancestor.color && node.path.startsWith(ancestor.path + "/")) {
-          ancestor.color = "dirtyRepository";
-        }
-      }
-    }
     return out;
   }, [children, expanded, loadingDirs, repositories, fileColors, root]);
 
