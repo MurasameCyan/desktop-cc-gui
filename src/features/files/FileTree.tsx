@@ -134,10 +134,10 @@ const TreeRow = memo(function TreeRow({
             ) : (
               <>
                 {node.repository.changed > 0 && (
-                  <span className="shrink-0 text-text-tertiary" aria-hidden>M{node.repository.changed}</span>
+                  <span className="shrink-0 text-text-warning-primary" aria-hidden>M{node.repository.changed}</span>
                 )}
                 {node.repository.untracked > 0 && (
-                  <span className="shrink-0 text-text-tertiary" aria-hidden>?{node.repository.untracked}</span>
+                  <span className="shrink-0 text-status-green-text" aria-hidden>?{node.repository.untracked}</span>
                 )}
               </>
             )}
