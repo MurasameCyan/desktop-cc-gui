@@ -227,8 +227,10 @@ export interface RepositorySummary {
   untracked: number;
 }
 
-/** Per-file git state for one loaded tree level: "modified" or "untracked". */
-export type FileTreeColor = "modified" | "untracked";
+/** Per-file/row git state for one loaded tree level. `dirtyRepository` is
+ *  frontend-derived: an exact repo root whose workspace has uncommitted
+ *  changes (the root row's folder name tints blue, as in the 0.9.x tree). */
+export type FileTreeColor = "modified" | "untracked" | "dirtyRepository";
 
 export interface BranchInfo {
   name: string;

@@ -104,33 +104,6 @@ pub async fn git_repository_summaries(paths: Vec<String>) -> Vec<RepositorySumma
         .await
         .unwrap_or_default()
 }
-/// One file's tree-render class: `"none"` for tracked-and-clean paths, or
-/// `"modified"` / `"untracked"` for the two colors the file tree paints.
-/// Staged+worktree-dirty resolves to "modified" (the color follows the worst
-/// state); the compact bucket split in `RepositorySummary` stays separate.
-pub fn file_tree_color(repo: &Repository, path: &str) -> Option<&'static str> {
-    let statuses = repo
-        .status_file(Path::new(path))
-        .ok()?;
-    if statuses.contains(git2::Status::WT_NEW) && !statuses.intersects(git2::Status::INDEX_NEW) {
-        Some("untracked")
-    } else if statuses.intersects(
-        git2::Status::INDEX_NEW
-            | git2::Status::INDEX_MODIFIED
-            | git2::Status::INDEX_DELETED
-            | git2::Status::INDEX_RENAMED
-            | git2::Status::INDEX_TYPECHANGE
-            | git2::Status::WT_MODIFIED
-            | git2::Status::WT_DELETED
-            | git2::Status::WT_RENAMED
-            | git2::Status::WT_TYPECHANGE,
-    ) {
-        Some("modified")
-    } else {
-        None
-    }
-}
-
 /// Bulk colors for one loaded tree level. Two sources, merged:
 /// 1. The repo *containing* the listed directory (any depth — the workspace
 ///    root itself, an ancestor, or none). Status paths are repo-relative, so

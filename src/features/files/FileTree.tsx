@@ -103,6 +103,7 @@ const TreeRow = memo(function TreeRow({
             "min-w-0 truncate",
             node.color === "untracked" && "text-state-success-text",
             node.color === "modified" && "text-status-yellow-text",
+            node.color === "dirtyRepository" && "text-status-blue-text",
           )}
         >
           {node.name}
@@ -191,7 +192,13 @@ export function FileTree() {
         expanded: !!expanded[root],
         loading: !!loadingDirs[root],
         repository: repositories[root],
-        color: undefined,
+        // The 0.9.x tree tinted a dirty workspace-repo folder name; mirror
+        // that with blue whenever the root repository has uncommitted work.
+        color:
+          repositories[root] &&
+          repositories[root].changed + repositories[root].untracked > 0
+            ? "dirtyRepository"
+            : undefined,
       });
     }
     const walk = (dirPath: string, depth: number) => {
@@ -206,7 +213,15 @@ export function FileTree() {
           expanded: e.isDir && !!expanded[path],
           loading: e.isDir && !!loadingDirs[path],
           repository: e.isDir ? repositories[path] : undefined,
-          color: fileColors[dirPath]?.[e.name],
+          // A nested repository with uncommitted work tints its own folder
+          // blue (same rule as the root row), overriding the level's
+          // aggregated color — its dirt is its own, not the parent's.
+          color:
+            e.isDir &&
+            repositories[path] &&
+            repositories[path].changed + repositories[path].untracked > 0
+              ? "dirtyRepository"
+              : fileColors[dirPath]?.[e.name],
         });
         // Only already-expanded levels are walked — the tree never loads
         // recursively; each expansion triggers exactly one listDir call.
@@ -214,6 +229,19 @@ export function FileTree() {
       }
     };
     if (root && expanded[root]) walk(root, 1);
+    // Bottom-up propagation (0.9.x behavior): a dirty repository lights up
+    // every loaded ancestor folder, so `Project` tints when the nested repo
+    // under it has uncommitted work. Backend-derived colors win.
+    for (let i = out.length - 1; i >= 0; i--) {
+      const node = out[i];
+      if (node.color !== "dirtyRepository" || !node.isDir) continue;
+      for (let j = i - 1; j >= 0; j--) {
+        const ancestor = out[j];
+        if (ancestor.isDir && !ancestor.color && node.path.startsWith(ancestor.path + "/")) {
+          ancestor.color = "dirtyRepository";
+        }
+      }
+    }
     return out;
   }, [children, expanded, loadingDirs, repositories, fileColors, root]);
 
