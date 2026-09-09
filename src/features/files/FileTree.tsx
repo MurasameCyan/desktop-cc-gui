@@ -221,15 +221,11 @@ export function FileTree() {
           expanded: e.isDir && !!expanded[path],
           loading: e.isDir && !!loadingDirs[path],
           repository: e.isDir ? repositories[path] : undefined,
-          // A nested repository with uncommitted work tints its own folder
-          // blue (same rule as the root row), overriding the level's
-          // aggregated color — its dirt is its own, not the parent's.
-          color:
-            e.isDir &&
-            repositories[path] &&
-            repositories[path].changed + repositories[path].untracked > 0
-              ? "dirtyRepository"
-              : fileColors[dirPath]?.[e.name],
+          // Spec: plain folders never carry color; files take their git
+          // state; nested repo dirs take their own repo's status color from
+          // the backend (orange when modified, green when untracked-only).
+          // Blue stays exclusive to the workspace root row.
+          color: fileColors[dirPath]?.[e.name],
         });
         // Only already-expanded levels are walked — the tree never loads
         // recursively; each expansion triggers exactly one listDir call.
