@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import { ipc, type DirEntry, type FileContent } from "@/lib/ipc";
+import {
+  ipc,
+  type DirEntry,
+  type FileContent,
+  type FileTreeColor,
+  type RepositorySummary,
+} from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { writeStored } from "@/lib/storage";
 
@@ -45,6 +51,10 @@ interface FilesStore {
   loadingDirs: Record<string, true>;
   dirErrors: Record<string, string>;
   expanded: Record<string, true>;
+  /** Exact nested repository root -> compact Git status (branch + counts). */
+  repositories: Record<string, RepositorySummary>;
+  /** Loaded level -> per-file git color ("modified" / "untracked"). */
+  fileColors: Record<string, Record<string, FileTreeColor>>;
   /** Currently selected tree node (file or dir). */
   selectedPath: string | null;
   /** Whether the selected tree node is a directory. */
@@ -65,10 +75,14 @@ interface FilesStore {
   toggleDir: (path: string) => Promise<void>;
   /** Re-fetch a directory only if it has been loaded before. */
   invalidateDir: (path: string) => Promise<void>;
+  /** Refresh compact Git status for the directories of one loaded level. */
+  loadRepositories: (dirPath: string, entries: DirEntry[]) => Promise<void>;
   /** Re-fetch every loaded/expanded directory (titlebar refresh button). */
   refreshTree: () => Promise<void>;
   /** True while refreshTree is in flight. */
   refreshing: boolean;
+  /** Refresh per-file git colors for the files of one loaded level. */
+  loadFileColors: (dirPath: string, entries: DirEntry[]) => Promise<void>;
   selectPath: (path: string | null, isDir?: boolean) => void;
   /** Open a file as a center tab (or focus its existing tab). */
   openFile: (path: string) => Promise<void>;
@@ -100,6 +114,8 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   loadingDirs: {},
   dirErrors: {},
   expanded: {},
+  repositories: {},
+  fileColors: {},
   selectedPath: null,
   selectedIsDir: false,
   refreshing: false,
@@ -125,6 +141,8 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       loadingDirs: {},
       dirErrors: {},
       expanded: {},
+      repositories: {},
+      fileColors: {},
       selectedPath: null,
       selectedIsDir: false,
     });
@@ -148,6 +166,8 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
           dirErrors,
         };
       });
+      void get().loadRepositories(path, entries);
+      void get().loadFileColors(path, entries);
     } catch (e) {
       set((s) => {
         const loadingDirs = { ...s.loadingDirs };
@@ -157,6 +177,35 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
           dirErrors: { ...s.dirErrors, [path]: errorText(e) },
         };
       });
+    }
+  },
+
+  loadRepositories: async (dirPath, entries) => {
+    const paths = entries
+      .filter((entry) => entry.isDir)
+      .map((entry) => joinPath(dirPath, entry.name));
+    if (paths.length === 0) return;
+    try {
+      const summaries = await ipc.gitRepositorySummaries(paths);
+      // Non-repos are dropped: a stale entry must not survive a refresh.
+      const fresh: Record<string, RepositorySummary> = {};
+      for (const summary of summaries) fresh[summary.path] = summary;
+      set((s) => ({ repositories: { ...s.repositories, ...fresh } }));
+    } catch {
+      // File browsing stays usable when the batch status call fails.
+    }
+  },
+
+  loadFileColors: async (dirPath, entries) => {
+    const files = entries
+      .filter((entry) => !entry.isDir && !entry.name.startsWith("."))
+      .map((entry) => entry.name);
+    if (files.length === 0) return;
+    try {
+      const colors = await ipc.gitFileColors(dirPath, files);
+      set((s) => ({ fileColors: { ...s.fileColors, [dirPath]: colors } }));
+    } catch {
+      // Colors are cosmetic; keep the tree usable when the walk fails.
     }
   },
 
@@ -177,6 +226,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     try {
       const entries = await ipc.listDir(path);
       set((s) => ({ children: { ...s.children, [path]: entries } }));
+      void get().loadRepositories(path, entries);
     } catch {
       // Keep stale listing on refresh failure; the user can retry by toggling.
     }
@@ -186,8 +236,6 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     if (!s.root || s.refreshing) return;
     set({ refreshing: true });
     try {
-      // Loaded dirs re-fetch in place; expanded-but-never-loaded dirs (e.g.
-      // created externally) fetch for the first time.
       const dirs = new Set([...Object.keys(s.children), ...Object.keys(s.expanded)]);
       await Promise.all(
         [...dirs].map((dir) =>
@@ -328,6 +376,8 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       expanded: prune(s.expanded),
       loadingDirs: prune(s.loadingDirs),
       dirErrors: prune(s.dirErrors),
+      repositories: prune(s.repositories),
+      fileColors: prune(s.fileColors),
       selectedPath:
         s.selectedPath && (s.selectedPath === path || s.selectedPath.startsWith(path + "/"))
           ? null
@@ -355,6 +405,8 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       dirErrors: remap(s.dirErrors),
       selectedPath: s.selectedPath ? mapPath(s.selectedPath) : s.selectedPath,
       clipboard: s.clipboard ? { ...s.clipboard, path: mapPath(s.clipboard.path) } : s.clipboard,
+      repositories: remap(s.repositories),
+      fileColors: remap(s.fileColors),
     }));
     get().remapOpenFiles(from, to);
   },

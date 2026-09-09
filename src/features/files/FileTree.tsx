@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import Loader2 from "lucide-react/dist/esm/icons/loader-2";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import { cx } from "@/utils/cx";
-import { ipc, type DirEntry } from "@/lib/ipc";
+import { ipc, type DirEntry, type FileTreeColor, type RepositorySummary } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { ConfirmDialog, PromptDialog } from "@/components/dialogs";
 import { fileName, joinPath, parentPath, useFilesStore } from "./store";
@@ -17,6 +17,8 @@ export interface VisibleNode extends DirEntry {
   depth: number;
   expanded: boolean;
   loading: boolean;
+  repository?: RepositorySummary;
+  color?: FileTreeColor;
 }
 
 interface TreeRowProps {
@@ -56,6 +58,14 @@ const TreeRow = memo(function TreeRow({
     [node.name, node.isDir, node.expanded],
   );
 
+  // Same inline form as the changes panel: `branch ✓` when clean, else
+  // `branch M<n> ?<n>` (tracked changes first, then untracked).
+  const repositoryLabel = node.repository
+    ? node.repository.changed + node.repository.untracked === 0
+      ? `${node.repository.branch} ✓`
+      : `${node.repository.branch}${node.repository.changed > 0 ? ` M${node.repository.changed}` : ""}${node.repository.untracked > 0 ? ` ?${node.repository.untracked}` : ""}`
+    : null;
+
   return (
     <div
       onContextMenu={(e) => onContextMenu(e, node)}
@@ -88,7 +98,41 @@ const TreeRow = memo(function TreeRow({
             dangerouslySetInnerHTML={{ __html: iconSvg }}
           />
         )}
-        <span className="truncate">{node.name}</span>
+        <span
+          className={cx(
+            "min-w-0 truncate",
+            node.color === "untracked" && "text-state-success-text",
+            node.color === "modified" && "text-status-yellow-text",
+          )}
+        >
+          {node.name}
+        </span>
+        {node.repository ? (
+          <span
+            className={cx(
+              "ml-2 flex shrink-0 items-center gap-1 truncate text-caption-1-medium",
+              node.repository.changed + node.repository.untracked === 0
+                ? "text-state-success-text"
+                : "text-status-yellow-text",
+            )}
+            title={repositoryLabel ?? undefined}
+            aria-label={repositoryLabel ?? undefined}
+          >
+            <span className="shrink-0 max-w-40 truncate">{node.repository.branch}</span>
+            {node.repository.changed + node.repository.untracked === 0 ? (
+              <span aria-hidden>✓</span>
+            ) : (
+              <>
+                {node.repository.changed > 0 && (
+                  <span className="text-text-tertiary" aria-hidden>M{node.repository.changed}</span>
+                )}
+                {node.repository.untracked > 0 && (
+                  <span className="text-text-tertiary" aria-hidden>?{node.repository.untracked}</span>
+                )}
+              </>
+            )}
+          </span>
+        ) : null}
       </button>
       <button
         type="button"
@@ -119,6 +163,8 @@ export function FileTree() {
   const invalidateDir = useFilesStore((s) => s.invalidateDir);
   const selectPath = useFilesStore((s) => s.selectPath);
   const openFile = useFilesStore((s) => s.openFile);
+  const repositories = useFilesStore((s) => s.repositories);
+  const fileColors = useFilesStore((s) => s.fileColors);
 
   // Load the root level whenever it changes and hasn't been fetched yet.
   useEffect(() => {
@@ -138,6 +184,8 @@ export function FileTree() {
           depth,
           expanded: e.isDir && !!expanded[path],
           loading: e.isDir && !!loadingDirs[path],
+          repository: e.isDir ? repositories[path] : undefined,
+          color: e.isDir ? undefined : fileColors[dirPath]?.[e.name],
         });
         // Only already-expanded levels are walked — the tree never loads
         // recursively; each expansion triggers exactly one listDir call.
@@ -146,7 +194,7 @@ export function FileTree() {
     };
     if (root) walk(root, 0);
     return out;
-  }, [children, expanded, loadingDirs, root]);
+  }, [children, expanded, loadingDirs, repositories, fileColors, root]);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({

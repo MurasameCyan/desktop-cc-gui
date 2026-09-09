@@ -471,6 +471,7 @@ struct RenameSessionArgs {
 struct PathArgs {
     path: String,
 }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IdsArgs {
@@ -813,6 +814,14 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "git_status" => {
             let a: PathArgs = parse_args(&raw)?;
             ser(crate::git::git_status(a.path).await)
+        }
+        "git_repository_summaries" => {
+            let a: PathsArgs = parse_args(&raw)?;
+            ser(Ok(crate::git::git_repository_summaries(a.paths).await))
+        }
+        "git_file_colors" => {
+            let a: GitFilesArgs = parse_args(&raw)?;
+            ser(Ok(crate::git::git_file_colors(a.path, a.files)))
         }
         "git_diff" => {
             let a: GitDiffArgs = parse_args(&raw)?;

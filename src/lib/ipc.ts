@@ -219,6 +219,17 @@ export interface GitStatus {
   untracked: GitFileEntry[];
 }
 
+/** Compact status for a directory that is itself a Git worktree root. */
+export interface RepositorySummary {
+  path: string;
+  branch: string;
+  changed: number;
+  untracked: number;
+}
+
+/** Per-file git state for one loaded tree level: "modified" or "untracked". */
+export type FileTreeColor = "modified" | "untracked";
+
 export interface BranchInfo {
   name: string;
   isCurrent: boolean;
@@ -447,6 +458,10 @@ export const ipc = {
   revokeGrantedRoot: (path: string) => invoke<void>("revoke_granted_root", { path }),
   // git
   gitStatus: (path: string) => invoke<GitStatus>("git_status", { path }),
+  gitRepositorySummaries: (paths: string[]) =>
+    invoke<RepositorySummary[]>("git_repository_summaries", { paths }),
+  gitFileColors: (path: string, files: string[]) =>
+    invoke<Record<string, FileTreeColor>>("git_file_colors", { path, files }),
   gitDiff: (path: string, file: string, staged: boolean) =>
     invoke<string>("git_diff", { path, file, staged }),
   gitStage: (path: string, files: string[]) => invoke<void>("git_stage", { path, files }),

@@ -1,6 +1,7 @@
 use git2::{Repository, StatusOptions};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +21,168 @@ pub struct GitStatus {
     pub staged: Vec<GitFileEntry>,
     pub unstaged: Vec<GitFileEntry>,
     pub untracked: Vec<GitFileEntry>,
+}
+
+/// Compact status for a directory that is itself a Git worktree root,
+/// rendered inline in the file tree. Unlike `GitStatus` it carries no file
+/// paths or diff stats — only the branch plus change counts.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySummary {
+    pub path: String,
+    pub branch: String,
+    pub changed: usize,
+    pub untracked: usize,
+}
+
+/// Open `path` only when that directory is itself a worktree root. Standard
+/// worktrees have a `.git` directory; linked worktrees carry a `.git` file.
+/// The cheap `.git` existence guard avoids `Repository::discover` walking up
+/// and mislabeling every ordinary folder under the workspace repo. The
+/// canonicalized comparison then rejects a parent repo opened through a
+/// stale/odd `.git` layout.
+fn open_exact_repo(path: &std::path::Path) -> Option<Repository> {
+    if !path.join(".git").exists() {
+        return None;
+    }
+    let repo = Repository::open(path).ok()?;
+    let workdir = repo.workdir()?;
+    let expected = std::fs::canonicalize(path).ok()?;
+    let actual = std::fs::canonicalize(workdir).ok()?;
+    (actual == expected).then_some(repo)
+}
+
+fn exact_repository_summary(path: &std::path::Path) -> Option<RepositorySummary> {
+    let repo = open_exact_repo(path)?;
+    let branch = repo
+        .head()
+        .ok()
+        .and_then(|head| head.shorthand().map(str::to_string))
+        .unwrap_or_else(|| "HEAD".to_string());
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses = repo.statuses(Some(&mut opts)).ok()?;
+    // Paths can appear both staged and worktree-modified; count each file
+    // once per bucket so `M1` means one modified file, not one diff.
+    let mut changed = std::collections::HashSet::new();
+    let mut untracked = std::collections::HashSet::new();
+    for entry in statuses.iter() {
+        let Some(file) = entry
+            .path()
+            .filter(|file| !file.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let status = entry.status();
+        if status.contains(git2::Status::WT_NEW) && !status.contains(git2::Status::INDEX_NEW) {
+            untracked.insert(file);
+        } else {
+            changed.insert(file);
+        }
+    }
+    Some(RepositorySummary {
+        path: path.to_string_lossy().into_owned(),
+        branch,
+        changed: changed.len(),
+        untracked: untracked.len(),
+    })
+}
+
+/// Sync body of `git_repository_summaries`: one batch answers one loaded
+/// tree level, so a status walk per candidate stays off the IPC thread.
+fn repository_summaries_blocking(paths: Vec<String>) -> Vec<RepositorySummary> {
+    paths
+        .iter()
+        .filter_map(|path| exact_repository_summary(std::path::Path::new(path)))
+        .collect()
+}
+
+#[tauri::command]
+pub async fn git_repository_summaries(paths: Vec<String>) -> Vec<RepositorySummary> {
+    tauri::async_runtime::spawn_blocking(move || repository_summaries_blocking(paths))
+        .await
+        .unwrap_or_default()
+}
+/// One file's tree-render class: `"none"` for tracked-and-clean paths, or
+/// `"modified"` / `"untracked"` for the two colors the file tree paints.
+/// Staged+worktree-dirty resolves to "modified" (the color follows the worst
+/// state); the compact bucket split in `RepositorySummary` stays separate.
+pub fn file_tree_color(repo: &Repository, path: &str) -> Option<&'static str> {
+    let statuses = repo
+        .status_file(Path::new(path))
+        .ok()?;
+    if statuses.contains(git2::Status::WT_NEW) && !statuses.intersects(git2::Status::INDEX_NEW) {
+        Some("untracked")
+    } else if statuses.intersects(
+        git2::Status::INDEX_NEW
+            | git2::Status::INDEX_MODIFIED
+            | git2::Status::INDEX_DELETED
+            | git2::Status::INDEX_RENAMED
+            | git2::Status::INDEX_TYPECHANGE
+            | git2::Status::WT_MODIFIED
+            | git2::Status::WT_DELETED
+            | git2::Status::WT_RENAMED
+            | git2::Status::WT_TYPECHANGE,
+    ) {
+        Some("modified")
+    } else {
+        None
+    }
+}
+
+/// Bulk form of `file_tree_color` for one loaded tree level: answers every
+/// entry with a single status walk instead of one per file.
+pub fn file_tree_colors(
+    path: &str,
+    files: &[String],
+) -> HashMap<String, &'static str> {
+    let Some(repo) = Repository::open(std::path::Path::new(path))
+        .ok()
+        .filter(|repo| {
+            repo.workdir()
+                .is_some_and(|workdir| workdir == std::path::Path::new(path))
+        })
+    else {
+        return HashMap::new();
+    };
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(false);
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
+        return HashMap::new();
+    };
+    let wanted: std::collections::HashSet<&str> =
+        files.iter().map(String::as_str).collect();
+    let mut out = HashMap::new();
+    for entry in statuses.iter() {
+        let Some(file) = entry.path().filter(|file| !file.is_empty()) else {
+            continue;
+        };
+        if !wanted.contains(file) {
+            continue;
+        }
+        let status = entry.status();
+        // INDEX_NEW is "added" (a new file staged but never committed) — its
+        // worktree side is a plain untracked file, so treat it as untracked.
+        let color = if status.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::WT_NEW,
+        ) {
+            "untracked"
+        } else {
+            "modified"
+        };
+        out.insert(file.to_string(), color);
+    }
+    out
+}
+
+#[tauri::command]
+pub fn git_file_colors(path: String, files: Vec<String>) -> HashMap<String, String> {
+    file_tree_colors(&path, &files)
+        .into_iter()
+        .map(|(file, color)| (file, color.to_string()))
+        .collect()
 }
 
 fn open_repo(path: &str) -> Result<Repository, String> {
@@ -554,4 +717,142 @@ pub fn git_create_branch(path: String, name: String) -> Result<(), String> {
     repo.checkout_tree(&object, None)
         .map_err(|e| e.to_string())?;
     repo.set_head(&refname).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ccgui-next-git-summary-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn commit_file(repo: &Repository, relative: &str, content: &str) {
+        let workdir = repo.workdir().unwrap();
+        std::fs::write(workdir.join(relative), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(relative)).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("test", "test@example.com").unwrap();
+        let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &parents)
+            .unwrap();
+    }
+
+    #[test]
+    fn ordinary_subdirectory_of_a_repo_is_not_a_repository() {
+        let scratch = Scratch::new();
+        let repo = Repository::init(&scratch.0).unwrap();
+        commit_file(&repo, "tracked.txt", "clean\n");
+        let plain = scratch.0.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        assert!(exact_repository_summary(&plain).is_none());
+        assert!(exact_repository_summary(&scratch.0).is_some());
+    }
+
+    #[test]
+    fn summary_counts_changes_and_untracked_once() {
+        let scratch = Scratch::new();
+        let nested = scratch.0.join("nested");
+        let repo = Repository::init(&nested).unwrap();
+        commit_file(&repo, "tracked.txt", "clean\n");
+        // Same file modified in the index and the worktree counts once.
+        std::fs::write(nested.join("tracked.txt"), "staged\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        std::fs::write(nested.join("tracked.txt"), "changed again\n").unwrap();
+        std::fs::write(nested.join("untracked.txt"), "new\n").unwrap();
+
+        let summary = exact_repository_summary(&nested).unwrap();
+        assert_eq!(summary.branch, repo.head().unwrap().shorthand().unwrap());
+        assert_eq!(summary.changed, 1);
+        assert_eq!(summary.untracked, 1);
+    }
+
+    #[test]
+    fn batch_keeps_only_exact_roots_and_clean_status() {
+        let scratch = Scratch::new();
+        let repo_root = scratch.0.join("repo");
+        let repo = Repository::init(&repo_root).unwrap();
+        commit_file(&repo, "tracked.txt", "clean\n");
+        let plain = scratch.0.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        let summaries = repository_summaries_blocking(vec![
+            plain.to_string_lossy().into_owned(),
+            repo_root.to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].path, repo_root.to_string_lossy().into_owned());
+        assert_eq!(summaries[0].changed, 0);
+        assert_eq!(summaries[0].untracked, 0);
+    }
+
+    #[test]
+    fn file_colors_distinguish_untracked_from_modified() {
+        let scratch = Scratch::new();
+        let repo_root = scratch.0.join("repo");
+        let repo = Repository::init(&repo_root).unwrap();
+        commit_file(&repo, "clean.txt", "clean\n");
+        commit_file(&repo, "modified.txt", "clean\n");
+        std::fs::write(repo_root.join("modified.txt"), "dirty\n").unwrap();
+        std::fs::write(repo_root.join("untracked.txt"), "new\n").unwrap();
+
+        let colors = file_tree_colors(
+            &repo_root.to_string_lossy(),
+            &[
+                "clean.txt".to_string(),
+                "modified.txt".to_string(),
+                "untracked.txt".to_string(),
+            ],
+        );
+
+        assert_eq!(colors.get("clean.txt"), None, "colors={colors:?}");
+        assert_eq!(
+            colors.get("modified.txt"),
+            Some(&"modified"),
+            "colors={colors:?}"
+        );
+        assert_eq!(
+            colors.get("untracked.txt"),
+            Some(&"untracked"),
+            "colors={colors:?}"
+        );
+    }
+
+    #[test]
+    fn file_colors_are_empty_outside_an_exact_repo() {
+        let scratch = Scratch::new();
+        let child = scratch.0.join("plain");
+        std::fs::create_dir(&child).unwrap();
+
+        let colors = file_tree_colors(
+            &child.to_string_lossy(),
+            &["whatever.txt".to_string()],
+        );
+
+        assert!(colors.is_empty());
+    }
 }
