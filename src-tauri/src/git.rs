@@ -131,64 +131,115 @@ pub fn file_tree_color(repo: &Repository, path: &str) -> Option<&'static str> {
     }
 }
 
-/// Bulk form of `file_tree_color` for one loaded tree level: answers every
-/// entry with a single status walk instead of one per file.
+/// Bulk colors for one loaded tree level. Two sources, merged:
+/// 1. The repo *containing* the listed directory (any depth — the workspace
+///    root itself, an ancestor, or none). Status paths are repo-relative, so
+///    they are re-based onto the listed dir before matching; that way both a
+///    root-level listing and a subdirectory listing inside one repo work.
+/// 2. Each listed directory that is itself a nested repo root: its own
+///    status decides its color, because the enclosing repo usually only sees
+///    the whole subtree as one entry (or nothing at all when the workspace
+///    root is not a repository).
 pub fn file_tree_colors(
     path: &str,
     files: &[String],
 ) -> HashMap<String, &'static str> {
-    let Some(repo) = open_exact_repo(std::path::Path::new(path)) else {
-        return HashMap::new();
-    };
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true)
-        // Untracked directories collapse to `dir/` in the status list; with
-        // recursion the entries expand, but `recurse_untracked_dirs(false)`
-        // keeps the walk cheap — expand the collapsed form manually below.
-        .recurse_untracked_dirs(false);
-    let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
-        return HashMap::new();
-    };
+    let listed = Path::new(path);
     let mut out: HashMap<String, &'static str> = HashMap::new();
-    for entry in statuses.iter() {
-        let Some(raw) = entry.path().filter(|file| !file.is_empty()) else {
+
+    let mut prefix = String::new();
+    if let Ok(repo) = Repository::discover(listed) {
+        let walk_ok = (|| {
+            let workdir = repo.workdir()?;
+            let listed_c = std::fs::canonicalize(listed).ok()?;
+            let root_c = std::fs::canonicalize(workdir).ok()?;
+            let rel = listed_c.strip_prefix(&root_c).ok()?;
+            prefix = rel.to_string_lossy().replace('\\', "/");
+            let mut opts = StatusOptions::new();
+            opts.include_untracked(true)
+                // Untracked directories collapse to `dir/`; recursion would
+                // expand them at real walk cost — strip the slash and let the
+                // ancestor aggregation color the parents instead.
+                .recurse_untracked_dirs(false);
+            let statuses = repo.statuses(Some(&mut opts)).ok()?;
+            let with_prefix = if prefix.is_empty() {
+                None
+            } else {
+                Some(format!("{prefix}/"))
+            };
+            for entry in statuses.iter() {
+                let Some(raw) = entry.path().filter(|file| !file.is_empty()) else {
+                    continue;
+                };
+                let file = raw.strip_suffix('/').unwrap_or(raw);
+                // Re-base onto the listed directory: entries elsewhere in the
+                // repo are irrelevant at this level.
+                let rel_file = match &with_prefix {
+                    Some(p) => match file.strip_prefix(p.as_str()) {
+                        Some(r) => r,
+                        None => continue,
+                    },
+                    None => file,
+                };
+                let status = entry.status();
+                // INDEX_NEW is "added" (staged but never committed) — the
+                // worktree side is a plain untracked file, so it paints as
+                // untracked.
+                let color = if status.intersects(git2::Status::INDEX_NEW | git2::Status::WT_NEW) {
+                    "untracked"
+                } else {
+                    "modified"
+                };
+                // Direct hits for entries asked for at this level…
+                if files.iter().any(|f| f == rel_file) {
+                    out.insert(rel_file.to_string(), color);
+                }
+                // …and ancestor aggregation: a directory inherits the worst
+                // state of anything under it (untracked beats modified), so
+                // parents light up without being expanded.
+                let mut dir = Path::new(rel_file);
+                while let Some(parent) = dir.parent() {
+                    if parent.as_os_str().is_empty() {
+                        break;
+                    }
+                    let key = parent.to_string_lossy().into_owned();
+                    if files.iter().any(|f| f == &key) {
+                        let next = match out.get(&key).copied() {
+                            Some("untracked") => "untracked",
+                            _ => color,
+                        };
+                        out.insert(key, next);
+                    }
+                    dir = parent;
+                }
+            }
+            Some(())
+        })();
+        let _ = walk_ok;
+    }
+
+    // Nested repo roots among the requested names: their own status wins.
+    for name in files {
+        let dir = listed.join(name);
+        if !dir.join(".git").exists() {
+            continue;
+        }
+        let Some(summary) = exact_repository_summary(&dir) else {
             continue;
         };
-        // A collapsed untracked directory (`sub/`) must still color every
-        // ancestor the tree asks about, so strip the trailing slash before
-        // the direct-hit and prefix-aggregation passes.
-        let file = raw.strip_suffix('/').unwrap_or(raw);
-        let status = entry.status();
-        // INDEX_NEW is "added" (a new file staged but never committed) — its
-        // worktree side is a plain untracked file, so treat it as untracked.
-        let color = if status.intersects(git2::Status::INDEX_NEW | git2::Status::WT_NEW) {
+        if summary.changed + summary.untracked == 0 {
+            continue;
+        }
+        let color = if summary.untracked > 0 {
             "untracked"
         } else {
             "modified"
         };
-        // Direct hits for files asked for at this level…
-        if files.iter().any(|f| f == file) {
-            out.insert(file.to_string(), color);
-        }
-        // …and prefix aggregation: a directory inherits the "worst" state of
-        // anything under it, so parents light up without expanding. Untracked
-        // wins over modified (the tree shows both as distinct colors and a
-        // parent containing new files is most interesting).
-        let mut dir = Path::new(file);
-        while let Some(parent) = dir.parent() {
-            if parent.as_os_str().is_empty() {
-                break;
-            }
-            let key = parent.to_string_lossy().into_owned();
-            if files.iter().any(|f| f == &key) {
-                let next = match out.get(&key).copied() {
-                    Some("untracked") => "untracked",
-                    _ => color,
-                };
-                out.insert(key, next);
-            }
-            dir = parent;
-        }
+        let next = match out.get(name.as_str()).copied() {
+            Some("untracked") => "untracked",
+            _ => color,
+        };
+        out.insert(name.clone(), next);
     }
     out
 }
@@ -898,5 +949,58 @@ mod tests {
         assert_eq!(colors.get("sub"), Some(&"untracked"), "colors={colors:?}");
         // `edited` holds a modified file: modified.
         assert_eq!(colors.get("edited"), Some(&"modified"), "colors={colors:?}");
+    }
+
+    #[test]
+    fn colors_work_for_a_subdirectory_listing_inside_a_repo() {
+        let scratch = Scratch::new();
+        let repo_root = scratch.0.join("repo");
+        let repo = Repository::init(&repo_root).unwrap();
+        std::fs::create_dir_all(repo_root.join("pkg")).unwrap();
+        commit_file(&repo, "top.txt", "clean\n");
+        commit_file(&repo, "pkg/kept.txt", "clean\n");
+        commit_file(&repo, "pkg/inner.txt", "clean\n");
+        std::fs::write(repo_root.join("pkg/inner.txt"), "dirty\n").unwrap();
+        std::fs::create_dir_all(repo_root.join("pkg/newdir")).unwrap();
+        std::fs::write(repo_root.join("pkg/newdir/f.txt"), "x\n").unwrap();
+
+        // Listing `pkg` (a plain subdir): paths are relative to `pkg`.
+        let colors = file_tree_colors(
+            &repo_root.join("pkg").to_string_lossy(),
+            &[
+                "kept.txt".to_string(),
+                "inner.txt".to_string(),
+                "newdir".to_string(),
+            ],
+        );
+
+        assert_eq!(colors.get("kept.txt"), None, "colors={colors:?}");
+        assert_eq!(colors.get("inner.txt"), Some(&"modified"), "colors={colors:?}");
+        assert_eq!(colors.get("newdir"), Some(&"untracked"), "colors={colors:?}");
+    }
+
+    #[test]
+    fn nested_repo_folder_colors_from_its_own_status() {
+        // The user's layout: a NON-repo workspace root whose subfolder is a
+        // nested repo with changes — the folder name must still light up.
+        let scratch = Scratch::new();
+        let workspace = scratch.0.join("ws");
+        let nested = workspace.join("Project").join("inner-repo");
+        std::fs::create_dir_all(&nested).unwrap();
+        let repo = Repository::init(&nested).unwrap();
+        commit_file(&repo, "tracked.txt", "clean\n");
+        std::fs::write(nested.join("tracked.txt"), "dirty\n").unwrap();
+        std::fs::write(nested.join("fresh.txt"), "new\n").unwrap();
+
+        let colors = file_tree_colors(
+            &workspace.join("Project").to_string_lossy(),
+            &["inner-repo".to_string()],
+        );
+
+        assert_eq!(
+            colors.get("inner-repo"),
+            Some(&"untracked"),
+            "colors={colors:?}"
+        );
     }
 }
