@@ -669,6 +669,13 @@ impl RunContext {
                 );
             }
             EngineEvent::Done { session_id, usage } => {
+                // A Done after a terminal Error must never reach the UI: it
+                // clears the error banner and flips a failed turn back to
+                // "success" in the footer. Engines can emit both in one
+                // flush (omp: turn_end error, then agent_end done).
+                if state.saw_error {
+                    return;
+                }
                 state.saw_done = true;
                 if let Some(id) = session_id {
                     self.adopt_session_id(state, &id, false);

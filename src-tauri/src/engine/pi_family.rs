@@ -151,12 +151,18 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             }
         }
         "turn_end" | "agent_end" => {
-            if let Some(error) = nested_error_text(&value, &[]) {
+            // omp nests the failure in `message.errorMessage` on every one
+            // of these events (e.g. upstream 401 Invalid token): a failed
+            // model call ends the turn with stopReason=error, so this is
+            // terminal — same treatment as a top-level errorMessage.
+            if let Some(error) = nested_error_text(&value, &["message"]) {
                 out.push(EngineEvent::Error(error));
             }
             // No terminal result event exists in this protocol; the runner
-            // emits Done on clean EOF. agent_end still settles the turn.
-            if event_type == "agent_end" {
+            // emits Done on clean EOF. agent_end still settles the turn —
+            // but never after an Error: the Done event would clear the
+            // error banner in the UI and report a failed turn as success.
+            if event_type == "agent_end" && !out.iter().any(|e| matches!(e, EngineEvent::Error(_))) {
                 out.push(EngineEvent::Done {
                     session_id: None,
                     usage: None,
@@ -271,13 +277,38 @@ mod tests {
         for line in [
             serde_json::json!({"type":"turn_end","errorMessage":"boom"}),
             serde_json::json!({"type":"turn_end","error":{"message":"nested boom"}}),
+            // Real omp 401 shape: the failure nests in `message.errorMessage`
+            // with stopReason=error on the enclosing message.
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorStatus":401,"errorMessage":"401 Invalid token"}}),
         ] {
             let mut out = Vec::new();
             parse_pi_family_line(&line.to_string(), &mut out);
             match out.first() {
-                Some(EngineEvent::Error(text)) => assert!(text.contains("boom"), "{line}"),
+                Some(EngineEvent::Error(text)) => assert!(text.contains("boom") || text.contains("401"), "{line}"),
                 other => panic!("expected Error for {line}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn agent_end_after_error_does_not_emit_done() {
+        // A failed turn ends turn_end(error) + agent_end: the Done must be
+        // suppressed or the UI clears the error banner and reports success.
+        let line = serde_json::json!({
+            "type":"agent_end",
+            "message":{"stopReason":"error","errorMessage":"401 Invalid token"},
+            "isTerminal":true
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        assert!(matches!(out[0], EngineEvent::Error(_)), "got {out:?}");
+        assert!(!out.iter().any(|e| matches!(e, EngineEvent::Done { .. })), "Done leaked after Error: {out:?}");
+
+        // Healthy turn: agent_end without an error still settles with Done.
+        let ok_line = serde_json::json!({"type":"agent_end","isTerminal":true}).to_string();
+        let mut ok_out = Vec::new();
+        parse_pi_family_line(&ok_line, &mut ok_out);
+        assert!(matches!(ok_out[0], EngineEvent::Done { .. }), "got {ok_out:?}");
     }
 }
