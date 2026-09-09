@@ -117,10 +117,10 @@ const TreeRow = memo(function TreeRow({
         {node.repository ? (
           <span
             className={cx(
-              // The branch badge takes what's left and scrolls horizontally
-              // (scrollbar hidden) instead of truncating the branch name.
-              "ml-2 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto text-caption-1-medium",
-              "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+              // The branch badge takes what's left; the branch name
+              // truncates with an ellipsis (full text in the title tip) —
+              // no horizontal scrolling, ever.
+              "ml-2 flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-caption-1-medium",
               node.repository.changed + node.repository.untracked === 0
                 ? "text-state-success-text"
                 : "text-status-yellow-text",
@@ -128,7 +128,7 @@ const TreeRow = memo(function TreeRow({
             title={repositoryLabel ?? undefined}
             aria-label={repositoryLabel ?? undefined}
           >
-            <span className="whitespace-nowrap">{node.repository.branch}</span>
+            <span className="min-w-0 flex-1 truncate">{node.repository.branch}</span>
             {node.repository.changed + node.repository.untracked === 0 ? (
               <span className="shrink-0" aria-hidden>✓</span>
             ) : (
@@ -410,7 +410,7 @@ export function FileTree() {
   );
 
   return (
-    <div ref={parentRef} className="min-h-0 flex-1 overflow-auto py-1">
+    <div ref={parentRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto py-1">
       {rootError ? (
         <div className="flex flex-col items-start gap-2 px-3 py-2">
           <p className="text-caption-1-regular text-text-error-primary break-all">{rootError}</p>
