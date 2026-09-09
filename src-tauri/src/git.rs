@@ -144,15 +144,20 @@ pub fn file_tree_colors(
                 let Some(raw) = entry.path().filter(|file| !file.is_empty()) else {
                     continue;
                 };
-                let file = raw.strip_suffix('/').unwrap_or(raw);
+                // A trailing slash marks a collapsed untracked DIRECTORY.
+                // Plain folders never carry color (only repo-bound folders
+                // do — see the nested-repo pass below), so skip them.
+                if raw.ends_with('/') {
+                    continue;
+                }
                 // Re-base onto the listed directory: entries elsewhere in the
                 // repo are irrelevant at this level.
                 let rel_file = match &with_prefix {
-                    Some(p) => match file.strip_prefix(p.as_str()) {
+                    Some(p) => match raw.strip_prefix(p.as_str()) {
                         Some(r) => r,
                         None => continue,
                     },
-                    None => file,
+                    None => raw,
                 };
                 let status = entry.status();
                 // INDEX_NEW is "added" (staged but never committed) — the
@@ -163,28 +168,11 @@ pub fn file_tree_colors(
                 } else {
                     "modified"
                 };
-                // Direct hits for entries asked for at this level…
+                // Direct hits for FILES at this level only. No ancestor
+                // aggregation: a plain folder containing dirty files (like
+                // `Project` around a nested repo) must stay uncolored.
                 if files.iter().any(|f| f == rel_file) {
                     out.insert(rel_file.to_string(), color);
-                }
-                // …and ancestor aggregation: a directory inherits the state
-                // of anything under it so parents light up without being
-                // expanded. Modified (uncommitted) wins over untracked — a
-                // folder holding both paints orange, per the tree spec.
-                let mut dir = Path::new(rel_file);
-                while let Some(parent) = dir.parent() {
-                    if parent.as_os_str().is_empty() {
-                        break;
-                    }
-                    let key = parent.to_string_lossy().into_owned();
-                    if files.iter().any(|f| f == &key) {
-                        let next = match out.get(&key).copied() {
-                            Some("modified") => "modified",
-                            _ => color,
-                        };
-                        out.insert(key, next);
-                    }
-                    dir = parent;
                 }
             }
             Some(())
@@ -898,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn colors_aggregate_up_through_parent_directories() {
+    fn plain_folders_stay_uncolored_even_with_dirty_content() {
         let scratch = Scratch::new();
         let repo_root = scratch.0.join("repo");
         let repo = Repository::init(&repo_root).unwrap();
@@ -923,14 +911,11 @@ mod tests {
             ],
         );
 
-        assert_eq!(colors.get("clean.txt"), None, "colors={colors:?}");
-        // `sub` holds only an untracked file deep down: untracked (green).
-        assert_eq!(colors.get("sub"), Some(&"untracked"), "colors={colors:?}");
-        // `mixed` holds a modified AND an untracked file: modified (orange)
-        // wins, per the tree color spec.
-        assert_eq!(colors.get("mixed"), Some(&"modified"), "colors={colors:?}");
-        // `edited` holds only a modified file: modified.
-        assert_eq!(colors.get("edited"), Some(&"modified"), "colors={colors:?}");
+        // Spec: folders not bound to a repository never carry color — even
+        // when they hold modified and/or untracked files inside.
+        assert_eq!(colors.get("sub"), None, "colors={colors:?}");
+        assert_eq!(colors.get("mixed"), None, "colors={colors:?}");
+        assert_eq!(colors.get("edited"), None, "colors={colors:?}");
     }
 
     #[test]
@@ -958,7 +943,8 @@ mod tests {
 
         assert_eq!(colors.get("kept.txt"), None, "colors={colors:?}");
         assert_eq!(colors.get("inner.txt"), Some(&"modified"), "colors={colors:?}");
-        assert_eq!(colors.get("newdir"), Some(&"untracked"), "colors={colors:?}");
+        // A plain untracked directory carries no color either.
+        assert_eq!(colors.get("newdir"), None, "colors={colors:?}");
     }
 
     #[test]

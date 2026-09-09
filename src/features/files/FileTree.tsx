@@ -100,7 +100,10 @@ const TreeRow = memo(function TreeRow({
         )}
         <span
           className={cx(
-            "min-w-0 truncate",
+            // The folder/file name has display priority: it keeps its
+            // natural width (truncating only when it alone overflows the
+            // row), so the badge below yields space instead.
+            "min-w-0 max-w-full shrink-0 truncate",
             // Spec: untracked → green, modified → orange, dirty repo root →
             // blue (folder containing both kinds takes modified's orange).
             node.color === "untracked" && "text-status-green-text",
@@ -113,7 +116,10 @@ const TreeRow = memo(function TreeRow({
         {node.repository ? (
           <span
             className={cx(
-              "ml-2 flex shrink-0 items-center gap-1 truncate text-caption-1-medium",
+              // The branch badge takes what's left and scrolls horizontally
+              // (scrollbar hidden) instead of truncating the branch name.
+              "ml-2 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto text-caption-1-medium",
+              "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
               node.repository.changed + node.repository.untracked === 0
                 ? "text-state-success-text"
                 : "text-status-yellow-text",
@@ -121,16 +127,16 @@ const TreeRow = memo(function TreeRow({
             title={repositoryLabel ?? undefined}
             aria-label={repositoryLabel ?? undefined}
           >
-            <span className="shrink-0 max-w-40 truncate">{node.repository.branch}</span>
+            <span className="whitespace-nowrap">{node.repository.branch}</span>
             {node.repository.changed + node.repository.untracked === 0 ? (
-              <span aria-hidden>✓</span>
+              <span className="shrink-0" aria-hidden>✓</span>
             ) : (
               <>
                 {node.repository.changed > 0 && (
-                  <span className="text-text-tertiary" aria-hidden>M{node.repository.changed}</span>
+                  <span className="shrink-0 text-text-tertiary" aria-hidden>M{node.repository.changed}</span>
                 )}
                 {node.repository.untracked > 0 && (
-                  <span className="text-text-tertiary" aria-hidden>?{node.repository.untracked}</span>
+                  <span className="shrink-0 text-text-tertiary" aria-hidden>?{node.repository.untracked}</span>
                 )}
               </>
             )}
