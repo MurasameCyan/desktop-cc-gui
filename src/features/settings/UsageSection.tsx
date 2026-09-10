@@ -60,7 +60,7 @@ interface Totals {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  turns: number;
+  requests: number;
 }
 
 const emptyTotals = (key: string, engine: string): Totals => ({
@@ -70,7 +70,7 @@ const emptyTotals = (key: string, engine: string): Totals => ({
   output: 0,
   cacheRead: 0,
   cacheWrite: 0,
-  turns: 0,
+  requests: 0,
 });
 
 function fold(rows: UsageRow[], keyOf: (row: UsageRow) => string, engineOf: (row: UsageRow) => string): Totals[] {
@@ -82,7 +82,7 @@ function fold(rows: UsageRow[], keyOf: (row: UsageRow) => string, engineOf: (row
     entry.output += row.output;
     entry.cacheRead += row.cacheRead;
     entry.cacheWrite += row.cacheWrite;
-    entry.turns += row.turns;
+    entry.requests += row.requests;
     map.set(key, entry);
   }
   const total = (e: Totals) => e.input + e.output + e.cacheRead + e.cacheWrite;
@@ -96,9 +96,9 @@ const sum = (entries: Totals[]) =>
       output: acc.output + e.output,
       cacheRead: acc.cacheRead + e.cacheRead,
       cacheWrite: acc.cacheWrite + e.cacheWrite,
-      turns: acc.turns + e.turns,
+      requests: acc.requests + e.requests,
     }),
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 },
   );
 
 const tokensOf = (e: Totals | { input: number; output: number; cacheRead: number; cacheWrite: number }) =>
@@ -169,7 +169,7 @@ export function UsageSection() {
       entry.output += row.output;
       entry.cacheRead += row.cacheRead;
       entry.cacheWrite += row.cacheWrite;
-      entry.turns += row.turns;
+      entry.requests += row.requests;
       if (!existing) cli.models.push(entry);
       clis.set(row.engine, cli);
     }
@@ -283,7 +283,7 @@ export function UsageSection() {
             </div>
             <div className="flex flex-1 flex-col gap-0.5">
               <span className="text-body-2-regular text-text-secondary">{t("usage.turns")}</span>
-              <span className="text-title-3 text-text-primary tabular-nums">{totals.turns}</span>
+              <span className="text-title-3 text-text-primary tabular-nums">{totals.requests}</span>
             </div>
           </div>
         </div>

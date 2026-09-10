@@ -324,11 +324,17 @@ function onSession(
   );
 }
 
+/** Usage reports per session for the turn in flight. Every report is one
+ *  model response, so the ledger's request count is the sum of these — a
+ *  number the engines actually produce, not a per-turn constant. */
+const turnUsageReports = new Map<string, number>();
+
 function onUsage(
   event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
+  turnUsageReports.set(key, (turnUsageReports.get(key) ?? 0) + 1);
   patchSession(deps.set, key, { usage: event.data });
 }
 
@@ -574,6 +580,8 @@ function recordTurnUsage(
 ) {
   if (!usageTrackingEnabled()) return;
   const parsed = parseUsage(usage);
+  const reports = turnUsageReports.get(key) ?? 0;
+  turnUsageReports.delete(key);
   if (!parsed) return;
   const state = deps.get();
   const tab = state.openTabs.find(
@@ -590,6 +598,8 @@ function recordTurnUsage(
       output: parsed.output,
       cacheRead: parsed.cacheRead,
       cacheWrite: parsed.cacheWrite,
+      // At least 1: a turn with usage but no counted report still spent one.
+      reports: Math.max(1, reports),
       durationMs: null,
     })
     .catch(() => {});

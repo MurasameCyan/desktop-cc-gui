@@ -318,6 +318,8 @@ export interface UsageEntryInput {
   cacheRead: number;
   cacheWrite: number;
   durationMs: number | null;
+  /** Model responses this turn reported (>= 1). */
+  reports: number;
 }
 
 /** Ledger totals for one (local day, engine, model) bucket. */
@@ -330,7 +332,8 @@ export interface UsageRow {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  turns: number;
+  /** Model responses in this bucket — the request total. */
+  requests: number;
 }
 // ---- DeepSeek Harness local host ----
 
