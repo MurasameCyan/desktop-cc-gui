@@ -22,11 +22,12 @@ describe("groupModelsByProvider", () => {
     expect(groups.map((g) => g.key)).toEqual(["agentrouter", "老王"]);
   });
 
-  it("collapses to one keyless group when a single provider carries the list", () => {
-    // A keyless group is the signal for rows to name their own provider.
+  it("keeps the header when a filter narrowed the list to one provider", () => {
+    // Filtering to a single relay used to drop the header, leaving rows that
+    // no longer said where the model came from — the reported regression.
     const groups = groupModelsByProvider([RELAYS[0], RELAYS[2]]);
     expect(groups).toHaveLength(1);
-    expect(groups[0].key).toBe("");
+    expect(groups[0].key).toBe("agentrouter");
     expect(groups[0].rows).toHaveLength(2);
   });
 
