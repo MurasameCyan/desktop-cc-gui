@@ -22,6 +22,9 @@ pub struct UsageEntry {
     pub cache_read: i64,
     pub cache_write: i64,
     pub duration_ms: Option<i64>,
+    /// Model responses this turn reported (>= 1): the request count.
+    #[serde(default)]
+    pub reports: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,8 +38,9 @@ pub struct UsageRow {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
-    /// How many turns folded into this bucket.
-    pub turns: i64,
+    /// Model responses folded into this bucket (one prompt's tool loop counts
+    /// each response), i.e. the request total.
+    pub requests: i64,
 }
 
 /// Append one finished turn. A turn with no tokens (interrupted before the
@@ -55,8 +59,8 @@ pub fn usage_record(
         conn.execute(
             "INSERT INTO usage_ledger
                (ts, engine, model, session_id, workspace_path,
-                input_tokens, output_tokens, cache_read, cache_write, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                input_tokens, output_tokens, cache_read, cache_write, duration_ms, reports)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 entry.ts,
                 entry.engine,
@@ -68,6 +72,7 @@ pub fn usage_record(
                 entry.cache_read,
                 entry.cache_write,
                 entry.duration_ms,
+                entry.reports.max(1),
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -101,7 +106,7 @@ pub fn usage_summary(
                     SUM(output_tokens),
                     SUM(cache_read),
                     SUM(cache_write),
-                    COUNT(*)
+                    SUM(reports)
              FROM usage_ledger
              WHERE day >= date('now', ?2)
              GROUP BY day, engine, model
@@ -119,7 +124,7 @@ pub fn usage_summary(
                 output: r.get(4)?,
                 cache_read: r.get(5)?,
                 cache_write: r.get(6)?,
-                turns: r.get(7)?,
+                requests: r.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?
