@@ -16,7 +16,8 @@ import {
 } from "./usage-tracking";
 import { UsageChart } from "./UsageChart";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
-import { CLI_DISPLAY_NAMES, inferModelEngine } from "@/components/foundations/icons/engine-brands";
+import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
+import { ModelBadge } from "@/components/foundations/icons/model-badge";
 import type { EngineIconId } from "@/components/foundations/icons/engine-icon";
 
 type Range = "today" | "week" | "month";
@@ -347,13 +348,7 @@ export function UsageSection() {
                         <div key={model.key || "__unknown__"} className="flex w-full flex-col gap-1">
                           <div className="flex items-center justify-between gap-3">
                             <span className="flex min-w-0 items-center gap-1.5">
-                              {inferModelEngine(model.key) && (
-                                <EngineIcon
-                                  engine={inferModelEngine(model.key)!}
-                                  size={12}
-                                  className="shrink-0 text-foreground-icon-primary"
-                                />
-                              )}
+                              <ModelBadge name={model.key} size={12} className="shrink-0" />
                               <span className="truncate text-body-regular text-text-primary">
                                 {model.key || t("usage.unknownModel")}
                               </span>

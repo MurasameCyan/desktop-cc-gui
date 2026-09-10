@@ -21,6 +21,10 @@ export function useEngineModels(
   // Engine-level custom models (设置 → CLI → 自定义模型): user-added ids
   // merged into the picker next to the CLI's catalog.
   const [customModels, setCustomModels] = useState<Record<string, string[]>>({});
+  // Engines whose catalog probe is still in flight: the picker shows whatever
+  // it already knows (usually just the configured model) until it lands, so
+  // the panel needs to say "still loading" instead of looking truncated.
+  const [pending, setPending] = useState<Record<string, true>>({});
 
   // Provider configs feed the model picker's per-engine model lists.
   useEffect(() => {
@@ -47,12 +51,23 @@ export function useEngineModels(
     let cancelled = false;
     for (const engine of engines) {
       if (engine.id in catalogs) continue;
+      setPending((prev) => (prev[engine.id] ? prev : { ...prev, [engine.id]: true }));
       ipc
         .listEngineModels(engine.id)
         .then((list) => {
           if (!cancelled) setCatalogs((prev) => ({ ...prev, [engine.id]: list }));
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setPending((prev) => {
+              if (!prev[engine.id]) return prev;
+              const next = { ...prev };
+              delete next[engine.id];
+              return next;
+            });
+          }
+        });
     }
     return () => {
       cancelled = true;
@@ -174,5 +189,5 @@ export function useEngineModels(
     );
   }, [engines]);
 
-  return { catalogs, modelsByEngine, refresh };
+  return { catalogs, modelsByEngine, refresh, pendingEngines: pending };
 }

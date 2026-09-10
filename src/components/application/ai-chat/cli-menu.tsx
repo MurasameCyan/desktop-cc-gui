@@ -417,12 +417,15 @@ function PanelActions({
 function ModelGroupList({
   groups,
   empty,
+  loading,
   selectedModelId,
   engineId,
   onPickModel,
 }: {
   groups: ModelGroup[];
   empty: boolean;
+  /** Catalog probe still running: the list on screen may be incomplete. */
+  loading?: boolean;
   selectedModelId: string;
   engineId: string;
   onPickModel: (engine: string, id: string) => void;
@@ -452,6 +455,11 @@ function ModelGroupList({
           ))}
         </div>
       ))}
+      {loading && !empty && (
+        <span className="px-2 pt-1 pb-2 text-body-2-regular text-text-tertiary">
+          {t("chat.modelsLoading")}
+        </span>
+      )}
       {empty && (
         <span className="p-2 text-body-medium text-text-tertiary">
           {t("chat.noMatchingModels")}
@@ -483,6 +491,7 @@ function EngineModelPanel({
   onCodexServiceTierChange,
   onRefresh,
   onClose,
+  loading,
 }: {
   option: MenuOption;
   models: ModelOption[];
@@ -499,6 +508,8 @@ function EngineModelPanel({
   /** Re-probe provider configs and model catalogs without an app restart. */
   onRefresh?: () => void | Promise<void>;
   onClose?: () => void;
+  /** This engine's catalog probe is still running. */
+  loading?: boolean;
 }) {
   const { t } = useTranslation();
   const normalizedQuery = query.trim().toLowerCase();
@@ -560,6 +571,7 @@ function EngineModelPanel({
       <ModelGroupList
         groups={visibleGroups ?? [{ key: "", rows: orderedModels }]}
         empty={orderedModels.length === 0}
+        loading={loading}
         selectedModelId={selectedModelId}
         engineId={option.id}
         onPickModel={onPickModel}
@@ -714,6 +726,7 @@ function EngineMenuBody({
   codexServiceTier,
   onCodexServiceTierChange,
   onRefreshModels,
+  loadingEngines,
 }: {
   options: MenuOption[];
   value: string;
@@ -733,6 +746,8 @@ function EngineMenuBody({
   codexServiceTier: OmpServiceTier;
   onCodexServiceTierChange: (tier: OmpServiceTier) => Promise<void>;
   onRefreshModels?: () => void | Promise<void>;
+  /** Engine ids whose catalog probe has not returned yet. */
+  loadingEngines?: readonly string[];
 }) {
   const flyoutOption = options.find((o) => o.id === openEngine);
   return (
@@ -774,6 +789,7 @@ function EngineMenuBody({
               codexServiceTier={codexServiceTier}
               onCodexServiceTierChange={onCodexServiceTierChange}
             onRefresh={onRefreshModels}
+            loading={loadingEngines?.includes(flyoutOption.id)}
           />
         )}
       </div>
@@ -863,6 +879,7 @@ export function CliMenu({
   codexServiceTier,
   onCodexServiceTierChange,
   onRefreshModels,
+  loadingEngines,
 }: {
   options: MenuOption[];
   value: string;
@@ -881,6 +898,8 @@ export function CliMenu({
   onCodexServiceTierChange: (tier: OmpServiceTier) => Promise<void>;
   /** Re-probe provider configs and model catalogs (flyout refresh button). */
   onRefreshModels?: () => void | Promise<void>;
+  /** Engine ids whose catalog probe has not returned yet (loading hint). */
+  loadingEngines?: readonly string[];
 }) {
   const { t } = useTranslation();
   const { isOpen, triggerRef, popoverRef, close, setOpen } = usePopoverState();
@@ -994,6 +1013,7 @@ export function CliMenu({
             codexServiceTier={codexServiceTier}
             onCodexServiceTierChange={onCodexServiceTierChange}
             onRefreshModels={onRefreshModels}
+            loadingEngines={loadingEngines}
           />
         </AriaDialog>
       </AriaPopover>

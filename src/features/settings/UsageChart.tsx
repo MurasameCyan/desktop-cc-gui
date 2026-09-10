@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { EngineIcon } from "@/components/foundations/icons/engine-icon";
-import { inferModelEngine } from "@/components/foundations/icons/engine-brands";
+import { EngineIcon, type EngineIconId } from "@/components/foundations/icons/engine-icon";
+import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
+import { ModelBadge } from "@/components/foundations/icons/model-badge";
 import type { UsageRow } from "@/lib/ipc";
 
 /**
@@ -26,7 +27,8 @@ const PALETTE = [
 ];
 
 const OTHER_COLOR = "#64748b";
-const MAX_SERIES = PALETTE.length;
+/** Model shades inside a CLI row: distinguishable, but clearly a family. */
+const MODEL_SHADES = ["#34d399", "#fbbf24", "#38bdf8", "#a78bfa", "#fb7185", "#facc15"];
 
 export interface UsageChartProps {
   rows: UsageRow[];
@@ -37,10 +39,15 @@ export interface UsageChartProps {
 }
 
 interface Series {
+  /** CLI display name (series key). */
   model: string;
+  /** Engine id behind the CLI, for its brand mark. */
+  engine: string;
   color: string;
   byDay: number[];
   total: number;
+  /** Models inside this CLI, largest first — the tooltip's second level. */
+  models: { name: string; color: string; byDay: number[]; total: number }[];
 }
 
 const tokensOf = (row: UsageRow) => row.input + row.output + row.cacheRead + row.cacheWrite;
@@ -61,42 +68,46 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
   const [hoverDay, setHoverDay] = useState<string | null>(null);
 
   const { series, dayTotals, max } = useMemo(() => {
-    const totalsByModel = new Map<string, number>();
-    const perDay = new Map<string, Map<string, number>>();
+    // Stack by CLI (the details card's top level), with each CLI's models kept
+    // for the tooltip — the chart and 详细数据 then describe the same thing.
+    const byCli = new Map<string, Map<string, number[]>>();
     for (const row of rows) {
-      const model = row.model || t("usage.unknownModel");
-      const tokens = tokensOf(row);
-      totalsByModel.set(model, (totalsByModel.get(model) ?? 0) + tokens);
-      const bucket = perDay.get(row.day) ?? new Map<string, number>();
-      bucket.set(model, (bucket.get(model) ?? 0) + tokens);
-      perDay.set(row.day, bucket);
+      const models = byCli.get(row.engine) ?? new Map<string, number[]>();
+      const perDay = models.get(row.model || t("usage.unknownModel")) ?? new Array(days.length).fill(0);
+      const index = days.indexOf(row.day);
+      if (index >= 0) {
+        perDay[index] += tokensOf(row);
+      }
+      models.set(row.model || t("usage.unknownModel"), perDay);
+      byCli.set(row.engine, models);
     }
-    const ranked = [...totalsByModel.entries()].sort((a, b) => b[1] - a[1]);
-    const top = ranked.slice(0, MAX_SERIES);
-    const rest = ranked.slice(MAX_SERIES);
-    const built: Series[] = top.map(([model], index) => ({
-      model,
-      color: PALETTE[index],
-      byDay: days.map((day) => perDay.get(day)?.get(model) ?? 0),
-      total: totalsByModel.get(model) ?? 0,
-    }));
-    if (rest.length > 0) {
-      const restNames = new Set(rest.map(([model]) => model));
-      built.push({
-        model: t("usage.otherModels"),
-        color: OTHER_COLOR,
-        byDay: days.map((day) => {
-          const bucket = perDay.get(day);
-          if (!bucket) return 0;
-          let sum = 0;
-          for (const [model, tokens] of bucket) {
-            if (restNames.has(model)) sum += tokens;
-          }
-          return sum;
-        }),
-        total: rest.reduce((acc, [, tokens]) => acc + tokens, 0),
+    const built: Series[] = [...byCli.entries()]
+      .map(([engine, models]) => {
+        const entries = [...models.entries()].map(([name, byDay]) => ({
+          name,
+          byDay,
+          total: byDay.reduce((acc, n) => acc + n, 0),
+          color: OTHER_COLOR,
+        }));
+        entries.sort((a, b) => b.total - a.total);
+        return {
+          model: CLI_DISPLAY_NAMES[engine] ?? engine,
+          engine,
+          color: OTHER_COLOR,
+          byDay: days.map((_, index) => entries.reduce((acc, e) => acc + (e.byDay[index] ?? 0), 0)),
+          total: entries.reduce((acc, e) => acc + e.total, 0),
+          models: entries,
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+    built.forEach((entry, index) => {
+      entry.color = PALETTE[index % PALETTE.length];
+      entry.models.forEach((model, modelIndex) => {
+        // Same hue as the CLI, stepped lighter per model so the tooltip reads
+        // as a breakdown of the bar rather than a different data set.
+        model.color = MODEL_SHADES[modelIndex % MODEL_SHADES.length];
       });
-    }
+    });
     const totals = days.map((_day, index) =>
       built.reduce((acc, s) => acc + (s.byDay[index] ?? 0), 0),
     );
@@ -115,7 +126,10 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
   const plotW = W - padLeft - padRight;
   const plotH = H - padTop - padBottom;
   const step = plotW / Math.max(days.length, 1);
-  const barW = Math.max(2, Math.min(26, step * 0.62));
+  // Bar width follows the range: a month packs slim columns, a single day
+  // fills a readable slab instead of leaving one hairline in the plot.
+  // The cap keeps ≤7-day views from looking like solid blocks.
+  const barW = Math.max(3, Math.min(step * 0.62, 76));
   const y = (tokens: number) => padTop + plotH - (tokens / max) * plotH;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
   // Thin the date labels so they never collide.
@@ -216,32 +230,45 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
             <span className="tabular-nums">{formatTokens(hoverTotal)}</span>
           </span>
           {series
-            .map((s) => ({ model: s.model, color: s.color, tokens: s.byDay[hoverIndex] ?? 0 }))
+            .map((s) => ({ series: s, tokens: s.byDay[hoverIndex] ?? 0 }))
             .filter((entry) => entry.tokens > 0)
-            .sort((a, b) => b.tokens - a.tokens)
-            .map((entry) => (
-              <span
-                key={entry.model}
-                className="flex items-center justify-between gap-3 text-body-2-regular"
-              >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  {inferModelEngine(entry.model) && (
+            .map(({ series: cli, tokens }) => (
+              <span key={cli.engine} className="flex flex-col gap-0.5">
+                <span className="flex items-center justify-between gap-3 text-body-2-regular">
+                  <span className="flex min-w-0 items-center gap-1.5">
                     <EngineIcon
-                      engine={inferModelEngine(entry.model)!}
+                      engine={cli.engine as EngineIconId}
                       size={12}
                       className="shrink-0 text-foreground-icon-primary"
                     />
-                  )}
-                  <span
-                    aria-hidden
-                    className="size-2 shrink-0 rounded-sm"
-                    style={{ backgroundColor: entry.color }}
-                  />
-                  <span className="truncate text-text-secondary">{entry.model}</span>
+                    <span
+                      aria-hidden
+                      className="size-2 shrink-0 rounded-sm"
+                      style={{ backgroundColor: cli.color }}
+                    />
+                    <span className="truncate text-text-secondary">{cli.model}</span>
+                  </span>
+                  <span className="shrink-0 tabular-nums text-text-primary">
+                    {formatTokens(tokens)}
+                  </span>
                 </span>
-                <span className="shrink-0 tabular-nums text-text-primary">
-                  {formatTokens(entry.tokens)}
-                </span>
+                {cli.models
+                  .map((model) => ({ model, tokens: model.byDay[hoverIndex] ?? 0 }))
+                  .filter((entry) => entry.tokens > 0)
+                  .map(({ model, tokens: modelTokens }) => (
+                    <span
+                      key={model.name}
+                      className="flex items-center justify-between gap-3 pl-5 text-caption-1-regular"
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <ModelBadge name={model.name} size={11} className="shrink-0" />
+                        <span className="truncate text-text-tertiary">{model.name}</span>
+                      </span>
+                      <span className="shrink-0 tabular-nums text-text-tertiary">
+                        {formatTokens(modelTokens)}
+                      </span>
+                    </span>
+                  ))}
               </span>
             ))}
         </div>
@@ -249,16 +276,12 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         {series.map((s) => (
-          <span key={s.model} className="flex min-w-0 items-center gap-1.5 text-body-2-regular text-text-secondary">
-            {/* Brand mark (which family the model belongs to) next to the
-                series swatch (which band it owns in the chart). */}
-            {inferModelEngine(s.model) && (
-              <EngineIcon
-                engine={inferModelEngine(s.model)!}
-                size={14}
-                className="shrink-0 text-foreground-icon-primary"
-              />
-            )}
+          <span key={s.engine} className="flex min-w-0 items-center gap-1.5 text-body-2-regular text-text-secondary">
+            <EngineIcon
+              engine={s.engine as EngineIconId}
+              size={14}
+              className="shrink-0 text-foreground-icon-primary"
+            />
             <span aria-hidden className="size-2 shrink-0 rounded-sm" style={{ backgroundColor: s.color }} />
             <span className="max-w-[150px] truncate">{s.model}</span>
           </span>
