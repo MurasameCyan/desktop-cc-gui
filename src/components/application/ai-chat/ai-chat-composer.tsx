@@ -458,21 +458,22 @@ function ProxyQuickToggle() {
 
   if (enabled === null) return null;
   const label = enabled ? t("chat.proxyOn") : t("chat.proxyOff");
+  // Mirror the context-meter button exactly: react-aria AriaButton, the same
+  // shape/focus classes, colour carries the state. That control never shows
+  // a stray circle, so this one should not either.
   return (
-    <button
-      type="button"
+    <AriaButton
       aria-label={label}
       aria-pressed={enabled}
-      title={label}
-      disabled={busy}
-      onClick={() => void toggle()}
+      isDisabled={busy}
+      onPress={() => void toggle()}
       className={cx(
-        "flex cursor-pointer items-center rounded-full p-1.5 transition-colors duration-150 ease disabled:cursor-not-allowed disabled:opacity-50",
+        "flex cursor-pointer items-center rounded-full p-1.5 outline-none transition-colors duration-150 ease focus-visible:ring-2 focus-visible:ring-border-focus-ring",
         enabled ? "text-notification-success-foreground" : "text-foreground-icon-tertiary",
       )}
     >
       <Globe className="size-4 shrink-0" strokeWidth={1.75} aria-hidden />
-    </button>
+    </AriaButton>
   );
 }
 
