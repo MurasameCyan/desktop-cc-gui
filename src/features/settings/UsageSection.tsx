@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Button } from "@/components/base/buttons/button";
+import Pause from "lucide-react/dist/esm/icons/pause";
+import Play from "lucide-react/dist/esm/icons/play";
+import Trash2 from "lucide-react/dist/esm/icons/trash-2";
 import {
   SettingsCard,
   SettingsRow,
@@ -14,9 +16,14 @@ import {
 } from "./usage-tracking";
 import { UsageChart } from "./UsageChart";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
+import { CLI_DISPLAY_NAMES, inferModelEngine } from "@/components/foundations/icons/engine-brands";
 import type { EngineIconId } from "@/components/foundations/icons/engine-icon";
 
 type Range = "today" | "week" | "month";
+
+/** Same affordance the message rows use: bare icon, hover-revealed chrome. */
+const ICON_BUTTON =
+  "flex size-7 cursor-pointer items-center justify-center rounded-md text-foreground-icon-secondary transition-colors hover:bg-background-tertiary-hover hover:text-foreground-icon-primary";
 
 const RANGES: { id: Range; labelKey: string }[] = [
   { id: "today", labelKey: "usage.rangeToday" },
@@ -113,45 +120,6 @@ const ENGINE_ICON_IDS: readonly EngineIconId[] = ["claude", "codex", "grok", "ki
 const isEngineIcon = (engine: string): engine is EngineIconId =>
   ENGINE_ICON_IDS.includes(engine as EngineIconId);
 
-function TotalsList({ entries, showEngine }: { entries: Totals[]; showEngine?: boolean }) {
-  const { t } = useTranslation();
-  const max = entries.length ? tokensOf(entries[0]) : 0;
-  if (entries.length === 0) {
-    return <p className="py-2 text-body-regular text-text-tertiary">{t("usage.empty")}</p>;
-  }
-  return (
-    <div className="flex w-full flex-col gap-3">
-      {entries.map((entry) => (
-        <div key={entry.key} className="flex w-full flex-col gap-1.5">
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="flex min-w-0 items-baseline gap-2">
-              {isEngineIcon(entry.engine) && (
-                <EngineIcon
-                  engine={entry.engine}
-                  size={14}
-                  className="shrink-0 self-center text-foreground-icon-primary"
-                />
-              )}
-              <span className="truncate text-body-regular text-text-primary">
-                {entry.key || t("usage.unknownModel")}
-              </span>
-              {showEngine && (
-                <span className="shrink-0 text-body-2-regular text-text-tertiary">
-                  {entry.engine}
-                </span>
-              )}
-            </span>
-            <span className="shrink-0 text-body-regular text-text-secondary tabular-nums">
-              {formatTokens(tokensOf(entry))}
-            </span>
-          </div>
-          <ShareBar pct={max > 0 ? Math.max(2, Math.round((tokensOf(entry) / max) * 100)) : 0} />
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /**
  * Token usage page: a local ledger of finished turns (see
  * `src-tauri/src/usage.rs`). Nothing is reconstructed from history — the
@@ -192,10 +160,31 @@ export function UsageSection() {
   }, [rows, range]);
 
   const byEngine = useMemo(() => fold(scoped, (row) => row.engine, (row) => row.engine), [scoped]);
-  const byModel = useMemo(
-    () => fold(scoped, (row) => row.model, (row) => row.engine),
-    [scoped],
-  );
+  // 详细数据 nests the models under their CLI: the per-CLI total is what the
+  // outer row shows, the models are the breakdown.
+  const byCli = useMemo(() => {
+    const clis = new Map<string, { engine: string; models: Totals[] }>();
+    for (const row of scoped) {
+      const cli = clis.get(row.engine) ?? { engine: row.engine, models: [] };
+      const existing = cli.models.find((m) => m.key === row.model);
+      const entry = existing ?? emptyTotals(row.model, row.engine);
+      entry.input += row.input;
+      entry.output += row.output;
+      entry.cacheRead += row.cacheRead;
+      entry.cacheWrite += row.cacheWrite;
+      entry.turns += row.turns;
+      if (!existing) cli.models.push(entry);
+      clis.set(row.engine, cli);
+    }
+    for (const cli of clis.values()) {
+      cli.models.sort((a, b) => tokensOf(b) - tokensOf(a));
+    }
+    return [...clis.values()].sort(
+      (a, b) =>
+        b.models.reduce((acc, m) => acc + tokensOf(m), 0) -
+        a.models.reduce((acc, m) => acc + tokensOf(m), 0),
+    );
+  }, [scoped]);
   const totals = useMemo(() => sum(byEngine), [byEngine]);
   const perDay = useMemo(() => {
     // One point per local day in the range, gaps filled with 0. The cursor is
@@ -225,17 +214,43 @@ export function UsageSection() {
           label={enabled ? t("usage.trackingOn") : t("usage.trackingOff")}
           description={t("usage.trackingDesc")}
         >
-          <Button
-            variant="secondary"
-            size="small"
-            onClick={() => {
-              const next = !enabled;
-              setUsageTrackingEnabled(next);
-              setEnabled(next);
-            }}
-          >
-            {enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
-          </Button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              aria-label={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+              title={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+              onClick={() => {
+                const next = !enabled;
+                setUsageTrackingEnabled(next);
+                setEnabled(next);
+              }}
+              className={ICON_BUTTON}
+            >
+              {enabled ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
+            </button>
+            <button
+              type="button"
+              aria-label={t("usage.clear")}
+              title={confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
+              onClick={() => {
+                if (!confirmClear) {
+                  setConfirmClear(true);
+                  return;
+                }
+                void ipc
+                  .usageClear()
+                  .then(() => {
+                    setConfirmClear(false);
+                    void refresh();
+                  })
+                  .catch(() => setConfirmClear(false));
+              }}
+              onBlur={() => setConfirmClear(false)}
+              className={confirmClear ? `${ICON_BUTTON} text-text-error-primary` : ICON_BUTTON}
+            >
+              <Trash2 className="size-4" aria-hidden />
+            </button>
+          </div>
         </SettingsRow>
         <div className="flex w-full flex-col gap-3 py-3 pr-3">
           <div className="flex items-center gap-1 self-start rounded-lg bg-background-tertiary-default p-0.5">
@@ -296,32 +311,67 @@ export function UsageSection() {
       <SettingsCard>
         <div className="flex flex-col gap-3 p-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-body-medium text-text-primary">{t("usage.byEngine")}</span>
-            <button
-              type="button"
-              onClick={() => {
-                if (!confirmClear) {
-                  setConfirmClear(true);
-                  return;
-                }
-                void ipc
-                  .usageClear()
-                  .then(() => {
-                    setConfirmClear(false);
-                    void refresh();
-                  })
-                  .catch(() => setConfirmClear(false));
-              }}
-              onBlur={() => setConfirmClear(false)}
-              className="cursor-pointer text-body-2-medium text-text-error-primary"
-            >
-              {confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
-            </button>
+            <span className="text-body-medium text-text-primary">{t("usage.details")}</span>
+            <span className="text-body-2-regular text-text-tertiary">{t("usage.perRange")}</span>
           </div>
           {loading ? (
             <p className="py-2 text-body-regular text-text-tertiary">{t("usage.loading")}</p>
+          ) : byCli.length === 0 ? (
+            <p className="py-2 text-body-regular text-text-tertiary">{t("usage.empty")}</p>
           ) : (
-            <TotalsList entries={byModel} showEngine />
+            <div className="flex flex-col gap-4">
+              {byCli.map((cli) => {
+                const total = cli.models.reduce((acc, m) => acc + tokensOf(m), 0);
+                const maxModel = cli.models.length ? tokensOf(cli.models[0]) : 0;
+                return (
+                  <div key={cli.engine} className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        {isEngineIcon(cli.engine) && (
+                          <EngineIcon
+                            engine={cli.engine}
+                            size={16}
+                            className="shrink-0 text-foreground-icon-primary"
+                          />
+                        )}
+                        <span className="text-body-medium text-text-primary">
+                          {CLI_DISPLAY_NAMES[cli.engine] ?? cli.engine}
+                        </span>
+                      </span>
+                      <span className="text-body-medium text-text-secondary tabular-nums">
+                        {formatTokens(total)}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-2 pl-6">
+                      {cli.models.map((model) => (
+                        <div key={model.key || "__unknown__"} className="flex w-full flex-col gap-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              {inferModelEngine(model.key) && (
+                                <EngineIcon
+                                  engine={inferModelEngine(model.key)!}
+                                  size={12}
+                                  className="shrink-0 text-foreground-icon-primary"
+                                />
+                              )}
+                              <span className="truncate text-body-regular text-text-primary">
+                                {model.key || t("usage.unknownModel")}
+                              </span>
+                            </span>
+                            <span className="shrink-0 text-body-2-regular text-text-secondary tabular-nums">
+                              {formatTokens(tokensOf(model))}
+                            </span>
+                          </div>
+                          <ShareBar
+                            pct={maxModel > 0 ? Math.max(2, Math.round((tokensOf(model) / maxModel) * 100)) : 0}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </SettingsCard>
