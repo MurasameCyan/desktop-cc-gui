@@ -2,6 +2,18 @@ import { useId, type CSSProperties } from "react";
 import SquareTerminal from "lucide-react/dist/esm/icons/square-terminal";
 import claudeIcon from "@/assets/model-icons/claude.svg";
 import deepseekIcon from "@/assets/model-icons/deepseek.svg";
+import chatglmIcon from "@/assets/model-icons/chatglm.svg";
+import qwenIcon from "@/assets/model-icons/qwen.svg";
+import doubaoIcon from "@/assets/model-icons/doubao.svg";
+import minimaxIcon from "@/assets/model-icons/minimax.svg";
+import yiIcon from "@/assets/model-icons/yi.svg";
+import baichuanIcon from "@/assets/model-icons/baichuan.svg";
+import hunyuanIcon from "@/assets/model-icons/hunyuan.svg";
+import stepfunIcon from "@/assets/model-icons/stepfun.svg";
+import geminiIcon from "@/assets/model-icons/gemini.svg";
+import mistralIcon from "@/assets/model-icons/mistral.svg";
+import cohereIcon from "@/assets/model-icons/cohere.svg";
+import perplexityIcon from "@/assets/model-icons/perplexity.svg";
 
 /**
  * Per-CLI brand marks for the engine picker (ported from the previous
@@ -11,6 +23,21 @@ import deepseekIcon from "@/assets/model-icons/deepseek.svg";
  */
 
 export type EngineIconId =
+  /** Model vendors as well as CLIs: the picker and the usage page badge a
+   *  model with its vendor mark (GLM, Qwen, ...), falling back to a
+   *  monogram for vendors we ship no art for. */
+  | "chatglm"
+  | "qwen"
+  | "doubao"
+  | "minimax"
+  | "yi"
+  | "baichuan"
+  | "hunyuan"
+  | "stepfun"
+  | "gemini"
+  | "mistral"
+  | "cohere"
+  | "perplexity"
   | "claude"
   | "codex"
   | "grok"
@@ -114,6 +141,54 @@ export function EngineIcon({ engine, size = 14, className, style }: EngineIconPr
     case "claude":
       return (
         <img src={claudeIcon} alt="Claude" className={className} style={iconStyle} aria-hidden />
+      );
+    case "chatglm":
+      return (
+        <img src={chatglmIcon} alt="GLM" className={className} style={iconStyle} aria-hidden />
+      );
+    case "qwen":
+      return (
+        <img src={qwenIcon} alt="Qwen" className={className} style={iconStyle} aria-hidden />
+      );
+    case "doubao":
+      return (
+        <img src={doubaoIcon} alt="Doubao" className={className} style={iconStyle} aria-hidden />
+      );
+    case "minimax":
+      return (
+        <img src={minimaxIcon} alt="MiniMax" className={className} style={iconStyle} aria-hidden />
+      );
+    case "yi":
+      return (
+        <img src={yiIcon} alt="Yi" className={className} style={iconStyle} aria-hidden />
+      );
+    case "baichuan":
+      return (
+        <img src={baichuanIcon} alt="Baichuan" className={className} style={iconStyle} aria-hidden />
+      );
+    case "hunyuan":
+      return (
+        <img src={hunyuanIcon} alt="Hunyuan" className={className} style={iconStyle} aria-hidden />
+      );
+    case "stepfun":
+      return (
+        <img src={stepfunIcon} alt="StepFun" className={className} style={iconStyle} aria-hidden />
+      );
+    case "gemini":
+      return (
+        <img src={geminiIcon} alt="Gemini" className={className} style={iconStyle} aria-hidden />
+      );
+    case "mistral":
+      return (
+        <img src={mistralIcon} alt="Mistral" className={className} style={iconStyle} aria-hidden />
+      );
+    case "cohere":
+      return (
+        <img src={cohereIcon} alt="Cohere" className={className} style={iconStyle} aria-hidden />
+      );
+    case "perplexity":
+      return (
+        <img src={perplexityIcon} alt="Perplexity" className={className} style={iconStyle} aria-hidden />
       );
     case "codex":
       return <MonochromeGlyph paths={[OPENAI_ICON_PATH]} size={size} className={className} style={style} />;
