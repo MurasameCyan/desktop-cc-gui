@@ -1,4 +1,5 @@
 import { OmpSpeedSection } from "./omp-speed-section";
+import { filterModels, groupModelsByProvider, type ModelGroup } from "./model-list";
 import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier";
 "use client";
 
@@ -318,32 +319,6 @@ function ModelRow({
 
 /** The flyout's effort section: label with a keyed blur-in value, the
  *  faster/smarter captions, and the five-stop slider. */
-interface ModelGroup {
-  /** Provider id, "" for rows with no provider. */
-  key: string;
-  rows: ModelOption[];
-}
-
-/** Bucket rows by provider, first-appearance order. Returns a single
- *  keyless group when fewer than two providers are present — layering only
- *  earns its headers when it actually separates sources. */
-function groupModelsByProvider(models: ModelOption[]): ModelGroup[] {
-  const groups: ModelGroup[] = [];
-  const byKey = new Map<string, ModelGroup>();
-  for (const model of models) {
-    const key = model.provider ?? "";
-    let group = byKey.get(key);
-    if (!group) {
-      group = { key, rows: [] };
-      byKey.set(key, group);
-      groups.push(group);
-    }
-    group.rows.push(model);
-  }
-  const labeled = groups.filter((g) => g.key !== "");
-  return labeled.length > 1 ? groups : [{ key: "", rows: models }];
-}
-
 function FlyoutEffortSection({
   effort,
   onChange,
@@ -381,18 +356,6 @@ function FlyoutEffortSection({
         <EffortSlider value={effort} onChange={onChange} />
       </div>
     </div>
-  );
-}
-
-/** Case-insensitive label/id/description match; an empty query passes the
- * catalog through untouched (identity, so memoized groups stay stable). */
-function filterModels(models: ModelOption[], normalizedQuery: string): ModelOption[] {
-  if (!normalizedQuery) return models;
-  return models.filter(
-    (m) =>
-      m.label.toLowerCase().includes(normalizedQuery) ||
-      m.id.toLowerCase().includes(normalizedQuery) ||
-      (m.description ?? "").toLowerCase().includes(normalizedQuery),
   );
 }
 
@@ -450,8 +413,9 @@ function PanelActions({
   );
 }
 
-/** The scrollable radio-group model list: provider-sectioned when layered,
- * flat otherwise; an exhausted search shows the no-match hint. */
+/** The scrollable radio-group model list: provider-sectioned (search
+ * included) when the catalog mixes sources, flat otherwise; an exhausted
+ * search shows the no-match hint. */
 function ModelGroupList({
   groups,
   empty,
@@ -541,19 +505,20 @@ function EngineModelPanel({
   const { t } = useTranslation();
   const normalizedQuery = query.trim().toLowerCase();
   const filteredModels = filterModels(models, normalizedQuery);
-  // Provider sections layer the list when the engine's catalog mixes sources
-  // (OMP serving several relays). Pinning the active row to the top would
-  // tear it out of its section, so grouped lists keep the catalog order and
-  // mark the pick in place; flat and searched lists keep the pin.
+  // Provider sections layer the list whenever the engine's catalog mixes
+  // sources (OMP serving several relays) — including while filtering, so the
+  // results keep naming their origin instead of collapsing into identical
+  // rows. Pinning the active row to the top would tear it out of its section,
+  // so a grouped list keeps the catalog order and marks the pick in place;
+  // only a flat single-source list reorders to surface the pick.
   const groups = useMemo(() => groupModelsByProvider(filteredModels), [filteredModels]);
-  const layered = !normalizedQuery && groups.length > 1;
-  const orderedModels =
-    normalizedQuery || layered
-      ? filteredModels
-      : [...filteredModels].sort(
-          (a, b) =>
-            Number(b.id === selectedModelId) - Number(a.id === selectedModelId),
-        );
+  const layered = groups.length > 1;
+  const orderedModels = layered
+    ? filteredModels
+    : [...filteredModels].sort(
+        (a, b) =>
+          Number(b.id === selectedModelId) - Number(a.id === selectedModelId),
+      );
   // The section holding the current pick leads so the selection is never
   // scrolled out of view; within sections the catalog order stands.
   const visibleGroups = layered
@@ -794,21 +759,27 @@ function EngineMenuBody({
         </div>
 
         {!isMobile && flyoutOption && (
-          <EngineFlyout
-            option={flyoutOption}
-            models={modelsByEngine[flyoutOption.id] ?? []}
-            selectedModelId={models[flyoutOption.id] ?? ""}
-            query={query}
-            onQueryChange={onQueryChange}
-            effort={efforts[flyoutOption.id] ?? "medium"}
-            onPickModel={onPickModel}
-            onEffortChange={onEffortChange}
-            ompServiceTier={ompServiceTier}
-            onOmpServiceTierChange={onOmpServiceTierChange}
-            codexServiceTier={codexServiceTier}
-            onCodexServiceTierChange={onCodexServiceTierChange}
-            onRefresh={onRefreshModels}
-          />
+          // The panel cancels a pending hover switch: the pointer may travel
+          // straight from an engine row into the search field, and the switch
+          // must not fire under it. Leaving is owned by the outer wrapper so
+          // the close timer is scheduled once.
+          <div className="contents" onMouseEnter={onFlyoutEnter}>
+            <EngineFlyout
+              option={flyoutOption}
+              models={modelsByEngine[flyoutOption.id] ?? []}
+              selectedModelId={models[flyoutOption.id] ?? ""}
+              query={query}
+              onQueryChange={onQueryChange}
+              effort={efforts[flyoutOption.id] ?? "medium"}
+              onPickModel={onPickModel}
+              onEffortChange={onEffortChange}
+              ompServiceTier={ompServiceTier}
+              onOmpServiceTierChange={onOmpServiceTierChange}
+              codexServiceTier={codexServiceTier}
+              onCodexServiceTierChange={onCodexServiceTierChange}
+              onRefresh={onRefreshModels}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -937,10 +908,17 @@ export function CliMenu({
   const [dialogEngine, setDialogEngine] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const closeTimer = useRef<number | null>(null);
+  const hoverTimer = useRef<number | null>(null);
   const cancelFlyoutClose = () => {
     if (closeTimer.current !== null) {
       clearTimeout(closeTimer.current);
       closeTimer.current = null;
+    }
+  };
+  const cancelHoverSwitch = () => {
+    if (hoverTimer.current !== null) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
     }
   };
   // Brief grace period so the pointer can cross the gap into the flyout.
@@ -948,10 +926,15 @@ export function CliMenu({
     cancelFlyoutClose();
     closeTimer.current = window.setTimeout(() => setOpenEngine(null), 150);
   };
+  // The filter belongs to the search, not to one engine: switching the flyout
+  // must not wipe what the user typed.
   useEffect(() => {
     setQuery("");
-  }, [openEngine, dialogEngine]);
-  useEffect(() => () => cancelFlyoutClose(), []);
+  }, [dialogEngine]);
+  useEffect(() => () => {
+    cancelFlyoutClose();
+    cancelHoverSwitch();
+  }, []);
 
   const handleOpenChange = (o: boolean) => {
     if (!setOpen(o)) return;
@@ -985,10 +968,20 @@ export function CliMenu({
     close();
   };
 
+  // Hover intent: the flyout sits right beside the engine column, so a
+  // pointer crossing it mid-search used to snap the panel to another engine
+  // (top row = Claude Code) and wipe the query. Only a deliberate dwell
+  // switches engines now; the flyout's own pointer keeps it put.
+  const HOVER_SWITCH_MS = 220;
   const hoverEngine = (option: MenuOption) => {
     if (isMobile) return;
     cancelFlyoutClose();
-    setOpenEngine(option.id);
+    cancelHoverSwitch();
+    if (option.id === openEngine) return;
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = null;
+      setOpenEngine(option.id);
+    }, HOVER_SWITCH_MS);
   };
 
   return (
@@ -1033,7 +1026,12 @@ export function CliMenu({
             codexServiceTier={codexServiceTier}
             onCodexServiceTierChange={onCodexServiceTierChange}
             onRefreshModels={onRefreshModels}
-            onFlyoutEnter={cancelFlyoutClose}
+            onFlyoutEnter={() => {
+              // Reaching the panel cancels both the pending close and any
+              // half-elapsed hover switch under the pointer.
+              cancelFlyoutClose();
+              cancelHoverSwitch();
+            }}
             onFlyoutLeave={scheduleFlyoutClose}
           />
         </AriaDialog>
