@@ -18,7 +18,8 @@ import {
   updatePendingStreamModel,
 } from "./stream";
 import type { ChatStore } from "../store";
-import { mergeUsage } from "../usage";
+import { mergeUsage, parseUsage } from "../usage";
+import { usageTrackingEnabled } from "@/features/settings/usage-tracking";
 
 /**
  * Engine-event handling: the main loop resolves each event's session key and
@@ -541,6 +542,10 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   });
   // The run is over: drop its routing entry so the map cannot grow forever.
   runRouting.delete(event.runId);
+  // Ledger the turn's tokens now that it is settled: the same report that
+  // stamps the row above, so the usage page counts real engine numbers. The
+  // feature's own switch gates it (localStorage-backed, see usage-tracking.ts).
+  recordTurnUsage(deps, event, key, finalUsage);
   // Native file changed; refresh list cache in background.
   ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
@@ -557,6 +562,37 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
       }, 400);
     }
   }
+}
+
+/** Ledger one settled turn. Skipped when the feature is off or the engine
+ *  reported nothing (an interrupted turn before its first report). */
+function recordTurnUsage(
+  deps: EngineEventDeps,
+  event: EngineEventPayload,
+  key: string,
+  usage: unknown,
+) {
+  if (!usageTrackingEnabled()) return;
+  const parsed = parseUsage(usage);
+  if (!parsed) return;
+  const state = deps.get();
+  const tab = state.openTabs.find(
+    (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
+  );
+  void ipc
+    .usageRecord({
+      ts: Date.now(),
+      engine: event.engine,
+      model: stampedModel(deps, event.engine, key),
+      sessionId: event.sessionId ?? tab?.sessionId ?? null,
+      workspacePath: tab?.workspacePath ?? state.active?.workspacePath ?? null,
+      input: parsed.input,
+      output: parsed.output,
+      cacheRead: parsed.cacheRead,
+      cacheWrite: parsed.cacheWrite,
+      durationMs: null,
+    })
+    .catch(() => {});
 }
 
 /** Resolve an event's session key (run routing, then session-id match) and

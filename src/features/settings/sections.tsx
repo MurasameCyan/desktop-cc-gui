@@ -3,6 +3,7 @@ import Globe from "lucide-react/dist/esm/icons/globe";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
 import Info from "lucide-react/dist/esm/icons/info";
 import Smartphone from "lucide-react/dist/esm/icons/smartphone";
+import ChartColumn from "lucide-react/dist/esm/icons/chart-column";
 import i18n from "@/lib/i18n";
 import type { SettingsNavItem } from "@/components/application/settings/settings-modal";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
@@ -15,6 +16,7 @@ import { WorkspacesSection } from "./WorkspacesSection";
 import { CliConfigSection } from "./CliConfigSection";
 import { AboutSection } from "./AboutSection";
 import { WebAccessSection } from "./WebAccessSection";
+import { UsageSection } from "./UsageSection";
 import { ENGINE_IDS, type EngineId } from "./providers";
 
 /**
@@ -73,6 +75,15 @@ settingsRegistry.register({
   group: "settings",
   order: 3,
   component: WebAccessSection,
+});
+settingsRegistry.register({
+  id: "usage",
+  key: "usage",
+  label: () => i18n.t("usage.title"),
+  icon: ChartColumn,
+  group: "settings",
+  order: 4,
+  component: UsageSection,
 });
 settingsRegistry.register({
   id: "about",

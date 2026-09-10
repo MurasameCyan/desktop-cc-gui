@@ -314,6 +314,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             path TEXT PRIMARY KEY,
             granted_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS usage_ledger(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            engine TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            session_id TEXT,
+            workspace_path TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read INTEGER NOT NULL DEFAULT 0,
+            cache_write INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_ledger_ts ON usage_ledger(ts);
         CREATE TABLE IF NOT EXISTS plugin_kv(
             plugin_id TEXT NOT NULL,
             key TEXT NOT NULL,
