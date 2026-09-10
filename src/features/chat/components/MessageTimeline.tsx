@@ -357,6 +357,12 @@ export const MessageTimeline = memo(function MessageTimeline({
     return t("chat.metaEffort", { effort: effortVal });
   }, [activeEffort, t]);
 
+  // Tokens reported for the turn in flight, in the same "↑in ↓out" shape the
+  // settled rows use. It appears as soon as an engine reports (omp per
+  // message, codex token_count, claude at the end) and updates in place —
+  // nothing is estimated from streamed text, so the number is always real.
+  const liveUsage = useMemo(() => formatUsage(session.usage), [session.usage]);
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <MessageAnchorRail
@@ -408,6 +414,7 @@ export const MessageTimeline = memo(function MessageTimeline({
                     durationFormatter={(d) => t("chat.metaDuration", { duration: d })}
                     model={activeModelFormatted}
                     effort={activeEffortFormatted}
+                    usage={liveUsage}
                   />
                 ) : (
                   <TimelineRowView

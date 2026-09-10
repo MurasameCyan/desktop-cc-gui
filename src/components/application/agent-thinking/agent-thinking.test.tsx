@@ -70,4 +70,33 @@ describe("AgentThinking", () => {
     expect(text).toContain("推理档位 high");
     expect(text).toContain("·");
   });
+
+  it("shows reported token usage between the timer and the model", () => {
+    // Live consumption for the running turn: engines report it mid-turn, so
+    // the strip must render it without waiting for the turn to settle.
+    act(() => {
+      root.render(
+        <AgentThinking
+          label="响应中"
+          startedAt={Date.now() - 5000}
+          durationFormatter={(d) => `耗时 ${d}`}
+          usage="↑12.3k ↓412"
+          model="模型 deepseek-v4-flash"
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("↑12.3k ↓412");
+    // Order mirrors the settled rows: duration · usage · model.
+    expect(text.indexOf("耗时")).toBeLessThan(text.indexOf("↑12.3k"));
+    expect(text.indexOf("↑12.3k")).toBeLessThan(text.indexOf("模型"));
+  });
+
+  it("omits the usage segment when the engine has not reported yet", () => {
+    act(() => {
+      root.render(<AgentThinking label="响应中" startedAt={Date.now() - 5000} usage={null} />);
+    });
+    expect(container.textContent ?? "").not.toContain("↑");
+  });
 });
