@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import GitMerge from "lucide-react/dist/esm/icons/git-merge";
+import Globe from "lucide-react/dist/esm/icons/globe";
 import {
   Button as AriaButton,
   Dialog as AriaDialog,
@@ -48,7 +49,9 @@ import { FileMentionMenu } from "@/components/application/ai-chat/file-mention-m
 import { SlashCommandMenu } from "@/components/application/ai-chat/slash-command-menu";
 import { findSlashTrigger } from "@/components/application/ai-chat/slash-commands";
 import { type MentionEntry } from "@/components/application/ai-chat/mention-files";
-import { type SlashCommandEntry } from "@/lib/ipc";
+import { ipc, type SlashCommandEntry } from "@/lib/ipc";
+import { listenSettingsChanged } from "@/lib/events";
+import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { joinPath } from "@/features/files/store";
 import {
   usePromptCompletion,
@@ -415,6 +418,64 @@ const CONTEXT_POPOVER_CLASSES = cx(
 const EMPTY_LIMITS: UsageLimit[] = [];
 const EMPTY_PLAN = "";
 
+/**
+ * One-click network-proxy switch for the composer footer: the glyph carries
+ * the state (dim = off, green = on) and the click persists `systemProxyEnabled`
+ * through the same read-modify-write funnel the settings page uses, so the two
+ * surfaces can never clobber each other.
+ */
+function ProxyQuickToggle() {
+  const { t } = useTranslation();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const read = useCallback(() => {
+    void ipc
+      .getAppSettings()
+      .then((s) => setEnabled(s.systemProxyEnabled ?? false))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => read(), [read]);
+  // The settings page (desktop or phone) writes the same field.
+  useTauriEvent(() => listenSettingsChanged(read));
+
+  const toggle = useCallback(async () => {
+    if (busy || enabled === null) return;
+    setBusy(true);
+    try {
+      const latest = await ipc.getAppSettings();
+      const next = !(latest.systemProxyEnabled ?? false);
+      await ipc.updateAppSettings({ ...latest, systemProxyEnabled: next });
+      setEnabled(next);
+    } catch {
+      // Persist failed (e.g. the proxy URL is empty): keep the old glyph, the
+      // settings page is where the reason is shown.
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, enabled]);
+
+  if (enabled === null) return null;
+  const label = enabled ? t("chat.proxyOn") : t("chat.proxyOff");
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={enabled}
+      title={label}
+      disabled={busy}
+      onClick={() => void toggle()}
+      className={cx(
+        "flex cursor-pointer items-center rounded-full p-1.5 transition-colors duration-150 ease disabled:cursor-not-allowed disabled:opacity-50",
+        enabled ? "text-notification-success-foreground" : "text-foreground-icon-tertiary",
+      )}
+    >
+      <Globe className="size-4 shrink-0" strokeWidth={1.75} aria-hidden />
+    </button>
+  );
+}
+
 /** 16px circular context meter at `pct` percent. */
 function ContextRing({ pct }: { pct: number }) {
   const r = 6;
@@ -532,6 +593,7 @@ export function StatusBar({
           ))}
       </div>
       <div className="flex items-center gap-3">
+        <ProxyQuickToggle />
         {/* Context meter is always on: 0% until the first usage report. */}
         <AriaDialogTrigger
           isOpen={contextOpen}

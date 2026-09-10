@@ -154,6 +154,8 @@ export const zh = {
     effortUltra: "ultra",
     effortFaster: "更快",
     effortSmarter: "更深入",
+    proxyOn: "网络代理：已开启，点击关闭",
+    proxyOff: "网络代理：已关闭，点击开启",
     contextWindow: "上下文窗口",
     freeSpace: "空闲",
     usageInput: "输入",

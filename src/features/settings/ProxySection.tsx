@@ -3,8 +3,7 @@ import { useTranslation } from "react-i18next";
 import Save from "lucide-react/dist/esm/icons/save";
 import { Button } from "@/components/base/buttons/button";
 import { Input } from "@/components/base/input/input";
-import Power from "lucide-react/dist/esm/icons/power";
-import PowerOff from "lucide-react/dist/esm/icons/power-off";
+import { Switch } from "@/components/base/switch/switch";
 import {
   SettingsCard,
   SettingsRow,
@@ -145,19 +144,13 @@ export function ProxySection() {
             label={t("settings.proxyEnabled")}
             description={t("settings.proxyEnabledDesc")}
           >
-            <button
-              type="button"
+            <Switch
+              size="sm"
               aria-label={t("settings.proxyEnabled")}
-              aria-pressed={enabledDraft}
-              title={t("settings.proxyEnabled")}
-              disabled={!settings || saving}
-              onClick={() => onToggle(!enabledDraft)}
-              className={`flex h-8 w-8 items-center justify-center rounded-full bg-transparent transition-colors duration-120 hover:bg-bg-tertiary disabled:cursor-not-allowed disabled:opacity-40 ${
-                enabledDraft ? "text-notification-success-foreground" : "text-text-tertiary"
-              }`}
-            >
-              {enabledDraft ? <Power size={18} strokeWidth={1.75} /> : <PowerOff size={18} strokeWidth={1.75} />}
-            </button>
+              isSelected={enabledDraft}
+              isDisabled={!settings || saving}
+              onChange={onToggle}
+            />
           </SettingsRow>
           <SettingsRow label={t("settings.proxyAddress")}>
             <Input

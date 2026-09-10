@@ -689,7 +689,10 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "get_app_settings" => ser(crate::settings::get_app_settings()),
         "update_app_settings" => {
             let a: UpdateSettingsArgs = parse_args(&raw)?;
-            ser(crate::settings::update_app_settings(a.settings))
+            ser(crate::settings::update_app_settings(
+                app.clone(),
+                a.settings,
+            ))
         }
         // engine
         "send_message" => {

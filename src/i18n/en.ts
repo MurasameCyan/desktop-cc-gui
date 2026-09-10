@@ -164,6 +164,8 @@ export const en: Messages = {
     effortUltra: "ultra",
     effortFaster: "Faster",
     effortSmarter: "Smarter",
+    proxyOn: "Proxy: on - click to turn off",
+    proxyOff: "Proxy: off - click to turn on",
     contextWindow: "Context window",
     freeSpace: "Free space",
     usageInput: "Input",

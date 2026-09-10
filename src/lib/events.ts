@@ -42,6 +42,11 @@ export interface ScanProgress {
   finished: boolean;
 }
 
+/** App settings were persisted (any page, any surface). */
+export function listenSettingsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen("settings://changed", () => cb());
+}
+
 /** History-scan progress, throttled by the scanner (~50 updates per run). */
 export function listenScanProgress(cb: (p: ScanProgress) => void): Promise<UnlistenFn> {
   return listen<ScanProgress>("scan://progress", (e) => cb(e.payload));
