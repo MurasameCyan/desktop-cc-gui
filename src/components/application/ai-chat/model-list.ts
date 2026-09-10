@@ -8,10 +8,11 @@ export interface ModelGroup {
 }
 
 /**
- * Bucket rows by provider. Returns a single keyless group when fewer than two
- * providers are present — layering only earns its headers when it actually
- * separates sources, and a keyless group is what tells the list to name each
- * row's provider instead.
+ * Bucket rows by provider, first-appearance order. A section header names the
+ * source, which matters most exactly when a filter has narrowed the list to
+ * one provider — dropping the header there left rows that no longer said
+ * where they came from. Only a catalog with no provider information at all
+ * collapses to a single keyless group.
  */
 export function groupModelsByProvider(models: ModelOption[]): ModelGroup[] {
   const groups: ModelGroup[] = [];
@@ -27,7 +28,7 @@ export function groupModelsByProvider(models: ModelOption[]): ModelGroup[] {
     group.rows.push(model);
   }
   const labeled = groups.filter((g) => g.key !== "");
-  return labeled.length > 1 ? groups : [{ key: "", rows: models }];
+  return labeled.length > 0 ? groups : [{ key: "", rows: models }];
 }
 
 /**

@@ -457,6 +457,17 @@ struct LoadSessionPageArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct UsageSummaryArgs {
+    days: u32,
+    tz_offset_minutes: i32,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageRecordArgs {
+    entry: crate::usage::UsageEntry,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct EngineSessionArgs {
     engine: String,
     session_id: String,
@@ -700,6 +711,25 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         }
         // history
         "list_sessions" => ser(crate::history::reader::list_sessions(app.state())),
+        // Usage ledger: the mobile/web client renders the same page, so the
+        // bridge must route it like every other settings surface.
+        "usage_summary" => {
+            let a: UsageSummaryArgs = parse_args(&raw)?;
+            ser(crate::usage::usage_summary(
+                app.state(),
+                a.days,
+                a.tz_offset_minutes,
+            ))
+        }
+        "usage_record" => {
+            let a: UsageRecordArgs = parse_args(&raw)?;
+            ser(crate::usage::usage_record(
+                app.clone(),
+                app.state(),
+                a.entry,
+            ))
+        }
+        "usage_clear" => ser(crate::usage::usage_clear(app.state())),
         "load_session_page" => {
             let a: LoadSessionPageArgs = parse_args(&raw)?;
             ser(crate::history::reader::load_session_page(

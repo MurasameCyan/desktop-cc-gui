@@ -3,7 +3,7 @@ import { filterModels, groupModelsByProvider, type ModelGroup } from "./model-li
 import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier";
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { Ref, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Check from "lucide-react/dist/esm/icons/check";
@@ -213,14 +213,14 @@ function EngineRow({
   selected,
   flyoutOpen,
   onSelect,
-  onHover,
 }: {
   option: MenuOption;
   selected: boolean;
   /** This engine's flyout is currently open. */
   flyoutOpen: boolean;
+  /** Row click: show this engine's model list (the engine itself switches
+   *  when a model is picked there). */
   onSelect: () => void;
-  onHover: () => void;
 }) {
   return (
     <button
@@ -229,8 +229,6 @@ function EngineRow({
       title={option.disabled ? option.disabledReason : undefined}
       aria-pressed={selected}
       onClick={onSelect}
-      onMouseEnter={onHover}
-      onFocus={onHover}
       className={cx(
         "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 outline-none transition-colors",
         selected || flyoutOpen
@@ -512,7 +510,9 @@ function EngineModelPanel({
   // so a grouped list keeps the catalog order and marks the pick in place;
   // only a flat single-source list reorders to surface the pick.
   const groups = useMemo(() => groupModelsByProvider(filteredModels), [filteredModels]);
-  const layered = groups.length > 1;
+  // Sectioned whenever the grouping carried keys — a single provider still
+  // gets its header (the group is keyless only when no provider is known).
+  const layered = groups.length > 0 && groups[0].key !== "";
   const orderedModels = layered
     ? filteredModels
     : [...filteredModels].sort(
@@ -695,7 +695,6 @@ function EngineMenuBody({
   onQueryChange,
   isMobile,
   onSelectEngine,
-  onHoverEngine,
   onPickModel,
   onEffortChange,
   ompServiceTier,
@@ -703,8 +702,6 @@ function EngineMenuBody({
   codexServiceTier,
   onCodexServiceTierChange,
   onRefreshModels,
-  onFlyoutEnter,
-  onFlyoutLeave,
 }: {
   options: MenuOption[];
   value: string;
@@ -717,7 +714,6 @@ function EngineMenuBody({
   onQueryChange: (value: string) => void;
   isMobile: boolean;
   onSelectEngine: (option: MenuOption) => void;
-  onHoverEngine: (option: MenuOption) => void;
   onPickModel: (engine: string, id: string) => void;
   onEffortChange: (engine: string, level: EffortLevel) => void;
   ompServiceTier: OmpServiceTier;
@@ -725,17 +721,11 @@ function EngineMenuBody({
   codexServiceTier: OmpServiceTier;
   onCodexServiceTierChange: (tier: OmpServiceTier) => Promise<void>;
   onRefreshModels?: () => void | Promise<void>;
-  onFlyoutEnter: () => void;
-  onFlyoutLeave: () => void;
 }) {
   const flyoutOption = options.find((o) => o.id === openEngine);
   return (
     <div className="flex w-full flex-col">
-      <div
-        className="relative"
-        onMouseEnter={onFlyoutEnter}
-        onMouseLeave={onFlyoutLeave}
-      >
+      <div className="relative">
         <div className="flex w-full flex-col">
           {options.map((option, index) => (
             <Fragment key={option.id}>
@@ -745,26 +735,20 @@ function EngineMenuBody({
                   className="-mx-1 my-1 border-t border-separator-border"
                 />
               )}
-              {/* Not `disabled`: that attribute would swallow hover
-                  events and leave a stale flyout on the prior engine. */}
+              {/* Not `disabled`: that attribute would swallow the click
+                  that switches the panel. */}
               <EngineRow
                 option={option}
                 selected={option.id === value}
                 flyoutOpen={option.id === openEngine}
                 onSelect={() => onSelectEngine(option)}
-                onHover={() => onHoverEngine(option)}
               />
             </Fragment>
           ))}
         </div>
 
         {!isMobile && flyoutOption && (
-          // The panel cancels a pending hover switch: the pointer may travel
-          // straight from an engine row into the search field, and the switch
-          // must not fire under it. Leaving is owned by the outer wrapper so
-          // the close timer is scheduled once.
-          <div className="contents" onMouseEnter={onFlyoutEnter}>
-            <EngineFlyout
+          <EngineFlyout
               option={flyoutOption}
               models={modelsByEngine[flyoutOption.id] ?? []}
               selectedModelId={models[flyoutOption.id] ?? ""}
@@ -777,9 +761,8 @@ function EngineMenuBody({
               onOmpServiceTierChange={onOmpServiceTierChange}
               codexServiceTier={codexServiceTier}
               onCodexServiceTierChange={onCodexServiceTierChange}
-              onRefresh={onRefreshModels}
-            />
-          </div>
+            onRefresh={onRefreshModels}
+          />
         )}
       </div>
     </div>
@@ -907,34 +890,12 @@ export function CliMenu({
   const isMobile = useMediaQuery(MOBILE_MEDIA);
   const [dialogEngine, setDialogEngine] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const closeTimer = useRef<number | null>(null);
-  const hoverTimer = useRef<number | null>(null);
-  const cancelFlyoutClose = () => {
-    if (closeTimer.current !== null) {
-      clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-  };
-  const cancelHoverSwitch = () => {
-    if (hoverTimer.current !== null) {
-      clearTimeout(hoverTimer.current);
-      hoverTimer.current = null;
-    }
-  };
-  // Brief grace period so the pointer can cross the gap into the flyout.
-  const scheduleFlyoutClose = () => {
-    cancelFlyoutClose();
-    closeTimer.current = window.setTimeout(() => setOpenEngine(null), 150);
-  };
+
   // The filter belongs to the search, not to one engine: switching the flyout
   // must not wipe what the user typed.
   useEffect(() => {
     setQuery("");
   }, [dialogEngine]);
-  useEffect(() => () => {
-    cancelFlyoutClose();
-    cancelHoverSwitch();
-  }, []);
 
   const handleOpenChange = (o: boolean) => {
     if (!setOpen(o)) return;
@@ -964,25 +925,21 @@ export function CliMenu({
       return;
     }
     if (option.disabled) return;
-    onChange(option.id);
-    close();
+    // Desktop: the row switches WHICH model list is shown, nothing more. The
+    // engine itself changes when a model is picked from that list (see
+    // pickModel), so browsing another CLI can never yank the panel away
+    // mid-search — a pointer crossing the column does nothing at all.
+    // An engine with no catalog has nothing to browse: keep the old
+    // behaviour of switching outright.
+    if ((modelsByEngine[option.id] ?? []).length === 0) {
+      onChange(option.id);
+      close();
+      return;
+    }
+    setOpenEngine(option.id);
   };
 
-  // Hover intent: the flyout sits right beside the engine column, so a
-  // pointer crossing it mid-search used to snap the panel to another engine
-  // (top row = Claude Code) and wipe the query. Only a deliberate dwell
-  // switches engines now; the flyout's own pointer keeps it put.
-  const HOVER_SWITCH_MS = 220;
-  const hoverEngine = (option: MenuOption) => {
-    if (isMobile) return;
-    cancelFlyoutClose();
-    cancelHoverSwitch();
-    if (option.id === openEngine) return;
-    hoverTimer.current = window.setTimeout(() => {
-      hoverTimer.current = null;
-      setOpenEngine(option.id);
-    }, HOVER_SWITCH_MS);
-  };
+
 
   return (
     <>
@@ -1018,7 +975,6 @@ export function CliMenu({
             onQueryChange={setQuery}
             isMobile={isMobile}
             onSelectEngine={selectEngine}
-            onHoverEngine={hoverEngine}
             onPickModel={pickModel}
             onEffortChange={onEffortChange}
             ompServiceTier={ompServiceTier}
@@ -1026,13 +982,6 @@ export function CliMenu({
             codexServiceTier={codexServiceTier}
             onCodexServiceTierChange={onCodexServiceTierChange}
             onRefreshModels={onRefreshModels}
-            onFlyoutEnter={() => {
-              // Reaching the panel cancels both the pending close and any
-              // half-elapsed hover switch under the pointer.
-              cancelFlyoutClose();
-              cancelHoverSwitch();
-            }}
-            onFlyoutLeave={scheduleFlyoutClose}
           />
         </AriaDialog>
       </AriaPopover>
