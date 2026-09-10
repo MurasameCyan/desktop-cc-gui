@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { EngineIcon, type EngineIconId } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
@@ -66,6 +66,13 @@ function axisMax(max: number): number {
 export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
   const { t } = useTranslation();
   const [hoverDay, setHoverDay] = useState<string | null>(null);
+  // The tooltip trails the pointer (clamped to the chart box) instead of
+  // being pinned to the hovered column: pinning made it jump to the other
+  // side near the edges and widened the settings pane into a scrollbar.
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
 
   const { series, dayTotals, max } = useMemo(() => {
     // Stack by CLI (the details card's top level), with each CLI's models kept
@@ -138,8 +145,44 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
   const hoverIndex = hoverDay ? days.indexOf(hoverDay) : -1;
   const hoverTotal = hoverIndex >= 0 ? dayTotals[hoverIndex] : 0;
 
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    const tip = tipRef.current;
+    if (!box || !tip || !cursor) {
+      setTipPos(null);
+      return;
+    }
+    const bounds = box.getBoundingClientRect();
+    const size = tip.getBoundingClientRect();
+    // Stay inside the settings pane (not just the chart): anything past it
+    // widened the pane into a scrollbar. Bounds are the pane's edges mapped
+    // into this wrapper's coordinates.
+    const pane = box.closest("[role='dialog']")?.getBoundingClientRect() ?? bounds;
+    const left = pane.left - bounds.left + 4;
+    const right = pane.right - bounds.left - 4;
+    const top = pane.top - bounds.top + 4;
+    const bottom = pane.bottom - bounds.top - 4;
+    // Auto side: prefer the pointer's right, flip to its left when the box
+    // would not fit there.
+    const flips = right - cursor.x < size.width + 18;
+    const desiredLeft = flips ? cursor.x - size.width - 14 : cursor.x + 14;
+    setTipPos({
+      left: Math.max(left, Math.min(desiredLeft, right - size.width)),
+      top: Math.max(top, Math.min(cursor.y + 14, bottom - size.height)),
+    });
+  }, [cursor, hoverDay]);
+
   return (
-    <div className="relative flex w-full flex-col gap-2">
+    <div
+      ref={boxRef}
+      className="relative flex w-full flex-col gap-2"
+      onMouseMove={(event) => {
+        const box = boxRef.current?.getBoundingClientRect();
+        if (!box) return;
+        setCursor({ x: event.clientX - box.left, y: event.clientY - box.top });
+      }}
+      onMouseLeave={() => setCursor(null)}
+    >
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label={t("usage.chartLabel")}>
         {ticks.map((tick) => (
           <g key={tick}>
@@ -213,16 +256,9 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
 
       {hoverIndex >= 0 && (
         <div
-          className="pointer-events-none absolute top-1 z-10 flex min-w-[150px] flex-col gap-1 rounded-lg border border-separator-border bg-background-primary-default p-2 shadow-dropdown"
-          style={
-            {
-              // Clamp inside the panel: the tooltip flips side near the edges.
-              left: `${Math.min(
-                88,
-                Math.max(0, ((hoverIndex + 0.5) / Math.max(days.length, 1)) * 100),
-              )}%`,
-            } as React.CSSProperties
-          }
+          ref={tipRef}
+          className="pointer-events-none absolute z-10 flex min-w-[150px] flex-col gap-1 rounded-lg border border-separator-border bg-background-primary-default p-2 shadow-dropdown"
+          style={tipPos ? { left: tipPos.left, top: tipPos.top } : { left: 0, top: 0, visibility: "hidden" }}
         >
           <span className="text-body-2-regular text-text-tertiary">{hoverDay}</span>
           <span className="flex items-baseline justify-between gap-3 text-body-2-medium text-text-primary">

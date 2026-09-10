@@ -207,21 +207,60 @@ export function UsageSection() {
     <div className="flex w-full flex-col gap-2">
       <SettingsCard>
         <div className="flex w-full flex-col gap-3 p-3">
-          <div className="flex items-center gap-1 self-start rounded-lg bg-background-tertiary-default p-0.5">
-            {RANGES.map((item) => (
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-1 rounded-lg bg-background-tertiary-default p-0.5">
+              {RANGES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setRange(item.id)}
+                  className={
+                    item.id === range
+                      ? "cursor-pointer rounded-md bg-background-primary-default px-2.5 py-1 text-body-2-medium text-text-primary shadow-sm"
+                      : "cursor-pointer rounded-md px-2.5 py-1 text-body-2-medium text-text-secondary"
+                  }
+                >
+                  {t(item.labelKey)}
+                </button>
+              ))}
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
               <button
-                key={item.id}
                 type="button"
-                onClick={() => setRange(item.id)}
-                className={
-                  item.id === range
-                    ? "cursor-pointer rounded-md bg-background-primary-default px-2.5 py-1 text-body-2-medium text-text-primary shadow-sm"
-                    : "cursor-pointer rounded-md px-2.5 py-1 text-body-2-medium text-text-secondary"
-                }
+                aria-label={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+                title={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+                onClick={() => {
+                  const next = !enabled;
+                  setUsageTrackingEnabled(next);
+                  setEnabled(next);
+                }}
+                className={ICON_BUTTON}
               >
-                {t(item.labelKey)}
+                {enabled ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
               </button>
-            ))}
+              <button
+                type="button"
+                aria-label={t("usage.clear")}
+                title={confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
+                onClick={() => {
+                  if (!confirmClear) {
+                    setConfirmClear(true);
+                    return;
+                  }
+                  void ipc
+                    .usageClear()
+                    .then(() => {
+                      setConfirmClear(false);
+                      void refresh();
+                    })
+                    .catch(() => setConfirmClear(false));
+                }}
+                onBlur={() => setConfirmClear(false)}
+                className={confirmClear ? `${ICON_BUTTON} text-text-error-primary` : ICON_BUTTON}
+              >
+                <Trash2 className="size-4" aria-hidden />
+              </button>
+        </div>
           </div>
           <div className="flex gap-3">
             <div className="flex flex-1 flex-col gap-0.5">
@@ -324,46 +363,7 @@ export function UsageSection() {
         </div>
       </SettingsCard>
 
-      <div className="flex items-center justify-between gap-3 px-1">
-        <p className="text-body-2-regular text-text-tertiary">{t("usage.footnote")}</p>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            aria-label={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
-            title={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
-            onClick={() => {
-              const next = !enabled;
-              setUsageTrackingEnabled(next);
-              setEnabled(next);
-            }}
-            className={ICON_BUTTON}
-          >
-            {enabled ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
-          </button>
-          <button
-            type="button"
-            aria-label={t("usage.clear")}
-            title={confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
-            onClick={() => {
-              if (!confirmClear) {
-                setConfirmClear(true);
-                return;
-              }
-              void ipc
-                .usageClear()
-                .then(() => {
-                  setConfirmClear(false);
-                  void refresh();
-                })
-                .catch(() => setConfirmClear(false));
-            }}
-            onBlur={() => setConfirmClear(false)}
-            className={confirmClear ? `${ICON_BUTTON} text-text-error-primary` : ICON_BUTTON}
-          >
-            <Trash2 className="size-4" aria-hidden />
-          </button>
-        </div>
-      </div>
+      <p className="px-1 text-body-2-regular text-text-tertiary">{t("usage.footnote")}</p>
     </div>
   );
 }
