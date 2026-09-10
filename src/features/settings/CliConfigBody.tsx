@@ -1,3 +1,4 @@
+import { useState } from "react";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import { Button } from "@/components/base/buttons/button";
 import {
@@ -8,7 +9,8 @@ import { WorkspaceSortableList } from "@/components/application/ai-chat/workspac
 import { ipc } from "@/lib/ipc";
 import { PSEUDO_LOCAL, type EngineId } from "./providers";
 import { ChannelRow } from "./CliChannelRow";
-import { CliEngineCard, CliOfficialCard } from "./CliEngineCard";
+import { CliEngineCard } from "./CliEngineCard";
+import { CliEngineSettingsCard } from "./CliEngineSettingsCard";
 import { CliImportMenu } from "./CliImportMenu";
 import { CliSyncBanner } from "./CliSyncBanner";
 import { DshHostSection } from "./DshHostSection";
@@ -37,7 +39,6 @@ export function CliConfigBody({ cli }: { cli: CliConfigState }) {
     ccStatus,
     busy,
     enabled,
-    officialActive,
     entries,
     currentId,
     mutate,
@@ -48,6 +49,10 @@ export function CliConfigBody({ cli }: { cli: CliConfigState }) {
     importCcSwitchFile,
     dismissCcSwitch,
   } = cli;
+  // pi/omp official files are never cc-gui-managed: their 编辑 entry opens
+  // the models.json/models.yml editor already living in the auth section.
+  const [customEditorSignal, setCustomEditorSignal] = useState(0);
+
   return (
     <>
       {ccStatus?.changed && (
@@ -67,14 +72,17 @@ export function CliConfigBody({ cli }: { cli: CliConfigState }) {
       />
 
       <div className="relative flex w-full flex-col gap-6">
-        <CliOfficialCard
-          engine={engine}
-          officialActive={officialActive}
-          busy={busy}
-          onActivateOfficial={() => requestActivate(PSEUDO_LOCAL)}
+        <CliEngineSettingsCard
+          cli={cli}
+          onEditOfficial={() => {
+            if (engine === "pi" || engine === "omp") setCustomEditorSignal((n) => n + 1);
+            else cli.setOfficialEditing(true);
+          }}
         />
 
-        {(engine === "pi" || engine === "omp") && <PiFamilyAuthSection engine={engine} />}
+        {(engine === "pi" || engine === "omp") && (
+          <PiFamilyAuthSection engine={engine} openCustomEditorSignal={customEditorSignal} />
+        )}
         {engine === "dsh" && <DshHostSection />}
 
         <div className="flex w-full flex-col gap-2">

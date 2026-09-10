@@ -151,6 +151,8 @@ pub fn run() {
             config::delete_provider,
             config::set_current_provider,
             provider_files::provider_file_paths,
+            provider_files::official_config_read,
+            provider_files::official_config_write,
             config::reorder_providers,
             config::set_engine_enabled,
             // cc-switch interop

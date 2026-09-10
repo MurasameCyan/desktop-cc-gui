@@ -186,6 +186,8 @@ export interface AppSettings {
   ompBin: string | null;
   dshBin: string | null;
   defaultModels: Record<string, string>;
+  /** Per-engine user-added custom model ids (设置 → CLI → 自定义模型). */
+  customModels: Record<string, string[]>;
   defaultEfforts: Record<string, string>;
   ompOpenaiServiceTier?: "default" | "priority" | null;
   /** Codex Fast override; null preserves ~/.codex/config.toml. */
@@ -240,15 +242,23 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
-/** A custom slash command from `.claude/commands` (`list_slash_commands`):
- *  workspace commands shadow global ones of the same name. */
+/** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
+ *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
+ *  distinct: the menu keys icons/badges/section grouping off this field,
+ *  and per-kind merging lets a command and a skill share a name. */
+export type SlashEntryKind = "command" | "skill";
+
+/** A `/` picker entry (`list_slash_commands`): workspace entries shadow
+ *  global ones of the same name and kind. */
 export interface SlashCommandEntry {
-  /** Slash-less name; directory segments join with `:` ("aimax:plan"). */
+  /** Slash-less name; commands join directory segments with `:`
+   *  ("aimax:plan"), skills use the SKILL.md directory name. */
   name: string;
   description?: string | null;
   argumentHint?: string | null;
-  /** "workspace" (project `.claude/commands`) or "global" (CLI home). */
+  /** "workspace" (project `.claude/`) or "global" (CLI home). */
   source: string;
+  kind: SlashEntryKind;
 }
 
 export interface GitFileEntry {
@@ -433,6 +443,21 @@ export interface PluginInfo {
   minAppVersion: string | null;
 }
 
+export interface OfficialConfigFile {
+  /** Absolute path — the pane label, and the write-back key. */
+  path: string;
+  /** Editor language mode: "json" | "toml". */
+  format: string;
+  /** Live file content; "" when absent (`exists` distinguishes). */
+  content: string;
+  exists: boolean;
+}
+
+export interface OfficialConfigDraft {
+  path: string;
+  content: string;
+}
+
 export const ipc = {
   // config
   getCliConfig: () => invoke<CliConfig>("get_cli_config"),
@@ -446,6 +471,13 @@ export const ipc = {
    *  switch confirmation); empty for display-only engines. */
   providerFilePaths: (engine: string) =>
     invoke<string[]>("provider_file_paths", { engine }),
+  /** Editable files of the engine's 官方配置 (pane order); empty for
+   *  pi/omp/dsh, whose official state lives in auth stores. */
+  officialConfigRead: (engine: string) =>
+    invoke<OfficialConfigFile[]>("official_config_read", { engine }),
+  /** Gated backend-side on 官方配置 being the active configuration. */
+  officialConfigWrite: (engine: string, files: OfficialConfigDraft[]) =>
+    invoke<void>("official_config_write", { engine, files }),
   reorderProviders: (engine: string, ids: string[]) =>
     invoke<void>("reorder_providers", { engine, ids }),
   setEngineEnabled: (engine: string, enabled: boolean) =>
@@ -561,8 +593,9 @@ export const ipc = {
    * paths; backend caps at 20k entries). */
   listFileIndex: (path: string) =>
     withGrantRetry(() => invoke<FileIndexEntry[]>("list_file_index", { path })),
-  /** Custom slash commands for the composer `/` picker (workspace
-   *  `.claude/commands` + the CLI's global commands dir). */
+  /** Catalog for the composer `/` picker (workspace
+   *  `.claude/commands` + `.claude/skills`, plus the CLI's global config
+   *  home). Commands and skills are distinguished by `entry.kind`. */
   listSlashCommands: (path: string) =>
     withGrantRetry(() => invoke<SlashCommandEntry[]>("list_slash_commands", { path })),
   // granted directories (desktop-only commands; the settings list hides on web)

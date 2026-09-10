@@ -2,7 +2,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/ipc", () => ({ ipc: {} }));
+vi.mock("@/lib/ipc", () => ({
+  ipc: {
+    // The bin-path / custom-models rows read AppSettings on mount.
+    getAppSettings: () => Promise.resolve({ customModels: {} }),
+  },
+}));
 // The auth section owns its own ipc state; CliConfigBody only places it.
 vi.mock("./PiFamilyAuthSection", () => ({
   PiFamilyAuthSection: () => <div data-testid="pi-auth-section" />,
@@ -38,6 +43,9 @@ function makeCli(over: Partial<CliConfigState> = {}): CliConfigState {
     enabled: true,
     entries: [],
     officialActive: true,
+    officialEditing: false,
+    setOfficialEditing: () => {},
+    saveOfficialConfig: () => Promise.resolve(null),
     mutate: vi.fn(),
     activate: () => {},
     requestActivate: () => {},
@@ -103,5 +111,58 @@ describe("CliConfigBody disabled overlay", () => {
   it("enabled: no overlay is rendered", async () => {
     await render(makeCli({ enabled: true }));
     expect(overlay()).toBeNull();
+  });
+});
+
+describe("CliEngineSettingsCard official edit entry", () => {
+  let container: HTMLDivElement;
+  let root: Root | null;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = null;
+  });
+
+  afterEach(async () => {
+    if (root) await act(async () => root?.unmount());
+    container.remove();
+  });
+
+  async function render(cli: CliConfigState) {
+    root = createRoot(container);
+    await act(async () => root?.render(<CliConfigBody cli={cli} />));
+  }
+
+  function editButton(): HTMLButtonElement {
+    const label = i18n.t("settings.cliEdit");
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === label,
+    );
+    expect(button).toBeDefined();
+    return button as HTMLButtonElement;
+  }
+
+  it("file-managed engine: 编辑 is disabled until 官方配置 is active", async () => {
+    await render(makeCli({ engine: "claude", officialActive: false, currentId: "chan-a" }));
+    expect(editButton().disabled).toBe(true);
+  });
+
+  it("file-managed engine: 编辑 opens the generic editor when 官方配置 is active", async () => {
+    const setOfficialEditing = vi.fn();
+    await render(makeCli({ engine: "claude", officialActive: true, setOfficialEditing }));
+    expect(editButton().disabled).toBe(false);
+    await act(async () => editButton().click());
+    expect(setOfficialEditing).toHaveBeenCalledWith(true);
+  });
+
+  it("pi/omp: 编辑 is never gated (files are not cc-gui-managed)", async () => {
+    await render(makeCli({ engine: "pi", officialActive: false, currentId: "chan-a" }));
+    expect(editButton().disabled).toBe(false);
+  });
+
+  it("dsh: no official config row at all (no native config file)", async () => {
+    await render(makeCli({ engine: "dsh" }));
+    expect(container.textContent).not.toContain(i18n.t("settings.cliOfficial"));
   });
 });

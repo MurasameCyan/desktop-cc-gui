@@ -139,7 +139,7 @@ export default function SettingsPage() {
     /** Enabled engine ids; empty when the engine probe hasn't landed, in
      *  which case every CLI stays in the main rail. */
     const enabledEngines = new Set(
-      engines.filter((engine) => engine.enabled).map((engine) => engine.id),
+      engines.flatMap((engine) => (engine.enabled ? [engine.id] : [])),
     );
     // Re-render the rail on language flips: labels are functions of i18n.
     return [...byGroup.entries()]
@@ -155,15 +155,14 @@ export default function SettingsPage() {
         // engine states are known and at least one CLI is disabled.
         const disabledItems =
           engines.length > 0
-            ? ordered
-                .filter(
-                  // Plugin sections in this rail have no engine state and
-                  // always stay in the main group.
-                  (item) =>
-                    item.key.startsWith("cli:") &&
-                    !enabledEngines.has(item.key.slice("cli:".length)),
-                )
-                .map((item) => ({ ...item, disabled: true }))
+            ? ordered.flatMap((item) =>
+                // Plugin sections in this rail have no engine state and
+                // always stay in the main group.
+                item.key.startsWith("cli:") &&
+                !enabledEngines.has(item.key.slice("cli:".length))
+                  ? [{ ...item, disabled: true }]
+                  : [],
+              )
             : [];
         const enabledItems =
           disabledItems.length > 0

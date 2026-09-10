@@ -70,6 +70,9 @@ export interface ComposerInputHandle {
   focus: () => void;
   /** Insert plain text at the caret; `@/abs/path` mentions render as chips. */
   insertText: (text: string) => void;
+  /** Focus the field and open the `/` picker, appending a line-start `/`
+   *  when the caret is not already inside a slash trigger. */
+  openSlashPicker: () => void;
 }
 
 export interface ComposerProps {
@@ -279,12 +282,32 @@ export function Composer({
         emitChange();
         syncTags();
       },
+      openSlashPicker: () => {
+        const el = editableRef.current;
+        if (!el) return;
+        el.focus();
+        // Append at the end: the trigger regex only accepts a line-start
+        // `/`, so an arbitrary caret position mid-line could not open the
+        // picker anyway.
+        const text = extractText(el);
+        setCaretOffset(el, text.length);
+        if (!findSlashTrigger(text, text.length)) {
+          insertTextAtCaret(el, text === "" || text.endsWith("\n") ? "/" : "\n/");
+        }
+        emitChange();
+        syncTags();
+        updateSlashTrigger();
+        // react-aria restores focus to the popover trigger when the add
+        // menu unmounts — after our focus() above. Reclaim the field so
+        // typing reaches it once the picker is open.
+        requestAnimationFrame(() => editableRef.current?.focus());
+      },
     };
     inputRef.current = handle;
     return () => {
       if (inputRef.current === handle) inputRef.current = null;
     };
-  }, [inputRef, emitChange, syncTags]);
+  }, [inputRef, emitChange, syncTags, updateSlashTrigger]);
 
   // Chip × removal via delegation (chips are raw DOM, not React).
   useEffect(() => {

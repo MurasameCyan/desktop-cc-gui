@@ -1,7 +1,9 @@
 "use client";
 
-import { type ComponentProps, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import Info from "lucide-react/dist/esm/icons/info";
 import {
+  Focusable,
   OverlayArrow as AriaOverlayArrow,
   Tooltip as AriaTooltip,
   TooltipTrigger as AriaTooltipTrigger,
@@ -15,6 +17,13 @@ import { cx } from "@/utils/cx";
  * wraps a trigger element (any focusable element works) and one
  * `TooltipContent`; hover/focus opens after `delay`, moving away closes
  * immediately. Never put essential copy here — it is unreachable on touch.
+ *
+ * The trigger MUST be a react-aria component (Button, Link, …) or a plain
+ * element wrapped in `Focusable`. AriaTooltipTrigger passes its ref and
+ * hover/focus handlers through FocusableContext, which only those consume;
+ * a bare DOM element leaves the trigger ref null, so useOverlayPosition
+ * never measures it and the tooltip pins to `top:0; left:0` — the viewport
+ * corner — instead of anchoring to the trigger.
  */
 
 export interface TooltipProps extends ComponentProps<typeof AriaTooltipTrigger> {}
@@ -59,5 +68,62 @@ export function TooltipContent({
       </AriaOverlayArrow>
       {children}
     </AriaTooltip>
+  );
+}
+
+/**
+ * InfoTip — clickable ⓘ hint next to a label.
+ *
+ * A plain Tooltip only opens on hover (after `delay`) or keyboard focus, so
+ * clicking the icon used to do nothing and felt dead. InfoTip additionally
+ * pins the tip open on click: it stays visible while the pointer moves away
+ * and closes on outside press, Escape, or a second click.
+ */
+export function InfoTip({ label }: { label: string }) {
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!pinned) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (triggerRef.current?.contains(e.target as Node)) return;
+      setPinned(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPinned(false);
+    };
+    // Unpin on scroll too: react-aria closes hover-driven tooltips when a
+    // parent scrolls, and a pinned one would otherwise float detached.
+    const onScroll = () => setPinned(false);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [pinned]);
+
+  return (
+    <Tooltip isOpen={pinned || hoverOpen} onOpenChange={setHoverOpen} delay={300}>
+      <Focusable>
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-label={label}
+          // Never let the hint click bubble into a surrounding clickable row.
+          onClick={(e) => {
+            e.stopPropagation();
+            setPinned((p) => !p);
+          }}
+          className="inline-flex shrink-0 cursor-help items-center justify-center text-foreground-icon-quaternary transition-colors hover:text-text-secondary"
+        >
+          <Info className="size-3.5" aria-hidden />
+        </button>
+      </Focusable>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }

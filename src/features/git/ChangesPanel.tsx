@@ -4,6 +4,7 @@ import Plus from "lucide-react/dist/esm/icons/plus";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import Minus from "lucide-react/dist/esm/icons/minus";
+import { Focusable } from "react-aria-components";
 import { Tooltip, TooltipContent } from "@/components/base/tooltip/tooltip";
 import { type GitFileEntry, type GitStatus } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
@@ -313,21 +314,23 @@ const FileRow = memo(function FileRow({
         {letter}
       </span>
       <Tooltip>
-        <button
-          type="button"
-          onClick={() => onOpen(entry.path)}
-          className="flex min-w-0 flex-1 items-baseline text-left font-mono text-xs"
-        >
-          {/* Directory truncates from the left (…/foo/bar) so the filename
-              — the most important part — is always fully visible; the tooltip
-              below shows the full path on hover. */}
-          {dirPart && (
-            <span dir="rtl" className="min-w-0 truncate text-left text-text-tertiary">
-              <bdo dir="ltr">{dirPart}</bdo>
-            </span>
-          )}
-          <span className="shrink-0 text-text-primary">{filePart}</span>
-        </button>
+        <Focusable>
+          <button
+            type="button"
+            onClick={() => onOpen(entry.path)}
+            className="flex min-w-0 flex-1 items-baseline text-left font-mono text-xs"
+          >
+            {/* Directory truncates from the left (…/foo/bar) so the filename
+                — the most important part — is always fully visible; the tooltip
+                below shows the full path on hover. */}
+            {dirPart && (
+              <span dir="rtl" className="min-w-0 truncate text-left text-text-tertiary">
+                <bdo dir="ltr">{dirPart}</bdo>
+              </span>
+            )}
+            <span className="shrink-0 text-text-primary">{filePart}</span>
+          </button>
+        </Focusable>
         <TooltipContent className="break-all font-mono">{entry.path}</TooltipContent>
       </Tooltip>
       {entry.additions !== undefined && (

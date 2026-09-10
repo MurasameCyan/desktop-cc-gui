@@ -54,7 +54,9 @@ export function useCliUpdateFlow(
   const { update } = useCliVersionStatus(engine);
   const [state, setState] = useState<CliUpdateFlowState>(IDLE);
   const callbacksRef = useRef(callbacks);
-  callbacksRef.current = callbacks;
+  useEffect(() => {
+    callbacksRef.current = callbacks;
+  });
 
   // Subscribe only for the duration of a run; events carry the runId, so a
   // stale/other-engine run can never leak lines into this dialog.

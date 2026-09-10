@@ -91,3 +91,21 @@ export async function pickFile(
   const path = Array.isArray(selected) ? selected[0] : selected;
   return path ?? null;
 }
+/**
+ * Multi-file picker: native dialog on desktop; on web there is no filesystem
+ * dialog, so fall back to typing one absolute path (same as pickFile). A
+ * cancelled dialog resolves to an empty list.
+ */
+export async function pickFiles(
+  title: string,
+  filters?: { name: string; extensions: string[] }[],
+): Promise<string[]> {
+  if (isWeb) {
+    const entered = window.prompt(title);
+    const trimmed = entered?.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  const selected = await openDialog({ multiple: true, title, filters });
+  if (!selected) return [];
+  return Array.isArray(selected) ? selected : [selected];
+}

@@ -2,13 +2,15 @@ import { create } from "zustand";
 import { ipc, type SlashCommandEntry } from "@/lib/ipc";
 
 /**
- * Custom slash-command catalog for the composer's `/` picker, ported from
- * desktop-cc-gui's slash-command completion (claude_commands.rs +
- * ChatInputBoxAdapter). The Rust side scans the workspace's
- * `.claude/commands` and the CLI's global commands dir; this store caches
- * the catalog per workspace root with the same stale-while-revalidate
- * model as the @-mention file index (mention-files.ts) — one IPC per TTL
- * window, matching is pure JS per keystroke.
+ * Catalog for the composer's `/` picker, ported from desktop-cc-gui's
+ * slash-command completion (claude_commands.rs + ChatInputBoxAdapter) and
+ * extended with skills. The Rust side scans the workspace's `.claude/`
+ * plus the CLI's global config home for two distinct kinds — commands
+ * (markdown under `commands/`) and skills (`skills/<name>/SKILL.md`) — via
+ * `entry.kind`; this store caches the catalog per workspace root with the
+ * same stale-while-revalidate model as the @-mention file index
+ * (mention-files.ts) — one IPC per TTL window, matching is pure JS per
+ * keystroke.
  */
 
 /** An active `/query` trigger at the caret: `start` is the offset of the

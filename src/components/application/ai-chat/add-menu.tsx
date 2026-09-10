@@ -4,8 +4,7 @@ import type { ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import Paperclip from "lucide-react/dist/esm/icons/paperclip";
-import Crosshair from "lucide-react/dist/esm/icons/crosshair";
-import ListChecks from "lucide-react/dist/esm/icons/list-checks";
+import Sparkles from "lucide-react/dist/esm/icons/sparkles";
 import {
   Button as AriaButton,
   Dialog as AriaDialog,
@@ -22,7 +21,7 @@ import { usePopoverState } from "@/utils/use-dismiss-on-outside-press";
  * live data. Same react-aria non-modal popover recipe as the template;
  * contents are props-driven:
  * - AddMenu — the composer's plus button: "Add" popover
- *   (Figma 4040:5414); all rows render disabled until they get backends.
+ *   (Figma 4040:5414); files (onPickFiles) and skills (onPickSkills) rows are wired.
  */
 
 /** The add menu is a custom, wider panel than the other popovers (Figma
@@ -43,8 +42,7 @@ interface AddMenuRow {
   /** 20px icon rows; lucide for builtins, any className-driven component for
    *  plugin-registered rows. */
   icon?: ComponentType<{ className?: string }>;
-  /** Wired action. Rows without one render disabled: no row has a backend
-   *  yet. */
+  /** Wired action. Rows without one render disabled. */
   onSelect?: () => void;
 }
 
@@ -84,15 +82,21 @@ function AddMenuGroup({ label, rows }: { label: string; rows: AddMenuRow[] }) {
 }
 
 /**
- * Composer plus-button + "Add" popover (Figma node 4040:5414). Every row
- * renders disabled until it gets a real backend.
+ * Composer plus-button + "Add" popover (Figma node 4040:5414). The files row is wired via
+ * onPickFiles; the skills row opens the composer's `/` picker via onPickSkills.
  */
 export function AddMenu({
   disabled = false,
   disabledReason,
+  onPickFiles,
+  onPickSkills,
 }: {
   disabled?: boolean;
   disabledReason?: string;
+  /** "Files and folders" row: opens the native multi-file picker. */
+  onPickFiles?: () => void;
+  /** "Skills" row: focuses the composer and opens the `/` command picker. */
+  onPickSkills?: () => void;
 }) {
   const { t } = useTranslation();
   const { isOpen, triggerRef, popoverRef, setOpen } = usePopoverState();
@@ -101,9 +105,27 @@ export function AddMenu({
   const pluginDefs = useRegistry(addMenuRegistry);
 
   const addRows: AddMenuRow[] = [
-    { icon: Paperclip, label: t("chat.addFilesFolders") },
-    { icon: Crosshair, label: t("chat.addGoal"), description: t("chat.addGoalDesc") },
-    { icon: ListChecks, label: t("chat.addPlanMode"), description: t("chat.addPlanModeDesc") },
+    {
+      icon: Paperclip,
+      label: t("chat.addFilesFolders"),
+      onSelect: onPickFiles
+        ? () => {
+            setOpen(false);
+            onPickFiles();
+          }
+        : undefined,
+    },
+    {
+      icon: Sparkles,
+      label: t("chat.addSkills"),
+      description: t("chat.addSkillsDesc"),
+      onSelect: onPickSkills
+        ? () => {
+            setOpen(false);
+            onPickSkills();
+          }
+        : undefined,
+    },
   ];
   const pluginRows: AddMenuRow[] = pluginDefs.map((def) => ({
     icon: def.icon,

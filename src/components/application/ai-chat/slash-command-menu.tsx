@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import Terminal from "lucide-react/dist/esm/icons/terminal";
+import Sparkles from "lucide-react/dist/esm/icons/sparkles";
 import {
   MENU_ITEM,
   MENU_ITEM_ACTIVE,
@@ -25,11 +26,13 @@ import {
 import { type SlashCommandEntry } from "@/lib/ipc";
 
 /**
- * `/` slash-command picker, rendered above the composer while a `/` trigger
- * is active. Same interaction model as FileMentionMenu: the contentEditable
- * keeps focus and owns the keyboard; the menu is deliberately NOT a
- * react-aria popover (those steal focus / manage their own trigger) — the
- * composer forwards keys through `menuRef` instead.
+ * `/` picker, rendered above the composer while a `/` trigger is active.
+ * Lists two distinct entry kinds — slash commands and skills — grouped by
+ * kind with per-kind icons/badges. Same interaction model as
+ * FileMentionMenu: the contentEditable keeps focus and owns the keyboard;
+ * the menu is deliberately NOT a react-aria popover (those steal focus /
+ * manage their own trigger) — the composer forwards keys through `menuRef`
+ * instead.
  */
 
 /** Imperative key handling for the composer's keydown handler. */
@@ -44,20 +47,30 @@ const SURFACE = cx(
   "absolute bottom-full z-20 mb-2",
 );
 
+/** Section header between kind groups; keyboard navigation skips it
+ *  (headers are not options — Row indices stay contiguous). */
+const GROUP_HEADER =
+  "px-2 pb-1 pt-1.5 text-caption-1-medium text-text-tertiary select-none";
+
 const Row = memo(function Row({
   entry,
   index,
   active,
+  kindLabel,
   onSelect,
   onHover,
 }: {
   entry: SlashCommandEntry;
   index: number;
   active: boolean;
+  /** Short kind badge ("命令" / "技能"); keeps commands and skills
+   *  visually distinct even when their icons scroll past. */
+  kindLabel: string;
   onSelect: (entry: SlashCommandEntry) => void;
   onHover: (index: number) => void;
 }) {
   const description = entry.description ?? "";
+  const Icon = entry.kind === "skill" ? Sparkles : Terminal;
   return (
     <div
       role="option"
@@ -83,7 +96,7 @@ const Row = memo(function Row({
       }}
       className={cx(MENU_ITEM, active && MENU_ITEM_ACTIVE)}
     >
-      <Terminal
+      <Icon
         aria-hidden
         className="size-4 shrink-0 text-foreground-icon-secondary"
       />
@@ -95,6 +108,9 @@ const Row = memo(function Row({
           {description}
         </span>
       )}
+      <span className="ml-auto shrink-0 text-caption-1-regular text-text-tertiary">
+        {kindLabel}
+      </span>
     </div>
   );
 });
@@ -200,16 +216,34 @@ export function SlashCommandMenu({
             {t("chat.slashNoMatches")}
           </div>
         ) : (
-          items.map((entry, i) => (
-            <Row
-              key={`${entry.source}:${entry.name}`}
-              entry={entry}
-              index={i}
-              active={i === active}
-              onSelect={onSelect}
-              onHover={setActiveIndex}
-            />
-          ))
+          items.map((entry, i) => {
+            // Group header at each kind boundary (the catalog arrives
+            // commands-then-skills, so at most one boundary renders).
+            const showHeader = i === 0 || items[i - 1].kind !== entry.kind;
+            return (
+              <div key={`${entry.kind}:${entry.source}:${entry.name}`}>
+                {showHeader && (
+                  <div className={GROUP_HEADER}>
+                    {entry.kind === "skill"
+                      ? t("chat.slashGroupSkills")
+                      : t("chat.slashGroupCommands")}
+                  </div>
+                )}
+                <Row
+                  entry={entry}
+                  index={i}
+                  active={i === active}
+                  kindLabel={
+                    entry.kind === "skill"
+                      ? t("chat.slashKindSkill")
+                      : t("chat.slashKindCommand")
+                  }
+                  onSelect={onSelect}
+                  onHover={setActiveIndex}
+                />
+              </div>
+            );
+          })
         )}
       </div>
     </div>

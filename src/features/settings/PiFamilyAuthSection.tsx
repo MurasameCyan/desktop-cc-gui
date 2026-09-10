@@ -40,7 +40,15 @@ import { launchPiFamilyLogin } from "./piFamilyLogin";
 import { PiFamilyOauthSection } from "./PiFamilyOauthSection";
 import { notifyCliConfigChanged } from "./providers";
 
-export function PiFamilyAuthSection({ engine }: { engine: "pi" | "omp" }) {
+export function PiFamilyAuthSection({
+  engine,
+  openCustomEditorSignal,
+}: {
+  engine: "pi" | "omp";
+  /** Bump to open the 自定义供应商 editor from the 官方配置 row's 编辑
+   *  entry (pi/omp official files are never cc-gui-managed, so no gate). */
+  openCustomEditorSignal?: number;
+}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<PiFamilyAuthListResult | null>(null);
@@ -193,6 +201,20 @@ export function PiFamilyAuthSection({ engine }: { engine: "pi" | "omp" }) {
     setModelsError(null);
     setModelsEditorOpen(true);
   }, [modelsEditorOpen, modelsConfig]);
+
+  // The 官方配置 row's 编辑 entry bumps this signal to open the models
+  // editor. Adjusting state during render (React's recommended pattern,
+  // comparing against the previous signal) fires exactly once per bump —
+  // modelsConfig refreshes can't re-fire it while the signal stays set.
+  const openSignal = openCustomEditorSignal ?? 0;
+  const [prevOpenSignal, setPrevOpenSignal] = useState(openSignal);
+  if (openSignal !== prevOpenSignal) {
+    setPrevOpenSignal(openSignal);
+    const existing = modelsConfig?.text ?? "";
+    setModelsDraft(existing.trim() ? existing : (modelsConfig?.template ?? ""));
+    setModelsError(null);
+    setModelsEditorOpen(true);
+  }
 
   const handleModelsSave = useCallback(async () => {
     setModelsSaving(true);

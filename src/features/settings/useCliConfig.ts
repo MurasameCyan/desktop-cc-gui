@@ -8,7 +8,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { ipc, type CcSwitchStatus, type CliConfig } from "@/lib/ipc";
+import { ipc, type CcSwitchStatus, type CliConfig, type OfficialConfigDraft } from "@/lib/ipc";
 import { newId } from "@/lib/id";
 import { pickFile } from "@/lib/platform";
 import {
@@ -45,6 +45,13 @@ export interface CliConfigState {
   setPendingDelete: Dispatch<SetStateAction<ProviderEntry | null>>;
   pendingSwitch: PendingSwitch | null;
   setPendingSwitch: Dispatch<SetStateAction<PendingSwitch | null>>;
+  /** 官方配置 edit dialog open state (claude/codex/kimi/grok only). */
+  officialEditing: boolean;
+  setOfficialEditing: Dispatch<SetStateAction<boolean>>;
+  /** Save the edited official files; returns the error message (dialog
+   *  stays open) or null on success (dialog closed). Backend re-validates
+   *  and gates on 官方配置 being active. */
+  saveOfficialConfig: (files: OfficialConfigDraft[]) => Promise<string | null>;
   ccStatus: CcSwitchStatus | null;
   currentId: string;
   enabled: boolean;
@@ -83,6 +90,7 @@ export function useCliConfig(engine: EngineId): CliConfigState {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [pendingDelete, setPendingDelete] = useState<ProviderEntry | null>(null);
   const [pendingSwitch, setPendingSwitch] = useState<PendingSwitch | null>(null);
+  const [officialEditing, setOfficialEditing] = useState(false);
   const [ccStatus, setCcStatus] = useState<CcSwitchStatus | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -267,6 +275,22 @@ export function useCliConfig(engine: EngineId): CliConfigState {
 
   const officialActive = currentId === PSEUDO_LOCAL;
 
+  const saveOfficialConfig = useCallback(
+    async (files: OfficialConfigDraft[]): Promise<string | null> => {
+      setBusy(true);
+      try {
+        await ipc.officialConfigWrite(engine, files);
+        setOfficialEditing(false);
+        return null;
+      } catch (e) {
+        return String(e);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [engine],
+  );
+
   return {
     t,
     config,
@@ -280,6 +304,9 @@ export function useCliConfig(engine: EngineId): CliConfigState {
     setPendingDelete,
     pendingSwitch,
     setPendingSwitch,
+    officialEditing,
+    setOfficialEditing,
+    saveOfficialConfig,
     ccStatus,
     currentId,
     enabled,

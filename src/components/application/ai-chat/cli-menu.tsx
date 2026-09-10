@@ -596,6 +596,27 @@ function EngineFlyout(props: Parameters<typeof EngineModelPanel>[0]) {
   );
 }
 
+/** Trigger min-width lock while the popover is open: snapshot on open, clear
+ *  on close, so shorter model labels can't shrink the trigger mid-session
+ *  and slide the top-end popover. Adjusted during render (prev-prop pattern)
+ *  so every open/close path — trigger press, outside press, Esc — flips it,
+ *  not just onOpenChange. */
+function useLockedMinWidth(isOpen: boolean, triggerRef: Ref<HTMLButtonElement>) {
+  const [lockedMinWidth, setLockedMinWidth] = useState<number | undefined>();
+  const [prevIsOpen, setPrevIsOpen] = useState(isOpen);
+  if (prevIsOpen !== isOpen) {
+    setPrevIsOpen(isOpen);
+    if (!isOpen) {
+      setLockedMinWidth(undefined);
+    } else {
+      const node =
+        triggerRef && typeof triggerRef !== "function" ? triggerRef.current : null;
+      if (node) setLockedMinWidth(node.offsetWidth);
+    }
+  }
+  return lockedMinWidth;
+}
+
 /** Borderless trigger carrying the whole selection at a glance:
  *  "{CLI} / {model} · {effort}" (CLI name / model / effort). The model
  *  part only drops out when the engine has no model list at all.
@@ -633,16 +654,7 @@ function CliMenuTrigger({
     (engine === "codex" && codexServiceTier === "priority");
   // Snapshot width on open; clear on close. Shorter model labels then can't
   // shrink the trigger mid-session and slide the popover.
-  const [lockedMinWidth, setLockedMinWidth] = useState<number | undefined>();
-  useEffect(() => {
-    if (!isOpen) {
-      setLockedMinWidth(undefined);
-      return;
-    }
-    const node =
-      triggerRef && typeof triggerRef !== "function" ? triggerRef.current : null;
-    if (node) setLockedMinWidth(node.offsetWidth);
-  }, [isOpen, triggerRef]);
+  const lockedMinWidth = useLockedMinWidth(isOpen, triggerRef);
   return (
     <AriaButton
       ref={triggerRef}

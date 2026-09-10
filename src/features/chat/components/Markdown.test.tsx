@@ -118,6 +118,18 @@ describe("math rendering", () => {
     expect(container.textContent).toContain("$HOME");
   });
 
+  it("preserves KaTeX's inline positioning styles through the span override", async () => {
+    // KaTeX lifts superscripts and stacks fractions with inline styles
+    // (`style="top:-3.06em"`, strut heights). The host span override once
+    // dropped every prop except className, collapsing the whole formula
+    // onto the baseline with overlapping glyphs.
+    await renderMarkdown("平方 $a^2 + \\frac{1}{\\ln x}$ 完");
+    const styled = container.querySelectorAll<HTMLElement>(".katex span[style]");
+    expect(styled.length).toBeGreaterThan(0);
+    const tops = [...styled].map((el) => el.style.top).filter(Boolean);
+    expect(tops.length).toBeGreaterThan(0);
+  });
+
   it("keeps the formula whole while the row is streaming", async () => {
     // Reveal spans render text as a moving prefix; a formula must never be
     // truncated by that (the reveal-plan unit test guards the mechanism).

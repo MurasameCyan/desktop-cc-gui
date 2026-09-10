@@ -280,6 +280,31 @@ struct Candidate {
     known_workspace: Option<String>,
 }
 
+/// Codex Desktop / `codex exec` writes one rollout per spawned subagent.
+/// Those files reuse the parent's first user line as the title, so listing
+/// them next to the parent looks like duplicate conversations. The live
+/// turn already surfaces them in the subagent strip.
+fn is_codex_subagent_source(source: &serde_json::Value) -> bool {
+    source
+        .get("subagent")
+        .map(|v| v.is_object() || v.as_bool() == Some(true))
+        .unwrap_or(false)
+}
+
+fn is_codex_subagent_head(head: &serde_json::Value) -> bool {
+    head.get("type").and_then(|v| v.as_str()) == Some("session_meta")
+        && head
+            .get("payload")
+            .and_then(|p| p.get("source"))
+            .is_some_and(is_codex_subagent_source)
+}
+
+fn is_codex_subagent_file(path: &Path) -> bool {
+    peek_head_json_lines(path, false, 8)
+        .iter()
+        .any(is_codex_subagent_head)
+}
+
 /// Engine file identity from the first JSON line (codex session_meta /
 /// pi-family & dsh session line). Returns (session_id, cwd).
 fn identify_head(engine: &str, path: &Path) -> Option<(String, String)> {
@@ -299,6 +324,9 @@ fn identify_head(engine: &str, path: &Path) -> Option<(String, String)> {
         } else {
             &head
         };
+        if engine == "codex" && source.get("source").is_some_and(is_codex_subagent_source) {
+            return None;
+        }
         let id = source.get("id").and_then(|v| v.as_str())?.trim();
         let cwd = source.get("cwd").and_then(|v| v.as_str())?.trim();
         if id.is_empty() || cwd.is_empty() {
@@ -632,6 +660,45 @@ fn prepare_candidate(
     })
 }
 
+/// Drop Codex subagent rollouts that were indexed as top-level chats.
+/// Returns true when any row was removed.
+fn prune_codex_subagent_sessions(db: &crate::db::Db) -> Result<bool, String> {
+    let paths: Vec<(String, String)> = {
+        let conn = db.0.lock();
+        let mut stmt = conn
+            .prepare("SELECT session_id, file_path FROM sessions WHERE engine='codex'")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok(pair) => out.push(pair),
+                Err(e) => eprintln!("[scanner] skipping undecodable codex session row: {e}"),
+            }
+        }
+        out
+    };
+    let dead: Vec<String> = paths
+        .into_iter()
+        .filter(|(_, path)| is_codex_subagent_file(Path::new(path)))
+        .map(|(id, _)| id)
+        .collect();
+    if dead.is_empty() {
+        return Ok(false);
+    }
+    let conn = db.0.lock();
+    for id in &dead {
+        conn.execute(
+            "DELETE FROM sessions WHERE engine='codex' AND session_id=?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
 /// Phase B (one lock, one transaction): upsert every prepared row, then
 /// record the signature that makes the next scan a short-circuit.
 fn upsert_rows(db: &crate::db::Db, rows: &[PreparedUpsert], tier1: &Tier1) -> Result<(), String> {
@@ -698,7 +765,8 @@ fn scan_inner(
     let candidates = gather_candidates(&workspaces);
     let (stats, signature) = stat_all(&workspaces, &candidates);
     let Some(tier1) = tier1_gate(db, signature)? else {
-        if super::codex_titles::sync(db)? {
+        let pruned = prune_codex_subagent_sessions(db)?;
+        if super::codex_titles::sync(db)? || pruned {
             on_changed();
         }
         return Ok(ScanReport {
@@ -746,6 +814,7 @@ fn scan_inner(
     // Phase B: the db lock is held only for the upsert transaction.
     let reparsed = rows.len();
     upsert_rows(db, &rows, &tier1)?;
+    prune_codex_subagent_sessions(db)?;
     super::codex_titles::sync(db)?;
     on_changed();
     if total > 0 {
@@ -858,6 +927,24 @@ mod tests {
             identify_head("omp", &path),
             Some(("abc".to_string(), "/tmp/ws".to_string()))
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn identify_head_skips_codex_subagent_rollout() {
+        let dir = scratch_dir("identify-subagent");
+        let path = dir.join("s.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"cwd\":\"/ws\",",
+                "\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"parent\",",
+                "\"depth\":1,\"agent_path\":\"/root/review\",\"agent_nickname\":\"Hypatia\"}}}}}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(identify_head("codex", &path), None);
+        assert!(is_codex_subagent_file(&path));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1130,6 +1217,91 @@ mod tests {
             .map_err(|e| e.to_string())?
         };
         assert_eq!(title, "你好啊");
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    /// Spawned Codex subagent rollouts share the parent's first user line.
+    /// They must not become extra sidebar rows, and a previously indexed
+    /// child must be pruned on the next scan.
+    #[test]
+    fn scan_skips_and_prunes_codex_subagent_rollouts() -> Result<(), String> {
+        let home = scratch_dir("scan-codex-subagent");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let rollout_dir = home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("10");
+        std::fs::create_dir_all(&rollout_dir).map_err(|e| e.to_string())?;
+        let cwd = workspace.display().to_string();
+        let user = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "改一下"}]
+            }
+        });
+        std::fs::write(
+            rollout_dir.join("rollout-2026-09-10T00-00-00-parent.jsonl"),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":"parent","cwd":cwd,"source":"vscode"}}),
+                user
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        let child_path = rollout_dir.join("rollout-2026-09-10T00-00-01-child.jsonl");
+        std::fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "child",
+                        "cwd": cwd,
+                        "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}
+                    }
+                }),
+                user
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let _guard = HomeGuard::set(&home);
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title) VALUES('codex', 'child', ?1, ?2, 1, 1, '改一下')",
+                rusqlite::params![workspace.to_string_lossy().to_string(), child_path.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let report = scan_with(&db, || {})?;
+        assert_eq!(report.reparsed, 1);
+        let ids: Vec<String> = {
+            let conn = db.0.lock();
+            let mut stmt = conn
+                .prepare("SELECT session_id FROM sessions WHERE engine='codex' ORDER BY session_id")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+        assert_eq!(ids, vec!["parent".to_string()]);
         drop(db);
         std::fs::remove_dir_all(&home).ok();
         Ok(())

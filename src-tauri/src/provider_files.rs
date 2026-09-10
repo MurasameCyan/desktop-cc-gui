@@ -107,6 +107,153 @@ pub fn provider_file_paths(engine: String) -> Vec<String> {
         .collect()
 }
 
+// ── 官方配置 editing ────────────────────────────────────────────────────────
+
+/// One editable file of an engine's 官方配置 (the CLI's own config), one pane
+/// of the edit dialog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfficialConfigFile {
+    /// Absolute path — the pane label, and the write-back key.
+    pub path: String,
+    /// Editor language mode, derived from the extension.
+    pub format: &'static str,
+    /// Live file content; "" when absent (`exists` distinguishes).
+    pub content: String,
+    pub exists: bool,
+}
+
+/// Editable draft of one official file, matched back to a declared target by
+/// exact path so the client can never name an arbitrary file.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OfficialConfigDraft {
+    pub path: String,
+    pub content: String,
+}
+
+fn file_format(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("toml") => "toml",
+        _ => "json",
+    }
+}
+
+/// True when the engine's native files currently hold the official (CLI's
+/// own) configuration: never managed, restored, or parked on 停用 straight
+/// from the official state. Only then is editing them safe — while a channel
+/// is current the files carry cc-gui's managed patch and the official
+/// original sits in the backup snapshot.
+fn official_files_active(section: &crate::config::ProviderSection) -> bool {
+    fn is_official(id: Option<&str>) -> bool {
+        matches!(
+            id,
+            None | Some("") | Some(LOCAL_PROVIDER_ID) | Some(LEGACY_LOCAL_CONFIG_TOML_ID)
+        )
+    }
+    match section.current.as_deref() {
+        Some(DISABLED_PROVIDER_ID) => is_official(section.disabled_from.as_deref()),
+        current => is_official(current),
+    }
+}
+
+/// Files of the engine's 官方配置, in pane order. Empty for engines without
+/// a native config file (pi/omp/dsh — their official state lives in auth
+/// stores edited by their own sections).
+#[tauri::command]
+pub fn official_config_read(engine: String) -> Result<Vec<OfficialConfigFile>, String> {
+    targets(&engine)
+        .iter()
+        .map(|t| {
+            let content = match std::fs::read_to_string(&t.path) {
+                Ok(content) => Ok(content),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(e) => Err(format!("read {}: {e}", t.path.display())),
+            }?;
+            Ok(OfficialConfigFile {
+                path: t.path.display().to_string(),
+                format: file_format(&t.path),
+                content,
+                exists: t.path.exists(),
+            })
+        })
+        .collect()
+}
+
+/// Overwrite 官方配置 files, gated on the official state being live (see
+/// official_files_active). Everything is validated before any write; each
+/// write then syncs the backup snapshot so a later channel switch patches
+/// on top of the edited official and switching back restores exactly it.
+#[tauri::command]
+pub fn official_config_write(
+    store: tauri::State<'_, crate::config::ConfigStore>,
+    engine: String,
+    files: Vec<OfficialConfigDraft>,
+) -> Result<(), String> {
+    let _guard = store.0.lock().map_err(|e| e.to_string())?;
+    let config = crate::config::read_config()?;
+    let section = config
+        .section(&engine)
+        .ok_or_else(|| format!("unknown engine: {engine}"))?;
+    if !official_files_active(section) {
+        return Err(format!(
+            "{engine}: 官方配置 is editable only while it is the active configuration"
+        ));
+    }
+    let targets = targets(&engine);
+    if targets.is_empty() {
+        return Err(format!("engine {engine} has no editable official config"));
+    }
+    for draft in &files {
+        let target = targets
+            .iter()
+            .find(|t| t.path.display().to_string() == draft.path)
+            .ok_or_else(|| format!("{} is not an official config file of {engine}", draft.path))?;
+        validate_official(target, &draft.content)?;
+    }
+    for draft in &files {
+        let target = targets
+            .iter()
+            .find(|t| t.path.display().to_string() == draft.path)
+            .expect("validated above");
+        write_official(target, &draft.content)?;
+    }
+    Ok(())
+}
+
+fn validate_official(target: &Target, content: &str) -> Result<(), String> {
+    match file_format(&target.path) {
+        "toml" => {
+            content
+                .parse::<DocumentMut>()
+                .map_err(|e| format!("invalid TOML in {}: {e}", target.path.display()))?;
+        }
+        _ => {
+            let value: Value = serde_json::from_str(content)
+                .map_err(|e| format!("invalid JSON in {}: {e}", target.path.display()))?;
+            if !value.is_object() {
+                return Err(format!("{} must be a JSON object", target.path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_official(target: &Target, content: &str) -> Result<(), String> {
+    if let Some(dir) = target.path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    }
+    crate::settings::atomic_write(&target.path, content)?;
+    let marker = absent_marker(&target.backup);
+    if target.backup.exists() {
+        crate::settings::atomic_write(&target.backup, content)?;
+    } else if marker.exists() {
+        // The file we created was deleted on restore; the user's edit makes
+        // it real content now, so restore must write it back, not delete it.
+        std::fs::remove_file(&marker).map_err(|e| format!("remove {}: {e}", marker.display()))?;
+        crate::settings::atomic_write(&target.backup, content)?;
+    }
+    Ok(())
+}
+
 /// Snapshot the file before the first managed write. An existing backup wins
 /// (it is the pre-cc-gui original); a missing file is recorded with an
 /// `.absent` marker so restore can remove what we created.
@@ -566,6 +713,78 @@ fn upsert_str(table: &mut Item, key: &str, val: &str) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn section(
+        current: Option<&str>,
+        disabled_from: Option<&str>,
+    ) -> crate::config::ProviderSection {
+        crate::config::ProviderSection {
+            providers: Default::default(),
+            current: current.map(str::to_string),
+            disabled_from: disabled_from.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn official_files_active_truth_table() {
+        // Never switched, or parked on an official pseudo id.
+        assert!(official_files_active(&section(None, None)));
+        assert!(official_files_active(&section(Some(LOCAL_PROVIDER_ID), None)));
+        assert!(official_files_active(&section(Some(LEGACY_LOCAL_CONFIG_TOML_ID), None)));
+        // A live channel means the files carry our managed patch.
+        assert!(!official_files_active(&section(Some("chan-a"), None)));
+        // 停用 preserves whatever was live when the switch flipped.
+        assert!(official_files_active(&section(
+            Some(DISABLED_PROVIDER_ID),
+            Some(LOCAL_PROVIDER_ID)
+        )));
+        assert!(official_files_active(&section(Some(DISABLED_PROVIDER_ID), None)));
+        assert!(!official_files_active(&section(
+            Some(DISABLED_PROVIDER_ID),
+            Some("chan-a")
+        )));
+    }
+
+    #[test]
+    fn validate_official_rejects_malformed_content() {
+        let (_, json_target) = fixture("validate-json", "settings.json");
+        let (_, toml_target) = fixture("validate-toml", "config.toml");
+        assert!(validate_official(&json_target, r#"{"env":{}}"#).is_ok());
+        assert!(validate_official(&json_target, "{not json").is_err());
+        // Scalars/arrays parse as JSON but are not a usable settings file.
+        assert!(validate_official(&json_target, "[1,2]").is_err());
+        assert!(validate_official(&toml_target, "[providers]\nx=1").is_ok());
+        assert!(validate_official(&toml_target, "key = = 1").is_err());
+    }
+
+    #[test]
+    fn write_official_syncs_the_snapshot() {
+        let (dir, target) = fixture("official-sync", "settings.json");
+        std::fs::create_dir_all(target.backup.parent().unwrap()).unwrap();
+        std::fs::write(&target.path, r#"{"a":1}"#).unwrap();
+        std::fs::write(&target.backup, r#"{"a":1}"#).unwrap();
+        write_official(&target, r#"{"a":2}"#).unwrap();
+        // Live file and snapshot move together, so a later channel switch
+        // patches on top of the edited official and restore returns to it.
+        assert_eq!(std::fs::read_to_string(&target.path).unwrap(), r#"{"a":2}"#);
+        assert_eq!(std::fs::read_to_string(&target.backup).unwrap(), r#"{"a":2}"#);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_official_upgrades_absent_marker_to_snapshot() {
+        let (dir, target) = fixture("official-absent", "settings.json");
+        std::fs::create_dir_all(target.backup.parent().unwrap()).unwrap();
+        std::fs::write(absent_marker(&target.backup), "").unwrap();
+        write_official(&target, r#"{"b":1}"#).unwrap();
+        assert!(!absent_marker(&target.backup).exists());
+        assert_eq!(std::fs::read_to_string(&target.backup).unwrap(), r#"{"b":1}"#);
+        // A subsequent restore writes the new official back instead of
+        // deleting the file.
+        restore(&target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target.path).unwrap(), r#"{"b":1}"#);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     static SEQ: AtomicU32 = AtomicU32::new(0);
 

@@ -179,11 +179,15 @@ export default memo(function Markdown({
   // HAST tree and re-parse the whole document.
   const hostComponents = useMemo<Components>(
     () => ({
-      span: ({ node, className, children }) => {
+      span: ({ node, className, children, ...rest }) => {
         const start = node?.properties.dataStreamStart;
+        // Forward every other prop (style, aria-hidden, ...): KaTeX positions
+        // superscripts, fractions and radicals with inline styles like
+        // `style="top:-3.06em"` on bare spans — dropping them collapses the
+        // whole formula onto the baseline with overlapping glyphs.
         return typeof start === "number" && typeof children === "string"
           ? <RevealText controller={controller} start={start}>{children}</RevealText>
-          : <span className={className}>{children}</span>;
+          : <span className={className} {...rest}>{children}</span>;
       },
       a: ({ href, children }) => {
         const url = href ?? "";

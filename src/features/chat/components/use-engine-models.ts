@@ -18,15 +18,25 @@ export function useEngineModels(
 ) {
   const [cliConfig, setCliConfig] = useState<CliConfig | null>(null);
   const [catalogs, setCatalogs] = useState<Record<string, EngineCatalog>>({});
+  // Engine-level custom models (设置 → CLI → 自定义模型): user-added ids
+  // merged into the picker next to the CLI's catalog.
+  const [customModels, setCustomModels] = useState<Record<string, string[]>>({});
 
   // Provider configs feed the model picker's per-engine model lists.
   useEffect(() => {
     ipc.getCliConfig().then(setCliConfig).catch(() => {});
   }, []);
-  // The settings CLI page mutates provider config outside this tree; refetch
-  // so the model picker tracks channel switches immediately.
+  // The settings CLI page mutates provider config and custom models outside
+  // this tree; refetch so the picker tracks both immediately.
   useEffect(() => {
-    const reload = () => ipc.getCliConfig().then(setCliConfig).catch(() => {});
+    const reload = () => {
+      ipc.getCliConfig().then(setCliConfig).catch(() => {});
+      ipc
+        .getAppSettings()
+        .then((s) => setCustomModels(s.customModels ?? {}))
+        .catch(() => {});
+    };
+    reload();
     window.addEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
     return () => window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
   }, []);
@@ -70,10 +80,16 @@ export function useEngineModels(
       const providerModels = configured ? [configured] : [];
       const current = models[engine.id]?.trim();
       const catalog = catalogs[engine.id]?.models ?? [];
-      // A channel's configured model leads (it is what the CLI would run
-      // unprompted); backend catalogs put the CLI default first.
+      // Channel model leads (it is what the CLI would run unprompted), the
+      // backend catalog follows, then engine-level custom models, and the
+      // current-override append last so the selection never vanishes.
       const known = [
-        ...new Set([...providerModels, ...catalog.map((m) => m.id), ...(current ? [current] : [])]),
+        ...new Set([
+          ...providerModels,
+          ...catalog.map((m) => m.id),
+          ...(customModels[engine.id] ?? []),
+          ...(current ? [current] : []),
+        ]),
       ];
       const byId = new Map(catalog.map((m) => [m.id, m]));
       result[engine.id] = known.map((m) => {
@@ -89,9 +105,9 @@ export function useEngineModels(
       });
     }
     return result;
-  }, [engines, cliConfig, catalogs, models]);
-  // Selectable ids WITHOUT the current-override append: what the channel
-  // plus the backend catalog can actually serve.
+  }, [engines, cliConfig, catalogs, models, customModels]);
+  // Selectable ids WITHOUT the current-override append: what the channel,
+  // the backend catalog, and the custom model list can actually serve.
   const knownIdsByEngine = useMemo(() => {
     const result: Record<string, Set<string>> = {};
     for (const engine of engines) {
@@ -106,10 +122,12 @@ export function useEngineModels(
         : "";
       const ids = new Set((catalogs[engine.id]?.models ?? []).map((m) => m.id));
       if (configured) ids.add(configured);
+      // Custom ids stay selectable past the authoritative-catalog reset.
+      for (const id of customModels[engine.id] ?? []) ids.add(id);
       result[engine.id] = ids;
     }
     return result;
-  }, [engines, cliConfig, catalogs]);
+  }, [engines, cliConfig, catalogs, customModels]);
   // No "default" pseudo entry: an unset selection would hide which model
   // actually runs. Pin it to the first entry — the CLI's effective default.
   // An authoritative catalog also invalidates stale stored picks (leftovers

@@ -267,7 +267,10 @@ pub(crate) async fn ensure_host(
         .arg("--host")
         .arg(&cfg.host)
         .arg("--port")
-        .arg(cfg.port.to_string());
+        .arg(cfg.port.to_string())
+        // The GUI talks to the host over HTTP itself; opening a browser tab
+        // on every app launch is pure noise.
+        .arg("--no-open");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -51,7 +51,10 @@ function plan(engine: EngineId): CliUpdatePlan {
 
 /** Renders the hook and captures its latest value. */
 function Probe({ engine, capture }: { engine: EngineId; capture: (v: CliUpdateFlow) => void }) {
-  capture(useCliUpdateFlow(engine));
+  const value = useCliUpdateFlow(engine);
+  useEffect(() => {
+    capture(value);
+  });
   return null;
 }
 

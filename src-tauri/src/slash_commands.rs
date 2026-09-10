@@ -3,23 +3,42 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Custom slash-command discovery for the composer's `/` picker (ported
-/// from desktop-cc-gui's claude_commands.rs, trimmed to the two Claude
-/// scopes the picker surfaces: the workspace's `.claude/commands` and the
-/// CLI's global config home). Command markdown stays on disk — the CLI
-/// expands `/name args` itself when the prompt is sent, so only the
-/// metadata the menu renders crosses IPC.
+/// Catalog discovery for the composer's `/` picker (ported from
+/// desktop-cc-gui's claude_commands.rs, trimmed to the two Claude scopes
+/// the picker surfaces: the workspace's `.claude/` and the CLI's global
+/// config home). Two entry kinds share the one trigger and stay distinct
+/// via `kind`:
+///
+/// - commands: `.claude/commands/**/*.md` — the CLI expands `/name args`
+///   itself when the prompt is sent;
+/// - skills: `.claude/skills/<name>/SKILL.md` — likewise invoked as
+///   `/name` by the CLI.
+///
+/// Markdown stays on disk; only the metadata the menu renders crosses IPC.
+
+/// What a `/` picker entry is: a custom slash command (markdown under
+/// `commands/`) or a skill (a `SKILL.md` directory under `skills/`). The
+/// two are never interchangeable in the menu — icons, badges and section
+/// grouping key off this field.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SlashEntryKind {
+    Command,
+    Skill,
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandEntry {
-    /// Slash-less command name; directory segments join with `:`
-    /// (`.claude/commands/aimax/plan.md` → `aimax:plan`).
+    /// Slash-less name; commands join directory segments with `:`
+    /// (`.claude/commands/aimax/plan.md` → `aimax:plan`), skills use the
+    /// SKILL.md directory name.
     pub name: String,
     pub description: Option<String>,
     pub argument_hint: Option<String>,
-    /// "workspace" (project `.claude/commands`) or "global" (CLI home).
+    /// "workspace" (project `.claude/`) or "global" (CLI home).
     pub source: String,
+    pub kind: SlashEntryKind,
 }
 
 fn sanitize_meta_value(value: &str) -> Option<String> {
@@ -169,6 +188,7 @@ fn discover_commands_in(dir: &Path, root: &Path, source: &str) -> Vec<SlashComma
             description,
             argument_hint,
             source: source.to_string(),
+            kind: SlashEntryKind::Command,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -176,8 +196,10 @@ fn discover_commands_in(dir: &Path, root: &Path, source: &str) -> Vec<SlashComma
 }
 
 /// Merge source lists in priority order: the first source defining a
-/// (lowercase) name wins, so workspace commands shadow global ones.
-fn merge_commands_by_priority(sources: Vec<Vec<SlashCommandEntry>>) -> Vec<SlashCommandEntry> {
+/// (lowercase) name wins, so workspace entries shadow global ones. Applied
+/// per kind — a command and a skill may share a name without shadowing
+/// each other.
+fn merge_entries_by_priority(sources: Vec<Vec<SlashCommandEntry>>) -> Vec<SlashCommandEntry> {
     let mut merged: Vec<SlashCommandEntry> = Vec::new();
     let mut seen_names: HashSet<String> = HashSet::new();
     for source in sources {
@@ -207,16 +229,87 @@ fn commands_dirs(workspace_root: &Path) -> Vec<(PathBuf, &'static str)> {
     dirs
 }
 
+/// Skill directories in priority order, mirroring `commands_dirs`: the
+/// workspace's `.claude/skills`, then the CLI config home's `skills`.
+fn skills_dirs(workspace_root: &Path) -> Vec<(PathBuf, &'static str)> {
+    let mut dirs: Vec<(PathBuf, &'static str)> = Vec::new();
+    let workspace_dir = workspace_root.join(".claude").join("skills");
+    if workspace_dir.is_dir() {
+        dirs.push((workspace_dir, "workspace"));
+    }
+    let global_dir = crate::engine::engine_home(Some("CLAUDE_CONFIG_DIR"), ".claude").join("skills");
+    if global_dir.is_dir() {
+        dirs.push((global_dir, "global"));
+    }
+    dirs
+}
+
+/// Discover skills directly under a skills dir: each child directory with
+/// a `SKILL.md` is one skill. Name comes from the frontmatter `name:`
+/// override, else the directory name; description from frontmatter. Skills
+/// take no argument hint — the CLI resolves the body itself.
+fn discover_skills_in(dir: &Path, source: &str) -> Vec<SlashCommandEntry> {
+    let mut out: Vec<SlashCommandEntry> = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let skill_dir = entry.path();
+        let is_dir = std::fs::metadata(&skill_dir).map(|m| m.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        let manifest = skill_dir.join("SKILL.md");
+        let content = match std::fs::read_to_string(&manifest) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let (name, description, _argument_hint) = parse_command_frontmatter(&content);
+        let resolved = name.or_else(|| {
+            skill_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_string())
+        });
+        let Some(resolved) = resolved else {
+            continue;
+        };
+        let normalized = resolved.trim().trim_start_matches('/').to_string();
+        if normalized.is_empty() {
+            continue;
+        }
+        out.push(SlashCommandEntry {
+            name: normalized,
+            description,
+            argument_hint: None,
+            source: source.to_string(),
+            kind: SlashEntryKind::Skill,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 fn list_slash_commands_blocking(
     db: &crate::db::Db,
     path: &str,
 ) -> Result<Vec<SlashCommandEntry>, String> {
     let root = crate::files::ensure_allowed(path, db)?;
-    let sources = commands_dirs(&root)
+    let command_sources = commands_dirs(&root)
         .iter()
         .map(|(dir, source)| discover_commands_in(dir, dir, source))
         .collect();
-    Ok(merge_commands_by_priority(sources))
+    let skill_sources = skills_dirs(&root)
+        .iter()
+        .map(|(dir, source)| discover_skills_in(dir, source))
+        .collect();
+    // Commands first, skills after: the menu groups by kind in catalog
+    // order, and per-kind merging keeps a same-named command and skill
+    // from shadowing each other.
+    let mut merged = merge_entries_by_priority(command_sources);
+    merged.extend(merge_entries_by_priority(skill_sources));
+    Ok(merged)
 }
 
 #[tauri::command]
@@ -274,21 +367,48 @@ mod tests {
 
     #[test]
     fn workspace_shadows_global_on_name_collision() {
-        let merged = merge_commands_by_priority(vec![
+        let merged = merge_entries_by_priority(vec![
             vec![SlashCommandEntry {
                 name: "plan".into(),
                 description: Some("workspace".into()),
                 argument_hint: None,
                 source: "workspace".into(),
+                kind: SlashEntryKind::Command,
             }],
             vec![SlashCommandEntry {
                 name: "Plan".into(),
                 description: Some("global".into()),
                 argument_hint: None,
                 source: "global".into(),
+                kind: SlashEntryKind::Command,
             }],
         ]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].description.as_deref(), Some("workspace"));
+    }
+
+    #[test]
+    fn discovers_skills_from_skill_md_directories() {
+        let root = scratch_dir("skills");
+        let review = root.join("code-review");
+        fs::create_dir_all(&review).unwrap();
+        fs::write(
+            review.join("SKILL.md"),
+            "---\ndescription: \"审查代码\"\n---\nbody\n",
+        )
+        .unwrap();
+        let named = root.join("renamed");
+        fs::create_dir_all(&named).unwrap();
+        fs::write(named.join("SKILL.md"), "---\nname: custom-skill\n---\n").unwrap();
+        let no_manifest = root.join("no-manifest");
+        fs::create_dir_all(&no_manifest).unwrap();
+        fs::write(root.join("loose.md"), "not a skill dir").unwrap();
+
+        let entries = discover_skills_in(&root, "workspace");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["code-review", "custom-skill"]);
+        assert!(entries.iter().all(|e| e.kind == SlashEntryKind::Skill));
+        assert_eq!(entries[0].description.as_deref(), Some("审查代码"));
+        assert!(entries.iter().all(|e| e.argument_hint.is_none()));
     }
 }

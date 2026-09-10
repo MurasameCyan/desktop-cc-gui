@@ -40,6 +40,10 @@ pub struct AppSettings {
     pub language: String,
     #[serde(default)]
     pub default_models: HashMap<String, String>,
+    /// Per-engine user-added custom model ids, merged into the chat model
+    /// picker alongside the CLI's catalog (设置 → CLI → 自定义模型).
+    #[serde(default)]
+    pub custom_models: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub default_efforts: HashMap<String, String>,
     /// Per-app OMP OpenAI tier override; None preserves native CLI settings.
@@ -107,6 +111,7 @@ impl Default for AppSettings {
             archived_workspaces: Vec::new(),
             language: default_language(),
             default_models: HashMap::new(),
+            custom_models: HashMap::new(),
             default_efforts: HashMap::new(),
             omp_openai_service_tier: None,
             codex_service_tier: None,

@@ -58,32 +58,178 @@ interface SessionTabStripProps {
   trafficLightInset?: boolean;
 }
 
-/**
- * Conversation tab strip doubling as the window drag region (overlay
- * titlebar). Clicks land on tab elements; only the strip's own padding
- * starts a window drag. Tabs scroll horizontally without a scrollbar and
- * vertical wheel deltas translate to horizontal scroll, like VSCode.
- */
-export function SessionTabStrip({
-  tabs,
-  activeKey,
+/** Custom tab icon when provided, else the engine brand mark. */
+function TabLeadingIcon({
+  icon: Icon,
+  engine,
+}: {
+  icon?: LucideIcon;
+  engine?: string;
+}) {
+  if (Icon) {
+    return (
+      <Icon
+        className="size-3 shrink-0 text-foreground-icon-secondary"
+        aria-hidden
+      />
+    );
+  }
+  return (
+    <EngineIcon
+      engine={engine ?? ""}
+      size={12}
+      className="size-3 shrink-0 text-foreground-icon-secondary"
+    />
+  );
+}
+
+/** Same status dots as the sidebar: breathing blue while the turn streams,
+ * solid green for unseen finished activity. */
+function TabStatusDot({
+  streaming,
+  unseen,
+}: {
+  streaming: boolean;
+  unseen?: boolean;
+}) {
+  const { t } = useTranslation();
+  if (streaming) {
+    return (
+      <span
+        className="sidebar-thread-status sidebar-thread-status-processing"
+        role="status"
+        aria-label={t("chat.sessionRunning")}
+        title={t("chat.sessionRunning")}
+      />
+    );
+  }
+  if (unseen) {
+    return (
+      <span
+        className="sidebar-thread-status sidebar-thread-status-unseen"
+        aria-label={t("chat.sessionUnseen")}
+        title={t("chat.sessionUnseen")}
+      />
+    );
+  }
+  return null;
+}
+
+/** One tab in the strip: icon, status dots, label, drop indicator, close
+ * button. Selection lives on the tab; the close button sits beside it so no
+ * focusable control nests inside the tab. */
+function SessionTab({
+  tab,
+  isActive,
+  dragged,
+  dropBefore,
+  closeLabel,
+  onShowMenu,
   onSelect,
   onClose,
-  onCloseAll,
-  closeLabel,
-  onReorder,
-  actions,
-  onNew,
-  leading,
-  trafficLightInset = true,
-}: SessionTabStripProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stripRef = useRef<HTMLDivElement>(null);
-  const { t } = useTranslation();
-  // Tab drag-reorder is pointer-driven, not HTML5 DnD: WKWebView never
-  // delivers dragover/drop, so native DnD only reordered in Chromium. A 5px
-  // threshold keeps plain clicks intact; the dragged key lives in a ref,
-  // the insertion point in state so the indicator bar follows the pointer.
+  onPointerDown,
+  suppressClickRef,
+}: {
+  tab: SessionTabItem;
+  isActive: boolean;
+  /** This tab is the one being drag-reordered. */
+  dragged: boolean;
+  /** Drop indicator side, null when this tab is not the drop target. */
+  dropBefore: boolean | null;
+  closeLabel: string;
+  /** Right-click menu anchor; omitted when the strip has no tab menu. */
+  onShowMenu?: (position: { x: number; y: number }) => void;
+  onSelect: (key: string) => void;
+  onClose: (key: string) => void;
+  onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  suppressClickRef: React.MutableRefObject<boolean>;
+}) {
+  return (
+    <div
+      data-tab-key={tab.key}
+      role="presentation"
+      title={tab.title ?? tab.label}
+      onContextMenu={(e) => {
+        if (!onShowMenu) return;
+        e.preventDefault();
+        onShowMenu({ x: e.clientX, y: e.clientY });
+      }}
+      className={cx(
+        "group relative flex h-7 max-w-48 shrink-0 cursor-default items-center gap-1.5 rounded-lg px-2.5 text-body-medium transition-colors",
+        dragged && "opacity-50",
+        isActive
+          ? "bg-background-secondary-default text-text-primary"
+          : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
+      )}
+    >
+      <div
+        role="tab"
+        aria-selected={isActive}
+        aria-controls="center-tabpanel"
+        tabIndex={isActive ? 0 : -1}
+        onClick={() => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          onSelect(tab.key);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect(tab.key);
+          }
+        }}
+        onAuxClick={(e) => {
+          if (e.button === 1) onClose(tab.key);
+        }}
+        onPointerDown={onPointerDown}
+        className="flex min-w-0 flex-1 cursor-default items-center gap-1.5"
+      >
+        <TabLeadingIcon icon={tab.icon} engine={tab.engine} />
+        <TabStatusDot streaming={tab.streaming} unseen={tab.unseen} />
+        {tab.dirty && (
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground-icon-primary" />
+        )}
+        <span className="truncate">{tab.label}</span>
+      </div>
+      {dropBefore !== null && (
+        <span
+          aria-hidden
+          className={cx(
+            "pointer-events-none absolute top-1 bottom-1 w-0.5 rounded-full bg-accent-500",
+            dropBefore ? "-left-[3px]" : "-right-[3px]",
+          )}
+        />
+      )}
+      <button
+        type="button"
+        aria-label={closeLabel}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose(tab.key);
+        }}
+        className={cx(
+          "flex h-4 w-4 shrink-0 items-center justify-center rounded text-foreground-icon-tertiary hover:bg-background-tertiary-hover hover:text-foreground-icon-primary",
+          // Keyboard users must see the button when it has focus, not
+          // only on pointer hover.
+          isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+        )}
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/** Pointer-driven tab drag-reorder: dragged key lives in a ref, the
+ * insertion point in state so the indicator bar follows the pointer.
+ * Pointer events, not HTML5 DnD: WKWebView never delivers dragover/drop, so
+ * native DnD only reordered in Chromium. A 5px threshold keeps plain clicks
+ * intact. */
+function useTabDragReorder(
+  onReorder?: (draggedKey: string, targetKey: string, before: boolean) => void,
+) {
   const dragStateRef = useRef<{ key: string; startX: number; dragging: boolean } | null>(null);
   const [dropTarget, setDropTarget] = useState<{
     draggedKey: string;
@@ -92,9 +238,6 @@ export function SessionTabStrip({
   } | null>(null);
   // pointerup fires before click; swallow the click that ends a drag.
   const suppressClickRef = useRef(false);
-  // Tab right-click menu (a single "Close All" entry for now), anchored at
-  // the pointer like every other context menu in the app.
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   function handleTabPointerDown(tab: SessionTabItem) {
     return (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -159,6 +302,37 @@ export function SessionTabStrip({
       window.removeEventListener("pointercancel", onUp);
     };
   }, [onReorder]);
+
+  return { dropTarget, suppressClickRef, handleTabPointerDown };
+}
+
+/**
+ * Conversation tab strip doubling as the window drag region (overlay
+ * titlebar). Clicks land on tab elements; only the strip's own padding
+ * starts a window drag. Tabs scroll horizontally without a scrollbar and
+ * vertical wheel deltas translate to horizontal scroll, like VSCode.
+ */
+export function SessionTabStrip({
+  tabs,
+  activeKey,
+  onSelect,
+  onClose,
+  onCloseAll,
+  closeLabel,
+  onReorder,
+  actions,
+  onNew,
+  leading,
+  trafficLightInset = true,
+}: SessionTabStripProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const { t } = useTranslation();
+  const { dropTarget, suppressClickRef, handleTabPointerDown } =
+    useTabDragReorder(onReorder);
+  // Tab right-click menu (a single "Close All" entry for now), anchored at
+  // the pointer like every other context menu in the app.
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Window drag: presses that miss every interactive element start dragging
   // the window (overlay titlebar). Native listener — the drag region is a
@@ -233,115 +407,21 @@ export function SessionTabStrip({
         className="group scrollbar-none flex min-w-0 flex-1 items-center overflow-x-auto px-2"
       >
       <div role="tablist" aria-label="tabs" className="flex min-w-0 items-center gap-1">
-      {tabs.map((tab) => {
-        const isActive = tab.key === activeKey;
-        const TabIcon = tab.icon;
-        return (
-          <div
-            key={tab.key}
-            data-tab-key={tab.key}
-            role="presentation"
-            title={tab.title ?? tab.label}
-            onContextMenu={(e) => {
-              if (!onCloseAll) return;
-              e.preventDefault();
-              setMenu({ x: e.clientX, y: e.clientY });
-            }}
-            className={cx(
-              "group relative flex h-7 max-w-48 shrink-0 cursor-default items-center gap-1.5 rounded-lg px-2.5 text-body-medium transition-colors",
-              dropTarget?.draggedKey === tab.key && "opacity-50",
-              isActive
-                ? "bg-background-secondary-default text-text-primary"
-                : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
-            )}
-          >
-            {/* Selection lives on the tab; the close button sits beside it
-                so no focusable control nests inside the tab. */}
-            <div
-              role="tab"
-              aria-selected={isActive}
-              aria-controls="center-tabpanel"
-              tabIndex={isActive ? 0 : -1}
-              onClick={() => {
-                if (suppressClickRef.current) {
-                  suppressClickRef.current = false;
-                  return;
-                }
-                onSelect(tab.key);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelect(tab.key);
-                }
-              }}
-              onAuxClick={(e) => {
-                if (e.button === 1) onClose(tab.key);
-              }}
-              onPointerDown={onReorder ? handleTabPointerDown(tab) : undefined}
-              className="flex min-w-0 flex-1 cursor-default items-center gap-1.5"
-            >
-              {TabIcon ? (
-                <TabIcon
-                  className="size-3 shrink-0 text-foreground-icon-secondary"
-                  aria-hidden
-                />
-              ) : (
-                <EngineIcon
-                  engine={tab.engine ?? ""}
-                  size={12}
-                  className="size-3 shrink-0 text-foreground-icon-secondary"
-                />
-              )}
-              {/* Same status dots as the sidebar: breathing blue while the
-               * turn streams, solid green for unseen finished activity. */}
-              {tab.streaming ? (
-                <span
-                  className="sidebar-thread-status sidebar-thread-status-processing"
-                  role="status"
-                  aria-label={t("chat.sessionRunning")}
-                  title={t("chat.sessionRunning")}
-                />
-              ) : tab.unseen ? (
-                <span
-                  className="sidebar-thread-status sidebar-thread-status-unseen"
-                  aria-label={t("chat.sessionUnseen")}
-                  title={t("chat.sessionUnseen")}
-                />
-              ) : null}
-              {tab.dirty && (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground-icon-primary" />
-              )}
-              <span className="truncate">{tab.label}</span>
-            </div>
-            {dropTarget?.key === tab.key && (
-              <span
-                aria-hidden
-                className={cx(
-                  "pointer-events-none absolute top-1 bottom-1 w-0.5 rounded-full bg-accent-500",
-                  dropTarget.before ? "-left-[3px]" : "-right-[3px]",
-                )}
-              />
-            )}
-            <button
-              type="button"
-              aria-label={closeLabel}
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose(tab.key);
-              }}
-              className={cx(
-                "flex h-4 w-4 shrink-0 items-center justify-center rounded text-foreground-icon-tertiary hover:bg-background-tertiary-hover hover:text-foreground-icon-primary",
-                // Keyboard users must see the button when it has focus, not
-                // only on pointer hover.
-                isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
-              )}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        );
-      })}
+      {tabs.map((tab) => (
+        <SessionTab
+          key={tab.key}
+          tab={tab}
+          isActive={tab.key === activeKey}
+          dragged={dropTarget?.draggedKey === tab.key}
+          dropBefore={dropTarget?.key === tab.key ? dropTarget.before : null}
+          closeLabel={closeLabel}
+          onShowMenu={onCloseAll ? setMenu : undefined}
+          onSelect={onSelect}
+          onClose={onClose}
+          onPointerDown={onReorder ? handleTabPointerDown(tab) : undefined}
+          suppressClickRef={suppressClickRef}
+        />
+      ))}
       </div>
       {onNew && (
         <button

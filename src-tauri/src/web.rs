@@ -438,6 +438,12 @@ struct EngineArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OfficialConfigWriteArgs {
+    engine: String,
+    files: Vec<crate::provider_files::OfficialConfigDraft>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SavePastedImageArgs {
     data_base64: String,
     extension: String,
@@ -628,6 +634,18 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
             ser(Ok::<_, String>(crate::provider_files::provider_file_paths(
                 a.engine,
             )))
+        }
+        "official_config_read" => {
+            let a: EngineArgs = parse_args(&raw)?;
+            ser(crate::provider_files::official_config_read(a.engine))
+        }
+        "official_config_write" => {
+            let a: OfficialConfigWriteArgs = parse_args(&raw)?;
+            ser(crate::provider_files::official_config_write(
+                app.state(),
+                a.engine,
+                a.files,
+            ))
         }
         "reorder_providers" => {
             let a: ReorderProvidersArgs = parse_args(&raw)?;
