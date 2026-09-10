@@ -44,6 +44,9 @@ export interface AgentThinkingProps {
   model?: string | null;
   /** Pre-localized reasoning effort label (e.g. "推理档位 high"). */
   effort?: string | null;
+  /** Engine-reported token usage for the running turn ("↑12.3k ↓412"),
+   *  refreshed as the CLI reports it. */
+  usage?: string | null;
 }
 
 const TONE_COLORS: Record<AgentThinkingTone, string> = {
@@ -296,6 +299,7 @@ export function AgentThinking({
   durationFormatter,
   model,
   effort,
+  usage,
 }: AgentThinkingProps) {
   const color = TONE_COLORS[tone ?? VARIANT_TONE[variant]];
 
@@ -314,13 +318,19 @@ export function AgentThinking({
       >
         {label}
       </span>
-      {(showTimer || model || effort) && (
+      {(showTimer || model || effort || usage) && (
         <div className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary tabular-nums">
           {showTimer && (
             <ElapsedTimer
               startedAt={startedAt}
               formatter={durationFormatter}
             />
+          )}
+          {usage && (
+            <>
+              <span aria-hidden className="text-text-tertiary">·</span>
+              <span>{usage}</span>
+            </>
           )}
           {model && (
             <>
