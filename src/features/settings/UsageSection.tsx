@@ -3,11 +3,7 @@ import { useTranslation } from "react-i18next";
 import Pause from "lucide-react/dist/esm/icons/pause";
 import Play from "lucide-react/dist/esm/icons/play";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
-import {
-  SettingsCard,
-  SettingsRow,
-  SettingsSectionLabel,
-} from "@/components/application/settings/settings-rows";
+import { SettingsCard } from "@/components/application/settings/settings-rows";
 import { ipc, type UsageRow } from "@/lib/ipc";
 import { listenUsageChanged } from "@/lib/events";
 import {
@@ -209,51 +205,8 @@ export function UsageSection() {
 
   return (
     <div className="flex w-full flex-col gap-2">
-      <SettingsSectionLabel>{t("usage.title")}</SettingsSectionLabel>
       <SettingsCard>
-        <SettingsRow
-          label={enabled ? t("usage.trackingOn") : t("usage.trackingOff")}
-          description={t("usage.trackingDesc")}
-        >
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              aria-label={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
-              title={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
-              onClick={() => {
-                const next = !enabled;
-                setUsageTrackingEnabled(next);
-                setEnabled(next);
-              }}
-              className={ICON_BUTTON}
-            >
-              {enabled ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
-            </button>
-            <button
-              type="button"
-              aria-label={t("usage.clear")}
-              title={confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
-              onClick={() => {
-                if (!confirmClear) {
-                  setConfirmClear(true);
-                  return;
-                }
-                void ipc
-                  .usageClear()
-                  .then(() => {
-                    setConfirmClear(false);
-                    void refresh();
-                  })
-                  .catch(() => setConfirmClear(false));
-              }}
-              onBlur={() => setConfirmClear(false)}
-              className={confirmClear ? `${ICON_BUTTON} text-text-error-primary` : ICON_BUTTON}
-            >
-              <Trash2 className="size-4" aria-hidden />
-            </button>
-          </div>
-        </SettingsRow>
-        <div className="flex w-full flex-col gap-3 py-3 pr-3">
+        <div className="flex w-full flex-col gap-3 p-3">
           <div className="flex items-center gap-1 self-start rounded-lg bg-background-tertiary-default p-0.5">
             {RANGES.map((item) => (
               <button
@@ -371,7 +324,46 @@ export function UsageSection() {
         </div>
       </SettingsCard>
 
-      <p className="px-1 text-body-2-regular text-text-tertiary">{t("usage.footnote")}</p>
+      <div className="flex items-center justify-between gap-3 px-1">
+        <p className="text-body-2-regular text-text-tertiary">{t("usage.footnote")}</p>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+            title={enabled ? t("usage.trackingDisable") : t("usage.trackingEnable")}
+            onClick={() => {
+              const next = !enabled;
+              setUsageTrackingEnabled(next);
+              setEnabled(next);
+            }}
+            className={ICON_BUTTON}
+          >
+            {enabled ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
+          </button>
+          <button
+            type="button"
+            aria-label={t("usage.clear")}
+            title={confirmClear ? t("usage.clearConfirm") : t("usage.clear")}
+            onClick={() => {
+              if (!confirmClear) {
+                setConfirmClear(true);
+                return;
+              }
+              void ipc
+                .usageClear()
+                .then(() => {
+                  setConfirmClear(false);
+                  void refresh();
+                })
+                .catch(() => setConfirmClear(false));
+            }}
+            onBlur={() => setConfirmClear(false)}
+            className={confirmClear ? `${ICON_BUTTON} text-text-error-primary` : ICON_BUTTON}
+          >
+            <Trash2 className="size-4" aria-hidden />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
