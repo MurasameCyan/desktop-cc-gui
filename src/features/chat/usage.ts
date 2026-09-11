@@ -36,8 +36,15 @@ export function parseUsage(usage: unknown): ParsedUsage | null {
   const u = nested ?? raw;
   const input = num(u, "input_tokens") || num(u, "input");
   const output = num(u, "output_tokens") || num(u, "output");
-  const cacheRead = num(u, "cache_read_input_tokens") || num(u, "cacheRead");
-  const cacheWrite = num(u, "cache_creation_input_tokens") || num(u, "cacheWrite");
+  // Codex names its cache fields differently (cached_input_tokens /
+  // cache_write_input_tokens): without them a codex report's cache hits land
+  // in the ledger as zero.
+  const cacheRead =
+    num(u, "cache_read_input_tokens") || num(u, "cacheRead") || num(u, "cached_input_tokens");
+  const cacheWrite =
+    num(u, "cache_creation_input_tokens") ||
+    num(u, "cacheWrite") ||
+    num(u, "cache_write_input_tokens");
   const total =
     num(u, "total_tokens") || num(u, "totalTokens") || input + output + cacheRead + cacheWrite;
   if (!total) return null;

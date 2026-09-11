@@ -353,7 +353,8 @@ echo '{"type":"agent_end"}'
     ] {
         settings.default_models.insert("omp".into(), model.into());
         settings.omp_openai_service_tier = tier.map(str::to_string);
-        ccgui_next_lib::settings::update_app_settings(settings.clone()).unwrap();
+        ccgui_next_lib::settings::update_app_settings(app.handle().clone(), settings.clone())
+            .unwrap();
         events.lock().unwrap().clear();
         engine::send_message(
             app.state(),

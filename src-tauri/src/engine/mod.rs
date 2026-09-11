@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 mod codex_provider_env;
+mod codex_usage;
 pub mod dsh;
 pub mod grok;
 pub mod images;
@@ -1159,15 +1160,53 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     if let Some(model) = ctx.initial_model.clone() {
         ctx.dispatch_event(&mut state, EngineEvent::Model(model));
     }
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+    // codex reports usage into its own session log instead of the stdout
+    // stream (the stream only carries it with `turn.completed`), so a long
+    // turn would otherwise show nothing until it ended. Poll that log
+    // alongside the stream once the thread id is known. `lines()` is what
+    // makes the select safe: `read_line` is not cancellation-safe, so a tick
+    // landing mid-line would consume and drop the read bytes.
+    let mut lines = BufReader::new(stdout).lines();
+    let is_codex = ctx.engine_id == "codex";
+    let mut usage_tail: Option<codex_usage::UsageTail> = None;
+    // Only the stream's own thread id (thread.started) may open the log: a
+    // resumed run's preassigned id names the *old* session, whose archived
+    // rollout would replay yesterday's records as if they were live.
+    let mut stream_session_id = false;
+    let mut tail_lookup_at = std::time::Instant::now();
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {}
+        let read = if is_codex {
+            tokio::select! {
+                line = lines.next_line() => line,
+                _ = poll.tick() => {
+                    if let Some(tail) = usage_tail.as_mut() {
+                        for usage in tail.poll() {
+                            ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
+                        }
+                    } else if stream_session_id
+                        && tail_lookup_at.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        // The CLI creates the log a moment after the thread
+                        // id arrives; until then there is nothing to open.
+                        tail_lookup_at = std::time::Instant::now();
+                        usage_tail = state
+                            .native_session_id
+                            .as_deref()
+                            .and_then(codex_usage::UsageTail::open);
+                    }
+                    continue;
+                }
+            }
+        } else {
+            lines.next_line().await
+        };
+        let line = match read {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
             Err(_) => break,
-        }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1175,8 +1214,19 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
         state.saw_any_output = true;
         let mut events = Vec::new();
         ctx.engine_impl.parse_line(trimmed, &mut events);
+        stream_session_id |= events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::SessionId(_)));
         for event in events {
             ctx.dispatch_event(&mut state, event);
+        }
+    }
+
+    // Last look at the session log: the final response's record may have
+    // landed after the last poll tick.
+    if let Some(tail) = usage_tail.as_mut() {
+        for usage in tail.poll() {
+            ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
         }
     }
 

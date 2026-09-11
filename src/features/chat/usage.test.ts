@@ -2,17 +2,24 @@ import { describe, expect, it } from "vitest";
 import { mergeUsage, parseUsage } from "./usage";
 
 describe("parseUsage", () => {
-  it("reads Codex last_token_usage and model_context_window", () => {
+  it("reads a codex rollout usage record, cache keys included", () => {
+    // The session-log tail emits token_usage_record payloads: a flat usage
+    // with codex's own cache field names and the stamped context window.
     const parsed = parseUsage({
-      total_token_usage: { input_tokens: 2_741_100, output_tokens: 11_900, total_tokens: 2_753_000 },
-      last_token_usage: { input_tokens: 34_660, output_tokens: 85, total_tokens: 34_745 },
-      model_context_window: 475_000,
+      input_tokens: 5000,
+      cached_input_tokens: 1000,
+      cache_write_input_tokens: 2000,
+      output_tokens: 300,
+      total_tokens: 8300,
+      model_context_window: 258_400,
     });
     expect(parsed).toMatchObject({
-      input: 34_660,
-      output: 85,
-      total: 34_745,
-      contextWindow: 475_000,
+      input: 5000,
+      output: 300,
+      cacheRead: 1000,
+      cacheWrite: 2000,
+      total: 8300,
+      contextWindow: 258_400,
     });
   });
 

@@ -139,21 +139,6 @@ impl Engine for CodexEngine {
                     _ => {}
                 }
             }
-            "token_count" => {
-                if let Some(usage) = usage_from_token_count(&value) {
-                    out.push(EngineEvent::Usage(usage));
-                }
-            }
-            "event_msg" => {
-                let Some(payload) = value.get("payload") else {
-                    return;
-                };
-                if payload.get("type").and_then(Value::as_str) == Some("token_count") {
-                    if let Some(usage) = usage_from_token_count(payload) {
-                        out.push(EngineEvent::Usage(usage));
-                    }
-                }
-            }
             "turn.completed" => {
                 let usage = value
                     .get("usage")
@@ -181,17 +166,6 @@ impl Engine for CodexEngine {
             _ => {}
         }
     }
-}
-
-/// last_token_usage + model_context_window from a Codex token_count event
-/// (top-level exec JSON or event_msg payload).
-fn usage_from_token_count(value: &Value) -> Option<Value> {
-    let info = value.get("info")?;
-    let usage = info
-        .get("last_token_usage")
-        .or_else(|| info.get("total_token_usage"))?
-        .clone();
-    Some(attach_context_window(usage, info))
 }
 
 fn attach_context_window(mut usage: Value, source: &Value) -> Value {
@@ -246,20 +220,6 @@ mod tests {
             service_tier: None,
             permission: Some("auto".into()),
             additional_dirs: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn token_count_emits_last_usage_and_window() {
-        let line = r#"{"type":"token_count","info":{"total_token_usage":{"input_tokens":2741100,"output_tokens":11900,"total_tokens":2753000},"last_token_usage":{"input_tokens":34660,"output_tokens":85,"total_tokens":34745},"model_context_window":475000}}"#;
-        let mut out = Vec::new();
-        CodexEngine.parse_line(line, &mut out);
-        match &out[..] {
-            [EngineEvent::Usage(usage)] => {
-                assert_eq!(usage["input_tokens"], 34660);
-                assert_eq!(usage["model_context_window"], 475000);
-            }
-            other => panic!("expected one usage event, got {other:?}"),
         }
     }
 

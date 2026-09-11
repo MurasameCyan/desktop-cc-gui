@@ -385,8 +385,8 @@ pub fn get_app_settings() -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-pub fn update_app_settings(
-    app: tauri::AppHandle,
+pub fn update_app_settings<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     mut settings: AppSettings,
 ) -> Result<(), String> {
     if settings
