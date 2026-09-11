@@ -24,7 +24,11 @@ export interface SessionState {
   turnStartedAt: number | null;
   activeModel?: string | null;
   activeEffort?: string | null;
+  /** Newest single report: the context meter reads occupancy from it. */
   usage: unknown;
+  /** Running total of the reply in flight (sum of its reports), so the tail
+   *  indicator counts this reply instead of showing one request's slice. */
+  turnUsage: unknown;
   error: string | null;
   /** Messages typed while a turn streams; sent FIFO when the turn ends. */
   queue: QueuedMessage[];
@@ -42,6 +46,7 @@ export const EMPTY_SESSION: SessionState = {
   activeModel: null,
   activeEffort: null,
   usage: null,
+  turnUsage: null,
   error: null,
   queue: [],
   interrupted: false,

@@ -424,6 +424,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
         turnStartedAt: Date.now(),
         activeModel: model,
         activeEffort: effort,
+        // The tail indicator counts this reply, not the one before it.
+        turnUsage: null,
       },
     );
     try {

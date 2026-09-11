@@ -357,11 +357,15 @@ export const MessageTimeline = memo(function MessageTimeline({
     return t("chat.metaEffort", { effort: effortVal });
   }, [activeEffort, t]);
 
-  // Tokens reported for the turn in flight, in the same "↑in ↓out" shape the
-  // settled rows use. It appears as soon as an engine reports (omp per
-  // message, codex token_count, claude at the end) and updates in place —
-  // nothing is estimated from streamed text, so the number is always real.
-  const liveUsage = useMemo(() => formatUsage(session.usage), [session.usage]);
+  // Tokens the reply in flight has spent, in the same "↑in ↓out" shape the
+  // settled rows use. `turnUsage` is the run's reports summed (omp per
+  // message, codex token_count); engines that report only at the end have
+  // nothing until they do. Nothing is estimated from streamed text, so the
+  // number is always real.
+  const liveUsage = useMemo(
+    () => formatUsage(session.turnUsage ?? session.usage),
+    [session.turnUsage, session.usage],
+  );
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
