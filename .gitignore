@@ -33,3 +33,9 @@ skills-lock.json
 boardui.dev.env
 CLAUDE.md
 .codegraph
+
+# Local-only outputs: downloaded CI builds (this fork downloads its Windows
+# artifact here to smoke-test) and bun's lockfile (this project uses pnpm).
+# Neither belongs in a commit, let alone a PR.
+artifacts/
+bun.lock
