@@ -112,6 +112,30 @@ describe("math rendering", () => {
     expect(container.querySelector(".katex-display")).toBeNull();
   });
 
+  it("renders a box command with nested math-mode dollars as one formula", async () => {
+    await renderMarkdown(
+      "颜色测试：$\\nabla_\\theta \\mathcal{L} 与 \\colorbox{yellow}{$\\displaystyle \\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}$}$",
+    );
+    // One formula — the inner `$...$` must not split it into an error span
+    // plus a raw-TeX text leak.
+    expect(container.querySelectorAll(".katex").length).toBe(1);
+    expect(container.querySelector(".katex-error")).toBeNull();
+    const outside = [...container.querySelectorAll("*")]
+      .filter((el) => !el.closest(".katex") && el.children.length === 0)
+      .map((el) => el.textContent ?? "")
+      .join("");
+    expect(outside).not.toContain("\\int");
+    expect(outside).not.toContain("\\colorbox");
+  });
+
+  it("renders nested box math in a display formula", async () => {
+    await renderMarkdown(
+      "$$\n\\hat{p} = \\mathrm{softmax}(Wh + b) \\quad \\colorbox{yellow}{$x^2$}\n$$",
+    );
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(container.querySelector(".katex-error")).toBeNull();
+  });
+
   it("leaves dollar signs inside code blocks alone", async () => {
     await renderMarkdown("```sh\necho $HOME\n```");
     expect(container.querySelector(".katex")).toBeNull();

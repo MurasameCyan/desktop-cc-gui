@@ -5,6 +5,10 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkDisplayMath } from "./remark-display-math";
+import {
+  protectNestedMathDollars,
+  restoreMathDollars,
+} from "./math-dollars";
 import { useReducedMotion } from "motion/react";
 import { StreamReveal } from "./stream-reveal";
 import { RevealText } from "./reveal-text";
@@ -159,10 +163,14 @@ export default memo(function Markdown({
   // them, retain its DOM shape on settle so selection does not jump.
   const [revealEnabled, setRevealEnabled] = useState(streaming);
   if (streaming && !revealEnabled) setRevealEnabled(true);
+  // Nested `$...$` inside box commands (e.g. `\colorbox{yellow}{$x$}`) must
+  // not end remark-math's span early; the protected text feeds both the plan
+  // and the renderer so reveal offsets stay aligned with the DOM.
+  const mathText = useMemo(() => protectNestedMathDollars(text), [text]);
   // Show already-received text on mount (including virtualizer remounts);
   // smooth only subsequent arrivals, never replay a paragraph from empty.
   const controller = useMemo(() => new StreamReveal(false), []);
-  const plan = useMemo(createRevealPlan, [text, contributions]);
+  const plan = useMemo(createRevealPlan, [mathText, contributions]);
   const reducedMotion = useReducedMotion();
   useLayoutEffect(() => {
     controller.update(plan.text, streaming && !reducedMotion && !document.hidden);
@@ -258,7 +266,9 @@ export default memo(function Markdown({
       [
         // Math first: a display formula arrives as a code block
         // (`language-math`), and the highlighter below would otherwise try to
-        // syntax-highlight the TeX as if it were source code.
+        // syntax-highlight the TeX as if it were source code. The dollar
+        // restore runs before KaTeX so nested `$...$` reaches the renderer.
+        restoreMathDollars,
         rehypeKatex,
         [cachedHighlight, { streaming }],
         ...contributions.flatMap((c) => c.rehypePlugins ?? []),
@@ -296,7 +306,7 @@ export default memo(function Markdown({
             : ""
         }
       >
-        {text}
+        {mathText}
       </ReactMarkdown>
     </div>
   );
