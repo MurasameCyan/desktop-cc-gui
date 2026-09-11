@@ -22,9 +22,7 @@ export const en: Messages = {
     ompFastDisable: "Disable Fast",
     ompSpeedReset: "Reset speed setting",
 
-    ompSpeed: "Generation speed",
     ompSpeedInherit: "Use CLI setting",
-    ompSpeedStandard: "Standard",
     ompSpeedUnsupported: "Select a Codex model to configure Fast.",
     ompSpeedSaveError:
       "Could not save. Speed setting is unchanged; please retry.",
@@ -392,7 +390,6 @@ export const en: Messages = {
       "While disabled, this CLI is hidden from the CLI picker and its history is not rendered.",
     cliChannelsHint: "Click a row to switch · applies to new sessions",
     cliBuiltin: "Built-in",
-    cliAddChannelDesc: "Start from a preset, or enter a custom Base URL / Key",
     cliEmptyTitle: "No custom channels yet",
     cliEmptyDesc: "Use “Add Channel” above to create one",
     cliDisabledOverlay:
@@ -677,8 +674,6 @@ export const en: Messages = {
   },
   usage: {
     title: "Usage",
-    trackingOn: "Tracking",
-    trackingOff: "Paused",
     trackingDesc:
       "Counts turns that run while tracking is on; the ledger stays in the local database",
     trackingEnable: "Start tracking",
@@ -687,8 +682,7 @@ export const en: Messages = {
     chartLabel: "Daily tokens stacked by model",
     chartTotal: "Range total {{tokens}}",
     tooltipTotal: "Day total",
-    otherModels: "Other models",
-  rangeToday: "Today",
+    rangeToday: "Today",
     rangeWeek: "This week",
     rangeMonth: "This month",
     tokens: "Tokens",
@@ -696,8 +690,6 @@ export const en: Messages = {
     output: "Output",
     turns: "Requests",
     details: "Details",
-      byEngine: "By CLI",
-    byModel: "By model",
     perRange: "Follows the selected range",
     clear: "Clear data",
     clearConfirm: "Confirm clear?",

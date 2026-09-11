@@ -55,6 +55,8 @@ function SortableRow<T extends { id?: string }>({
   const draggingRef = useRef(false);
   const dragEndedRef = useRef(false);
   const suppressClickRef = useRef(false);
+  // Removes the gesture's window listeners when the row unmounts mid-drag.
+  const gestureCleanupRef = useRef<(() => void) | null>(null);
   const [dragging, setDragging] = useState(false);
 
   const endDrag = useCallback(
@@ -79,6 +81,12 @@ function SortableRow<T extends { id?: string }>({
   useEffect(() => {
     endDragRef.current = endDrag;
   });
+  useEffect(
+    () => () => {
+      gestureCleanupRef.current?.();
+    },
+    [],
+  );
 
   const dragHandleProps = useMemo<RepoDragChrome["dragHandleProps"]>(() => {
     if (!canReorder) return null;
@@ -97,6 +105,7 @@ function SortableRow<T extends { id?: string }>({
           if (upEvent.pointerId !== pointerId) return;
           window.removeEventListener("pointerup", onPointerUp);
           window.removeEventListener("pointercancel", onPointerUp);
+          gestureCleanupRef.current = null;
           // motion fires onDragEnd (post-render) when the drag actually
           // moved; fall back to a plain reset when the handle was pressed
           // but never dragged.
@@ -106,6 +115,10 @@ function SortableRow<T extends { id?: string }>({
         };
         window.addEventListener("pointerup", onPointerUp);
         window.addEventListener("pointercancel", onPointerUp);
+        gestureCleanupRef.current = () => {
+          window.removeEventListener("pointerup", onPointerUp);
+          window.removeEventListener("pointercancel", onPointerUp);
+        };
       },
     };
   }, [canReorder, controls, onArm]);

@@ -33,6 +33,7 @@ vi.mock("../runtime/loader", () => ({
   loadPlugin: (args: unknown) => loadPlugin(args),
   // Already bootstrapped: refresh() under test never re-kicks bootstrap.
   pluginsBootstrapped: () => true,
+  prunePluginRuntimeState: vi.fn(),
   subscribePluginStates: () => () => {},
   unloadPlugin: vi.fn(),
 }));

@@ -129,6 +129,32 @@ function MonochromeGlyph({
   );
 }
 
+/** Static brand marks rendered as <img> (engine → asset + accessible label). */
+const RASTER_ICONS: Partial<Record<EngineIconId, { src: string; alt: string }>> = {
+  claude: { src: claudeIcon, alt: "Claude" },
+  chatglm: { src: chatglmIcon, alt: "GLM" },
+  qwen: { src: qwenIcon, alt: "Qwen" },
+  doubao: { src: doubaoIcon, alt: "Doubao" },
+  minimax: { src: minimaxIcon, alt: "MiniMax" },
+  yi: { src: yiIcon, alt: "Yi" },
+  baichuan: { src: baichuanIcon, alt: "Baichuan" },
+  hunyuan: { src: hunyuanIcon, alt: "Hunyuan" },
+  stepfun: { src: stepfunIcon, alt: "StepFun" },
+  gemini: { src: geminiIcon, alt: "Gemini" },
+  mistral: { src: mistralIcon, alt: "Mistral" },
+  cohere: { src: cohereIcon, alt: "Cohere" },
+  perplexity: { src: perplexityIcon, alt: "Perplexity" },
+  dsh: { src: deepseekIcon, alt: "DeepSeek Harness" },
+};
+
+/** Monochrome glyphs drawn from path data, following `currentColor`. */
+const MONOCHROME_ICONS: Partial<Record<EngineIconId, readonly string[]>> = {
+  codex: [OPENAI_ICON_PATH],
+  grok: GROK_ICON_PATHS,
+  kimi: KIMI_ICON_PATHS,
+  pi: PI_ICON_PATHS,
+};
+
 export function EngineIcon({ engine, size = 14, className, style }: EngineIconProps) {
   const iconStyle: CSSProperties = {
     width: size,
@@ -137,86 +163,21 @@ export function EngineIcon({ engine, size = 14, className, style }: EngineIconPr
     ...style,
   };
 
-  switch (engine) {
-    case "claude":
-      return (
-        <img src={claudeIcon} alt="Claude" className={className} style={iconStyle} aria-hidden />
-      );
-    case "chatglm":
-      return (
-        <img src={chatglmIcon} alt="GLM" className={className} style={iconStyle} aria-hidden />
-      );
-    case "qwen":
-      return (
-        <img src={qwenIcon} alt="Qwen" className={className} style={iconStyle} aria-hidden />
-      );
-    case "doubao":
-      return (
-        <img src={doubaoIcon} alt="Doubao" className={className} style={iconStyle} aria-hidden />
-      );
-    case "minimax":
-      return (
-        <img src={minimaxIcon} alt="MiniMax" className={className} style={iconStyle} aria-hidden />
-      );
-    case "yi":
-      return (
-        <img src={yiIcon} alt="Yi" className={className} style={iconStyle} aria-hidden />
-      );
-    case "baichuan":
-      return (
-        <img src={baichuanIcon} alt="Baichuan" className={className} style={iconStyle} aria-hidden />
-      );
-    case "hunyuan":
-      return (
-        <img src={hunyuanIcon} alt="Hunyuan" className={className} style={iconStyle} aria-hidden />
-      );
-    case "stepfun":
-      return (
-        <img src={stepfunIcon} alt="StepFun" className={className} style={iconStyle} aria-hidden />
-      );
-    case "gemini":
-      return (
-        <img src={geminiIcon} alt="Gemini" className={className} style={iconStyle} aria-hidden />
-      );
-    case "mistral":
-      return (
-        <img src={mistralIcon} alt="Mistral" className={className} style={iconStyle} aria-hidden />
-      );
-    case "cohere":
-      return (
-        <img src={cohereIcon} alt="Cohere" className={className} style={iconStyle} aria-hidden />
-      );
-    case "perplexity":
-      return (
-        <img src={perplexityIcon} alt="Perplexity" className={className} style={iconStyle} aria-hidden />
-      );
-    case "codex":
-      return <MonochromeGlyph paths={[OPENAI_ICON_PATH]} size={size} className={className} style={style} />;
-    case "grok":
-      return <MonochromeGlyph paths={GROK_ICON_PATHS} size={size} className={className} style={style} />;
-    case "kimi":
-      return <MonochromeGlyph paths={KIMI_ICON_PATHS} size={size} className={className} style={style} />;
-    case "pi":
-      return <MonochromeGlyph paths={PI_ICON_PATHS} size={size} className={className} style={style} />;
-    case "omp":
-      return <OmpGlyph size={size} className={className} style={style} />;
-    case "dsh":
-      return (
-        <img
-          src={deepseekIcon}
-          alt="DeepSeek Harness"
-          className={className}
-          style={iconStyle}
-          aria-hidden
-        />
-      );
-    default:
-      return (
-        <SquareTerminal
-          className={className}
-          style={iconStyle}
-          aria-hidden
-        />
-      );
+  if (engine === "omp") {
+    return <OmpGlyph size={size} className={className} style={style} />;
   }
+
+  const raster = RASTER_ICONS[engine as EngineIconId];
+  if (raster) {
+    return (
+      <img src={raster.src} alt={raster.alt} className={className} style={iconStyle} aria-hidden />
+    );
+  }
+
+  const paths = MONOCHROME_ICONS[engine as EngineIconId];
+  if (paths) {
+    return <MonochromeGlyph paths={paths} size={size} className={className} style={style} />;
+  }
+
+  return <SquareTerminal className={className} style={iconStyle} aria-hidden />;
 }

@@ -154,21 +154,6 @@ pub(crate) fn parse_tool_args_value(value: &Value) -> Option<Value> {
     }
 }
 
-/// Check if a tool name is a dedicated task/todo management tool.
-#[allow(dead_code)]
-pub(crate) fn is_todo_tool(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    lower == "todowrite"
-        || lower == "todo_write"
-        || lower == "todo"
-        || lower == "todos"
-        || lower == "taskcreate"
-        || lower == "task_create"
-        || lower == "taskupdate"
-        || lower == "task_update"
-        || lower == "task"
-}
-
 /// Tool-call start: name plus parsed args (path / todos derived from args).
 pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
     let name = name.into();
@@ -520,6 +505,13 @@ pub struct ChildEntry {
     /// runner commits the partial turn as done instead of pushing a bogus
     /// "exited with status …" error.
     pub killed: Arc<std::sync::atomic::AtomicBool>,
+    /// Abort handle for this run's detached stdout-reader task, set by
+    /// send_message right after spawn (a OnceLock so registry insertion
+    /// still happens before the task starts). A child that closed stdout
+    /// but refuses to die would park the reader on `wait()` forever,
+    /// pinning the registry/EventSink/engine Arcs it owns: kill() aborts
+    /// the reader after a settle grace, kill_all() aborts immediately.
+    pub reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
 }
 
 #[derive(Default)]
@@ -610,14 +602,14 @@ impl ProcessRegistry {
     /// several parallel runs must all die on a single stop, or the survivors
     /// keep streaming and fight the next run over the session file.
     pub fn kill(&self, key: &str) -> bool {
-        let mut entries: Vec<(u32, Arc<TokioMutex<tokio::process::Child>>, Arc<std::sync::atomic::AtomicBool>)> =
+        let mut entries: Vec<(u32, Arc<TokioMutex<tokio::process::Child>>, Arc<std::sync::atomic::AtomicBool>, Arc<std::sync::OnceLock<tokio::task::AbortHandle>>)> =
             match self.0.lock() {
                 Ok(map) => {
                     let mut seen_pids = std::collections::HashSet::new();
                     map.iter()
                         .filter(|(k, e)| *k == key || e.run_id == key)
                         .filter(|(_, e)| seen_pids.insert(e.pid))
-                        .map(|(_, e)| (e.pid, Arc::clone(&e.child), Arc::clone(&e.killed)))
+                        .map(|(_, e)| (e.pid, Arc::clone(&e.child), Arc::clone(&e.killed), Arc::clone(&e.reader_abort)))
                         .collect()
                 }
                 Err(_) => Vec::new(),
@@ -625,14 +617,30 @@ impl ProcessRegistry {
         // The registry keys one child under BOTH its session id and run id
         // (rekey copies): de-duplicate by pid so one stop fires one
         // taskkill, not one per key.
-        entries.sort_by_key(|(pid, _, _)| *pid);
-        entries.dedup_by_key(|(pid, _, _)| *pid);
+        entries.sort_by_key(|(pid, _, _, _)| *pid);
+        entries.dedup_by_key(|(pid, _, _, _)| *pid);
         // No Iterator::any here: it short-circuits on the first true, which
         // would leave every later parallel run alive — the exact bug this
         // aggregate kill exists to fix.
         let mut killed_any = false;
-        for (pid, child, killed) in &entries {
+        for (pid, child, killed, _) in &entries {
             killed_any |= Self::kill_entry(*pid, child, killed);
+        }
+        // Backstop for a child that ignores SIGKILL (uninterruptible
+        // sleep): its reader parks on wait() after EOF, pinning the Arcs it
+        // owns. Abort it after a grace long enough for a healthy settle
+        // (kill → EOF → wait → terminal event, milliseconds in practice) —
+        // on an already-finished task abort is a no-op, so normal stop
+        // semantics are unchanged. kill() only runs inside a runtime
+        // (spawn_blocking callers), so tokio::spawn is safe here.
+        for (_, _, _, reader_abort) in &entries {
+            if let Some(handle) = reader_abort.get() {
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(READER_SETTLE_GRACE).await;
+                    handle.abort();
+                });
+            }
         }
         killed_any
     }
@@ -653,6 +661,13 @@ impl ProcessRegistry {
             kill_process_group(entry.pid);
             if let Ok(mut guard) = entry.child.try_lock() {
                 let _ = guard.start_kill();
+            }
+            // Teardown: abort the reader outright so it drops its
+            // registry/sink Arcs now instead of parking on wait() past
+            // exit. Settle events would go nowhere anyway (the window is
+            // being destroyed).
+            if let Some(handle) = entry.reader_abort.get() {
+                handle.abort();
             }
         }
     }
@@ -824,6 +839,16 @@ pub fn list_engines() -> Vec<EngineInfo> {
 /// Concurrent engine runs; past this the machine thrashes and the registry
 /// fan-out makes interrupts unreliable anyway.
 const MAX_CONCURRENT_RUNS: usize = 16;
+/// Grace between a Stop kill and force-aborting the reader task. A healthy
+/// settle (kill → EOF → wait → terminal event) finishes in milliseconds;
+/// the abort only fires when a killed child still won't die and the reader
+/// would otherwise park on `wait()` forever.
+const READER_SETTLE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Hard cap on one NDJSON line from an engine. Real events are kilobytes;
+/// `BufReader::lines` has no limit, so a runaway engine writing without
+/// newlines would buffer the line whole and OOM the host.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Resolved launch parameters for one send: request, binary, built command.
 struct Launch {
@@ -1153,6 +1178,54 @@ impl RunContext {
     }
 }
 
+/// One line read from the engine's stdout, size-capped.
+enum LineRead {
+    /// A complete line, newline terminator stripped (may be empty).
+    Line(Vec<u8>),
+    /// Clean EOF.
+    Eof,
+    /// No newline within MAX_LINE_BYTES: the run must be torn down.
+    TooLong,
+}
+
+/// Cancellation-safe replacement for `BufReader::lines().next_line()` with a
+/// hard byte cap: partial bytes live in the caller-owned `line`, and the
+/// only await is `fill_buf`, so a `tokio::select!` tick landing mid-line
+/// consumes and drops nothing — the property the old code relied on
+/// `next_line` for (a cancelled `read_line` would lose the partial bytes).
+async fn read_line_capped(
+    reader: &mut BufReader<ChildStdout>,
+    line: &mut Vec<u8>,
+) -> std::io::Result<LineRead> {
+    line.clear();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if line.is_empty() {
+                LineRead::Eof
+            } else {
+                // EOF mid-line: deliver the partial line, like next_line.
+                LineRead::Line(std::mem::take(line))
+            });
+        }
+        let end = available
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(available.len());
+        if line.len() + end > MAX_LINE_BYTES {
+            return Ok(LineRead::TooLong);
+        }
+        line.extend_from_slice(&available[..end]);
+        let has_newline = end < available.len();
+        // Consume the newline too when present. No await between extend and
+        // consume, so cancellation cannot split the pair.
+        reader.consume(end + usize::from(has_newline));
+        if has_newline {
+            return Ok(LineRead::Line(std::mem::take(line)));
+        }
+    }
+}
+
 /// Read NDJSON stdout until EOF, dispatch events, then settle the turn:
 /// registry cleanup, temp-file cleanup, and the terminal done/error event.
 async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
@@ -1163,10 +1236,12 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     // codex reports usage into its own session log instead of the stdout
     // stream (the stream only carries it with `turn.completed`), so a long
     // turn would otherwise show nothing until it ended. Poll that log
-    // alongside the stream once the thread id is known. `lines()` is what
-    // makes the select safe: `read_line` is not cancellation-safe, so a tick
-    // landing mid-line would consume and drop the read bytes.
-    let mut lines = BufReader::new(stdout).lines();
+    // alongside the stream once the thread id is known. `read_line_capped`
+    // is what makes the select safe: partial bytes stay in the caller-owned
+    // buffer across polls, so a tick landing mid-line consumes and drops
+    // nothing, and one runaway line can't grow without bound.
+    let mut reader = BufReader::new(stdout);
+    let mut line_buf = Vec::new();
     let is_codex = ctx.engine_id == "codex";
     let mut usage_tail: Option<codex_usage::UsageTail> = None;
     // Only the stream's own thread id (thread.started) may open the log: a
@@ -1179,7 +1254,7 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     loop {
         let read = if is_codex {
             tokio::select! {
-                line = lines.next_line() => line,
+                line = read_line_capped(&mut reader, &mut line_buf) => line,
                 _ = poll.tick() => {
                     if let Some(tail) = usage_tail.as_mut() {
                         for usage in tail.poll() {
@@ -1200,14 +1275,29 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
                 }
             }
         } else {
-            lines.next_line().await
+            read_line_capped(&mut reader, &mut line_buf).await
         };
         let line = match read {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
+            Ok(LineRead::Line(bytes)) => bytes,
+            Ok(LineRead::Eof) => break,
+            Ok(LineRead::TooLong) => {
+                // A line this large is never a real event — the engine is
+                // stuck writing garbage. Settle the turn as a terminal
+                // error; dispatch also kills the process tree off-thread.
+                ctx.dispatch_event(
+                    &mut state,
+                    EngineEvent::Error(format!(
+                        "{} emitted a line over {} MiB without a newline; run terminated",
+                        ctx.engine_id,
+                        MAX_LINE_BYTES / (1024 * 1024),
+                    )),
+                );
+                break;
+            }
             Err(_) => break,
         };
-        let trimmed = line.trim();
+        let text = String::from_utf8_lossy(&line);
+        let trimmed = text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -1394,6 +1484,7 @@ pub async fn send_message(
     };
     let child = Arc::new(TokioMutex::new(child));
     let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_abort = Arc::new(std::sync::OnceLock::new());
     state.processes.insert(
         run_id.clone(),
         ChildEntry {
@@ -1401,6 +1492,7 @@ pub async fn send_message(
             pid,
             run_id: run_id.clone(),
             killed: Arc::clone(&killed),
+            reader_abort: Arc::clone(&reader_abort),
         },
     );
     if let Some(session_id) = launch.built.preassigned_session_id.as_deref() {
@@ -1411,6 +1503,7 @@ pub async fn send_message(
                 pid,
                 run_id: run_id.clone(),
                 killed: Arc::clone(&killed),
+                reader_abort: Arc::clone(&reader_abort),
             },
         );
     }
@@ -1441,7 +1534,10 @@ pub async fn send_message(
         cleanup_files: launch.built.cleanup_files,
         stderr_buf,
     };
-    tokio::spawn(run_reader(stdout, ctx));
+    let reader = tokio::spawn(run_reader(stdout, ctx));
+    // Registration order is unchanged (entries land before the task can
+    // settle); the OnceLock just hands kill()/kill_all() the handle.
+    let _ = reader_abort.set(reader.abort_handle());
 
     Ok(SendResult {
         run_id,
@@ -1729,6 +1825,7 @@ mod registry_tests {
             pid,
             run_id: "run-1".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reader_abort: Arc::new(std::sync::OnceLock::new()),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-1".to_string(), entry);
@@ -1774,6 +1871,7 @@ mod registry_tests {
             pid,
             run_id: "run-preassigned".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reader_abort: Arc::new(std::sync::OnceLock::new()),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-preassigned".to_string(), entry.clone());
@@ -1830,6 +1928,7 @@ mod registry_tests {
             pid: cmd_pid,
             run_id: "run-tree".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reader_abort: Arc::new(std::sync::OnceLock::new()),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-tree".to_string(), entry);

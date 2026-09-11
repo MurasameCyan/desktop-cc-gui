@@ -25,10 +25,20 @@ export function useLoadEarlier({
   const loadingRef = useRef(false);
   const itemsRef = useRef(rows);
   const onLoadEarlierRef = useRef(onLoadEarlier);
+  const frameRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     itemsRef.current = rows;
     onLoadEarlierRef.current = onLoadEarlier;
   });
+  // Unmount-only: cancel a pending anchor-restore frame. Not cancelled in
+  // the observer effect below — that effect re-subscribes when a load
+  // lands (nextBefore/itemCount change), and cancelling there would leave
+  // loadingRef stuck on.
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== undefined) cancelAnimationFrame(frameRef.current);
+    };
+  }, []);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -45,7 +55,7 @@ export function useLoadEarlier({
             : undefined;
         onLoadEarlierRef.current();
         // Restore anchor after prepend: find the same seq in the new list.
-        requestAnimationFrame(() => {
+        frameRef.current = requestAnimationFrame(() => {
           // Read the freshest rows via the ref; the store update lands
           // before this frame.
           const idx = anchorSeq
@@ -53,6 +63,7 @@ export function useLoadEarlier({
             : -1;
           if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "start" });
           loadingRef.current = false;
+          frameRef.current = undefined;
         });
       },
       { root: el, rootMargin: "400px 0px 0px 0px" },

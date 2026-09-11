@@ -51,6 +51,7 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
     let inputDisposable: IDisposable | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
+    let disposed = false;
     try {
       const { Terminal, FitAddon, WebglAddon } = xterm;
       const term = new Terminal({
@@ -83,10 +84,16 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
         ipc
           .terminalOpen({ id, cwd, cols: term.cols, rows: term.rows })
           .then(() => {
+            // Unmounted before the open resolved: leave the PTY alone (it
+            // outlives the view by design — a remount reopens/reuses it),
+            // but don't mark or touch state for a dead view.
+            if (disposed) return;
             markTerminalOpened(id);
             setError(null);
           })
-          .catch((e: unknown) => setError(String(e)));
+          .catch((e: unknown) => {
+            if (!disposed) setError(String(e));
+          });
 
       const safeFit = () => {
         try {
@@ -141,6 +148,7 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
     }
 
     return () => {
+      disposed = true;
       clearTimeout(resizeTimer);
       inputDisposable?.dispose();
       resizeObserver?.disconnect();

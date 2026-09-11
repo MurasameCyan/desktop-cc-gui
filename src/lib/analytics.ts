@@ -162,33 +162,3 @@ export function installBaiduTongji(): void {
   }
   installExternalBaiduTongji();
 }
-
-/**
- * Custom event (自定义埋点). Wraps Baidu Tongji `_trackEvent`:
- * pushes into the `_hmt` queue, which the official script drains and sends
- * through whichever transport is active (external Image or native bridge).
- *
- * @param category 事件类别，如 "session"
- * @param action 事件动作，如 "create"
- * @param label 可选标签，如 engine 名
- * @param value 可选数值
- */
-export function trackBaiduEvent(
-  category: string,
-  action: string,
-  label?: string,
-  value?: number,
-): void {
-  if (!import.meta.env.PROD) {
-    return;
-  }
-  const queue = (window._hmt = window._hmt || []);
-  const event: unknown[] = ["_trackEvent", category, action];
-  if (label !== undefined) {
-    event.push(label);
-  }
-  if (value !== undefined) {
-    event.push(value);
-  }
-  queue.push(event);
-}

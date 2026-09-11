@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { subscribeTauriEvent } from "@/hooks/use-tauri-event";
 import { listenCliUpdateProgress } from "@/lib/events";
 import { ipc, type CliUpdatePlan } from "@/lib/ipc";
 import type { EngineId } from "./providers";
@@ -63,25 +64,25 @@ export function useCliUpdateFlow(
   const running = state.status === "running";
   useEffect(() => {
     if (!running) return;
-    let unlisten: (() => void) | null = null;
-    void listenCliUpdateProgress((events) => {
-      setState((cur) => {
-        if (cur.runId === null) return cur;
-        let logs = cur.logs;
-        for (const event of events) {
-          if (event.runId !== cur.runId) continue;
-          if (event.phase === "stdout" || event.phase === "stderr") {
-            logs = [...logs, { stream: event.phase, text: event.line ?? "" }];
+    // subscribeTauriEvent also covers the race where this teardown runs
+    // before the listen promise resolves (late unlistener fires at once).
+    return subscribeTauriEvent(() =>
+      listenCliUpdateProgress((events) => {
+        setState((cur) => {
+          if (cur.runId === null) return cur;
+          let logs = cur.logs;
+          for (const event of events) {
+            if (event.runId !== cur.runId) continue;
+            if (event.phase === "stdout" || event.phase === "stderr") {
+              logs = [...logs, { stream: event.phase, text: event.line ?? "" }];
+            }
           }
-        }
-        if (logs === cur.logs) return cur;
-        if (logs.length > MAX_LOG_LINES) logs = logs.slice(-MAX_LOG_LINES);
-        return { ...cur, logs };
-      });
-    }).then((f) => {
-      unlisten = f;
-    });
-    return () => unlisten?.();
+          if (logs === cur.logs) return cur;
+          if (logs.length > MAX_LOG_LINES) logs = logs.slice(-MAX_LOG_LINES);
+          return { ...cur, logs };
+        });
+      }),
+    );
   }, [running]);
 
   const begin = useCallback(async () => {

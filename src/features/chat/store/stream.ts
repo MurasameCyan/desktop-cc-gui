@@ -92,6 +92,48 @@ export type SetFn<T extends BySessionSlice> = (fn: (s: T) => Partial<T>) => void
  * the run settles (done/error) or is interrupted — the map must not grow
  * monotonically over the app's lifetime. */
 export const runRouting = new Map<string, string>();
+/** runId -> last activity (stamped at routing, refreshed on each routed
+ * event). A run that dies without done/error (engine crash, killed process)
+ * never gets its routing entry removed by the settling paths, so each newly
+ * routed run sweeps entries silent for longer than the TTL — bounded, no
+ * timer. Activity-based rather than start-based so an hours-long codex turn
+ * is never swept while it is still talking. */
+const runActivity = new Map<string, number>();
+const RUN_ORPHAN_TTL_MS = 30 * 60_000;
+
+/** Route a run to its session key and stamp its activity. Each call also
+ * sweeps runs silent past the TTL; the returned `[runId, sessionKey]` pairs
+ * are the dropped orphans, so the caller can clear their other run-scoped
+ * state (usage maps, streaming flags). */
+export function routeRun(runId: string, key: string): Array<[string, string]> {
+  runRouting.set(runId, key);
+  runActivity.set(runId, Date.now());
+  return sweepOrphanRuns();
+}
+
+/** Refresh a live run's activity stamp on each routed event. */
+export function touchRun(runId: string) {
+  if (runActivity.has(runId)) runActivity.set(runId, Date.now());
+}
+
+/** Forget a settled run (its routing entry is dropped by the settling path). */
+export function untrackRun(runId: string) {
+  runActivity.delete(runId);
+}
+
+/** Drop routing entries silent past the TTL — their done/error never came. */
+function sweepOrphanRuns(): Array<[string, string]> {
+  const now = Date.now();
+  const orphaned: Array<[string, string]> = [];
+  for (const [runId, seenAt] of runActivity) {
+    if (now - seenAt < RUN_ORPHAN_TTL_MS) continue;
+    runActivity.delete(runId);
+    const key = runRouting.get(runId);
+    runRouting.delete(runId);
+    if (key !== undefined) orphaned.push([runId, key]);
+  }
+  return orphaned;
+}
 
 /** One ordered stream chunk. Thinking and text deltas interleave within a
  * turn (extended thinking resumes between tool calls), so per-kind string

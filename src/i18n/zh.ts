@@ -19,9 +19,7 @@ export const zh = {
     ompFastDisable: "关闭 Fast",
     ompSpeedReset: "恢复速度设置",
 
-    ompSpeed: "生成速度",
     ompSpeedInherit: "跟随 CLI 设置",
-    ompSpeedStandard: "标准",
     ompSpeedUnsupported: "选择 Codex 模型后可设置 Fast。",
     ompSpeedSaveError: "保存失败，速度设置未更改，请重试。",
 
@@ -373,7 +371,6 @@ export const zh = {
       "停用后该 CLI 不会出现在 CLI 选择页面，该 CLI 的历史记录也不会渲染。",
     cliChannelsHint: "点击行即切换 · 对新会话生效",
     cliBuiltin: "内置",
-    cliAddChannelDesc: "从预设模板快速创建，或自定义 Base URL / Key",
     cliEmptyTitle: "还没有自定义渠道",
     cliEmptyDesc: "点击右上角「添加渠道」创建",
     cliDisabledOverlay: "该 CLI 已停用 · 打开上方开关后可管理配置",
@@ -645,8 +642,6 @@ export const zh = {
   },
   usage: {
     title: "用量",
-    trackingOn: "正在统计",
-    trackingOff: "已暂停统计",
     trackingDesc: "只统计开启后的回合，数据保存在本机数据库，不会上传",
     trackingEnable: "开始统计",
     trackingDisable: "暂停统计",
@@ -654,8 +649,7 @@ export const zh = {
     chartLabel: "按天堆叠的模型 token 消耗",
     chartTotal: "区间累计 {{tokens}}",
     tooltipTotal: "当天合计",
-    otherModels: "其他模型",
-  rangeToday: "今日",
+    rangeToday: "今日",
     rangeWeek: "本周",
     rangeMonth: "本月",
     tokens: "Token 累计",
@@ -664,8 +658,6 @@ export const zh = {
     // Counts engine-reported responses, not user prompts.
     turns: "请求",
     details: "详细数据",
-      byEngine: "按 CLI",
-    byModel: "按模型",
     perRange: "随上方时间范围变化",
     clear: "清空数据",
     clearConfirm: "确认清空？",

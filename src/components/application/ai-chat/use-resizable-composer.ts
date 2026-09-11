@@ -395,10 +395,13 @@ export function useResizableComposer({
 
   useEffect(() => {
     return () => {
+      // Mid-drag unmount: stopResize restores the body userSelect/cursor
+      // captured in onPointerDown (no-op when no drag is active).
+      stopResize();
       clearPendingTransition();
       clearPendingExpandResizeUnlock();
     };
-  }, [clearPendingExpandResizeUnlock, clearPendingTransition]);
+  }, [clearPendingExpandResizeUnlock, clearPendingTransition, stopResize]);
 
   const getHandleProps = useCallback((): ComponentPropsWithoutRef<"div"> => {
     return {

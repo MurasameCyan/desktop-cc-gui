@@ -1,5 +1,8 @@
-import { create } from "zustand";
 import { ipc, type FileIndexEntry } from "@/lib/ipc";
+import {
+  createRootCacheStore,
+  type RootCache,
+} from "@/components/application/ai-chat/create-root-cache-store";
 
 /**
  * Workspace file index + fuzzy matcher for the composer's @-mention picker.
@@ -8,7 +11,8 @@ import { ipc, type FileIndexEntry } from "@/lib/ipc";
  * keystroke — this is the opposite):
  * - The whole tree is fetched ONCE per workspace root (a single bounded
  *   walk on the Rust side), then revalidated in the background after
- *   INDEX_TTL_MS while stale entries stay visible (stale-while-revalidate).
+ *   INDEX_TTL_MS while stale entries stay visible (stale-while-revalidate,
+ *   via createRootCacheStore).
  * - Matching is pure JS over precomputed lowercase keys. A subsequence
  *   scan is O(rel length) per entry, so even a full 20k-entry index costs
  *   ~1ms per keystroke — no debouncing, no IPC, no workers needed.
@@ -29,15 +33,9 @@ export interface MentionEntry {
   nameStart: number;
 }
 
-export interface RootIndex {
-  entries: MentionEntry[];
-  status: "loading" | "ready" | "error";
-  fetchedAt: number;
-}
+export type RootIndex = RootCache<MentionEntry>;
 
 const INDEX_TTL_MS = 60_000;
-/** In-flight fetches keyed by root: concurrent ensure() calls share one IPC. */
-const inFlight = new Map<string, Promise<void>>();
 
 function buildEntries(raw: FileIndexEntry[]): MentionEntry[] {
   const entries = raw.map(({ rel, isDir }) => {
@@ -59,54 +57,15 @@ function buildEntries(raw: FileIndexEntry[]): MentionEntry[] {
   return entries;
 }
 
-interface MentionIndexStore {
-  byRoot: Record<string, RootIndex>;
-  /** Fetch the index for a root: once, then again only once it is stale.
-   *  Never throws; failures keep the previous entries and mark "error". */
-  ensure: (root: string) => void;
-}
+const { useStore: useMentionIndexStore, prune: pruneMentionIndex } =
+  createRootCacheStore<MentionEntry>({
+    fetch: (root) => ipc.listFileIndex(root).then(buildEntries),
+    ttlMs: INDEX_TTL_MS,
+  });
 
-export const useMentionIndexStore = create<MentionIndexStore>((set, get) => ({
-  byRoot: {},
-  ensure: (root) => {
-    if (!root) return;
-    const cur = get().byRoot[root];
-    if (inFlight.has(root)) return;
-    if (cur && cur.status === "ready" && Date.now() - cur.fetchedAt < INDEX_TTL_MS) return;
-    if (!cur) {
-      set((s) => ({
-        byRoot: { ...s.byRoot, [root]: { entries: [], status: "loading", fetchedAt: 0 } },
-      }));
-    }
-    const p = ipc
-      .listFileIndex(root)
-      .then((raw) => {
-        set((s) => ({
-          byRoot: {
-            ...s.byRoot,
-            [root]: { entries: buildEntries(raw), status: "ready", fetchedAt: Date.now() },
-          },
-        }));
-      })
-      .catch(() => {
-        set((s) => {
-          const prev = s.byRoot[root];
-          return {
-            byRoot: {
-              ...s.byRoot,
-              // A failed refresh keeps serving the stale index; only a failed
-              // first fetch leaves the picker empty.
-              [root]: { entries: prev?.entries ?? [], status: "error", fetchedAt: prev?.fetchedAt ?? 0 },
-            },
-          };
-        });
-      })
-      .finally(() => {
-        inFlight.delete(root);
-      });
-    inFlight.set(root, p);
-  },
-}));
+/** Drop one workspace root's cached index when its workspace is removed;
+ * the per-root cache would otherwise accumulate every root ever opened. */
+export { useMentionIndexStore, pruneMentionIndex };
 
 /** Max rows the picker renders — caps DOM work regardless of match count. */
 export const MENTION_MENU_LIMIT = 50;

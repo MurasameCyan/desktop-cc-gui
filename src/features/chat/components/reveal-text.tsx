@@ -1,5 +1,4 @@
-import { memo, useCallback, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { useReducedMotion } from "motion/react";
+import { memo, useCallback, useMemo, useSyncExternalStore } from "react";
 import { StreamReveal, createVisibleTextReader } from "./stream-reveal";
 
 /** Only the text runs crossing the reveal cursor rerender each frame.
@@ -17,22 +16,3 @@ export const RevealText = memo(function RevealText({ controller, start, children
   const reader = useMemo(() => createVisibleTextReader(children), [children]);
   return <span>{windowSize ? reader.window(count, windowSize) : reader.prefix(count)}</span>;
 });
-
-/** Plain streaming text (thinking) shares the frame cursor without parsing
- * Markdown. The whole stored text is retained; only its displayed window moves. */
-export function SmoothThinkingText({ text }: { text: string }) {
-  const [controller] = useState(() => new StreamReveal(false));
-  const reducedMotion = useReducedMotion();
-  useLayoutEffect(() => {
-    controller.update(text, !reducedMotion && !document.hidden);
-  }, [controller, text, reducedMotion]);
-  useLayoutEffect(() => {
-    const onVisibility = () => { if (document.hidden) controller.finish(); };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      controller.cancel();
-    };
-  }, [controller]);
-  return <RevealText controller={controller} start={0} windowSize={2000}>{text}</RevealText>;
-}

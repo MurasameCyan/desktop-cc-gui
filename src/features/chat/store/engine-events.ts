@@ -11,10 +11,13 @@ import {
   moveStreamingFlag,
   patchSession,
   resolveSessionModel,
+  routeRun,
   runRouting,
   scheduleDeltaFlush,
   setStreamingFlag,
   settleLiveRows,
+  touchRun,
+  untrackRun,
   updatePendingStreamModel,
 } from "./stream";
 import type { ChatStore } from "../store";
@@ -261,7 +264,7 @@ function onSession(
   const workspacePath =
     tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
-  runRouting.set(event.runId, newKey);
+  settleOrphanedRuns(deps.set, routeRun(event.runId, newKey));
   // Unflushed stream chunks sit under the pre-migration key; move them too.
   migratePendingStream(key, newKey);
   // Migrate pending key -> native key.
@@ -335,6 +338,35 @@ const liveLedgerRuns = new Set<string>();
  *  the tail indicator and the settled row show this total: what the reply has
  *  spent so far. Claude reports nothing until the end, so it never appears. */
 const turnUsageTotals = new Map<string, ParsedUsage>();
+/** Drop a run's usage bookkeeping (settled, interrupted, or swept). */
+export function dropRunUsage(runId: string) {
+  turnUsageTotals.delete(runId);
+  liveLedgerRuns.delete(runId);
+}
+
+/** Drop every trace of runs the orphan sweep reaped: their usage maps here
+ * and the session's stuck streaming state in the store — a dead run's
+ * done/error never arrives to clear them. */
+export function settleOrphanedRuns(
+  set: (fn: (s: ChatStore) => Partial<ChatStore>) => void,
+  orphaned: Array<[string, string]>,
+) {
+  if (orphaned.length === 0) return;
+  for (const [runId] of orphaned) dropRunUsage(runId);
+  set((s) => {
+    let streamingByKey = s.streamingByKey;
+    let bySession = s.bySession;
+    for (const [, key] of orphaned) {
+      streamingByKey = setStreamingFlag(streamingByKey, key, false);
+      const cur = bySession[key];
+      if (cur?.streaming) {
+        if (bySession === s.bySession) bySession = { ...s.bySession };
+        bySession[key] = { ...cur, streaming: false, turnStartedAt: null };
+      }
+    }
+    return { bySession, streamingByKey };
+  });
+}
 
 function onUsage(
   event: EngineEventPayload,
@@ -470,10 +502,11 @@ function onError(
       streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
     };
   });
-  // The run is over: drop its routing entry and running total so the maps
-  // cannot grow forever.
+  // The run is over: drop its routing entry and usage bookkeeping so the
+  // maps cannot grow forever.
   runRouting.delete(event.runId);
-  turnUsageTotals.delete(event.runId);
+  untrackRun(event.runId);
+  dropRunUsage(event.runId);
   deps.markUnseenIfBackground(key);
 }
 
@@ -643,6 +676,7 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   });
   // The run is over: drop its routing entry so the map cannot grow forever.
   runRouting.delete(event.runId);
+  untrackRun(event.runId);
   // Ledger the turn's tokens now that it is settled: the same report that
   // stamps the row above, so the usage page counts real engine numbers. The
   // feature's own switch gates it (localStorage-backed, see usage-tracking.ts).
@@ -690,6 +724,7 @@ export function handleEngineEvents(
   for (const event of events) {
     const state = deps.get();
     let key = runRouting.get(event.runId);
+    if (key) touchRun(event.runId);
     if (!key && event.sessionId) {
       key = sessionKey(event.engine, event.sessionId, "");
       // sessionId-only key lacks workspace; find active match

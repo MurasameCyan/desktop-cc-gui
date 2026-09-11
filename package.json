@@ -13,7 +13,6 @@
     "dev": "tauri dev"
   },
   "dependencies": {
-    "@base-ui/react": "^1.8.0",
     "@ccgui/plugin-sdk": "workspace:*",
     "@codemirror/language": "^6.12.3",
     "@codemirror/language-data": "^6.5.2",
@@ -31,7 +30,6 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
-    "date-fns": "^4.4.0",
     "i18next": "^24",
     "katex": "^0.16.47",
     "lucide-react": "^0.562.0",
@@ -39,7 +37,6 @@
     "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-aria-components": "^1.21.1",
-    "react-day-picker": "^10.0.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15",
     "react-markdown": "^9",

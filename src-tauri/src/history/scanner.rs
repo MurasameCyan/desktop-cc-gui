@@ -407,8 +407,8 @@ fn dsh_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// Shared by scan_all_workspaces and spawn_scan: the scan only ever needs the
-/// db and the event sink, so both callers pass those two directly.
+/// The scan only ever needs the
+/// db and the event sink, so callers pass those two directly.
 fn scan_with_sink(
     db: &crate::db::Db,
     sink: &Arc<crate::event_sink::EventSink>,
@@ -420,12 +420,6 @@ fn scan_with_sink(
         move || changed_sink.emit_sessions_changed(),
         move |p| progress_sink.emit_scan_progress(p),
     )
-}
-
-/// Scan all registered workspaces; reparse only files whose stat signature
-/// changed; upsert the sessions table; emit sessions://changed once.
-pub fn scan_all_workspaces(state: &crate::AppState) -> Result<ScanReport, String> {
-    scan_with_sink(&state.db, &state.sink)
 }
 
 /// The scan itself, decoupled from the event sink for testing.

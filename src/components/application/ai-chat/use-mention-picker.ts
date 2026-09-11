@@ -1,28 +1,26 @@
 import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
   type Dispatch,
   type MutableRefObject,
   type RefObject,
   type SetStateAction,
 } from "react";
-import {
-  caretLeftPx,
-  extractText,
-  findMentionTrigger,
-  getCaretOffset,
-} from "@/components/application/ai-chat/file-tags";
+import { findMentionTrigger } from "@/components/application/ai-chat/file-tags";
 import { type FileMentionMenuHandle } from "@/components/application/ai-chat/file-mention-menu";
 import { useMentionIndexStore } from "@/components/application/ai-chat/mention-files";
+import {
+  useTriggerPicker,
+  type TriggerState,
+} from "@/components/application/ai-chat/use-trigger-picker";
 
 /** Active `@query` trigger: start offset, query text, popover x anchor. */
-export interface MentionTriggerState {
-  start: number;
-  query: string;
-  left: number;
-}
+export type MentionTriggerState = TriggerState;
+
+/** Popover width; shared by the caret clamp and the menu surface. */
+const MENTION_MENU_WIDTH = 320;
+
+/** Prefetch the file index on workspace switch, so the first `@` is instant. */
+const prefetchMentionIndex = (root: string) =>
+  useMentionIndexStore.getState().ensure(root);
 
 /**
  * useMentionPicker — state for the composer's `@` file-mention picker: an
@@ -30,7 +28,7 @@ export interface MentionTriggerState {
  * consumes arrows/Enter/Tab/Escape through mentionMenuRef; `left` anchors
  * the popover to the caret's x position and stays fixed while the query
  * grows. Selecting an entry (DOM mutation) stays in the composer — this hook
- * only tracks the trigger.
+ * only tracks the trigger. Thin wrapper over useTriggerPicker.
  */
 export function useMentionPicker({
   editableRef,
@@ -52,67 +50,23 @@ export function useMentionPicker({
   mentionMenuRef: MutableRefObject<FileMentionMenuHandle | null>;
   updateMentionTrigger: () => void;
 } {
-  const mentionMenuRef = useRef<FileMentionMenuHandle | null>(null);
-  const [mention, setMention] = useState<MentionTriggerState | null>(null);
-
-  // Workspace switch closes the picker: render-time adjustment via prev-prop
-  // comparison instead of a cascading effect setState.
-  const [prevWorkspacePath, setPrevWorkspacePath] = useState(workspacePath);
-  if (prevWorkspacePath !== workspacePath) {
-    setPrevWorkspacePath(workspacePath);
-    setMention(null);
-  }
-
-  // Prefetch the file index on workspace switch, so the first `@` is instant.
-  useEffect(() => {
-    if (workspacePath) useMentionIndexStore.getState().ensure(workspacePath);
-  }, [workspacePath]);
-
-  // External value changes (draft restore on tab switch, clear on submit)
-  // rebuild the editable DOM from text, which invalidates any live trigger
-  // range — reset the picker via prev-prop comparison (render-time
-  // adjustment, no cascading effect setState). Own emissions are already in
-  // the DOM and skip this path through lastEmittedRef.
-  const [prevValue, setPrevValue] = useState(value);
-  if (value !== prevValue) {
-    setPrevValue(value);
-    if ((value ?? "") !== lastEmittedRef.current) setMention(null);
-  }
-
-  /** Caret x relative to the composer wrapper, clamped to the menu width. */
-  const caretLeft = useCallback(
-    () => caretLeftPx(wrapperRef.current, 320),
-    [wrapperRef],
-  );
-
-  /** Re-derive the mention trigger from the DOM (called on real input only,
-   *  never during IME composition). */
-  const updateMentionTrigger = useCallback(() => {
-    const el = editableRef.current;
-    if (!el || !workspacePath) return;
-    const caret = getCaretOffset(el);
-    const trigger = caret >= 0 ? findMentionTrigger(extractText(el), caret) : null;
-    setMention((prev) => {
-      if (!trigger) return null;
-      if (prev && prev.start === trigger.start) return { ...prev, query: trigger.query };
-      return { ...trigger, left: caretLeft() };
+  const { trigger, setTrigger, menuRef, updateTrigger } =
+    useTriggerPicker<FileMentionMenuHandle>({
+      editableRef,
+      wrapperRef,
+      workspacePath,
+      value,
+      lastEmittedRef,
+      findTrigger: findMentionTrigger,
+      prefetch: prefetchMentionIndex,
+      menuWidth: MENTION_MENU_WIDTH,
     });
-  }, [editableRef, workspacePath, caretLeft]);
-
-  // Close the picker when the caret leaves the trigger (mouse click, arrow
-  // keys). Typing keeps the same trigger start, so input stays open.
-  useEffect(() => {
-    if (!mention) return;
-    const closeIfCaretLeft = () => {
-      const el = editableRef.current;
-      if (!el) return;
-      const caret = getCaretOffset(el);
-      const trigger = caret >= 0 ? findMentionTrigger(extractText(el), caret) : null;
-      if (!trigger || trigger.start !== mention.start) setMention(null);
-    };
-    document.addEventListener("selectionchange", closeIfCaretLeft);
-    return () => document.removeEventListener("selectionchange", closeIfCaretLeft);
-  }, [editableRef, mention]);
-
-  return { mention, setMention, mentionMenuRef, updateMentionTrigger };
+  return {
+    mention: trigger,
+    setMention: setTrigger,
+    mentionMenuRef: menuRef,
+    updateMentionTrigger: () => {
+      updateTrigger();
+    },
+  };
 }

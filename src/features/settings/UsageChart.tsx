@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { EngineIcon, type EngineIconId } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
@@ -61,6 +61,63 @@ function axisMax(max: number): number {
     if (candidate >= max) return candidate;
   }
   return magnitude * 10;
+}
+
+/** Tooltip breakdown for one hovered day: one pass over the series (and one
+ *  over each CLI's models), keeping non-zero entries in series order. */
+function buildTooltipRows(
+  series: Series[],
+  dayIndex: number,
+  formatTokens: (n: number) => string,
+): ReactNode[] {
+  const rows: ReactNode[] = [];
+  for (const cli of series) {
+    const tokens = cli.byDay[dayIndex] ?? 0;
+    if (tokens <= 0) continue;
+    const modelRows: ReactNode[] = [];
+    for (const model of cli.models) {
+      const modelTokens = model.byDay[dayIndex] ?? 0;
+      if (modelTokens <= 0) continue;
+      modelRows.push(
+        <span
+          key={model.name}
+          className="flex items-center justify-between gap-3 pl-5 text-caption-1-regular"
+        >
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ModelBadge name={model.name} size={11} className="shrink-0" />
+            <span className="truncate text-text-tertiary">{model.name}</span>
+          </span>
+          <span className="shrink-0 tabular-nums text-text-tertiary">
+            {formatTokens(modelTokens)}
+          </span>
+        </span>,
+      );
+    }
+    rows.push(
+      <span key={cli.engine} className="flex flex-col gap-0.5">
+        <span className="flex items-center justify-between gap-3 text-body-2-regular">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <EngineIcon
+              engine={cli.engine as EngineIconId}
+              size={12}
+              className="shrink-0 text-foreground-icon-primary"
+            />
+            <span
+              aria-hidden
+              className="size-2 shrink-0 rounded-sm"
+              style={{ backgroundColor: cli.color }}
+            />
+            <span className="truncate text-text-secondary">{cli.model}</span>
+          </span>
+          <span className="shrink-0 tabular-nums text-text-primary">
+            {formatTokens(tokens)}
+          </span>
+        </span>
+        {modelRows}
+      </span>,
+    );
+  }
+  return rows;
 }
 
 export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
@@ -147,6 +204,7 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
 
   const hoverIndex = hoverDay ? days.indexOf(hoverDay) : -1;
   const hoverTotal = hoverIndex >= 0 ? dayTotals[hoverIndex] : 0;
+  const tooltipRows = hoverIndex >= 0 ? buildTooltipRows(series, hoverIndex, formatTokens) : [];
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -268,48 +326,7 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
             <span>{t("usage.tooltipTotal")}</span>
             <span className="tabular-nums">{formatTokens(hoverTotal)}</span>
           </span>
-          {series
-            .map((s) => ({ series: s, tokens: s.byDay[hoverIndex] ?? 0 }))
-            .filter((entry) => entry.tokens > 0)
-            .map(({ series: cli, tokens }) => (
-              <span key={cli.engine} className="flex flex-col gap-0.5">
-                <span className="flex items-center justify-between gap-3 text-body-2-regular">
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <EngineIcon
-                      engine={cli.engine as EngineIconId}
-                      size={12}
-                      className="shrink-0 text-foreground-icon-primary"
-                    />
-                    <span
-                      aria-hidden
-                      className="size-2 shrink-0 rounded-sm"
-                      style={{ backgroundColor: cli.color }}
-                    />
-                    <span className="truncate text-text-secondary">{cli.model}</span>
-                  </span>
-                  <span className="shrink-0 tabular-nums text-text-primary">
-                    {formatTokens(tokens)}
-                  </span>
-                </span>
-                {cli.models
-                  .map((model) => ({ model, tokens: model.byDay[hoverIndex] ?? 0 }))
-                  .filter((entry) => entry.tokens > 0)
-                  .map(({ model, tokens: modelTokens }) => (
-                    <span
-                      key={model.name}
-                      className="flex items-center justify-between gap-3 pl-5 text-caption-1-regular"
-                    >
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <ModelBadge name={model.name} size={11} className="shrink-0" />
-                        <span className="truncate text-text-tertiary">{model.name}</span>
-                      </span>
-                      <span className="shrink-0 tabular-nums text-text-tertiary">
-                        {formatTokens(modelTokens)}
-                      </span>
-                    </span>
-                  ))}
-              </span>
-            ))}
+          {tooltipRows}
         </div>
       )}
 

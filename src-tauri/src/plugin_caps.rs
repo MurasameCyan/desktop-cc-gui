@@ -250,11 +250,15 @@ fn tracked_children() -> &'static Mutex<HashMap<String, Vec<tokio::process::Chil
 }
 
 pub(crate) fn register_tracked_child(plugin_id: &str, child: tokio::process::Child) {
-    tracked_children()
-        .lock()
-        .entry(plugin_id.to_string())
-        .or_default()
-        .push(child);
+    let mut registry = tracked_children().lock();
+    let children = registry.entry(plugin_id.to_string()).or_default();
+    // Prune dead handles before pushing: a plugin that respawns a child in
+    // a loop would otherwise accumulate one entry per spawn until an
+    // explicit kill/disable/uninstall/exit. try_wait reaps the zombie as a
+    // side effect; an error means the handle can no longer be waited on, so
+    // treat it as exited too.
+    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    children.push(child);
 }
 
 /// Remove every tracked child of `plugin_id` and SIGKILL each one, returning

@@ -9,6 +9,7 @@ import {
   ipcBackend,
   loadPlugin,
   pluginsBootstrapped,
+  prunePluginRuntimeState,
   subscribePluginStates,
   unloadPlugin,
 } from "../runtime/loader";
@@ -123,6 +124,7 @@ export const usePluginsStore = create<PluginsStore>((set, get) => ({
     try {
       unloadPlugin(plugin.id);
       await ipc.pluginUninstall(plugin.id, deleteData);
+      prunePluginRuntimeState(plugin.id);
       await get().refresh();
     } catch (error) {
       set({ error: String(error) });

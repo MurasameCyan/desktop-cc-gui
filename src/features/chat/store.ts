@@ -1,19 +1,15 @@
-import {
-  normalizeOmpServiceTier,
-  type OmpServiceTier,
-} from "@/lib/omp-service-tier";
+import { normalizeOmpServiceTier } from "@/lib/omp-service-tier";
 import { create } from "zustand";
 import {
   ipc,
-  type AppSettings,
-  type Message,
   type SessionMeta,
   type Workspace,
   type WorkspaceGroup,
   type EngineInfo,
 } from "@/lib/ipc";
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
-import type { ComposerPermission } from "@/components/application/ai-chat/permission-menu";
+import { pruneMentionIndex } from "@/components/application/ai-chat/mention-files";
+import { pruneSlashCommands } from "@/components/application/ai-chat/slash-commands";
 import { listenEngineEvents, listenSessionsChanged } from "@/lib/events";
 import { errorText } from "@/lib/errors";
 import { writeStored } from "@/lib/storage";
@@ -38,284 +34,40 @@ import {
   moveStreamingFlag,
   patchSession,
   resolveSessionModel,
+  routeRun,
   runRouting,
   setStreamingFlag,
   settleLiveRows,
-  type SessionState,
+  untrackRun,
 } from "./store/stream";
 import {
+  dropRunUsage,
   firstLineTitle,
   handleEngineEvents,
   optimisticMeta,
   patchGrantBySeq,
+  settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./store/engine-events";
+import { effectivePermission, readPermissionPref } from "./store/permissions";
+import { persistSettings } from "./store/settings-persist";
+import { appendCommittedRows, visibleSessions } from "./store/session-utils";
+import type { ChatStore } from "./store/types";
 
 // Facade re-exports: callers keep importing everything from "../store".
 export { sessionKey } from "./store/persistence";
 export type { ActiveSession } from "./store/persistence";
 export type { QueuedMessage, SessionState } from "./store/stream";
-
-/** Sidebar workspace groups (工作区二级分类), ordered by sortOrder then name. */
-export function sortedWorkspaceGroups(
-  groups: WorkspaceGroup[],
-): WorkspaceGroup[] {
-  return groups.slice().sort((a, b) => {
-    const diff =
-      (a.sortOrder ?? Number.MAX_SAFE_INTEGER) -
-      (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
-    return diff !== 0 ? diff : a.name.localeCompare(b.name);
-  });
-}
+export type { ChatStore } from "./store/types";
+export { effectivePermission } from "./store/permissions";
+export { sortedWorkspaceGroups } from "./store/session-utils";
 
 /** Unlisteners for the module-scope event subscriptions set up in init. */
 const eventTeardowns: Array<() => void> = [];
-/** History lists hide sessions of CLIs the user disabled in settings. An
- * empty engines list means listEngines failed — keep sessions rather than
- * blanking the sidebar. */
-function visibleSessions(
-  sessions: SessionMeta[],
-  engines: EngineInfo[],
-): SessionMeta[] {
-  if (engines.length === 0) return sessions;
-  const enabled = new Set<string>();
-  for (const e of engines) {
-    if (e.enabled) enabled.add(e.id);
-  }
-  return sessions.filter((s) => enabled.has(s.engine));
-}
-const PERMISSION_MODES: readonly ComposerPermission[] = [
-  "auto",
-  "manual",
-  "plan",
-  "bypass",
-];
-
-/** Persisted composer permission, validated against the known modes. */
-function readPermissionPref(): ComposerPermission {
-  const raw = localStorage.getItem(PERMISSION_PREF_KEY);
-  return PERMISSION_MODES.includes(raw as ComposerPermission)
-    ? (raw as ComposerPermission)
-    : "auto";
-}
-
-/** The mode actually sent for an engine: the user's pick when the engine
- * honors it, else the engine's first supported mode (same fallback the
- * Rust side applies). */
-export function effectivePermission(
-  engines: EngineInfo[],
-  engine: string,
-  selected: ComposerPermission,
-): ComposerPermission {
-  const supported = engines.find((e) => e.id === engine)?.permissions;
-  if (!supported || supported.length === 0) return selected;
-  return supported.includes(selected)
-    ? selected
-    : (supported[0] as ComposerPermission);
-}
-
-export interface ChatStore {
-  workspaces: Workspace[];
-  sessions: SessionMeta[];
-  engines: EngineInfo[];
-  active: ActiveSession | null;
-  /** Open conversation tabs, in display order. Persisted in localStorage. */
-  openTabs: ActiveSession[];
-  activeEngine: string;
-  /** Composer permission mode ("auto" | "manual" | "plan" | "bypass"),
-   * persisted in localStorage; engines resolve unsupported modes to their
-   * first supported one at send time (and the picker greys them out). */
-  permission: ComposerPermission;
-  /** Per-engine reasoning effort ("low" | … | "ultra"), persisted in app settings. */
-  efforts: Record<string, EffortLevel>;
-  ompServiceTier: OmpServiceTier;
-  /** Codex Fast override; null preserves ~/.codex. */
-  codexServiceTier: OmpServiceTier;
-  /** Per-engine model override ("" = CLI/provider default), persisted in app settings. */
-  models: Record<string, string>;
-  /** Max sessions listed per workspace in the sidebar, persisted in app settings. */
-  threadLimit: number;
-  /** Sidebar workspace groups, persisted in app settings. The assignment
-   *  lives on each workspace (`Workspace.groupId`), same as the legacy app. */
-  workspaceGroups: WorkspaceGroup[];
-  /** Workspace id -> sidebar display alias, persisted in app settings;
-   *  workspaces missing here show their folder name. */
-  workspaceAliases: Record<string, string>;
-  /** Ids of workspaces hidden into the sidebar's collapsible 已归档 section,
-   *  persisted in app settings; records and sessions stay intact. */
-  archivedWorkspaces: string[];
-  /** Composer send gesture ("enter" | "cmdEnter"), persisted in app settings. */
-  sendShortcut: string;
-  bySession: Record<string, SessionState>;
-  /** Flat sessionKey -> streaming map, written only when a flag flips. The
-   * tab strip and sidebar select this instead of scanning bySession on every
-   * store write (streaming deltas would otherwise re-render them per frame). */
-  streamingByKey: Record<string, true>;
-  /** Sessions with activity the user has not opened yet (sidebar green dot),
-   * keyed `${engine}/${sessionId}` like the sidebar thread id. In-memory only. */
-  unseen: Record<string, boolean>;
-  drafts: Record<string, string>;
-  /** File-tree "+" click asking the active composer to insert an @path
-   * mention; nonce re-fires for the same path. */
-  pendingMention: { path: string; nonce: number } | null;
-  /** Last failed store action (add/remove workspace, delete/pin/rename
-   * session); surfaced as a dismissable banner in ChatPage. */
-  actionError: string | null;
-  initialized: boolean;
-
-  init: () => Promise<void>;
-  refreshSessions: () => Promise<void>;
-  /** Re-read engines + sessions after CLI config changes (enable switch,
-   * channel edits): refreshes the picker's enabled set and re-filters the
-   * history list, migrating the engine pref off a disabled CLI. */
-  refreshEngines: () => Promise<void>;
-  refreshWorkspaces: () => Promise<void>;
-  addWorkspace: (path: string) => Promise<void>;
-  reorderWorkspaces: (ids: string[]) => Promise<void>;
-  removeWorkspace: (id: string) => Promise<void>;
-  selectSession: (
-    engine: string,
-    sessionId: string,
-    workspacePath: string,
-  ) => Promise<void>;
-  closeTab: (
-    engine: string,
-    sessionId: string | null,
-    workspacePath: string,
-  ) => void;
-  /** Activate an already-open tab without changing the tab list. */
-  focusTab: (
-    engine: string,
-    sessionId: string | null,
-    workspacePath: string,
-  ) => void;
-  /** Move an open tab to a new position (drag-reorder in the tab strip). */
-  moveTab: (
-    engine: string,
-    sessionId: string | null,
-    workspacePath: string,
-    toIndex: number,
-  ) => void;
-  startNewChat: (workspacePath: string) => void;
-  setActiveEngine: (engine: string) => void;
-  setPermission: (permission: ComposerPermission) => void;
-  setEffort: (engine: string, effort: EffortLevel) => Promise<void>;
-  setOmpServiceTier: (tier: OmpServiceTier) => Promise<void>;
-  setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
-  setModel: (engine: string, model: string) => Promise<void>;
-  /** Pin several engines' models at once (startup defaulting); one settings
-   * write instead of one per engine. */
-  pinModels: (updates: Record<string, string>) => Promise<void>;
-  setThreadLimit: (limit: number) => void;
-  /** Create a named sidebar group; throws on empty/duplicate names. */
-  createWorkspaceGroup: (name: string) => Promise<WorkspaceGroup | null>;
-  /** Rename a group; throws on empty/duplicate names. */
-  renameWorkspaceGroup: (id: string, name: string) => Promise<boolean>;
-  /** Persist a new sidebar group order (ids in display order). */
-  reorderWorkspaceGroups: (orderedIds: string[]) => Promise<void>;
-  /** Delete a group; its workspaces fall back to ungrouped. */
-  deleteWorkspaceGroup: (id: string) => Promise<void>;
-  /** Put a workspace into a group (null = ungrouped). */
-  assignWorkspaceGroup: (
-    workspaceId: string,
-    groupId: string | null,
-  ) => Promise<void>;
-  /** Set (or clear, null/empty/name-equal) the sidebar alias of a workspace. */
-  setWorkspaceAlias: (
-    workspaceId: string,
-    alias: string | null,
-  ) => Promise<void>;
-  /** Move a workspace into / out of the sidebar's archived section. */
-  setWorkspaceArchived: (
-    workspaceId: string,
-    archived: boolean,
-  ) => Promise<void>;
-  setSendShortcut: (shortcut: string) => void;
-  setDraft: (key: string, text: string) => void;
-  /** Ask the active composer to insert an @path mention at the caret. */
-  requestMention: (path: string) => void;
-  clearPendingMention: () => void;
-  dismissActionError: () => void;
-  /** Clear a session's turn/load error banner. */
-  dismissSessionError: (key: string) => void;
-  loadEarlier: () => Promise<void>;
-  send: (prompt: string, images: string[]) => Promise<void>;
-  /** Answer a permission-denial grant card: persist the directory grant
-   * (accept) or mark the card declined. */
-  respondToGrant: (key: string, seq: number, accept: boolean) => Promise<void>;
-  /** Re-send the session's last user message (grant card's one-click retry
-   * after a directory grant takes effect on the next launch). */
-  resendLastUser: (key: string) => Promise<void>;
-  /** Enqueue a message on the active session while a turn streams. */
-  queueMessage: (text: string, images: string[]) => void;
-  /** Drop a queued message from the active session. */
-  removeQueued: (id: string) => void;
-  /** Drop every queued message from the active session. */
-  clearQueue: () => void;
-  interrupt: () => Promise<void>;
-  deleteSession: (engine: string, sessionId: string) => Promise<void>;
-  pinSession: (
-    engine: string,
-    sessionId: string,
-    pinned: boolean,
-  ) => Promise<void>;
-  renameSession: (
-    engine: string,
-    sessionId: string,
-    title: string,
-  ) => Promise<void>;
-  /** Send /compact to compress conversation context. */
-  compactContext: (key?: string) => Promise<void>;
-  /** Re-fetch the latest token usage from session history for the current session. */
-  refreshSessionUsage: (key?: string) => Promise<void>;
-}
-
-/** Persist one app-settings patch; callers have already applied the in-memory
- * value, so a persist failure is non-fatal. */
-async function persistSettings(
-  patch: (settings: AppSettings) => Partial<AppSettings>,
-) {
-  try {
-    const settings = await ipc.getAppSettings();
-    await ipc.updateAppSettings({ ...settings, ...patch(settings) });
-  } catch {
-    // Persist failure is non-fatal: the in-memory value still applies.
-  }
-}
-
 function omitKey(rec: Record<string, boolean>, key: string) {
   const next = { ...rec };
   delete next[key];
   return next;
-}
-
-/** Append committed timeline rows, assigning seq after the session's last
- * row; `patch` carries any extra per-site session changes. */
-function appendCommittedRows(
-  set: (fn: (s: ChatStore) => Partial<ChatStore>) => void,
-  key: string,
-  rows: Omit<Message, "seq">[],
-  patch: Partial<SessionState> = {},
-) {
-  set((s) => {
-    const prev = s.bySession[key] ?? EMPTY_SESSION;
-    const lastSeq = prev.messages.length
-      ? prev.messages[prev.messages.length - 1].seq
-      : 0;
-    return {
-      bySession: {
-        ...s.bySession,
-        [key]: {
-          ...prev,
-          ...patch,
-          messages: [
-            ...prev.messages,
-            ...rows.map((row, i) => ({ ...row, seq: lastSeq + 1 + i })),
-          ],
-        },
-      },
-    };
-  });
 }
 
 export const useChatStore = create<ChatStore>((set, get) => {
@@ -360,6 +112,47 @@ export const useChatStore = create<ChatStore>((set, get) => {
     });
   }
 
+  /** Reopen cache for closed tabs: keys whose bySession entry survives tab
+   * close so selectSession skips a backend reload, most-recently-closed
+   * last. Bounded — the oldest non-streaming entries beyond the cap are
+   * evicted, so the cache cannot grow forever. */
+  const CLOSED_CACHE_LIMIT = 10;
+  const closedTabCache: string[] = [];
+
+  function rememberClosedTab(key: string) {
+    const i = closedTabCache.indexOf(key);
+    if (i >= 0) closedTabCache.splice(i, 1);
+    closedTabCache.push(key);
+    // Keys whose tab is open again are not "closed" anymore.
+    const openKeys = new Set(
+      get().openTabs.map((t) =>
+        sessionKey(t.engine, t.sessionId, t.workspacePath),
+      ),
+    );
+    for (let j = closedTabCache.length - 1; j >= 0; j--) {
+      if (openKeys.has(closedTabCache[j])) closedTabCache.splice(j, 1);
+    }
+    let overflow = closedTabCache.length - CLOSED_CACHE_LIMIT;
+    if (overflow <= 0) return;
+    const evict: string[] = [];
+    for (const cached of closedTabCache) {
+      if (overflow <= 0) break;
+      // A streaming closed tab still receives events — never evict it.
+      if (get().streamingByKey[cached]) continue;
+      evict.push(cached);
+      overflow--;
+    }
+    if (evict.length === 0) return;
+    for (const cached of evict) {
+      closedTabCache.splice(closedTabCache.indexOf(cached), 1);
+    }
+    set((s) => {
+      const bySession = { ...s.bySession };
+      for (const cached of evict) delete bySession[cached];
+      return { bySession };
+    });
+  }
+
   /** Remove a tab; when it was active, fall back to its nearest neighbor. */
   function removeTab(
     engine: string,
@@ -373,6 +166,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     if (idx < 0) return;
     const openTabs = s.openTabs.filter((_, i) => i !== idx);
     set({ openTabs });
+    rememberClosedTab(sessionKey(engine, sessionId, workspacePath));
     if (s.active && sameTab(s.active, engine, sessionId, workspacePath)) {
       activateTab(openTabs[Math.min(idx, openTabs.length - 1)] ?? null);
     } else {
@@ -445,18 +239,18 @@ export const useChatStore = create<ChatStore>((set, get) => {
       });
       if (result.sessionId && !tab.sessionId) {
         // Preassigned native id (grok): adopt immediately.
+        const newKey = sessionKey(
+          engine,
+          result.sessionId,
+          tab.workspacePath,
+        );
+        settleOrphanedRuns(set, routeRun(result.runId, newKey));
         set((s) => {
-          const newKey = sessionKey(
-            engine,
-            result.sessionId,
-            tab.workspacePath,
-          );
           const bySession = { ...s.bySession };
           if (bySession[key]) {
             bySession[newKey] = bySession[key];
             if (newKey !== key) delete bySession[key];
           }
-          runRouting.set(result.runId, newKey);
           // Stamp only the tab that owns this run; blanketing every pending
           // tab of this engine+workspace would create duplicate session tabs.
           let stamped = false;
@@ -503,7 +297,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
           ),
         );
       } else {
-        runRouting.set(result.runId, key);
+        settleOrphanedRuns(set, routeRun(result.runId, key));
       }
       // Stop pressed while this send was still in flight: interrupt() ran
       // before runRouting had this run (it is written above, after the
@@ -517,6 +311,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
           : key;
       if (get().bySession[liveKey]?.interrupted) {
         runRouting.delete(result.runId);
+        untrackRun(result.runId);
+        dropRunUsage(result.runId);
         await Promise.all([
           ipc.interruptSession(result.runId).catch(() => false),
           ...(result.sessionId
@@ -749,6 +545,44 @@ export const useChatStore = create<ChatStore>((set, get) => {
         await get().refreshWorkspaces();
         set({ actionError: null });
         if (!removedPath) return;
+        // The composer's per-root picker caches die with the workspace.
+        pruneMentionIndex(removedPath);
+        pruneSlashCommands(removedPath);
+        // Evict cached session state belonging to the removed workspace:
+        // real session keys come from the list cache, pending-chat keys
+        // carry the path in the key itself.
+        const dead = new Set<string>();
+        for (const sess of get().sessions) {
+          if (sess.workspacePath === removedPath) {
+            dead.add(sessionKey(sess.engine, sess.sessionId, ""));
+          }
+        }
+        const current = get();
+        for (const key of [
+          ...Object.keys(current.bySession),
+          ...Object.keys(current.drafts),
+          ...Object.keys(current.unseen),
+        ]) {
+          if (key.startsWith("new:") && key.endsWith(`:${removedPath}`)) {
+            dead.add(key);
+          }
+        }
+        if (dead.size > 0) {
+          for (let i = closedTabCache.length - 1; i >= 0; i--) {
+            if (dead.has(closedTabCache[i])) closedTabCache.splice(i, 1);
+          }
+          set((s) => {
+            const bySession = { ...s.bySession };
+            const drafts = { ...s.drafts };
+            const unseen = { ...s.unseen };
+            for (const key of dead) {
+              delete bySession[key];
+              delete drafts[key];
+              delete unseen[key];
+            }
+            return { bySession, drafts, unseen };
+          });
+        }
         const openTabs = get().openTabs.filter(
           (t) => t.workspacePath !== removedPath,
         );
@@ -1330,9 +1164,13 @@ export const useChatStore = create<ChatStore>((set, get) => {
           ipc.interruptSession(runId).catch(() => false),
         ),
       );
-      // The runs are dead: drop their routing entries so the map cannot grow
-      // forever. (A late done event would also remove them.)
-      for (const runId of deadRunIds) runRouting.delete(runId);
+      // The runs are dead: drop their routing and usage entries so the maps
+      // cannot grow forever. (A late done event would also remove them.)
+      for (const runId of deadRunIds) {
+        runRouting.delete(runId);
+        untrackRun(runId);
+        dropRunUsage(runId);
+      }
     },
 
     deleteSession: async (engine, sessionId) => {
@@ -1343,14 +1181,28 @@ export const useChatStore = create<ChatStore>((set, get) => {
         return;
       }
       set({ actionError: null });
+      const key = sessionKey(engine, sessionId, "");
       const tab = get().openTabs.find(
         (t) => t.engine === engine && t.sessionId === sessionId,
       );
-      set((s) => ({
-        sessions: s.sessions.filter(
-          (x) => !(x.engine === engine && x.sessionId === sessionId),
-        ),
-      }));
+      set((s) => {
+        // Permanent delete: the cached session state is dead weight.
+        const bySession = { ...s.bySession };
+        const drafts = { ...s.drafts };
+        delete bySession[key];
+        delete drafts[key];
+        return {
+          sessions: s.sessions.filter(
+            (x) => !(x.engine === engine && x.sessionId === sessionId),
+          ),
+          bySession,
+          drafts,
+          unseen: omitKey(s.unseen, key),
+        };
+      });
+      // The closed-tab reopen cache must not keep the dead key either.
+      const cacheIdx = closedTabCache.indexOf(key);
+      if (cacheIdx >= 0) closedTabCache.splice(cacheIdx, 1);
       if (tab) {
         // removeTab activates the neighboring tab when the deleted one was active.
         removeTab(engine, sessionId, tab.workspacePath);

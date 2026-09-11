@@ -30,6 +30,11 @@ const ERROR_TAIL_CAP: usize = 2048;
 /// Chars per streamed output line; minified progress-bar lines would
 /// otherwise flood the IPC channel in one event.
 const PROGRESS_LINE_CAP: usize = 1000;
+/// Per-stream capture cap for run_capture/run_streaming. Callers need the
+/// first line (version probes) or a failure tail — both fit in a few KB,
+/// and normal npm output stays well under this. Without a cap a chatty or
+/// stuck installer buffered unboundedly for up to INSTALL_TIMEOUT.
+const CAPTURE_CAP_BYTES: usize = 1024 * 1024;
 
 /// npm-distributed engines → registry package. Grok CLI ships via its own
 /// installer script (no npm distribution), so it gets a local-version probe
@@ -450,9 +455,13 @@ async fn run_capture(command: &mut Command, limit: Duration) -> Result<ProcOutpu
 
 fn spawn_read_all<R: AsyncRead + Unpin + Send + 'static>(pipe: R) -> JoinHandle<String> {
     tokio::spawn(async move {
+        // Keep the first CAPTURE_CAP_BYTES + 1 bytes, then drain the rest
+        // to a sink so the child never blocks on a full pipe (same
+        // pattern as plugin_caps::read_stream_capped).
+        let mut taken = pipe.take((CAPTURE_CAP_BYTES + 1) as u64);
         let mut bytes = Vec::new();
-        let mut pipe = pipe;
-        let _ = pipe.read_to_end(&mut bytes).await;
+        let _ = taken.read_to_end(&mut bytes).await;
+        let _ = tokio::io::copy(&mut taken.into_inner(), &mut tokio::io::sink()).await;
         String::from_utf8_lossy(&bytes).into_owned()
     })
 }
@@ -527,8 +536,12 @@ fn spawn_read_lines<R: AsyncRead + Unpin + Send + 'static>(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    captured.push_str(&line);
-                    captured.push('\n');
+                    // Capture is capped; keep draining and reporting past the cap
+                    // so the child never blocks on a full pipe.
+                    if captured.len() + line.len() <= CAPTURE_CAP_BYTES {
+                        captured.push_str(&line);
+                        captured.push('\n');
+                    }
                     let clipped = if line.chars().count() > PROGRESS_LINE_CAP {
                         line.chars().take(PROGRESS_LINE_CAP).collect()
                     } else {

@@ -63,7 +63,7 @@ function isPathCandidate(value: string) {
 
 /** True when an inline-code / link-target string is a plausible file path. */
 export function isLinkableFilePath(value: string) {
-  const trimmed = value.trim();
+  const trimmed = stripFileLocation(value.trim());
   if (!trimmed || !FILE_PATH_MATCH.test(trimmed)) return false;
   return isPathCandidate(trimmed);
 }
@@ -87,7 +87,7 @@ export function decodeFileLink(url: string) {
 
 /**
  * Resolve a markdown-sourced path to an absolute one. Relative paths anchor
- * at the session's workspace; absolute POSIX/Windows paths pass through.
+ * at the session's workspace; slash-prefixed Windows drive paths are normalized.
  * Returns null for `~/` paths (home dir unknown to the frontend) and empties.
  *
  * Paths that arrive percent-encoded (a model or upstream tool URL-encoded a
@@ -95,14 +95,26 @@ export function decodeFileLink(url: string) {
  * filesystem never sees `%E7%BB%86…` as a literal name.
  */
 export function resolveFilePath(path: string, workspacePath: string): string | null {
-  const trimmed = percentDecodePath(path.trim());
+  // Strip the leading slash on `/D:/...` (Git-Bash / MSYS style drive prefix)
+  // *before* stripping the `:line[:col]` suffix. Doing the location strip
+  // first leaves the `/` in place only in odd inputs; normalizing the drive
+  // prefix up-front keeps every downstream check (absolute detection, reveal,
+  // open) operating on the real disk path.
+  const deSlashed = path.trim().replace(/^\/+(?=[A-Za-z]:[\\/])/, "");
+  const trimmed = percentDecodePath(stripFileLocation(deSlashed));
   if (!trimmed) return null;
   if (trimmed.startsWith("~/")) return null;
-  if (trimmed.startsWith("/") || WINDOWS_ABSOLUTE_PATH_MATCH.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)) return trimmed;
   const relative = trimmed.replace(/^\.\//, "");
   if (trimmed.startsWith("../")) return null; // escaping the workspace: don't guess
   const root = workspacePath.replace(/[/\\]+$/, "");
   return root ? `${root}/${relative}` : null;
+}
+
+/** Strip source locations before URL-decoding, preserving encoded filename
+ * characters such as `%23L53` that are not navigation suffixes. */
+function stripFileLocation(path: string): string {
+  return path.replace(/(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/i, "");
 }
 
 /** Decode `%XX` sequences when they look like URL-encoding smuggled into a

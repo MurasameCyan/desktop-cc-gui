@@ -1,5 +1,8 @@
-import { create } from "zustand";
 import { ipc, type SlashCommandEntry } from "@/lib/ipc";
+import {
+  createRootCacheStore,
+  type RootCache,
+} from "@/components/application/ai-chat/create-root-cache-store";
 
 /**
  * Catalog for the composer's `/` picker, ported from desktop-cc-gui's
@@ -9,7 +12,7 @@ import { ipc, type SlashCommandEntry } from "@/lib/ipc";
  * (markdown under `commands/`) and skills (`skills/<name>/SKILL.md`) — via
  * `entry.kind`; this store caches the catalog per workspace root with the
  * same stale-while-revalidate model as the @-mention file index
- * (mention-files.ts) — one IPC per TTL window, matching is pure JS per
+ * (createRootCacheStore) — one IPC per TTL window, matching is pure JS per
  * keystroke.
  */
 
@@ -42,64 +45,19 @@ export function findSlashTrigger(text: string, caret: number): SlashTrigger | nu
   return { start, query };
 }
 
-export interface RootCommands {
-  entries: SlashCommandEntry[];
-  status: "loading" | "ready" | "error";
-  fetchedAt: number;
-}
+export type RootCommands = RootCache<SlashCommandEntry>;
 
 const COMMANDS_TTL_MS = 60_000;
-/** In-flight fetches keyed by root: concurrent ensure() calls share one IPC. */
-const inFlight = new Map<string, Promise<void>>();
 
-interface SlashCommandStore {
-  byRoot: Record<string, RootCommands>;
-  /** Fetch the catalog for a root: once, then again only once it is stale.
-   *  Never throws; failures keep the previous entries and mark "error". */
-  ensure: (root: string) => void;
-}
+const { useStore: useSlashCommandStore, prune: pruneSlashCommands } =
+  createRootCacheStore<SlashCommandEntry>({
+    fetch: (root) => ipc.listSlashCommands(root),
+    ttlMs: COMMANDS_TTL_MS,
+  });
 
-export const useSlashCommandStore = create<SlashCommandStore>((set, get) => ({
-  byRoot: {},
-  ensure: (root) => {
-    if (!root) return;
-    const cur = get().byRoot[root];
-    if (inFlight.has(root)) return;
-    if (cur && cur.status === "ready" && Date.now() - cur.fetchedAt < COMMANDS_TTL_MS) return;
-    if (!cur) {
-      set((s) => ({
-        byRoot: { ...s.byRoot, [root]: { entries: [], status: "loading", fetchedAt: 0 } },
-      }));
-    }
-    const p = ipc
-      .listSlashCommands(root)
-      .then((entries) => {
-        set((s) => ({
-          byRoot: {
-            ...s.byRoot,
-            [root]: { entries, status: "ready", fetchedAt: Date.now() },
-          },
-        }));
-      })
-      .catch(() => {
-        set((s) => {
-          const prev = s.byRoot[root];
-          return {
-            byRoot: {
-              ...s.byRoot,
-              // A failed refresh keeps serving the stale catalog; only a
-              // failed first fetch leaves the picker empty.
-              [root]: { entries: prev?.entries ?? [], status: "error", fetchedAt: prev?.fetchedAt ?? 0 },
-            },
-          };
-        });
-      })
-      .finally(() => {
-        inFlight.delete(root);
-      });
-    inFlight.set(root, p);
-  },
-}));
+/** Drop one workspace root's cached catalog when its workspace is removed;
+ * the per-root cache would otherwise accumulate every root ever opened. */
+export { useSlashCommandStore, pruneSlashCommands };
 
 /** Max rows the picker renders — caps DOM work regardless of match count. */
 export const SLASH_MENU_LIMIT = 50;

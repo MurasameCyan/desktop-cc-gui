@@ -133,6 +133,9 @@ pub fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, String
         record.quarantined = true;
         record.last_error = Some(error.clone());
     })?;
+    // Quarantine takes effect immediately for lifecycle="plugin" children
+    // too — they belong to the quarantined plugin's runtime.
+    crate::plugin_caps::kill_tracked_children(&id);
     Ok(fs::info_for(&state::plugins_dir(), &id, &record))
 }
 

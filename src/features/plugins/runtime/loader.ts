@@ -88,6 +88,9 @@ interface ActivePlugin {
 }
 
 const active = new Map<string, ActivePlugin>();
+/** Ids with a loadPlugin call between its first await and completion —
+ *  the re-entrancy guard `active` can't provide before `active.set` runs. */
+const loading = new Set<string>();
 const crashCounts: Record<string, number> = {};
 const states = new Map<string, PluginRuntimeEntry>();
 const stateListeners = new Set<() => void>();
@@ -156,83 +159,92 @@ export async function loadPlugin(
 ): Promise<void> {
   const { info } = plugin;
   const id = info.id;
-  if (active.has(id)) return;
+  // Re-entrancy guard: `loading` is set synchronously before the first
+  // await, so two concurrent loads of the same id can't both pass the check
+  // and double-activate (orphaning the first handle's disposer stack). The
+  // finally below clears it, so a failed load stays retryable.
+  if (active.has(id) || loading.has(id)) return;
   if (info.quarantined) {
     setState(id, "quarantined", info.lastError ?? undefined);
     return;
   }
-  const appVersion = await backend.appVersion();
-  if (info.minAppVersion && compareVersions(info.minAppVersion, appVersion) > 0) {
-    setState(id, "incompatible", `requires app ≥ ${info.minAppVersion}`);
-    return;
-  }
-  setState(id, "loading");
-  // Hoisted so the catch can unwind registrations an activate made before
-  // throwing — otherwise its CSS/settings/bus listeners leak while the
-  // plugin shows quarantined.
-  let handle: PluginHandle | undefined;
+  loading.add(id);
   try {
-    let manifest: PluginManifest;
-    let builtinCleanup: void | Disposer = undefined;
-    if (plugin.builtinActivate) {
-      if (!plugin.manifest) throw new Error(`builtin plugin ${id} must carry its manifest`);
-      manifest = plugin.manifest;
-    } else {
-      manifest = JSON.parse(await backend.readFile(id, "manifest.json")) as PluginManifest;
-    }
-    const problems = validateManifest(manifest);
-    if (problems.length > 0) throw new Error(`invalid manifest: ${problems.join("; ")}`);
-    // SDK version handshake (plan §5.1 sdkVersion): a plugin built against an
-    // incompatible contract range is disabled, never loaded — same treatment
-    // as minAppVersion, one layer down (contract vs app).
-    if (!satisfiesSdkRange(manifest.sdkVersion, SDK_VERSION)) {
-      setState(id, "incompatible", `requires sdk ${manifest.sdkVersion} (host ${SDK_VERSION})`);
+    const appVersion = await backend.appVersion();
+    if (info.minAppVersion && compareVersions(info.minAppVersion, appVersion) > 0) {
+      setState(id, "incompatible", `requires app ≥ ${info.minAppVersion}`);
       return;
     }
+    setState(id, "loading");
+    // Hoisted so the catch can unwind registrations an activate made before
+    // throwing — otherwise its CSS/settings/bus listeners leak while the
+    // plugin shows quarantined.
+    let handle: PluginHandle | undefined;
+    try {
+      let manifest: PluginManifest;
+      let builtinCleanup: void | Disposer = undefined;
+      if (plugin.builtinActivate) {
+        if (!plugin.manifest) throw new Error(`builtin plugin ${id} must carry its manifest`);
+        manifest = plugin.manifest;
+      } else {
+        manifest = JSON.parse(await backend.readFile(id, "manifest.json")) as PluginManifest;
+      }
+      const problems = validateManifest(manifest);
+      if (problems.length > 0) throw new Error(`invalid manifest: ${problems.join("; ")}`);
+      // SDK version handshake (plan §5.1 sdkVersion): a plugin built against an
+      // incompatible contract range is disabled, never loaded — same treatment
+      // as minAppVersion, one layer down (contract vs app).
+      if (!satisfiesSdkRange(manifest.sdkVersion, SDK_VERSION)) {
+        setState(id, "incompatible", `requires sdk ${manifest.sdkVersion} (host ${SDK_VERSION})`);
+        return;
+      }
 
-    const newHandle = createPluginContext(manifest, backend, { appVersion });
-    handle = newHandle;
-    if (manifest.tier === "declarative") {
-      // Bundle styles.css: injected like the js branch below — it is the
-      // install-time-reviewed artifact, not a runtime permission-gated API
-      // call, so a declarative plugin needs no theme permission for it.
-      let stylesCss: string | undefined;
-      try {
-        stylesCss = await backend.readFile(id, "styles.css");
-      } catch {
-        // styles.css is optional.
+      const newHandle = createPluginContext(manifest, backend, { appVersion });
+      handle = newHandle;
+      if (manifest.tier === "declarative") {
+        // Bundle styles.css: injected like the js branch below — it is the
+        // install-time-reviewed artifact, not a runtime permission-gated API
+        // call, so a declarative plugin needs no theme permission for it.
+        let stylesCss: string | undefined;
+        try {
+          stylesCss = await backend.readFile(id, "styles.css");
+        } catch {
+          // styles.css is optional.
+        }
+        if (stylesCss) injectBundleCss(newHandle, stylesCss);
+        runAsPlugin(() => applyDeclarativePlugin(newHandle));
+      } else if (plugin.builtinActivate) {
+        builtinCleanup = runAsPlugin(() => plugin.builtinActivate!(newHandle.ctx));
+      } else {
+        // Bundle styles.css (Obsidian three-file convention): injected for js
+        // plugins too — it's the install-time-reviewed artifact, not a runtime
+        // permission-gated API call. Optional file; absence is fine, but a
+        // remote-reference violation fails the load.
+        let stylesCss: string | undefined;
+        try {
+          stylesCss = await backend.readFile(id, "styles.css");
+        } catch {
+          // styles.css is optional.
+        }
+        if (stylesCss) injectBundleCss(newHandle, stylesCss);
+        const code = await backend.readFile(id, "main.js");
+        const mod = await importBlob(code);
+        if (typeof mod.default !== "function") {
+          throw new Error("main.js must `export default function activate(ctx)`");
+        }
+        builtinCleanup = runAsPlugin(() => (mod.default as (c: unknown) => void | Disposer)(newHandle.ctx));
       }
-      if (stylesCss) injectBundleCss(newHandle, stylesCss);
-      runAsPlugin(() => applyDeclarativePlugin(newHandle));
-    } else if (plugin.builtinActivate) {
-      builtinCleanup = runAsPlugin(() => plugin.builtinActivate!(newHandle.ctx));
-    } else {
-      // Bundle styles.css (Obsidian three-file convention): injected for js
-      // plugins too — it's the install-time-reviewed artifact, not a runtime
-      // permission-gated API call. Optional file; absence is fine, but a
-      // remote-reference violation fails the load.
-      let stylesCss: string | undefined;
-      try {
-        stylesCss = await backend.readFile(id, "styles.css");
-      } catch {
-        // styles.css is optional.
-      }
-      if (stylesCss) injectBundleCss(newHandle, stylesCss);
-      const code = await backend.readFile(id, "main.js");
-      const mod = await importBlob(code);
-      if (typeof mod.default !== "function") {
-        throw new Error("main.js must `export default function activate(ctx)`");
-      }
-      builtinCleanup = runAsPlugin(() => (mod.default as (c: unknown) => void | Disposer)(newHandle.ctx));
+      active.set(id, {
+        handle: newHandle,
+        cleanup: typeof builtinCleanup === "function" ? builtinCleanup : undefined,
+      });
+      setState(id, "active");
+    } catch (error) {
+      if (handle) disposeHandle(handle);
+      fail(id, backend, error, true);
     }
-    active.set(id, {
-      handle: newHandle,
-      cleanup: typeof builtinCleanup === "function" ? builtinCleanup : undefined,
-    });
-    setState(id, "active");
-  } catch (error) {
-    if (handle) disposeHandle(handle);
-    fail(id, backend, error, true);
+  } finally {
+    loading.delete(id);
   }
 }
 
@@ -281,6 +293,18 @@ export function reportPluginCrash(id: string, error: unknown, backend: LoaderBac
 /** Successful activation resets the crash counter. */
 export function notePluginRenderOk(id: string) {
   crashCounts[id] = 0;
+}
+
+/** Uninstall-only prune (the manager's uninstall path): crash counts and the
+ *  state entry are per-install runtime data with no meaning once the plugin
+ *  is gone. NOT for disable/unload — crash counting must survive reloads so
+ *  a crash-looping plugin still quarantines across them. */
+export function prunePluginRuntimeState(id: string): void {
+  delete crashCounts[id];
+  if (states.delete(id)) {
+    statesSnapshot = [...states.values()];
+    for (const l of stateListeners) l();
+  }
 }
 
 let bootstrapped = false;
