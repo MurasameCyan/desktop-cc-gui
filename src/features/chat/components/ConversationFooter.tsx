@@ -436,6 +436,7 @@ export function ConversationFooter({
           onBranchSelect={onBranchSelect}
           startNewChat={startNewChat}
         />
+
       </div>
       <AttachmentLightbox zoom={zoomImage} onClose={() => setZoomImage(null)} />
     </>

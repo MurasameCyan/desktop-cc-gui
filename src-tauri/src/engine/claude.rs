@@ -13,6 +13,9 @@ pub struct ClaudeEngine {
     /// tool_use id -> tool name, recorded at `content_block_start` so a
     /// later `tool_result` (user message) can be attributed to its call.
     tool_names: Mutex<HashMap<String, String>>,
+    /// Post-compaction remaining context tokens from `compact_boundary` event,
+    /// used to report accurate post-compaction usage instead of the turn's billing usage.
+    compact_post_tokens: Mutex<Option<i64>>,
 }
 
 struct PendingTool {
@@ -25,6 +28,7 @@ impl ClaudeEngine {
         Self {
             pending_tool_json: Mutex::new(HashMap::new()),
             tool_names: Mutex::new(HashMap::new()),
+            compact_post_tokens: Mutex::new(None),
         }
     }
 }
@@ -126,8 +130,24 @@ impl Engine for ClaudeEngine {
                 // api_retry precedes minutes of silent exponential backoff
                 // (10 attempts, 30s+ delays); surface it as a non-terminal
                 // warning so the UI shows progress instead of a dead spinner.
-                if value.get("subtype").and_then(Value::as_str) == Some("api_retry") {
+                let subtype = value.get("subtype").and_then(Value::as_str);
+                if subtype == Some("api_retry") {
                     out.push(EngineEvent::Warn(format_api_retry(&value)));
+                } else if subtype == Some("compact_boundary") {
+                    if let Some(post_tokens) = value
+                        .get("compactMetadata")
+                        .and_then(|m| m.get("postTokens").or_else(|| m.get("post_tokens")))
+                        .and_then(Value::as_i64)
+                    {
+                        if let Ok(mut lock) = self.compact_post_tokens.lock() {
+                            *lock = Some(post_tokens);
+                        }
+                        let usage_obj = serde_json::json!({
+                            "input_tokens": post_tokens,
+                            "total_tokens": post_tokens,
+                        });
+                        out.push(EngineEvent::Usage(usage_obj));
+                    }
                 }
             }
             "stream_event" => {
@@ -229,7 +249,15 @@ impl Engine for ClaudeEngine {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let usage = value.get("usage").cloned();
+                let raw_usage = value.get("usage").cloned();
+                let usage = if let Ok(mut lock) = self.compact_post_tokens.lock() {
+                    match lock.take() {
+                        Some(post_tokens) => Some(compact_usage(post_tokens, raw_usage.as_ref())),
+                        None => raw_usage,
+                    }
+                } else {
+                    raw_usage
+                };
                 let is_error = value
                     .get("is_error")
                     .and_then(Value::as_bool)
@@ -249,6 +277,29 @@ impl Engine for ClaudeEngine {
             _ => {}
         }
     }
+}
+
+/// Usage snapshot for a compacted turn. Occupancy is the post-compaction
+/// remainder (`post_tokens`), not the turn's billing input, but the turn's
+/// output still enters the context afterwards and the reported context
+/// window is carried over so the breakdown keeps its segments and scale
+/// (total = post_tokens + output_tokens).
+fn compact_usage(post_tokens: i64, raw: Option<&Value>) -> Value {
+    let output = raw
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let mut usage = serde_json::json!({
+        "input_tokens": post_tokens,
+        "output_tokens": output,
+        "total_tokens": post_tokens + output,
+    });
+    if let (Some(raw), Some(obj)) = (raw, usage.as_object_mut()) {
+        if let Some(window) = raw.get("model_context_window") {
+            obj.insert("model_context_window".to_string(), window.clone());
+        }
+    }
+    usage
 }
 
 /// Phrases the CLI uses when a tool call is denied by the permission
@@ -777,5 +828,93 @@ mod tests {
             Some("/etc/hosts".to_string())
         );
         assert_eq!(extract_absolute_path("no path here"), None);
+    }
+
+    fn compact_result_line() -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "session_id": "s-1",
+            "usage": {
+                "input_tokens": 30190,
+                "output_tokens": 1200,
+                "total_tokens": 31390,
+                "model_context_window": 200000
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn compact_boundary_emits_usage_and_overrides_turn_result_once() {
+        let engine = ClaudeEngine::new();
+        let boundary = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compactMetadata": { "preTokens": 30190, "postTokens": 8038, "durationMs": 4207 }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        engine.parse_line(&boundary, &mut out);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            EngineEvent::Usage(usage) => {
+                assert_eq!(usage["input_tokens"], 8038);
+                assert_eq!(usage["total_tokens"], 8038);
+            }
+            _ => panic!("expected usage event"),
+        }
+
+        // The following result's billing usage is replaced by the
+        // post-compaction occupancy, keeping output and the context window.
+        let mut out = Vec::new();
+        engine.parse_line(&compact_result_line(), &mut out);
+        match &out[0] {
+            EngineEvent::Done { usage, .. } => {
+                let usage = usage.as_ref().expect("usage");
+                assert_eq!(usage["input_tokens"], 8038);
+                assert_eq!(usage["output_tokens"], 1200);
+                assert_eq!(usage["total_tokens"], 8038 + 1200);
+                assert_eq!(usage["model_context_window"], 200000);
+            }
+            _ => panic!("expected done event"),
+        }
+
+        // Single-shot: the next turn without a boundary keeps billing usage.
+        let mut out = Vec::new();
+        engine.parse_line(&compact_result_line(), &mut out);
+        match &out[0] {
+            EngineEvent::Done { usage, .. } => {
+                assert_eq!(usage.as_ref().expect("usage")["input_tokens"], 30190);
+            }
+            _ => panic!("expected done event"),
+        }
+    }
+
+    #[test]
+    fn result_without_compact_boundary_keeps_billing_usage() {
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&compact_result_line(), &mut out);
+        match &out[0] {
+            EngineEvent::Done { usage, .. } => {
+                let usage = usage.as_ref().expect("usage");
+                assert_eq!(usage["input_tokens"], 30190);
+                assert_eq!(usage["total_tokens"], 31390);
+            }
+            _ => panic!("expected done event"),
+        }
+    }
+
+    #[test]
+    fn compact_boundary_without_metadata_stays_silent() {
+        let line = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary"
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        assert!(out.is_empty());
     }
 }

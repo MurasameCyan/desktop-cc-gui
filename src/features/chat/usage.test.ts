@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mergeUsage, parseUsage } from "./usage";
+import { usageBreakdown } from "./components/usage-breakdown";
 
 describe("parseUsage", () => {
   it("folds a codex record's cache counters out of its input", () => {
@@ -70,5 +71,35 @@ describe("mergeUsage", () => {
       total_tokens: 12,
       model_context_window: 475_000,
     });
+});
+
+describe("usageBreakdown", () => {
+  /** 验证空用量安全返回 null */
+  it("returns null when usage cannot be parsed", () => {
+    expect(usageBreakdown(null, 200000)).toBeNull();
+  });
+
+  /** 验证按调用方解析出的 maxTokens 计算百分比 */
+  it("computes pct against the provided maxTokens", () => {
+    const breakdown = usageBreakdown(
+      { input_tokens: 10000, output_tokens: 2000, total_tokens: 12000 },
+      200000,
+    );
+    expect(breakdown).not.toBeNull();
+    // 12000 / 200000 = 6%
+    expect(breakdown?.pct).toBe(6);
+    // 分段相加必须等于 total (10000 + 2000 = 12000)
+    const sumSegments = breakdown?.parts.reduce((sum, p) => sum + p.tokens, 0);
+    expect(sumSegments).toBe(12000);
+  });
+
+  /** 验证畸形 payload 的负 token 不会得到负百分比 */
+  it("clamps pct at zero for negative token counts", () => {
+    const breakdown = usageBreakdown(
+      { input_tokens: -5000, output_tokens: 0, total_tokens: -5000 },
+      200000,
+    );
+    expect(breakdown?.pct).toBe(0);
+  });
   });
 });

@@ -101,11 +101,19 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
     let mut seq = 0i64;
     let mut last_user_ts: Option<i64> = None;
     walk_lines(reader, extract, |row| {
-        // Usage-only marker (codex token_count): fold onto the last
-        // assistant message instead of creating an empty row.
+        // Usage-only marker (codex token_count or claude compact_boundary): fold
+        // onto the last assistant message instead of creating an empty row.
         if row.role == "__usage__" {
             if let Some(last) = messages.iter_mut().rev().find(|m| m.role == "assistant") {
-                last.usage = row.usage;
+                let mut new_usage = row.usage;
+                if let (Some(prev), Some(next)) = (last.usage.as_ref(), new_usage.as_mut()) {
+                    if let (Some(mcw), Some(obj)) = (prev.get("model_context_window"), next.as_object_mut()) {
+                        if !obj.contains_key("model_context_window") {
+                            obj.insert("model_context_window".to_string(), mcw.clone());
+                        }
+                    }
+                }
+                last.usage = new_usage;
             }
             return;
         }
@@ -708,6 +716,26 @@ fn claude_block_rows(
 
 fn extract_claude_line(value: &Value, images: ImageMode) -> LineRows {
     let line_type = type_str(value);
+    if line_type == "system" {
+        if value.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
+            let post_tokens = value
+                .get("compactMetadata")
+                .and_then(|m| m.get("postTokens").or_else(|| m.get("post_tokens")))
+                .and_then(Value::as_i64);
+            if let Some(tokens) = post_tokens {
+                let ts = ts_string(value, &["timestamp"]);
+                let usage = serde_json::json!({
+                    "input_tokens": tokens,
+                    "total_tokens": tokens,
+                });
+                return vec![LineRow {
+                    usage: Some(usage),
+                    ..LineRow::new("__usage__", String::new(), ts)
+                }];
+            }
+        }
+        return Vec::new();
+    }
     if line_type != "user" && line_type != "assistant" {
         return Vec::new();
     }
@@ -1262,5 +1290,58 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].role, "thinking");
         assert_eq!(rows[0].text, "first thought\nsecond thought");
+    }
+
+    #[test]
+    fn codex_token_count_prefers_last_usage_and_attaches_context_window() {
+        let line: Value = serde_json::json!({
+            "type": "event_msg",
+            "timestamp": "2026-09-05T11:12:16.469Z",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": 200000,
+                        "output_tokens": 5000,
+                        "total_tokens": 205000
+                    },
+                    "last_token_usage": {
+                        "input_tokens": 30000,
+                        "cached_input_tokens": 15000,
+                        "output_tokens": 500,
+                        "total_tokens": 30500
+                    },
+                    "model_context_window": 1000000
+                }
+            }
+        });
+        let rows = extract_codex_line(&line, ImageMode::Collect);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "__usage__");
+        let usage = rows[0].usage.as_ref().expect("usage object");
+        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(30000));
+        assert_eq!(usage.get("cached_input_tokens").and_then(Value::as_i64), Some(15000));
+        assert_eq!(usage.get("total_tokens").and_then(Value::as_i64), Some(30500));
+        assert_eq!(usage.get("model_context_window").and_then(Value::as_i64), Some(1000000));
+    }
+
+    #[test]
+    fn claude_compact_boundary_extracts_post_tokens_into_usage() {
+        let line: Value = serde_json::json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "timestamp": "2026-09-10T05:55:55.956Z",
+            "compactMetadata": {
+                "preTokens": 30190,
+                "postTokens": 8038,
+                "durationMs": 4207
+            }
+        });
+        let rows = extract_claude_line(&line, ImageMode::Collect);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "__usage__");
+        let usage = rows[0].usage.as_ref().expect("usage object");
+        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(8038));
+        assert_eq!(usage.get("total_tokens").and_then(Value::as_i64), Some(8038));
     }
 }

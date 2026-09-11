@@ -25,7 +25,10 @@ export function usageBreakdown(usage: unknown, maxTokens: number): UsageBreakdow
     { kind: "cacheWrite" as const, tokens: u.cacheWrite },
   ].filter((p) => p.tokens > 0);
   return {
-    pct: Math.min(100, Math.round((u.total / maxTokens) * 100)),
+    // Clamp at 0 as well: a malformed payload with negative tokens must not
+    // produce a negative percentage. The dynamic context window is resolved
+    // upstream in ChatConversation (contextMax), keeping a single source.
+    pct: Math.max(0, Math.min(100, Math.round((u.total / maxTokens) * 100))),
     parts: parts.length ? parts : [{ kind: "total", tokens: u.total }],
   };
 }

@@ -14,7 +14,8 @@ import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier
 import { cx } from "@/utils/cx";
 import { OmpSpeedSection } from "./omp-speed-section";
 import { filterModels, groupModelsByProvider, type ModelGroup } from "./model-list";
-import { EFFORT_LABEL_KEYS, EffortSlider, type EffortLevel } from "./effort-slider";
+import { EFFORT_LABEL_KEYS, type EffortLevel } from "./effort-levels";
+import { EffortSlider } from "./effort-slider";
 import type { MenuOption, ModelOption } from "./cli-menu";
 
 /** Per-engine model flyout: pops to the right of the CLI popover, bottom-

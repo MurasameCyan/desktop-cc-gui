@@ -9,18 +9,7 @@ import {
 } from "react-aria-components";
 import { AnimatePresence, m } from "motion/react";
 import { FlameOverlay } from "./effort-flame";
-import { EFFORT_LEVELS } from "./effort-levels";
-
-export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
-
-export const EFFORT_LABEL_KEYS: Record<EffortLevel, string> = {
-  low: "chat.effortLow",
-  medium: "chat.effortMedium",
-  high: "chat.effortHigh",
-  xhigh: "chat.effortXhigh",
-  max: "chat.effortMax",
-  ultra: "chat.effortUltra",
-};
+import { EFFORT_LEVELS, type EffortLevel } from "./effort-levels";
 
 /** Fresh random impulse per tick each time the engine ignites: blown left by
  *  the exhaust with random lift, tumble and stagger, like debris. */

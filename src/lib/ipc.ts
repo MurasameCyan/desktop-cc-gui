@@ -270,6 +270,9 @@ export interface GitFileEntry {
 
 export interface GitStatus {
   branch: string;
+  /** Commits ahead of / behind the upstream; absent when there is none. */
+  ahead?: number;
+  behind?: number;
   staged: GitFileEntry[];
   unstaged: GitFileEntry[];
   untracked: GitFileEntry[];
@@ -598,9 +601,11 @@ export const ipc = {
    * paths; backend caps at 20k entries). */
   listFileIndex: (path: string) =>
     withGrantRetry(() => invoke<FileIndexEntry[]>("list_file_index", { path })),
-  /** Catalog for the composer `/` picker (workspace
-   *  `.claude/commands` + `.claude/skills`, plus the CLI's global config
-   *  home). Commands and skills are distinguished by `entry.kind`. */
+  /** Catalog for the composer `/` picker (workspace `.claude/commands` +
+   *  `.claude/skills`, plus the global skill roots of the CLIs the app
+   *  drives — Claude home, `$CODEX_HOME/skills` incl. `.system`,
+   *  `~/.agents/skills`, Codex plugin cache). Commands and skills are
+   *  distinguished by `entry.kind`. */
   listSlashCommands: (path: string) =>
     withGrantRetry(() => invoke<SlashCommandEntry[]>("list_slash_commands", { path })),
   // granted directories (desktop-only commands; the settings list hides on web)

@@ -18,6 +18,7 @@ import {
   type ActiveSession,
   type QueuedMessage,
 } from "../store";
+
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
 import { useBranchSwitcher } from "./use-branch-switcher";

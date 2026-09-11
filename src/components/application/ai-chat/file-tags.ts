@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import { getFileTreeIconSvg } from "@/features/files/fileIcons";
 /** An active `@` autocomplete trigger at the caret: `start` is the offset
  * of the `@` itself, `query` is the text typed after it. */
@@ -233,6 +234,17 @@ export function htmlFromText(text: string): string {
 }
 
 /**
+ * Sanitize chip HTML at the innerHTML trust boundary. Everything
+ * htmlFromText interpolates is already escaped or static icon markup; this
+ * makes the invariant provable at each sink. `contenteditable` is
+ * allowlisted because DOMPurify's default profile strips it and the chips
+ * must stay non-editable.
+ */
+export function sanitizeEditableHtml(html: string): string {
+  return DOMPurify.sanitize(html, { ADD_ATTR: ["contenteditable"] });
+}
+
+/**
  * Convert every unrendered mention in the editable into a chip, preserving
  * the caret. No-op when no text node contains a full mention token (so
  * typing `@` or a partial path never rebuilds the DOM).
@@ -258,7 +270,7 @@ export function renderFileTags(el: HTMLElement): void {
 
   const caret = getCaretOffset(el);
   const text = extractText(el);
-  el.innerHTML = htmlFromText(text);
+  el.innerHTML = sanitizeEditableHtml(htmlFromText(text));
   if (caret >= 0) setCaretOffset(el, caret);
 }
 
