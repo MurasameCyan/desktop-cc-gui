@@ -6,9 +6,9 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkDisplayMath } from "./remark-display-math";
 import {
-  protectNestedMathDollars,
+  prepareMathText,
   restoreMathDollars,
-} from "./math-dollars";
+} from "./math-delimiters";
 import { useReducedMotion } from "motion/react";
 import { StreamReveal } from "./stream-reveal";
 import { RevealText } from "./reveal-text";
@@ -163,10 +163,11 @@ export default memo(function Markdown({
   // them, retain its DOM shape on settle so selection does not jump.
   const [revealEnabled, setRevealEnabled] = useState(streaming);
   if (streaming && !revealEnabled) setRevealEnabled(true);
-  // Nested `$...$` inside box commands (e.g. `\colorbox{yellow}{$x$}`) must
-  // not end remark-math's span early; the protected text feeds both the plan
+  // `\[...\]` / `\(...\)` become the `$` delimiters remark-math knows, and
+  // nested `$...$` inside box commands (e.g. `\colorbox{yellow}{$x$}`) must
+  // not end remark-math's span early; the prepared text feeds both the plan
   // and the renderer so reveal offsets stay aligned with the DOM.
-  const mathText = useMemo(() => protectNestedMathDollars(text), [text]);
+  const mathText = useMemo(() => prepareMathText(text), [text]);
   // Show already-received text on mount (including virtualizer remounts);
   // smooth only subsequent arrivals, never replay a paragraph from empty.
   const controller = useMemo(() => new StreamReveal(false), []);

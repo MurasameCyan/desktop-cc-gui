@@ -12,6 +12,7 @@ import {
 } from "./usage-tracking";
 import { UsageChart } from "./UsageChart";
 import { modelDisplayName } from "./usage-model";
+import { tokensOf } from "./usage-totals";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { ModelBadge } from "@/components/foundations/icons/model-badge";
@@ -101,9 +102,6 @@ const sum = (entries: Totals[]) =>
     }),
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, requests: 0 },
   );
-
-const tokensOf = (e: Totals | { input: number; output: number; cacheRead: number; cacheWrite: number }) =>
-  e.input + e.output + e.cacheRead + e.cacheWrite;
 
 /** Horizontal share bar: the list's own scale, no chart dependency. */
 function ShareBar({ pct }: { pct: number }) {
@@ -275,7 +273,9 @@ export function UsageSection() {
             <div className="flex flex-1 flex-col gap-0.5">
               <span className="text-body-2-regular text-text-secondary">{t("usage.input")}</span>
               <span className="text-title-3 text-text-primary tabular-nums">
-                {formatTokens(totals.input)}
+                {/* Prompt-side input: fresh tokens plus cache reads/writes, so
+                    累计 = 输入 + 输出 holds on screen. */}
+                {formatTokens(totals.input + totals.cacheRead + totals.cacheWrite)}
               </span>
             </div>
             <div className="flex flex-1 flex-col gap-0.5">

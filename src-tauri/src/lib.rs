@@ -164,6 +164,7 @@ pub fn run() {
             // settings
             settings::get_app_settings,
             settings::update_app_settings,
+            settings::set_window_theme,
             // plugins
             plugins::plugin_list,
             plugins::plugin_install_from_path,

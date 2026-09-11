@@ -106,6 +106,23 @@ describe("math rendering", () => {
     expect(container.querySelector(".katex-display")).not.toBeNull();
   });
 
+  it("typesets LaTeX `\\[ ... \\]` display math", async () => {
+    // gpt/codex write display math with LaTeX delimiters; remark-math does
+    // not know them, so before the fix the whole formula leaked as raw TeX.
+    await renderMarkdown(
+      "这个公式表示总的瞬时波动率：\n\n\\[\n\\sigma_{\\mathrm{总}}(t,S_t,X_t)\n\\]\n\n其中每一项……",
+    );
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(container.textContent).not.toContain("\\[");
+    expect(container.textContent).not.toContain("\\]");
+  });
+
+  it("typesets LaTeX `\\( ... \\)` inline math", async () => {
+    await renderMarkdown("当 \\(x > 0\\) 时收敛");
+    expect(container.querySelector(".katex")).not.toBeNull();
+    expect(container.textContent).not.toContain("\\(");
+  });
+
   it("keeps math inline when it sits inside a sentence", async () => {
     await renderMarkdown("由 $a^2 + b^2 = c^2$ 可得结论");
     expect(container.querySelector(".katex")).not.toBeNull();

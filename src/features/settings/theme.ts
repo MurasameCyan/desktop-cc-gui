@@ -15,6 +15,7 @@ export function applyTheme(theme: string): void {
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.classList.toggle("dark", dark);
+  ipc.setWindowTheme(dark).catch(() => {});
   // Mirror the applied theme into storage for main.tsx's pre-paint read.
   window.localStorage.setItem(THEME_STORAGE_KEY, dark ? "dark" : "light");
 }

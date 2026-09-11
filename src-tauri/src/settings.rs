@@ -633,3 +633,21 @@ mod tests {
         assert!(!scratch.path("settings.json").exists());
     }
 }
+#[tauri::command]
+pub fn set_window_theme(
+    app: tauri::AppHandle,
+    dark: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::{Manager, Theme};
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_theme(Some(if dark {
+                Theme::Dark
+            } else {
+                Theme::Light
+            }));
+        }
+    }
+    Ok(())
+}

@@ -4,6 +4,7 @@ import { EngineIcon, type EngineIconId } from "@/components/foundations/icons/en
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { ModelBadge } from "@/components/foundations/icons/model-badge";
 import { modelDisplayName } from "./usage-model";
+import { tokensOf } from "./usage-totals";
 import type { UsageRow } from "@/lib/ipc";
 
 /**
@@ -50,8 +51,6 @@ interface Series {
   /** Models inside this CLI, largest first — the tooltip's second level. */
   models: { name: string; color: string; byDay: number[]; total: number }[];
 }
-
-const tokensOf = (row: UsageRow) => row.input + row.output + row.cacheRead + row.cacheWrite;
 
 /** Readable axis step: 1/2/5 × 10^n covering `max` in ~4 ticks. */
 function axisMax(max: number): number {

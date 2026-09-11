@@ -113,14 +113,18 @@ function formatMessageTime(ts: string | null | undefined): string | null {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
 }
 
-/** Compact token usage for one message: "↑3.2k ↓412". */
+/** Compact token usage for one message: "↑3.2k ↓412". Input is the whole
+ *  prompt side — fresh tokens plus cache reads/writes — so a cache-heavy turn
+ *  does not read as if it had sent almost nothing. */
 function formatUsage(usage: unknown): string | null {
   const u = parseUsage(usage);
-  if (!u || (!u.input && !u.output)) return null;
+  if (!u) return null;
+  const input = u.input + u.cacheRead + u.cacheWrite;
+  if (!input && !u.output) return null;
   const fmt = (n: number) =>
     n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
   const parts: string[] = [];
-  if (u.input) parts.push(`↑${fmt(u.input)}`);
+  if (input) parts.push(`↑${fmt(input)}`);
   if (u.output) parts.push(`↓${fmt(u.output)}`);
   return parts.join(" ");
 }

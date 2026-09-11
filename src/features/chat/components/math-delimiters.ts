@@ -1,27 +1,36 @@
 /**
- * Nested math-mode dollars.
+ * Text preparation for remark-math.
  *
- * Real LaTeX lets a box command take math mode as its argument:
- * `\colorbox{yellow}{$\displaystyle \int x\,dx$}` — the inner `$...$` is
- * valid LaTeX and KaTeX needs to see it. remark-math cannot: it terminates
- * the outer `$...$` at the first inner `$`, splitting one formula into a
- * KaTeX error, a raw-TeX text leak, and a stray `}` span.
+ * remark-math follows the micromark grammar, which knows two delimiters: `$`
+ * and `$$`. Two things models write have to be rewritten before the markdown
+ * parse — and both have to leave code spans and fenced blocks alone, because
+ * their backslashes and dollars are content:
  *
- * Inside math a `$` is never a delimiter — it is either a nested math-mode
- * marker (which KaTeX requires to survive) or, escaped, a literal dollar.
- * So the renderer protects the nested ones from remark-math with a private
- * placeholder and restores them immediately before KaTeX reads the TeX.
+ * 1. LaTeX delimiters. Display math arrives as `\[ ... \]` and inline math as
+ *    `\( ... \)`. remark-math never sees them, so the whole formula rendered
+ *    as raw TeX in prose.
+ * 2. Nested math-mode dollars. Real LaTeX lets a box command take math mode as
+ *    its argument: `\colorbox{yellow}{$\displaystyle \int x\,dx$}` — the inner
+ *    `$...$` is valid and KaTeX needs to see it. remark-math cannot: it ends
+ *    the outer `$...$` at the first inner `$`, splitting one formula into a
+ *    KaTeX error, a raw-TeX text leak, and a stray `}` span. Inside math a `$`
+ *    is never a delimiter — it is a nested math-mode marker or an escaped
+ *    literal — so the walker hides the nested ones behind a private
+ *    placeholder and restores them right before KaTeX reads the TeX.
  */
 
 export const NESTED_DOLLAR = "\uE000";
 
-/** Escape `$` inside math so remark-math keeps each formula as one span.
- *  Code spans and fenced blocks are copied verbatim: their dollars are
- *  content, not delimiters. */
-export function protectNestedMathDollars(text: string): string {
-  if (!text.includes("$")) return text;
+/** The delimiter that ends the math span the walker is inside. */
+type Closer = "$" | "$$" | "\\)" | "\\]";
+
+/** Rewrite the delimiters remark-math does not know, and hide the nested
+ *  dollars it would otherwise end a formula on. */
+export function prepareMathText(text: string): string {
+  if (!text.includes("$") && !text.includes("\\")) return text;
   const out: string[] = [];
   let mode: "none" | "inline" | "display" = "none";
+  let closer: Closer = "$";
   let depth = 0;
   let i = 0;
   const n = text.length;
@@ -29,8 +38,15 @@ export function protectNestedMathDollars(text: string): string {
     const ch = text[i];
     if (mode !== "none") {
       if (ch === "\\") {
-        out.push(ch);
-        if (i + 1 < n) out.push(text[i + 1]);
+        // `\)` / `\]` end the span LaTeX opened with `\(` / `\[`; every other
+        // backslash pair is TeX the engine needs verbatim (`\frac`, `\,`, …).
+        if (closer.length === 2 && text[i + 1] === closer[1]) {
+          mode = "none";
+          out.push(closer === "\\)" ? "$" : "$$");
+        } else {
+          out.push(ch);
+          if (i + 1 < n) out.push(text[i + 1]);
+        }
         i += 2;
         continue;
       }
@@ -47,11 +63,11 @@ export function protectNestedMathDollars(text: string): string {
         continue;
       }
       if (ch === "$") {
-        if (mode === "display" && text[i + 1] === "$" && depth === 0) {
+        if (closer === "$$" && text[i + 1] === "$" && depth === 0) {
           mode = "none";
           out.push("$$");
           i += 2;
-        } else if (mode === "inline" && depth === 0) {
+        } else if (closer === "$" && depth === 0) {
           mode = "none";
           out.push("$");
           i += 1;
@@ -99,18 +115,37 @@ export function protectNestedMathDollars(text: string): string {
       continue;
     }
     if (ch === "\\") {
+      const next = text[i + 1];
+      if (next === "(") {
+        mode = "inline";
+        closer = "\\)";
+        depth = 0;
+        out.push("$");
+        i += 2;
+        continue;
+      }
+      if (next === "[") {
+        mode = "display";
+        closer = "\\]";
+        depth = 0;
+        out.push("$$");
+        i += 2;
+        continue;
+      }
       out.push(ch);
-      if (i + 1 < n) out.push(text[i + 1]);
+      if (i + 1 < n) out.push(next);
       i += 2;
       continue;
     }
     if (ch === "$") {
       if (text[i + 1] === "$") {
         mode = "display";
+        closer = "$$";
         out.push("$$");
         i += 2;
       } else {
         mode = "inline";
+        closer = "$";
         out.push("$");
         i += 1;
       }

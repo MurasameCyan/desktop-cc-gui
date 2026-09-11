@@ -24,6 +24,14 @@ function reportedWindow(...sources: Array<Record<string, unknown> | null>): numb
   return undefined;
 }
 
+/** Engines whose cache counters sit *inside* `input_tokens`. Codex reports
+ *  `cached_input_tokens` / `cache_write_input_tokens` as parts of the prompt
+ *  it bills (`total_tokens` = input + output), while Claude and the pi family
+ *  report `cache_read_input_tokens` / `cacheRead` outside it. */
+function cacheInsideInput(u: Record<string, unknown>): boolean {
+  return typeof u.cached_input_tokens === "number";
+}
+
 /** Normalize the per-engine usage shapes (snake_case for claude/codex, bare
  * keys for pi/omp) into one token breakdown. Returns null when no tokens
  * were reported at all. */
@@ -34,7 +42,7 @@ export function parseUsage(usage: unknown): ParsedUsage | null {
   // total_token_usage is session-billed cumulative and must not fill the bar.
   const nested = asRecord(raw.last_token_usage);
   const u = nested ?? raw;
-  const input = num(u, "input_tokens") || num(u, "input");
+  const reportedInput = num(u, "input_tokens") || num(u, "input");
   const output = num(u, "output_tokens") || num(u, "output");
   // Codex names its cache fields differently (cached_input_tokens /
   // cache_write_input_tokens): without them a codex report's cache hits land
@@ -45,6 +53,12 @@ export function parseUsage(usage: unknown): ParsedUsage | null {
     num(u, "cache_creation_input_tokens") ||
     num(u, "cacheWrite") ||
     num(u, "cache_write_input_tokens");
+  // Fold codex's cache counters out of its input so the four parts never
+  // overlap. Adding them on top inflated every total by the whole cache
+  // volume (a cache-heavy codex turn counted ~3x its real prompt).
+  const input = cacheInsideInput(u)
+    ? Math.max(0, reportedInput - cacheRead - cacheWrite)
+    : reportedInput;
   const total =
     num(u, "total_tokens") || num(u, "totalTokens") || input + output + cacheRead + cacheWrite;
   if (!total) return null;

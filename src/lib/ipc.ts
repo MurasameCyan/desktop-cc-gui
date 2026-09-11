@@ -519,6 +519,8 @@ export const ipc = {
     // Keep the cache in sync with the authoritative value just persisted.
     settingsPromise = Promise.resolve(settings);
   },
+  setWindowTheme: (dark: boolean) =>
+    invoke<void>("set_window_theme", { dark }),
   // engine
   sendMessage: (args: {
     engine: string;
