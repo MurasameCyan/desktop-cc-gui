@@ -24,3 +24,10 @@ Open `/tests/browser/effort-layout.html` to verify the actual model menu keeps
 its trigger width and popover position while cycling all five reasoning levels.
 The fixture waits for fonts and the entrance animation before measuring; it
 uses local React state and never changes app settings or sends a model request.
+
+Open `/tests/browser/usage-pane.html` to check the usage page against a seeded
+ledger: the same model recorded once as a relay-qualified slug
+("agentrouter qunyou/deepseek-v4-flash") and once as the engine's plain id must
+fold into a single row — in 详细数据 and in the chart's hover breakdown — with
+the totals summed. It also replays a live report (`usage://changed`) to show
+the page growing mid-turn. No app, no database, no saved state.

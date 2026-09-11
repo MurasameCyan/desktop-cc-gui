@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { EngineIcon, type EngineIconId } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { ModelBadge } from "@/components/foundations/icons/model-badge";
+import { modelDisplayName } from "./usage-model";
 import type { UsageRow } from "@/lib/ipc";
 
 /**
@@ -79,13 +80,16 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
     // for the tooltip — the chart and 详细数据 then describe the same thing.
     const byCli = new Map<string, Map<string, number[]>>();
     for (const row of rows) {
+      // Same fold as 详细数据: the chart and the details card must describe
+      // one model per row, whatever slug the session ran.
+      const name = modelDisplayName(row.model) || t("usage.unknownModel");
       const models = byCli.get(row.engine) ?? new Map<string, number[]>();
-      const perDay = models.get(row.model || t("usage.unknownModel")) ?? new Array(days.length).fill(0);
+      const perDay = models.get(name) ?? new Array(days.length).fill(0);
       const index = days.indexOf(row.day);
       if (index >= 0) {
         perDay[index] += tokensOf(row);
       }
-      models.set(row.model || t("usage.unknownModel"), perDay);
+      models.set(name, perDay);
       byCli.set(row.engine, models);
     }
     const built: Series[] = [...byCli.entries()]

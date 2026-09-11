@@ -11,6 +11,7 @@ import {
   usageTrackingEnabled,
 } from "./usage-tracking";
 import { UsageChart } from "./UsageChart";
+import { modelDisplayName } from "./usage-model";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { ModelBadge } from "@/components/foundations/icons/model-badge";
@@ -158,13 +159,15 @@ export function UsageSection() {
 
   const byEngine = useMemo(() => fold(scoped, (row) => row.engine, (row) => row.engine), [scoped]);
   // 详细数据 nests the models under their CLI: the per-CLI total is what the
-  // outer row shows, the models are the breakdown.
+  // outer row shows, the models are the breakdown. Rows fold by the model's
+  // own name, so a relay-qualified slug and the engine's plain id are one row.
   const byCli = useMemo(() => {
     const clis = new Map<string, { engine: string; models: Totals[] }>();
     for (const row of scoped) {
       const cli = clis.get(row.engine) ?? { engine: row.engine, models: [] };
-      const existing = cli.models.find((m) => m.key === row.model);
-      const entry = existing ?? emptyTotals(row.model, row.engine);
+      const name = modelDisplayName(row.model);
+      const existing = cli.models.find((m) => m.key === name);
+      const entry = existing ?? emptyTotals(name, row.engine);
       entry.input += row.input;
       entry.output += row.output;
       entry.cacheRead += row.cacheRead;
