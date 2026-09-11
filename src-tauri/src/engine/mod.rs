@@ -1245,10 +1245,14 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     let is_codex = ctx.engine_id == "codex";
     let mut usage_tail: Option<codex_usage::UsageTail> = None;
     // Only the stream's own thread id (thread.started) may open the log: a
-    // resumed run's preassigned id names the *old* session, whose archived
-    // rollout would replay yesterday's records as if they were live.
+    // resumed run's preassigned id can name a thread the CLI is no longer
+    // writing to, and tailing that file would miss this run's reports.
     let mut stream_session_id = false;
-    let mut tail_lookup_at = std::time::Instant::now();
+    // The CLI writes the rollout at thread start, so the open normally
+    // succeeds on the first tick. Bound the retries anyway: each one walks
+    // the whole `sessions/**` tree, and a run whose home is not the one being
+    // written would walk it every tick for the length of the turn.
+    let mut tail_attempts = 0u32;
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1260,12 +1264,12 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
                         for usage in tail.poll() {
                             ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
                         }
-                    } else if stream_session_id
-                        && tail_lookup_at.elapsed() >= std::time::Duration::from_secs(1)
-                    {
+                    } else if stream_session_id && tail_attempts < 20 {
                         // The CLI creates the log a moment after the thread
-                        // id arrives; until then there is nothing to open.
-                        tail_lookup_at = std::time::Instant::now();
+                        // id arrives. Attempt every tick rather than backing
+                        // off: the tail starts at the file's end, so any wait
+                        // here is a window in which a record lands unread.
+                        tail_attempts += 1;
                         usage_tail = state
                             .native_session_id
                             .as_deref()
