@@ -209,6 +209,14 @@ export interface AppSettings {
   systemProxyEnabled: boolean;
   /** Proxy URL (http/https/socks5); null = unset. */
   systemProxyUrl: string | null;
+  /** Require a pairing key before the bridge serves a browser. */
+  webAuthEnabled?: boolean | null;
+  /** 8-character pairing key, minted when the switch is turned on. */
+  webAuthKey?: string | null;
+  /** Relay worker base URL (设置 → 远程访问 → 外网访问); null = unset. */
+  webRelayUrl?: string | null;
+  /** Shared relay key; also the phone URL's path segment. */
+  webRelayKey?: string | null;
 }
 
 export interface DirEntry {
@@ -300,6 +308,37 @@ export interface AppMetrics {
   /** CPU usage since the previous poll, percent of one core. */
   cpuPercent: number;
 }
+/** The outbound relay: the phone reaches the app through a Worker. */
+export interface RelayInfo {
+  /** Address to open on the phone (key already in the path). */
+  url: string;
+  agentUrl: string;
+  connected: boolean;
+  error: string | null;
+}
+
+/** Outcome of a one-click relay deploy (mirrors Rust `RelayDeployResult`). */
+export interface RelayDeployResult {
+  /** `https://ccgui-relay.<subdomain>.workers.dev` — a suggestion, not a lock:
+   *  the URL field stays editable so a custom domain can replace it. */
+  url: string;
+  /** The relay key that was uploaded with the Worker. */
+  key: string;
+  accountId: string;
+  accountName: string;
+}
+
+/** A browser that reached the LAN bridge; approved devices may use it. */
+export interface WebDevice {
+  id: string;
+  userAgent: string;
+  createdAt: number;
+  lastSeenAt: number;
+  approvedAt: number | null;
+  /** Name the user gave it; empty falls back to the user-agent summary. */
+  name: string | null;
+}
+
 export interface WebAccessInfo {
   /** Full URL including the auth token — shareable as-is or as a QR code. */
   url: string;
@@ -393,6 +432,15 @@ export interface CliUpdatePlan {
 // Shared in-flight/cached app-settings promise: startup, the settings page
 // and the chat store all read the same settings, so fetch once.
 let settingsPromise: Promise<AppSettings> | null = null;
+
+function fetchAppSettings(): Promise<AppSettings> {
+  return (settingsPromise ??= invoke<AppSettings>("get_app_settings").catch((e) => {
+    // Allow retry after a failed fetch instead of caching the rejection.
+    settingsPromise = null;
+    throw e;
+  }));
+}
+
 // ---- pi-family (pi/omp) provider auth & custom providers (供应商认证) ----
 
 export type PiFamilyAuthState = "configured" | "none";
@@ -511,16 +559,21 @@ export const ipc = {
   fetchProviderModels: (baseUrl: string, apiKey: string) =>
     invoke<ProviderModelList>("fetch_provider_models", { baseUrl, apiKey }),
   // settings
-  getAppSettings: () =>
-    (settingsPromise ??= invoke<AppSettings>("get_app_settings").catch((e) => {
-      // Allow retry after a failed fetch instead of caching the rejection.
-      settingsPromise = null;
-      throw e;
-    })),
+  getAppSettings: fetchAppSettings,
+  /** De-cached read: settings the backend changed on its own (the pairing key
+   *  rotates after a pairing and on a timer) never pass through a write here,
+   *  so the cached copy would keep showing the retired code. */
+  refreshAppSettings: () => {
+    settingsPromise = null;
+    return fetchAppSettings();
+  },
   updateAppSettings: async (settings: AppSettings) => {
     await invoke<void>("update_app_settings", { settings });
-    // Keep the cache in sync with the authoritative value just persisted.
-    settingsPromise = Promise.resolve(settings);
+    // Drop the cache instead of caching `settings`: the backend adjusts what
+    // it stores (it mints the pairing key, drops rejected bin paths), and a
+    // write must never seed the shared copy with something the backend did
+    // not answer — one bad value here blanks every settings page.
+    settingsPromise = null;
   },
   setWindowTheme: (dark: boolean) =>
     invoke<void>("set_window_theme", { dark }),
@@ -669,6 +722,29 @@ export const ipc = {
   pluginStorageDelete: (id: string, key: string) =>
     invoke<void>("plugin_storage_delete", { id, key }),
   // web access (start/stop are desktop-only; the bridge answers status too)
+  webDevices: () => invoke<WebDevice[]>("web_devices"),
+  webDeviceApprove: (id: string) => invoke<boolean>("web_device_approve", { id }),
+  webDeviceRevoke: (id: string) => invoke<boolean>("web_device_revoke", { id }),
+  webDeviceRename: (id: string, name: string) =>
+    invoke<boolean>("web_device_rename", { id, name }),
+  webRelayStatus: () => invoke<RelayInfo | null>("web_relay_status"),
+  webRelayStart: (url: string, key: string) => invoke<RelayInfo>("web_relay_start", { url, key }),
+  webRelayStop: () => invoke<void>("web_relay_stop"),
+  /** Is a browser driving this machine through the relay right now? */
+  remoteControlActive: () => invoke<boolean>("remote_control_active"),
+  /** Replace the pairing key now instead of waiting for the automatic
+   *  rotation. Desktop-only — a phone rotating it would lock others out. */
+  rotateWebPairKey: () => invoke<string>("rotate_web_pair_key"),
+  /** Write the deploy pack (source + wrangler project + how-to) to `path` as a
+   *  STORE-only zip; resolves with the relay key baked into it. */
+  relayDeployPack: (path: string, key: string | null) =>
+    invoke<string>("relay_deploy_pack", { path, key }),
+  /** Deploy the relay Worker into the token's account: creates the Durable
+   *  Object class, its binding and the key in one upload. `accountId` is only
+   *  needed for account-owned tokens (`cfat_…`), which Cloudflare does not let
+   *  list their own accounts. */
+  relayDeploy: (token: string, accountId: string | null, key: string | null) =>
+    invoke<RelayDeployResult>("relay_deploy", { token, accountId, key }),
   webAccessStart: () => invoke<WebAccessInfo>("web_access_start"),
   webAccessStop: () => invoke<void>("web_access_stop"),
   webAccessStatus: () => invoke<WebAccessInfo | null>("web_access_status"),
