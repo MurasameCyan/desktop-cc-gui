@@ -11,6 +11,11 @@
 //! numbers until the next response and therefore only feed the context
 //! window; `token_usage_record` is the once-per-response report this tail
 //! emits, so a turn's usage is the sum of its records.
+//!
+//! The tail starts at the file's end: `codex exec resume` appends to the
+//! rollout the thread wrote the first time, so byte 0 is the thread's whole
+//! history — reading from there ledgers every past response again on every
+//! launch.
 
 use serde_json::Value;
 use std::fs::File;
@@ -27,18 +32,24 @@ pub struct UsageTail {
 }
 
 impl UsageTail {
-    /// Open the rollout backing `thread_id`. None until the CLI has created
-    /// the file, so callers retry while the run streams.
+    /// Open the rollout backing `thread_id`, reporting only what the CLI
+    /// appends from here on. None until the CLI has created the file, so
+    /// callers retry while the run streams.
     pub fn open(thread_id: &str) -> Option<Self> {
         let home = crate::engine::engine_home(Some("CODEX_HOME"), ".codex");
         Self::open_in(&home, thread_id)
     }
 
     fn open_in(home: &Path, thread_id: &str) -> Option<Self> {
-        let file = File::open(rollout_path(home, thread_id)?).ok()?;
+        let mut file = File::open(rollout_path(home, thread_id)?).ok()?;
+        // Anything already in the file belongs to earlier turns — a resumed
+        // thread's rollout carries the entire thread. Start where the CLI
+        // will write next; a half-written trailing line fails to parse and is
+        // skipped, so starting mid-line costs nothing.
+        let offset = file.seek(SeekFrom::End(0)).ok()?;
         Some(Self {
             file,
-            offset: 0,
+            offset,
             context_window: None,
         })
     }
@@ -223,6 +234,39 @@ mod tests {
         assert_eq!(polled[0]["cache_write_input_tokens"], 500);
         assert_eq!(polled[1]["output_tokens"], 60);
         assert!(tail.poll().is_empty(), "already read");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `codex exec resume` appends to the rollout the thread wrote the first
+    /// time, so the file already holds every past response. One real thread's
+    /// 47 MB rollout carried 771 records summing to 102M tokens; reading from
+    /// byte 0 ledgered all of them again on every launch.
+    #[test]
+    fn history_already_in_the_rollout_is_not_reported() {
+        let dir = scratch("resume");
+        let day = dir.join("sessions").join("2026").join("09").join("11");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join("rollout-2026-09-11T01-00-00-t-4.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                record_line(9_000, 500, 9_500),
+                record_line(8_000, 400, 8_400)
+            ),
+        )
+        .unwrap();
+
+        let mut tail = UsageTail::open_in(&dir, "t-4").expect("tail opens");
+        assert!(
+            tail.poll().is_empty(),
+            "earlier turns are not this run's usage"
+        );
+
+        append(&path, &record_line(1_000, 40, 1_040));
+        let polled = tail.poll();
+        assert_eq!(polled.len(), 1, "only what was appended after open");
+        assert_eq!(polled[0]["input_tokens"], 1_000);
         std::fs::remove_dir_all(&dir).ok();
     }
 
