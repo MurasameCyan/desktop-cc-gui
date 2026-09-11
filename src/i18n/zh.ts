@@ -577,6 +577,16 @@ export const zh = {
     showInHeader: "在顶栏显示",
     collapsePanel: "收起侧边栏",
     expandPanel: "展开侧边栏",
+    addProgram: {
+      add: "添加程序",
+      name: "名称",
+      namePlaceholder: "例如 Notepad++",
+      executable: "可执行文件",
+      executablePlaceholder: "程序路径或点击浏览",
+      browse: "浏览…",
+      pickExecutable: "选择程序可执行文件",
+    },
+    removeProgram: "删除程序",
   },
   changelog: {
     title: "版本更新",

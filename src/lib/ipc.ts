@@ -635,6 +635,12 @@ export const ipc = {
   // open-app
   openWorkspaceIn: (path: string, options: { appName: string; args?: string[] }) =>
     invoke<void>("open_workspace_in", { path, app: options.appName, args: options.args ?? [] }),
+  /** Launch a user-picked custom program with the workspace path as argument. */
+  openCustomProgram: (executablePath: string, path: string) =>
+    invoke<void>("open_custom_program", { executablePath, path }),
+  /** OS icon for a program executable as a PNG data URL (null when none). */
+  getProgramIcon: (executablePath: string) =>
+    invoke<string | null>("get_program_icon", { executablePath }),
   revealInFileManager: (path: string) =>
     invoke<void>("reveal_in_file_manager", { path }),
   // metrics

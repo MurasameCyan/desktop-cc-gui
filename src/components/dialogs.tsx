@@ -30,11 +30,14 @@ export function ModalShell({
   children,
   onClose,
   className,
+  label,
 }: {
   children: ReactNode;
   onClose: () => void;
   /** Panel sizing override; defaults to the compact w-80 prompt size. */
   className?: string;
+  /** Accessible title for the dialog (or render a Heading slot="title"). */
+  label?: string;
 }) {
   return (
     <ModalOverlay
@@ -51,7 +54,9 @@ export function ModalShell({
           className,
         )}
       >
-        <Dialog className="outline-none">{children}</Dialog>
+        <Dialog aria-label={label} className="outline-none">
+          {children}
+        </Dialog>
       </Modal>
     </ModalOverlay>
   );

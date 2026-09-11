@@ -236,6 +236,8 @@ pub fn run() {
             git::git_create_branch,
             // open-app
             open_app::open_workspace_in,
+            open_app::open_custom_program,
+            open_app::get_program_icon,
             open_app::reveal_in_file_manager,
             // terminal
             terminal::terminal_open,

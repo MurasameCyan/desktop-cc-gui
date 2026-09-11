@@ -579,6 +579,17 @@ struct OpenWorkspaceArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenCustomProgramArgs {
+    executable_path: String,
+    path: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetProgramIconArgs {
+    executable_path: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TerminalOpenArgs {
     id: String,
     cwd: String,
@@ -920,6 +931,14 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "open_workspace_in" => {
             let a: OpenWorkspaceArgs = parse_args(&raw)?;
             ser(crate::open_app::open_workspace_in(a.path, a.app, a.args).await)
+        }
+        "open_custom_program" => {
+            let a: OpenCustomProgramArgs = parse_args(&raw)?;
+            ser(crate::open_app::open_custom_program(a.executable_path, a.path).await)
+        }
+        "get_program_icon" => {
+            let a: GetProgramIconArgs = parse_args(&raw)?;
+            ser(crate::open_app::get_program_icon(a.executable_path).await)
         }
         "reveal_in_file_manager" => {
             let a: PathArgs = parse_args(&raw)?;

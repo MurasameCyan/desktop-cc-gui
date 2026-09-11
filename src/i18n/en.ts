@@ -608,6 +608,16 @@ export const en: Messages = {
     showInHeader: "Show in header",
     collapsePanel: "Collapse sidebar",
     expandPanel: "Expand sidebar",
+    addProgram: {
+      add: "Add program",
+      name: "Name",
+      namePlaceholder: "e.g. Notepad++",
+      executable: "Executable",
+      executablePlaceholder: "/path/to/program or browse",
+      browse: "Browse…",
+      pickExecutable: "Select the program executable",
+    },
+    removeProgram: "Remove program",
   },
   changelog: {
     title: "Release Notes",

@@ -36,13 +36,14 @@ export const OPEN_APP_ICONS: Record<string, string> = {
 
 /**
  * Which path a target receives: the file manager always gets the workspace
- * folder; editors prefer the file currently open in the files panel.
+ * folder; editors (and custom programs) prefer the file currently open in
+ * the files panel.
  */
 export function resolveOpenAppPath(
-  target: Pick<OpenAppTarget, "kind">,
+  target: Pick<OpenAppTarget, "kind"> | CustomApp,
   options: { workspacePath: string; activeFilePath?: string | null },
 ): string {
-  if (target.kind === "finder") return options.workspacePath;
+  if ("kind" in target && target.kind === "finder") return options.workspacePath;
   return options.activeFilePath?.trim() || options.workspacePath;
 }
 
@@ -53,6 +54,62 @@ export async function openPathInTarget(path: string, target: OpenAppTarget): Pro
   }
   if (!target.appName) return;
   await ipc.openWorkspaceIn(path, { appName: target.appName });
+}
+
+/** Launch a custom program entry at `path` with the workspace path appended. */
+export async function openCustomProgram(path: string, app: CustomApp): Promise<void> {
+  await ipc.openCustomProgram(app.path, path);
+}
+
+// ---------- user-added custom programs (header menu "添加程序") ----------
+
+export type CustomApp = {
+  id: string;
+  /** Display name in the menu (user-provided; falls back to the file name). */
+  label: string;
+  /** Absolute path of the executable (or macOS .app bundle). */
+  path: string;
+  /**
+   * OS-extracted icon as a PNG data URL. `undefined` = not extracted yet,
+   * `null` = extraction ran and found nothing (so we don't retry).
+   */
+  icon?: string | null;
+};
+
+export const CUSTOM_APPS_KEY = "ccgui-next.openWorkspaceCustomApps";
+
+export function readCustomApps(): CustomApp[] {
+  return (
+    readStoredJson<CustomApp[]>(CUSTOM_APPS_KEY, (stored) =>
+      Array.isArray(stored)
+        ? stored.flatMap((entry): CustomApp[] => {
+            if (
+              typeof entry !== "object" ||
+              entry === null ||
+              typeof (entry as CustomApp).id !== "string" ||
+              typeof (entry as CustomApp).label !== "string" ||
+              typeof (entry as CustomApp).path !== "string"
+            ) {
+              return [];
+            }
+            const raw = entry as CustomApp;
+            const icon =
+              typeof raw.icon === "string" ? raw.icon : raw.icon === null ? null : undefined;
+            return [{ id: raw.id, label: raw.label, path: raw.path, icon }];
+          })
+        : null,
+    ) ?? []
+  );
+}
+
+export function writeCustomApps(apps: CustomApp[]): void {
+  writeStored(CUSTOM_APPS_KEY, JSON.stringify(apps));
+}
+
+/** Extract the icon for an app that has not been probed yet (failures → null). */
+export async function extractCustomAppIcon(app: CustomApp): Promise<string | null> {
+  if (app.icon !== undefined) return app.icon;
+  return ipc.getProgramIcon(app.path).catch(() => null);
 }
 
 // ---------- header pinning / selection persistence (localStorage) ----------
