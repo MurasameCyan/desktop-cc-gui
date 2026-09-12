@@ -217,14 +217,16 @@ export function useChatTabs({
     if (dirty[0]) setDialog({ kind: "closeFile", path: dirty[0] });
   }, [sessionTabItems, closeTab, openFiles, dirtyPaths, closeFile, closeDiff, setDialog]);
 
-  // Tab context menu "Close Inactive": keep the tab in view and drop the
-  // rest. Same dirty-file rule as Close All — a file with unsaved edits is
-  // never discarded silently; the first one routes through the save dialog
-  // and the others stay open. The tab in view keeps its edit either way.
+  // Tab context menu "Close Inactive": drop the tabs that are neither in
+  // view nor running. A session tab whose turn is still streaming stays —
+  // closing it would leave the turn running with nothing showing it.
+  // Same dirty-file rule as Close All: unsaved edits are never discarded
+  // silently; the first one routes through the save dialog and the others
+  // stay open. The tab in view keeps its edit either way.
   const handleTabCloseInactive = useCallback(() => {
     if (activeTabKey !== DIFF_TAB_KEY) closeDiff();
     for (const item of sessionTabItems) {
-      if (item.key === activeTabKey) continue;
+      if (item.key === activeTabKey || item.streaming) continue;
       closeTab(item.tab.engine, item.tab.sessionId, item.tab.workspacePath);
     }
     const others = openFiles.filter((path) => FILE_TAB_PREFIX + path !== activeTabKey);
