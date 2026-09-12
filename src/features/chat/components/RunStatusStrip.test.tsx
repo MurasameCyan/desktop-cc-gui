@@ -258,6 +258,29 @@ describe("RunStatusStrip", () => {
     expect(panel).toContain("运行中");
   });
 
+  it("opens a subagent's full assignment inside the existing panel", async () => {
+    const assignment = "# Target\nOwn relay.rs only.\n# Acceptance\nOutages recover without toggling.";
+    seed([
+      msg(1, "user", "delegate"),
+      {
+        seq: 2,
+        role: "tool",
+        text: "task · Dispatching relay worker",
+        ts: null,
+        args: { tasks: [{ agent: "task", name: "RelayRecovery", task: assignment }] },
+      },
+    ], true);
+    await renderStrip();
+    await click(pill("子代理"));
+    await click(container.querySelector("[data-agent-step-key]")!);
+
+    const panel = container.querySelector("[data-testid='run-status-subagents']");
+    expect(panel?.textContent).toContain("RelayRecovery");
+    expect(panel?.textContent).toContain("Own relay.rs only.");
+    expect(panel?.textContent).toContain("Outages recover without toggling.");
+    expect(panel?.querySelector("[data-testid='subagent-detail-overlay']")).not.toBeNull();
+  });
+
   it("keeps subagents from earlier turns visible in completed state", async () => {
     const multiTurn: Message[] = [
       msg(1, "user", "turn 1: run subagent"),

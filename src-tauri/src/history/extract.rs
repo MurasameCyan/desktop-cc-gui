@@ -1,5 +1,6 @@
 use super::{content_text, parse_ts_ms_str, Message};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -100,6 +101,10 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
     let mut messages = Vec::<Message>::new();
     let mut seq = 0i64;
     let mut last_user_ts: Option<i64> = None;
+    // tool call id -> index in `messages`. Results arrive in completion order,
+    // so pairing them back up by the latest row still missing one mislabels
+    // parallel calls; the id is what actually names the call.
+    let mut call_rows: HashMap<String, usize> = HashMap::new();
     walk_lines(reader, extract, |row| {
         // Usage-only marker (codex token_count or claude compact_boundary): fold
         // onto the last assistant message instead of creating an empty row.
@@ -117,14 +122,23 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
             }
             return;
         }
-        // Tool result marker: fold onto the matching or latest tool message.
+        // Tool result marker: fold onto its named call when the transcript
+        // carries toolCallId, else retain the legacy latest-unresolved
+        // fallback used by Claude transcripts.
         if row.role == "__tool_result__" {
             if let Some(res) = row.result {
-                for m in messages.iter_mut().rev() {
-                    if m.role == "tool" && m.result.is_none() {
-                        m.result = Some(res);
-                        break;
-                    }
+                let by_id = row
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| call_rows.get(id).copied())
+                    .filter(|index| messages[*index].result.is_none());
+                let index = by_id.or_else(|| {
+                    messages
+                        .iter()
+                        .rposition(|m| m.role == "tool" && m.result.is_none())
+                });
+                if let Some(index) = index {
+                    messages[index].result = Some(res);
                 }
             }
             return;
@@ -147,6 +161,7 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
             None
         });
         seq += 1;
+        let call_id = row.tool_call_id;
         messages.push(Message {
             seq,
             role: row.role,
@@ -162,6 +177,9 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
             duration_ms,
             images: row.images,
         });
+        if let Some(id) = call_id {
+            call_rows.insert(id, messages.len() - 1);
+        }
     });
     ParsedSession { messages }
 }
@@ -378,6 +396,7 @@ struct LineRow {
     ts: Option<String>,
     path: Option<String>,
     args: Option<Value>,
+    tool_call_id: Option<String>,
     result: Option<Value>,
     todos: Option<crate::engine::TodosPayload>,
     usage: Option<Value>,
@@ -396,6 +415,7 @@ impl LineRow {
             ts,
             path: None,
             args: None,
+            tool_call_id: None,
             result: None,
             todos: None,
             usage: None,
@@ -536,6 +556,7 @@ fn pi_assistant_part(part: &Value, out: &mut LineRows, text: &mut String, ts: &O
             out.push(LineRow {
                 path: arguments.and_then(crate::engine::tool_path_arg),
                 args: arguments.and_then(crate::engine::parse_tool_args_value),
+                tool_call_id: part.get("id").and_then(Value::as_str).map(str::to_string),
                 // Session files store `arguments` as an already-parsed object.
                 todos: arguments.and_then(crate::engine::parse_todo_args),
                 ..LineRow::new(
@@ -632,7 +653,29 @@ fn extract_pi_family_line(value: &Value, images: ImageMode) -> LineRows {
                 }
             }
         },
-        "toolResult" => Vec::new(),
+        "toolResult" => {
+            let content = message.get("content").cloned();
+            let text = match content.as_ref() {
+                Some(Value::Array(parts)) => text_of_parts(parts, false, "\n"),
+                other => content_text(other),
+            };
+            let details = message.get("details").cloned();
+            let result = match details {
+                Some(details) if !details.is_null() => Some(serde_json::json!({
+                    "text": text,
+                    "details": details,
+                })),
+                _ => Some(Value::String(text)),
+            };
+            vec![LineRow {
+                tool_call_id: message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                result,
+                ..LineRow::new("__tool_result__", String::new(), ts)
+            }]
+        }
         _ => Vec::new(),
     }
 }
@@ -987,6 +1030,56 @@ mod tests {
         );
         assert_eq!(rows[3].text, "answer two");
         assert_eq!(rows[3].path, None);
+    }
+
+    /// Results pair with their call by id, not by arrival order: parallel tool
+    /// calls finish in whatever order they finish, and the fallback (attach to
+    /// the latest row still without a result) mislabels them when they do.
+    /// The `details` payload is what the subagent panel reads for job status.
+    #[test]
+    fn pi_tool_results_pair_with_their_call_ids() {
+        let call = |id: &str| {
+            serde_json::json!({
+                "type": "message",
+                "message": {"role": "assistant", "content": [{
+                    "type": "toolCall",
+                    "id": id,
+                    "name": "hub",
+                    "intent": "Waiting for workers",
+                    "arguments": {"op": "wait"}
+                }]}
+            })
+        };
+        let result = |id: &str, text: &str, status: &str| {
+            serde_json::json!({
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": id,
+                    "content": [{"type": "text", "text": text}],
+                    "details": {"jobs": [{"id": id, "status": status}]}
+                }
+            })
+        };
+        let lines = vec![
+            call("call_a"),
+            call("call_b"),
+            // Out of order: `a` answers first even though `b` was called later.
+            result("call_a", "## Still Running (1)", "running"),
+            result("call_b", "done", "completed"),
+        ];
+        let input = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let extractor: LineExtractor<'_> =
+            Box::new(|value: &Value| extract_pi_family_line(value, ImageMode::Collect));
+        let parsed = collect_session(std::io::Cursor::new(input), &extractor);
+
+        let (first, second) = (&parsed.messages[0], &parsed.messages[1]);
+        assert_eq!(first.result.as_ref().unwrap()["details"]["jobs"][0]["status"], "running");
+        assert_eq!(second.result.as_ref().unwrap()["details"]["jobs"][0]["status"], "completed");
     }
 
     #[test]

@@ -58,6 +58,53 @@ describe("subagent counting", () => {
     expect(deriveAgentTaskSteps([tool(2, "hub · Checking background job roster", { op: "jobs" })], true, "omp")).toHaveLength(0);
   });
 
+  it("keeps agents named by a running hub snapshot active even when the host is not streaming", () => {
+    const snapshot = tool(6, "hub · Waiting for workers", { op: "wait" }, {
+      details: {
+        op: "wait",
+        jobs: [
+          { id: "CoreInvokeFilterParse", type: "task", status: "running" },
+          { id: "IdolLiveTranslate", type: "task", status: "running" },
+        ],
+      },
+    });
+    const steps = deriveAgentTaskSteps([DISPATCH, snapshot], false, "omp");
+    expect(steps.map(({ label, state }) => ({ label, state }))).toEqual([
+      { label: "CoreInvokeFilterParse", state: "active" },
+      { label: "IdolLiveDemosaic", state: "complete" },
+      { label: "IdolLiveTranslate", state: "active" },
+    ]);
+  });
+
+  it("retains the complete delegated task as its clickable detail", () => {
+    const dispatch = tool(2, "task · Dispatching worker", {
+      tasks: [{
+        agent: "task",
+        name: "Worker",
+        task: "# Target\nOwn relay.rs only.\n# Acceptance\nOutages recover without toggling.",
+      }],
+    });
+    expect(deriveAgentTaskSteps([dispatch], true, "omp")[0].detail).toBe(
+      "# Target\nOwn relay.rs only.\n# Acceptance\nOutages recover without toggling.",
+    );
+  });
+
+  it("tags every row: the agent kind when the harness names one, else the tool", () => {
+    // The harness writes `agent` only for some dispatches (scout batches carry
+    // it, task batches do not); a row without a tag loses the only hint of
+    // where it came from.
+    const kindless = tool(2, "task · Dispatching workers", {
+      tasks: [{ name: "RelayWorker", task: "# Target\nOwn relay.rs." }],
+    });
+    const kinded = tool(3, "task · Dispatching scouts", {
+      tasks: [{ agent: "scout", name: "RepoMap", task: "# Target\nMap the repo." }],
+    });
+    expect(deriveAgentTaskSteps([kindless, kinded], true, "omp").map((s) => s.subagentType)).toEqual([
+      "task",
+      "scout",
+    ]);
+  });
+
   it("reads ids off both spellings", () => {
     expect(subagentRefsFromArgs({ ids: ["bg_1", "bg_2"] }).map((r) => r.id)).toEqual(["bg_1", "bg_2"]);
     expect(subagentRefsFromArgs({ tasks: [{ id: "alpha" }] })[0]).toMatchObject({ id: "alpha", label: "alpha" });

@@ -292,50 +292,114 @@ function TodoRows({ items }: { items: TodoItem[] }) {
   );
 }
 
+function BackIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.5 4 6 8l3.5 4" />
+    </svg>
+  );
+}
+
+/** One agent's full assignment, overlaid on the list inside the same panel:
+ *  task briefs run long, and leaving the strip to read one loses the panel. */
+function SubagentDetail({ step, onBack }: { step: AgentTaskStep; onBack: () => void }) {
+  const { t } = useTranslation();
+  const complete = step.state === "complete";
+  return (
+    <div data-testid="subagent-detail-overlay" className="flex flex-col gap-1 p-1">
+      <div className="flex items-center gap-1.5 px-1">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label={t("chat.agentDetailBack")}
+          title={t("chat.agentDetailBack")}
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-foreground-icon-tertiary hover:bg-background-tertiary-hover hover:text-foreground-icon-primary"
+        >
+          <BackIcon />
+        </button>
+        <div className="flex min-w-0 items-center gap-1.5">
+          {step.subagentType && (
+            <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
+              {step.subagentType}
+            </span>
+          )}
+          <span className="truncate text-caption-1-medium text-text-primary">{step.label}</span>
+        </div>
+        <span
+          className={cx(
+            "ml-auto shrink-0 text-caption-2-medium",
+            complete ? "text-[var(--color-status-unseen)]" : "font-medium text-blue-500",
+          )}
+        >
+          {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
+        </span>
+      </div>
+      <pre className="max-h-52 overflow-y-auto rounded bg-background-secondary-default px-2 py-1.5 text-caption-1-medium break-words whitespace-pre-wrap text-text-secondary">
+        {step.detail ?? step.label}
+      </pre>
+    </div>
+  );
+}
+
 function SubagentRows({ steps }: { steps: AgentTaskStep[] }) {
   const { t } = useTranslation();
+  // Open detail lives here, not in the strip: closing the panel unmounts this
+  // component, so reopening always starts on the list.
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const open = openKey ? steps.find((step) => step.key === openKey) : undefined;
+  if (open) return (
+    <div data-testid="run-status-subagents">
+      <SubagentDetail step={open} onBack={() => setOpenKey(null)} />
+    </div>
+  );
   return (
-    <ul className="flex flex-col gap-0.5 p-1" data-testid="run-status-subagents">
-      {steps.map((step) => {
-        const complete = step.state === "complete";
-        return (
-          <li
-            key={step.key}
-            className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-background-tertiary-default/50"
-          >
-            <div className="flex items-center justify-center">
-              <BreathingDot active={!complete} />
-            </div>
-            <div className="flex min-w-0 items-center gap-1.5">
-              {step.subagentType && (
-                <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
-                  {step.subagentType}
-                </span>
-              )}
-              <span
-                className={cx(
-                  "truncate text-caption-1-medium",
-                  complete ? "text-text-secondary" : "text-text-primary",
-                )}
+    <div data-testid="run-status-subagents">
+      <ul className="flex flex-col gap-0.5 p-1">
+        {steps.map((step) => {
+          const complete = step.state === "complete";
+          return (
+            <li key={step.key}>
+              <button
+                type="button"
+                data-agent-step-key={step.key}
+                onClick={() => setOpenKey(step.key)}
                 title={step.detail ? `${step.label}\n${step.detail}` : step.label}
+                className="grid w-full cursor-pointer grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-background-tertiary-default/50"
               >
-                {step.label}
-              </span>
-            </div>
-            <span
-              className={cx(
-                "text-caption-2-medium shrink-0 flex items-center gap-1",
-                complete
-                  ? "text-[var(--color-status-unseen)]"
-                  : "text-blue-500 font-medium",
-              )}
-            >
-              {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
+                <div className="flex items-center justify-center">
+                  <BreathingDot active={!complete} />
+                </div>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {step.subagentType && (
+                    <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
+                      {step.subagentType}
+                    </span>
+                  )}
+                  <span
+                    className={cx(
+                      "truncate text-caption-1-medium",
+                      complete ? "text-text-secondary" : "text-text-primary",
+                    )}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+                <span
+                  className={cx(
+                    "text-caption-2-medium flex shrink-0 items-center gap-1",
+                    complete
+                      ? "text-[var(--color-status-unseen)]"
+                      : "font-medium text-blue-500",
+                  )}
+                >
+                  {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
