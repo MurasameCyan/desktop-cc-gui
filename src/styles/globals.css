@@ -238,11 +238,15 @@ input[type="search"]::-webkit-search-cancel-button {
 /* iOS Safari auto-zooms the page when a focused form field's font-size is
  * under 16px — our text-body-regular/medium tokens are 14px by design, so
  * bump just the font-size (not the whole token) on small screens instead of
- * changing the design system's type scale. */
+ * changing the design system's type scale. The composer is a contentEditable
+ * div, not a textarea: leaving it out meant focusing it on a phone zoomed the
+ * whole app, and the zoom stayed after the keyboard closed. Only the editable
+ * host — `contenteditable="false"` is the file chips inside it. */
 @media (max-width: 639px) {
   input,
   select,
-  textarea {
+  textarea,
+  [contenteditable="true"] {
     font-size: 16px;
   }
 }
