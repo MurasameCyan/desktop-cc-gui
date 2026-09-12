@@ -392,13 +392,15 @@ export interface DshHostStatus {
   /** "spawned" = we launched it (and will kill it); "adopted" = pre-existing
    *  listener we attached to and never kill implicitly. */
   ownership: "spawned" | "adopted" | null;
-  /** Raw host.describe value (provider/model/attachedSessions/…). */
+  /** Normalized describe view (provider/model from the host's
+   *  agent-default-model namespace; 0.1.2 removed raw host.describe). */
   describe: {
     provider?: string | null;
     model?: string | null;
-    attachedSessions?: number | null;
-    version?: string | null;
   } | null;
+  /** Web UI entry carrying the persisted launch token (BrowserAuth gates
+   *  the web UI like every RPC); fall back to origin when null. */
+  webUrl: string | null;
   /** Probe error, set only when the host is down. */
   error: string | null;
 }
