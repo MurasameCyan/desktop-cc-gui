@@ -17,6 +17,7 @@
 //! the Worker holds no policy beyond the shared key.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -24,16 +25,24 @@ use parking_lot::Mutex;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tauri::Manager;
 
-/// Pause before the single redial that follows a dropped socket: long enough
-/// for the Worker to finish recycling the old connection, short enough that a
-/// phone reload barely notices. A dial that *fails* does not come back on its
-/// own — see `run_agent`.
+/// Pause before redialing after a dropped socket: long enough for the Worker
+/// to finish recycling the old connection, short enough that a phone reload
+/// barely notices.
 const REDIAL_DELAY_MS: u64 = 1_000;
+/// Ceiling for the redial backoff. A dial that fails is retried for as long as
+/// the switch is on — see `run_agent` — so the pause has to stay bounded.
+const REDIAL_MAX_MS: u64 = 30_000;
+/// Liveness probe period on a connected agent socket. A Cloudflare blip can
+/// leave the socket open at this end with no Durable Object behind it, and the
+/// switch keeps reading 已连接; a ping that stays unanswered for a whole period
+/// drops the socket so the outer loop redials.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// Marks traffic that arrived through the relay: the bridge requires the
 /// pairing key for those requests only, so the LAN keeps upstream's model.
 pub const VIA_HEADER: &str = "x-ccgui-via";
@@ -156,6 +165,13 @@ struct LiveSocket {
     /// Frame bytes plus whether they are a text frame (see `spawn_socket`).
     frames: mpsc::Sender<(Vec<u8>, bool)>,
     task: tokio::task::AbortHandle,
+}
+
+/// What the writer task puts on the wire: protocol replies, plus the liveness
+/// ping the read loop schedules.
+enum OutFrame {
+    Text(String),
+    Ping,
 }
 
 /// `https://host` → `wss://host/agent?key=…`, `http://host` → `ws://…`.
@@ -699,11 +715,54 @@ pub async fn relay_deploy(
     })
 }
 
+/// Backoff before the next dial: 1s, 2s, 4s … capped. Attempt 0 (the redial
+/// right after a live socket died) waits the base delay, which is also what
+/// keeps a Worker that accepts and immediately closes from being a hot loop.
+fn redial_delay(attempt: u32) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(5);
+    std::time::Duration::from_millis((REDIAL_DELAY_MS << shift).min(REDIAL_MAX_MS))
+}
+
+/// Dial until a socket comes up or `stop` flips; `None` means stopped. A dial
+/// that fails is reported and then retried — the Worker is a service on the
+/// internet, so "not answering right now" is what an outage looks like, and
+/// ending the session there used to turn a Cloudflare blip into a manual
+/// repair: the switch still read 连接中转, so the only way back was toggling it.
+async fn redial_until_connected<S, F, Fut>(
+    stop: &mut watch::Receiver<bool>,
+    mut dial: F,
+    mut on_failure: impl FnMut(String),
+) -> Option<S>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<S, String>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        if *stop.borrow() {
+            return None;
+        }
+        match dial().await {
+            Ok(socket) => return Some(socket),
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                on_failure(error);
+            }
+        }
+        if *stop.borrow() {
+            return None;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(redial_delay(attempt)) => {}
+            _ = stop.changed() => return None,
+        }
+    }
+}
+
 /// Keeps the agent socket up. A socket that lived and then died is redialed —
-/// a blip on the desktop's uplink should not cost the phone its link. A dial
-/// that *cannot be established* ends the session instead: retrying forever
-/// leaves the relay switch reading 断开中转 for a Worker that is not answering,
-/// and only the user knows when the address/key deserves another try.
+/// a blip on the desktop's uplink should not cost the phone its link — and a
+/// dial that never comes up is retried on a capped backoff until the user
+/// switches the relay off. Only an address no retry can fix ends the session.
 async fn run_agent(
     app: tauri::AppHandle,
     agent: String,
@@ -711,34 +770,43 @@ async fn run_agent(
     mut stop: watch::Receiver<bool>,
     generation: u64,
 ) {
+    let request = match agent.clone().into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            give_up(&app, generation, format!("中继地址无效：{e}"));
+            return;
+        }
+    };
     loop {
         if *stop.borrow() {
             return;
         }
-        let request = match agent.clone().into_client_request() {
-            Ok(r) => r,
-            Err(e) => {
-                give_up(&app, generation, format!("中继地址无效：{e}"));
-                return;
-            }
-        };
-        match tokio_tungstenite::connect_async(request).await {
-            Ok((socket, _)) => {
-                set_error(&app, generation, String::new());
-                set_connected(&app, generation, true);
-                serve(socket, port, &mut stop).await;
+        let connected = redial_until_connected(
+            &mut stop,
+            || {
+                let request = request.clone();
+                async move {
+                    tokio_tungstenite::connect_async(request)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+            },
+            |error| {
                 set_connected(&app, generation, false);
-            }
-            Err(e) => {
-                give_up(&app, generation, format!("连接中继失败：{e}"));
-                return;
-            }
-        }
+                set_error(&app, generation, format!("连接中继失败，正在重试：{error}"));
+            },
+        )
+        .await;
+        let Some((socket, _)) = connected else {
+            return;
+        };
+        set_error(&app, generation, String::new());
+        set_connected(&app, generation, true);
+        serve(socket, port, &mut stop).await;
+        set_connected(&app, generation, false);
         if *stop.borrow() {
             return;
         }
-        // The pause is what keeps a Worker that accepts and immediately closes
-        // from turning this into a hot loop.
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(REDIAL_DELAY_MS)) => {}
             _ = stop.changed() => return,
@@ -755,10 +823,14 @@ async fn serve(
     stop: &mut watch::Receiver<bool>,
 ) {
     let (mut tx, mut rx) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<OutFrame>(256);
     let writer = tokio::spawn(async move {
-        while let Some(text) = out_rx.recv().await {
-            if tx.send(Message::Text(text.into())).await.is_err() {
+        while let Some(frame) = out_rx.recv().await {
+            let message = match frame {
+                OutFrame::Text(text) => Message::Text(text.into()),
+                OutFrame::Ping => Message::Ping(Vec::new().into()),
+            };
+            if tx.send(message).await.is_err() {
                 break;
             }
         }
@@ -775,18 +847,48 @@ async fn serve(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
+    // Liveness probe. A Cloudflare blip can take the Durable Object out from
+    // under an open socket: nothing arrives, nothing errors, and the switch
+    // keeps reading 已连接 while every request answers 503. A ping that no
+    // frame follows within one interval is the only signal that the far end is
+    // gone, and dropping the socket here is what lets `run_agent` redial.
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick fires immediately; the first probe belongs one interval in.
+    heartbeat.tick().await;
+    let mut ping_sent_at: Option<tokio::time::Instant> = None;
+
     loop {
         let frame = tokio::select! {
             _ = stop.changed() => break,
-            next = rx.next() => match next {
-                Some(Ok(Message::Text(text))) => text.to_string(),
-                Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
-                    Ok(text) => text,
-                    Err(_) => continue,
-                },
-                Some(Ok(_)) => continue,
-                Some(Err(_)) | None => break,
-            },
+            _ = heartbeat.tick() => {
+                if ping_sent_at.take().is_some() {
+                    break;
+                }
+                ping_sent_at = Some(tokio::time::Instant::now());
+                // A full channel means traffic is flowing, which is proof
+                // enough; only a closed one ends the loop.
+                if matches!(
+                    out_tx.try_send(OutFrame::Ping),
+                    Err(mpsc::error::TrySendError::Closed(_))
+                ) {
+                    break;
+                }
+                continue;
+            }
+            next = rx.next() => {
+                // Any frame — a pong included — proves the far end is alive.
+                ping_sent_at = None;
+                match next {
+                    Some(Ok(Message::Text(text))) => text.to_string(),
+                    Some(Ok(Message::Binary(bytes))) => match String::from_utf8(bytes.to_vec()) {
+                        Ok(text) => text,
+                        Err(_) => continue,
+                    },
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => break,
+                }
+            }
         };
         let Ok(frame) = serde_json::from_str::<AgentFrame>(&frame) else {
             continue;
@@ -877,7 +979,7 @@ fn spawn_http(
     id: u64,
     pending: PendingHttp,
     port: u16,
-    out: mpsc::Sender<String>,
+    out: mpsc::Sender<OutFrame>,
     client: reqwest::Client,
 ) {
     tokio::spawn(async move {
@@ -965,7 +1067,7 @@ fn spawn_socket(
     path: String,
     headers: HashMap<String, String>,
     port: u16,
-    out: mpsc::Sender<String>,
+    out: mpsc::Sender<OutFrame>,
 ) -> LiveSocket {
     let (frames_tx, mut frames_rx) = mpsc::channel::<(Vec<u8>, bool)>(256);
     let handle = tokio::spawn(async move {
@@ -1078,11 +1180,11 @@ fn spawn_socket(
     }
 }
 
-async fn send(out: &mpsc::Sender<String>, frame: &ClientFrame) -> Result<(), ()> {
+async fn send(out: &mpsc::Sender<OutFrame>, frame: &ClientFrame) -> Result<(), ()> {
     let Ok(text) = serde_json::to_string(frame) else {
         return Err(());
     };
-    out.send(text).await.map_err(|_| ())
+    out.send(OutFrame::Text(text)).await.map_err(|_| ())
 }
 
 fn b64_to_bytes(text: &str) -> Vec<u8> {
@@ -1201,6 +1303,55 @@ mod tests {
         assert!(String::from_utf8_lossy(&pack).contains(key), "key baked in");
     }
 
+    /// A dial that fails must not end the session. It used to: the first
+    /// connect error called `give_up`, dropped `RelayState`, and left the
+    /// switch reading 连接中转 — a Cloudflare blip became a manual repair,
+    /// because nothing brought the tunnel back until the user toggled it.
+    #[tokio::test]
+    async fn a_failed_dial_is_retried_instead_of_ending_the_session() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        let attempts = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&attempts);
+        let failures = Arc::new(Mutex::new(Vec::<String>::new()));
+        let reported = Arc::clone(&failures);
+        // The second failure flips the switch off. A give-up implementation
+        // would have returned after the first, so two attempts prove the retry.
+        let dial = move || {
+            let n = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            let stop = stop_tx.clone();
+            async move {
+                if n >= 2 {
+                    let _ = stop.send(true);
+                }
+                Err::<(), String>("cloudflare unavailable".into())
+            }
+        };
+
+        let outcome = redial_until_connected(&mut stop, dial, |error| {
+            reported.lock().push(error);
+        })
+        .await;
+
+        assert!(outcome.is_none(), "only stop ends the loop");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "the failed dial was retried");
+        assert_eq!(
+            failures.lock().len(),
+            2,
+            "every failure reaches the settings card"
+        );
+    }
+
+    /// The backoff is what keeps a Worker that is down from becoming a hot
+    /// loop while the switch stays on.
+    #[test]
+    fn redial_backoff_grows_then_caps() {
+        assert_eq!(redial_delay(0).as_millis(), 1_000);
+        assert_eq!(redial_delay(1).as_millis(), 1_000);
+        assert_eq!(redial_delay(2).as_millis(), 2_000);
+        assert_eq!(redial_delay(6).as_millis(), 30_000);
+        assert_eq!(redial_delay(99).as_millis(), 30_000);
+    }
+
     #[test]
     fn relay_key_is_url_safe_and_long() {
         let key = new_relay_key();
@@ -1226,16 +1377,20 @@ mod tests {
     /// (status, body). Panics on an `error` frame: the tests below all describe
     /// hops that must succeed.
     async fn drain_stream(
-        frames: &mut mpsc::Receiver<String>,
+        frames: &mut mpsc::Receiver<OutFrame>,
         id: u64,
     ) -> (Option<u64>, Vec<u8>) {
         let mut status = None;
         let mut body = Vec::new();
         loop {
-            let text = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+            let text = match tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
                 .await
                 .expect("the stream produced no frame")
-                .expect("the stream ended without closing");
+                .expect("the stream ended without closing")
+            {
+                OutFrame::Text(text) => text,
+                OutFrame::Ping => continue,
+            };
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(value["id"], id, "every frame carries its stream id");
             match value["t"].as_str().unwrap() {
@@ -1279,7 +1434,7 @@ mod tests {
             .with_state(seen.clone());
         let port = serve_local(bridge).await;
 
-        let (out, mut frames) = mpsc::channel::<String>(32);
+        let (out, mut frames) = mpsc::channel::<OutFrame>(32);
         let mut headers = HashMap::new();
         // The phone's own claim about the hop, and a hop-by-hop header that
         // would describe a body length reqwest is about to set itself.
@@ -1335,7 +1490,7 @@ mod tests {
         );
         let port = serve_local(bridge).await;
 
-        let (out, mut frames) = mpsc::channel::<String>(32);
+        let (out, mut frames) = mpsc::channel::<OutFrame>(32);
         let live = spawn_socket(11, "/ws".into(), HashMap::new(), port, out);
         let text_payload = br#"{"type":"hello"}"#.to_vec();
         // Deliberately not UTF-8: a binary frame decoded as text would corrupt.
@@ -1345,10 +1500,14 @@ mod tests {
 
         let mut got = Vec::new();
         while got.len() < 2 {
-            let text = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+            let text = match tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
                 .await
                 .expect("the socket produced no frame")
-                .expect("the socket closed before both echoes");
+                .expect("the socket closed before both echoes")
+            {
+                OutFrame::Text(text) => text,
+                OutFrame::Ping => continue,
+            };
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             if value["t"] == "data" {
                 got.push((
@@ -1380,14 +1539,14 @@ mod tests {
             serde_json::json!({"t":"body","id":3,"b64":bytes_to_b64(b"second")}).to_string(),
             serde_json::json!({"t":"end","id":3}).to_string(),
         ]);
-        let (got_tx, mut got_rx) = mpsc::channel::<String>(32);
+        let (got_tx, mut got_rx) = mpsc::channel::<OutFrame>(32);
         let worker = axum::Router::new()
             .route(
                 "/agent",
                 axum::routing::get(
                     |axum::extract::State((scripted, got)): axum::extract::State<(
                         Arc<Vec<String>>,
-                        mpsc::Sender<String>,
+                        mpsc::Sender<OutFrame>,
                     )>,
                      ws: axum::extract::WebSocketUpgrade| async move {
                         ws.on_upgrade(move |mut socket| async move {
@@ -1398,7 +1557,7 @@ mod tests {
                                 }
                             }
                             while let Some(Ok(Axum::Text(text))) = socket.recv().await {
-                                if got.send(text.to_string()).await.is_err() {
+                                if got.send(OutFrame::Text(text.to_string())).await.is_err() {
                                     return;
                                 }
                             }
