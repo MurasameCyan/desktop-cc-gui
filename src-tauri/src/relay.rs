@@ -210,6 +210,37 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
+/// Relay url + key to dial at launch, when the switch was left on. The tunnel
+/// is what makes the machine reachable without anyone at the desk, so an app
+/// relaunch (update, crash, reboot) has to bring it back — losing it there
+/// would need a human to notice and click.
+pub fn autostart_target(settings: &crate::settings::AppSettings) -> Option<(String, String)> {
+    if settings.web_relay_on != Some(true) {
+        return None;
+    }
+    let url = settings.web_relay_url.as_deref()?.trim();
+    let key = settings.web_relay_key.as_deref()?.trim();
+    if url.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((url.to_string(), key.to_string()))
+}
+
+/// Remember the switch position for the next launch. Best effort: a settings
+/// write failure must never take the running relay down with it.
+fn remember_relay_enabled(enabled: bool) {
+    let Ok(mut settings) = crate::settings::read_settings() else {
+        return;
+    };
+    if settings.web_relay_on == Some(enabled) {
+        return;
+    }
+    settings.web_relay_on = Some(enabled);
+    if let Err(error) = crate::settings::persist_settings(&mut settings) {
+        eprintln!("[relay] could not remember the switch position: {error}");
+    }
+}
+
 #[tauri::command]
 pub async fn web_relay_start(
     app: tauri::AppHandle,
@@ -256,6 +287,9 @@ pub async fn web_relay_start(
     tokio::spawn(async move {
         run_agent(handle, agent, bridge_port, stop_rx, generation).await;
     });
+    // Only after the switch is actually up: a failed start must not leave a
+    // remembered "on" that a relaunch would retry forever.
+    remember_relay_enabled(true);
     Ok(info)
 }
 
@@ -267,6 +301,7 @@ pub fn web_relay_stop(app: tauri::AppHandle) -> Result<(), String> {
         let _ = running.stop.send(true);
     }
     drop(guard);
+    remember_relay_enabled(false);
     broadcast_relay(&app);
     Ok(())
 }
@@ -724,14 +759,15 @@ fn redial_delay(attempt: u32) -> std::time::Duration {
 }
 
 /// Dial until a socket comes up or `stop` flips; `None` means stopped. A dial
-/// that fails is reported and then retried — the Worker is a service on the
-/// internet, so "not answering right now" is what an outage looks like, and
-/// ending the session there used to turn a Cloudflare blip into a manual
-/// repair: the switch still read 连接中转, so the only way back was toggling it.
+/// that fails is reported — with its attempt count, so a switch that is being
+/// retried unattended shows progress rather than looking stuck — and then
+/// retried: the Worker is a service on the internet, so "not answering right
+/// now" is what an outage looks like, and ending the session there turned a
+/// Cloudflare blip into a manual repair. Only `stop` ends this loop.
 async fn redial_until_connected<S, F, Fut>(
     stop: &mut watch::Receiver<bool>,
     mut dial: F,
-    mut on_failure: impl FnMut(String),
+    mut on_failure: impl FnMut(u32, String),
 ) -> Option<S>
 where
     F: FnMut() -> Fut,
@@ -746,7 +782,7 @@ where
             Ok(socket) => return Some(socket),
             Err(error) => {
                 attempt = attempt.saturating_add(1);
-                on_failure(error);
+                on_failure(attempt, error);
             }
         }
         if *stop.borrow() {
@@ -761,8 +797,9 @@ where
 
 /// Keeps the agent socket up. A socket that lived and then died is redialed —
 /// a blip on the desktop's uplink should not cost the phone its link — and a
-/// dial that never comes up is retried on a capped backoff until the user
-/// switches the relay off. Only an address no retry can fix ends the session.
+/// dial that never comes up is retried on a capped backoff. Nothing but
+/// switching the relay off stops it: unattended machines are expected to be
+/// reachable when the Worker comes back, however long that takes.
 async fn run_agent(
     app: tauri::AppHandle,
     agent: String,
@@ -770,13 +807,6 @@ async fn run_agent(
     mut stop: watch::Receiver<bool>,
     generation: u64,
 ) {
-    let request = match agent.clone().into_client_request() {
-        Ok(r) => r,
-        Err(e) => {
-            give_up(&app, generation, format!("中继地址无效：{e}"));
-            return;
-        }
-    };
     loop {
         if *stop.borrow() {
             return;
@@ -784,16 +814,26 @@ async fn run_agent(
         let connected = redial_until_connected(
             &mut stop,
             || {
-                let request = request.clone();
+                let agent = agent.clone();
                 async move {
+                    // A bad address used to end the session; it is a
+                    // configuration error the user sees in the switch's tooltip,
+                    // not a reason to stop watching for a fix.
+                    let request = agent
+                        .into_client_request()
+                        .map_err(|e| format!("中继地址无效：{e}"))?;
                     tokio_tungstenite::connect_async(request)
                         .await
                         .map_err(|e| e.to_string())
                 }
             },
-            |error| {
+            |attempt, error| {
                 set_connected(&app, generation, false);
-                set_error(&app, generation, format!("连接中继失败，正在重试：{error}"));
+                set_error(
+                    &app,
+                    generation,
+                    format!("连接中继失败，第 {attempt} 次重试：{error}"),
+                );
             },
         )
         .await;
@@ -1221,28 +1261,6 @@ fn set_error(app: &tauri::AppHandle, generation: u64, message: String) {
     broadcast_relay(app);
 }
 
-/// Ends the session on a dial that will not come up and hands the reason to the
-/// UI. The entry is dropped, so the page's next status read returns null and the
-/// switch flips back to 连接中转; the message therefore has to ride the event —
-/// the state it would otherwise be read from no longer exists.
-fn give_up(app: &tauri::AppHandle, generation: u64, message: String) {
-    let state = app.state::<crate::AppState>();
-    {
-        let mut guard = state.relay.inner.lock();
-        match guard.as_ref() {
-            // Superseded: a newer session owns the switch, leave it alone.
-            Some(running) if running.generation != generation => return,
-            Some(_) => {
-                guard.take();
-            }
-            None => return,
-        }
-    }
-    use crate::event_sink::Emit;
-    let payload = serde_json::json!({ "error": message }).to_string();
-    let _ = state.emitters.emit_json("web://relay", &payload);
-}
-
 fn broadcast_relay(app: &tauri::AppHandle) {
     // Through the sink: the bridge forwards sink events to phones, plain
     // `app.emit` would stop at the webview.
@@ -1312,7 +1330,7 @@ mod tests {
         let (stop_tx, mut stop) = watch::channel(false);
         let attempts = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&attempts);
-        let failures = Arc::new(Mutex::new(Vec::<String>::new()));
+        let failures = Arc::new(Mutex::new(Vec::<(u32, String)>::new()));
         let reported = Arc::clone(&failures);
         // The second failure flips the switch off. A give-up implementation
         // would have returned after the first, so two attempts prove the retry.
@@ -1327,8 +1345,8 @@ mod tests {
             }
         };
 
-        let outcome = redial_until_connected(&mut stop, dial, |error| {
-            reported.lock().push(error);
+        let outcome = redial_until_connected(&mut stop, dial, |attempt, error| {
+            reported.lock().push((attempt, error));
         })
         .await;
 
@@ -1341,8 +1359,62 @@ mod tests {
         );
     }
 
-    /// The backoff is what keeps a Worker that is down from becoming a hot
-    /// loop while the switch stays on.
+    /// Unattended machines are reachable by contract: with the switch on, a
+    /// Worker that stays down is retried for as long as it takes, and only the
+    /// switch itself ends the loop. Six consecutive failures used to be three
+    /// more than the old code survived.
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_that_stays_down_is_retried_indefinitely() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        let dialed = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dialed);
+        let dial = move || {
+            let attempt = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            let stop = stop_tx.clone();
+            async move {
+                if attempt >= 6 {
+                    let _ = stop.send(true);
+                }
+                Err::<(), String>(format!("cloudflare unavailable #{attempt}"))
+            }
+        };
+        let reported = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let log = Arc::clone(&reported);
+
+        let outcome = redial_until_connected(&mut stop, dial, move |attempt, error| {
+            assert!(error.contains("cloudflare unavailable"));
+            log.lock().push(attempt);
+        })
+        .await;
+
+        assert!(outcome.is_none(), "only the switch ends the loop");
+        assert_eq!(dialed.load(Ordering::SeqCst), 6, "every failure redialed");
+        assert_eq!(
+            reported.lock().as_slice(),
+            &[1, 2, 3, 4, 5, 6],
+            "the switch can show how many times it has tried"
+        );
+    }
+
+    /// A relaunch restores the tunnel only when the user left it on: an address
+    /// on file is not a switch, and switching off has to stick.
+    #[test]
+    fn autostart_follows_the_remembered_switch() {
+        let mut settings = crate::settings::AppSettings::default();
+        assert!(autostart_target(&settings).is_none(), "off until switched on");
+        settings.web_relay_url = Some("https://relay.example".into());
+        settings.web_relay_key = Some("KEY".into());
+        assert!(autostart_target(&settings).is_none(), "an address is not a switch");
+        settings.web_relay_on = Some(true);
+        assert_eq!(
+            autostart_target(&settings),
+            Some(("https://relay.example".to_string(), "KEY".to_string()))
+        );
+        settings.web_relay_on = Some(false);
+        assert!(autostart_target(&settings).is_none(), "off stays off");
+    }
+
+
     #[test]
     fn redial_backoff_grows_then_caps() {
         assert_eq!(redial_delay(0).as_millis(), 1_000);
