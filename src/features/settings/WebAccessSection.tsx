@@ -138,14 +138,7 @@ export function WebAccessSection() {
 
   useEffect(() => refreshDevices(), [refreshDevices]);
   useTauriEvent(() => listenWebDevices(refreshDevices));
-  useTauriEvent(() =>
-    listenRelay((error) => {
-      // A give-up drops the session and carries the reason: keep it, so the
-      // dot can still explain itself once the switch is back to 连接中转.
-      if (error) setRelayError(error);
-      refreshRelay();
-    }),
-  );
+  useTauriEvent(() => listenRelay(() => refreshRelay()));
   // The pairing key rotates by itself (after a pairing, and on a timer), so
   // this page re-reads settings whenever anything writes them.
   useTauriEvent(() => listenSettingsChanged(refreshAuth));

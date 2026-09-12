@@ -48,14 +48,12 @@ export function listenSettingsChanged(cb: () => void): Promise<UnlistenFn> {
 }
 
 /**
- * The outbound relay's connection state changed. `error` is set only when the
- * backend gave up on a dial and dropped the session — the status it would
- * otherwise be read from is gone by then.
+ * The outbound relay's state changed. The switch itself never disappears, so
+ * this is a "re-read the status" signal — the reason for a failed dial rides
+ * `RelayInfo.error`, not the event.
  */
-export function listenRelay(cb: (error: string | null) => void): Promise<UnlistenFn> {
-  return listen<{ error?: string } | null>("web://relay", (event) =>
-    cb(event.payload?.error ?? null),
-  );
+export function listenRelay(cb: () => void): Promise<UnlistenFn> {
+  return listen("web://relay", () => cb());
 }
 
 /**
