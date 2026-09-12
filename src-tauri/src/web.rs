@@ -304,27 +304,6 @@ fn user_agent(headers: &axum::http::HeaderMap) -> String {
         .collect()
 }
 
-/// The auth switch + pairing key, re-read at most once a second: the gate
-/// runs for every asset request, and settings.json lives on disk.
-fn auth_config() -> (bool, String) {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-    static CACHE: OnceLock<Mutex<(Instant, bool, String)>> = OnceLock::new();
-    let cell = CACHE.get_or_init(|| {
-        Mutex::new((Instant::now() - Duration::from_secs(60), false, String::new()))
-    });
-    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.0.elapsed() >= Duration::from_secs(1) {
-        let enabled = crate::settings::get_app_settings()
-            .map(|s| (s.web_auth_enabled, s.web_auth_key.unwrap_or_default()))
-            .unwrap_or((false, String::new()));
-        guard.1 = enabled.0;
-        guard.2 = enabled.1;
-        guard.0 = Instant::now();
-    }
-    (guard.1, guard.2.clone())
-}
-
 /// Did this request actually come through the relay? The desktop's relay
 /// client is the only thing that dials the bridge on loopback and tags the hop
 /// — so both have to hold. Trusting the header alone let any LAN browser claim
@@ -337,18 +316,21 @@ fn relayed(headers: &axum::http::HeaderMap, peer: SocketAddr) -> bool {
             .is_some_and(|value| value == "relay")
 }
 
-/// Is the `?token=` still needed? On the LAN it always is (upstream's model).
-/// Through the relay the pairing key takes over — but only while the switch
-/// is on; otherwise a tokenless tunnel would be wide open.
-fn token_required(headers: &axum::http::HeaderMap, auth_enabled: bool, peer: SocketAddr) -> bool {
-    !(relayed(headers, peer) && auth_enabled)
+/// Is the `?token=` still needed? On the LAN it always is (upstream's model) —
+/// the token is what keeps a stranger on the same Wi-Fi out. Through the relay
+/// the device approval is the credential and the phone URL deliberately carries
+/// no token, so the token has no part to play there at all.
+fn token_required(headers: &axum::http::HeaderMap, peer: SocketAddr) -> bool {
+    !relayed(headers, peer)
 }
 
-/// Does this request have to unlock first? The pairing key guards the relay
-/// path only: on the LAN the token URL stays the whole story (upstream's
-/// model), while anything that arrived through the relay needs the key once.
-fn needs_unlock(relayed: bool, auth_enabled: bool, device: Option<&WebDevice>) -> bool {
-    relayed && auth_enabled && !device.is_some_and(|d| d.approved_at.is_some())
+/// Does this request have to pair first? The relay path answers to the device
+/// list, not to the switch: an approved device walks straight in, and one that
+/// is not approved gets the pairing page. The switch only decides whether that
+/// page can lead anywhere — with it off there is nothing to pair with, and
+/// `unlock_handler` says so.
+fn needs_unlock(relayed: bool, device: Option<&WebDevice>) -> bool {
+    relayed && !device.is_some_and(|d| d.approved_at.is_some())
 }
 
 /// What the request may do.
@@ -359,18 +341,16 @@ enum Gate {
     Waiting(Response),
 }
 
-/// Every entry point asks this before doing work. With the switch off the
-/// LAN behaves as it always did (the token URL is the only thing needed);
-/// with it on, an unknown browser gets the key page and is remembered once
-/// it types the key in.
+/// Every entry point asks this before doing work. On the LAN the token URL is
+/// the whole story (upstream's model). Through the relay the device list is:
+/// an approved device is served, an unknown one gets the pairing page.
 fn gate(ctx: &WebCtx, headers: &axum::http::HeaderMap, peer: SocketAddr) -> Gate {
     let db = ctx.app.state::<crate::AppState>().db.clone();
-    let (enabled, _) = auth_config();
     let relayed = relayed(headers, peer);
     let now = now_ms();
     let device = cookie_value(headers).and_then(|id| db.web_device_get(&id).ok().flatten());
 
-    if !needs_unlock(relayed, enabled, device.as_ref()) {
+    if !needs_unlock(relayed, device.as_ref()) {
         if let Some(device) = device.as_ref() {
             if now - device.last_seen_at >= TOUCH_INTERVAL_MS {
                 let _ = db.web_device_touch(&device.id, "", now);
@@ -505,12 +485,11 @@ async fn unlock_handler(
         }
     };
     let submitted = form_field(&body, "key").unwrap_or_default().to_uppercase();
-    // Compare and rotate in one locked step, straight off disk: the cached
-    // config behind `auth_config` is a second old at worst, and a second is
-    // long enough for two devices to spend the same code. The switch being off
-    // (nothing to pair with) and a wrong key are the same answer here — a
-    // caller that could tell them apart would learn whether pairing is even
-    // possible.
+    // Compare and rotate in one locked step, straight off disk: a cached read
+    // is a second old at worst, and a second is long enough for two devices to
+    // spend the same code. The switch being off (nothing to pair with) and a
+    // wrong key are the same answer here — a caller that could tell them apart
+    // would learn whether pairing is even possible.
     match crate::settings::consume_web_auth_key(&ctx.app, &submitted) {
         Ok(true) => {}
         Ok(false) => return unlock_response(unlock_page(Some("密钥不正确")), &device, false),
@@ -625,7 +604,6 @@ struct RelayDeployArgs {
     /// practice for account-owned ones (`cfat_…`).
     #[serde(default)]
     account_id: Option<String>,
-    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -655,7 +633,7 @@ async fn ws_handler(
         Gate::Waiting(page) => return page,
         Gate::Allowed(device) => {
             let supplied = q.token.as_deref().unwrap_or_default();
-            if token_required(&headers, auth_config().0, peer) && supplied != &*ctx.token {
+            if token_required(&headers, peer) && supplied != &*ctx.token {
                 return StatusCode::FORBIDDEN.into_response();
             }
             ws.on_upgrade(move |socket| handle_socket(ctx, socket, device, relayed(&headers, peer)))
@@ -733,11 +711,10 @@ async fn handle_socket(ctx: WebCtx, socket: WebSocket, device: String, remote: b
             }
             _ = stop_reader.changed() => break,
             _ = approval.tick() => {
-                // Only devices that unlocked can lose the socket this way:
-                // with the switch off (or an anonymous browser) there is
-                // nothing to revoke, and the socket must stay up.
-                let (auth_on, _) = auth_config();
-                if !auth_on || device.is_empty() {
+                // Approval outlives the switch — an approved device keeps its
+                // socket with the switch off — so revocation is checked on the
+                // same terms. An anonymous browser has no row to revoke.
+                if device.is_empty() {
                     continue;
                 }
                 let approved = ctx
@@ -840,7 +817,7 @@ async fn file_handler(
         return page;
     }
     let supplied = q.token.as_deref().unwrap_or_default();
-    if token_required(&headers, auth_config().0, peer) && supplied != &*ctx.token {
+    if token_required(&headers, peer) && supplied != &*ctx.token {
         return StatusCode::FORBIDDEN.into_response();
     }
     match read_scoped_file(Path::new(&q.path)) {
@@ -1512,7 +1489,7 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         }
         "relay_deploy" => {
             let a: RelayDeployArgs = parse_args(&raw)?;
-            ser(crate::relay::relay_deploy(a.token, a.account_id, a.key).await)
+            ser(crate::relay::relay_deploy(a.token, a.account_id).await)
         }
         // Device approval is the one management action a phone may take: it
         // is already device-scoped, and the desktop page would otherwise be
@@ -1625,49 +1602,50 @@ mod tests {
         }
     }
 
-    /// The switch is the whole point: off = LAN behaves as it always did,
-    /// on = only devices that typed the key get through.
+    /// The relay path answers to the device list, never to the switch: an
+    /// approved device walks in with the switch off, and an unapproved one is
+    /// asked to pair. The LAN keeps upstream's model (the token is the gate,
+    /// so there is nothing to unlock there).
     #[test]
-    fn gate_only_locks_the_relay_path() {
+    fn gate_locks_the_relay_path_by_approval_not_by_the_switch() {
         assert!(
-            !needs_unlock(false, true, None),
+            !needs_unlock(false, None),
             "LAN keeps upstream's model: the token URL is enough"
         );
         assert!(
-            !needs_unlock(true, false, None),
-            "relay traffic with the switch off is not locked either"
+            !needs_unlock(false, Some(&device(None))),
+            "a LAN browser is never asked to pair"
         );
-        assert!(needs_unlock(true, true, None), "relay + switch on: unlock");
+        assert!(needs_unlock(true, None), "a relay device must pair first");
         assert!(
-            needs_unlock(true, true, Some(&device(None))),
+            needs_unlock(true, Some(&device(None))),
             "a relay device that never unlocked is still asked"
         );
         assert!(
-            !needs_unlock(true, true, Some(&device(Some(42)))),
-            "a device that unlocked is never asked again"
+            !needs_unlock(true, Some(&device(Some(42)))),
+            "an approved device connects with the switch off as well"
         );
     }
 
-    /// The relay swaps the token for the pairing key, and only while the
-    /// switch is on: a tokenless tunnel with no key would be wide open.
+    /// Through the relay the device approval is the credential and the phone
+    /// URL carries no token, so the token is never asked for there — while a
+    /// shipped URL must keep working on the LAN, switch or no switch.
     ///
     /// The peer address is half the test: only the desktop's own relay client
     /// dials the bridge on loopback, so a LAN browser writing the header
     /// itself must not be able to opt out of the token.
     #[test]
-    fn token_is_waived_only_for_relayed_traffic_with_auth_on() {
-        let check = |headers: &axum::http::HeaderMap, on: bool, peer: &str| {
-            token_required(headers, on, format!("{peer}:1234").parse().unwrap())
+    fn token_is_waived_only_for_relayed_traffic() {
+        let check = |headers: &axum::http::HeaderMap, peer: &str| {
+            token_required(headers, format!("{peer}:1234").parse().unwrap())
         };
-        // Switch off: the token stays mandatory everywhere.
-        assert!(check(&axum::http::HeaderMap::new(), false, "127.0.0.1"));
-        assert!(check(&relay_headers(), false, "127.0.0.1"));
-        assert!(check(&relay_headers(), false, "192.168.1.6"));
-        // Switch on: relayed traffic may come without it, the LAN may not.
-        assert!(check(&axum::http::HeaderMap::new(), true, "127.0.0.1"));
-        assert!(check(&axum::http::HeaderMap::new(), true, "192.168.1.6"));
-        assert!(check(&relay_headers(), true, "192.168.1.6"));
-        assert!(!check(&relay_headers(), true, "127.0.0.1"));
+        // Relayed: no token, from the loopback peer the relay client dials from.
+        assert!(!check(&relay_headers(), "127.0.0.1"));
+        // Everything else still carries it — a LAN browser writing our own
+        // header from a LAN address included.
+        assert!(check(&axum::http::HeaderMap::new(), "127.0.0.1"));
+        assert!(check(&axum::http::HeaderMap::new(), "192.168.1.6"));
+        assert!(check(&relay_headers(), "192.168.1.6"));
     }
 
     fn relay_headers() -> axum::http::HeaderMap {

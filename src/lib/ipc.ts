@@ -740,11 +740,12 @@ export const ipc = {
   relayDeployPack: (path: string, key: string | null) =>
     invoke<string>("relay_deploy_pack", { path, key }),
   /** Deploy the relay Worker into the token's account: creates the Durable
-   *  Object class, its binding and the key in one upload. `accountId` is only
-   *  needed for account-owned tokens (`cfat_…`), which Cloudflare does not let
-   *  list their own accounts. */
-  relayDeploy: (token: string, accountId: string | null, key: string | null) =>
-    invoke<RelayDeployResult>("relay_deploy", { token, accountId, key }),
+   *  Object class, its binding and a freshly minted key in one upload.
+   *  `accountId` is only needed for account-owned tokens (`cfat_…`), which
+   *  Cloudflare does not let list their own accounts. The key is never taken
+   *  from the caller — it is the only guard on the agent endpoint. */
+  relayDeploy: (token: string, accountId: string | null) =>
+    invoke<RelayDeployResult>("relay_deploy", { token, accountId }),
   webAccessStart: () => invoke<WebAccessInfo>("web_access_start"),
   webAccessStop: () => invoke<void>("web_access_stop"),
   webAccessStatus: () => invoke<WebAccessInfo | null>("web_access_status"),

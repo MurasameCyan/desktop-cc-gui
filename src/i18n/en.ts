@@ -303,7 +303,8 @@ export const en: Messages = {
     webAuthCopy: "Copy key",
     webAuthRotate: "New key",
     webRemoteActive: "Remote session",
-    webAuthKeyHint: "Each key pairs one device and is replaced once it is used",
+    webAuthKeyHint:
+      "Each key pairs one device and is replaced once it is used. This switch only decides whether new devices can pair at all: with it off there is no key and no new pairing. Devices you have already approved are unaffected and keep connecting.",
     webDevices: "Authorized devices",
     webDevicesEmpty:
       "No devices yet. A browser shows up here once it submits the pairing key — approve it to let it in.",

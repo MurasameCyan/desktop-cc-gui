@@ -6,6 +6,7 @@ import Check from "lucide-react/dist/esm/icons/check";
 import type { Message } from "@/lib/ipc";
 import type { SessionState } from "../store";
 import { parseUsage } from "../usage";
+import { formatTokens } from "@/utils/format-tokens";
 import { AgentThinking } from "@/components/application/agent-thinking/agent-thinking";
 import { streamParseInterval, useThrottled } from "@/hooks/use-throttled";
 import { useCopied } from "@/hooks/use-copied";
@@ -122,11 +123,9 @@ function formatUsage(usage: unknown): string | null {
   if (!u) return null;
   const input = u.input + u.cacheRead + u.cacheWrite;
   if (!input && !u.output) return null;
-  const fmt = (n: number) =>
-    n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
   const parts: string[] = [];
-  if (input) parts.push(`↑${fmt(input)}`);
-  if (u.output) parts.push(`↓${fmt(u.output)}`);
+  if (input) parts.push(`↑${formatTokens(input)}`);
+  if (u.output) parts.push(`↓${formatTokens(u.output)}`);
   return parts.join(" ");
 }
 

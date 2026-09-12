@@ -344,11 +344,7 @@ export function WebAccessSection() {
       setDeployBusy(true);
       setDeployStatus(null);
       try {
-        const result = await ipc.relayDeploy(
-          apiToken.trim(),
-          accountId.trim() || null,
-          relayKey.trim() || null,
-        );
+        const result = await ipc.relayDeploy(apiToken.trim(), accountId.trim() || null);
         setRelayUrl(result.url);
         setRelayKey(result.key);
         // Persist right away: the key is uploaded as a Cloudflare secret, so
@@ -372,7 +368,7 @@ export function WebAccessSection() {
         setDeployBusy(false);
       }
     })();
-  }, [apiToken, accountId, relayKey, saveRelayFields, t]);
+  }, [apiToken, accountId, saveRelayFields, t]);
 
   /** Write the whole wrangler project (source + config + this key) to disk, so
    *  the user can read it and `npx wrangler deploy` it themselves. */

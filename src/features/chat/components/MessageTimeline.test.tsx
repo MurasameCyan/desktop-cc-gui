@@ -103,5 +103,24 @@ describe("user bubble copy affordance", () => {
     });
     expect(container.querySelector("button")).toBeNull();
   });
+
+  /// The readout is the first thing that shows a huge prompt side (cache-heavy
+  /// turns run into the millions), and it used to stop at "k": 1.5M tokens
+  /// rendered as "1503.9k". It shares `formatTokens` now, so the unit rolls.
+  it("rolls the per-message token readout past k into M", async () => {
+    const heavy: Message = {
+      seq: 2,
+      role: "assistant",
+      text: "done",
+      ts: null,
+      usage: { input: 1_503_900, output: 2_200 },
+    };
+    await act(async () => {
+      root.render(<MessageRow message={heavy} workspacePath="/ws" turnFinal />);
+    });
+    const shown = container.textContent ?? "";
+    expect(shown).toContain("↑1.5M");
+    expect(shown).toContain("↓2.2k");
+  });
 });
 

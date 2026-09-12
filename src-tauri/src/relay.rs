@@ -591,6 +591,11 @@ async fn cf_subdomain(
 /// the upload metadata, which is why nobody has to run wrangler. The relay URL
 /// is only reported back — the settings page decides whether to fill it.
 ///
+/// The key is always minted here: it is the only thing standing between the
+/// `/agent` endpoint and whoever guesses it, so it must never be whatever the
+/// settings field happened to hold (a leftover test value, a hand-typed
+/// short string). The caller stores what comes back.
+///
 /// `account_id` is optional: user tokens can list their accounts, account-owned
 /// ones (which Cloudflare now hands out as `cfat_…`) cannot, so for those the
 /// page asks for the id instead.
@@ -598,7 +603,6 @@ async fn cf_subdomain(
 pub async fn relay_deploy(
     token: String,
     account_id: Option<String>,
-    key: Option<String>,
 ) -> Result<RelayDeployResult, String> {
     let token = token.trim().to_string();
     if token.is_empty() {
@@ -607,10 +611,7 @@ pub async fn relay_deploy(
     let account_id = account_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let key = key
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(new_relay_key);
+    let key = new_relay_key();
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))

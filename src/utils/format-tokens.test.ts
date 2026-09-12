@@ -10,6 +10,11 @@ describe("formatTokens", () => {
     // Rounding must not print a value that belongs to the unit above.
     expect(formatTokens(999_999_999)).toBe("1B");
     expect(formatTokens(999_999)).toBe("1M");
+    // The ladder has to end somewhere, but not at a rung that a real number
+    // can outgrow: this is where "1503.9B" would have come from.
+    expect(formatTokens(1_000_000_000_000)).toBe("1T");
+    expect(formatTokens(1_503_900_000_000)).toBe("1.5T");
+    expect(formatTokens(999_999_999_999)).toBe("1T");
   });
 
   it("keeps small counts exact and drops trailing zeros", () => {
