@@ -217,12 +217,40 @@ export function useChatTabs({
     if (dirty[0]) setDialog({ kind: "closeFile", path: dirty[0] });
   }, [sessionTabItems, closeTab, openFiles, dirtyPaths, closeFile, closeDiff, setDialog]);
 
+  // Tab context menu "Close Inactive": keep the tab in view and drop the
+  // rest. Same dirty-file rule as Close All — a file with unsaved edits is
+  // never discarded silently; the first one routes through the save dialog
+  // and the others stay open. The tab in view keeps its edit either way.
+  const handleTabCloseInactive = useCallback(() => {
+    if (activeTabKey !== DIFF_TAB_KEY) closeDiff();
+    for (const item of sessionTabItems) {
+      if (item.key === activeTabKey) continue;
+      closeTab(item.tab.engine, item.tab.sessionId, item.tab.workspacePath);
+    }
+    const others = openFiles.filter((path) => FILE_TAB_PREFIX + path !== activeTabKey);
+    const dirty = others.filter((path) => dirtyPaths[path]);
+    for (const path of others) {
+      if (!dirtyPaths[path]) closeFile(path);
+    }
+    if (dirty[0]) setDialog({ kind: "closeFile", path: dirty[0] });
+  }, [
+    activeTabKey,
+    sessionTabItems,
+    closeTab,
+    openFiles,
+    dirtyPaths,
+    closeFile,
+    closeDiff,
+    setDialog,
+  ]);
+
   return {
     tabItems,
     activeTabKey,
     handleTabSelect,
     handleTabClose,
     handleTabCloseAll,
+    handleTabCloseInactive,
     handleTabReorder,
     sessionById,
     threadStreaming,

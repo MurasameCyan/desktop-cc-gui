@@ -28,6 +28,7 @@ export const zh = {
     newChat: "新对话",
     newSession: "新建会话",
     closeAllTabs: "全部关闭",
+    closeInactiveTabs: "关闭非活跃窗口",
     collapseSidebar: "收起侧边栏",
     expandSidebar: "展开侧边栏",
     resizeSidebar: "拖拽调整侧边栏宽度",

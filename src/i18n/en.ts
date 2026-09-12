@@ -32,6 +32,7 @@ export const en: Messages = {
     newChat: "New chat",
     newSession: "New session",
     closeAllTabs: "Close All",
+    closeInactiveTabs: "Close Others",
     collapseSidebar: "Collapse sidebar",
     expandSidebar: "Expand sidebar",
     resizeSidebar: "Drag to resize sidebar",
