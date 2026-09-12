@@ -715,6 +715,32 @@ function recordTurnUsage(
   writeUsageRow(deps, event, key, parsed, 1);
 }
 
+/** Mark a session running off an event of a turn this client never sent: the
+ *  phone watching the desktop's run, or the desktop watching the phone's.
+ *  Routes the run first so Stop and the orphan sweep reach it, then lifts the
+ *  two flags the composer / sidebar / tab dots read. */
+function adoptObservedRun(
+  event: EngineEventPayload,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  if (!runRouting.has(event.runId)) {
+    settleOrphanedRuns(deps.set, routeRun(event.runId, key));
+  }
+  const cur = deps.get().bySession[key];
+  if (!cur?.streaming) {
+    patchSession(deps.set, key, {
+      streaming: true,
+      turnStartedAt: cur?.turnStartedAt ?? Date.now(),
+    });
+  }
+  if (!deps.get().streamingByKey[key]) {
+    deps.set((s) => ({
+      streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
+    }));
+  }
+}
+
 /** Resolve an event's session key (run routing, then session-id match) and
  * dispatch to the per-kind handler. */
 export function handleEngineEvents(
@@ -736,6 +762,16 @@ export function handleEngineEvents(
       }
     }
     if (!key) continue;
+
+    // Engine events reach every attached client, but the running flag is set
+    // by the sender's own send path — so an observer (a phone watching the
+    // desktop's turn) would never see one. The events are the shared truth:
+    // adopt any run still talking, let done/error settle it below. A denial
+    // is excluded on purpose: the CLI has stopped to ask, and the grant
+    // card's resend has to stay available while it waits.
+    if (event.kind !== "done" && event.kind !== "error" && event.kind !== "permission_denied") {
+      adoptObservedRun(event, key, deps);
+    }
 
     switch (event.kind) {
       case "delta":
