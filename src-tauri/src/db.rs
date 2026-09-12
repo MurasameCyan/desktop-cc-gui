@@ -159,6 +159,28 @@ impl Db {
         Ok(())
     }
 
+    /// Remember the model id a session ran, spelled as the picker spells it
+    /// ("provider/model"). The engine's own transcript keeps only the bare
+    /// model name, so this row is the session's provider + model memory for
+    /// every other client and for the next app start.
+    pub fn remember_session_model(
+        &self,
+        engine: &str,
+        session_id: &str,
+        model: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let conn = self.0.lock();
+        conn.execute(
+            "INSERT INTO session_models(engine, session_id, model, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(engine, session_id) DO UPDATE SET model=excluded.model, updated_at=excluded.updated_at",
+            rusqlite::params![engine, session_id, model, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Approve (or re-approve) a device. Unknown ids are ignored: the row is
     /// created by the device's own request, never by the UI.
     pub fn web_device_approve(&self, id: &str, now: i64) -> Result<bool, String> {
@@ -443,6 +465,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             value TEXT NOT NULL,
             PRIMARY KEY(plugin_id, key)
         );
+        CREATE TABLE IF NOT EXISTS session_models(
+            engine TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(engine, session_id)
+        );
         ",
     )?;
     // NB: no `cache_version` meta row — it was written but never read; cache
@@ -513,6 +542,44 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn session_model_record_round_trips_and_takes_the_newest() {
+        let scratch = Scratch::new();
+        let db = Db::open_at(&scratch.path("app.db")).unwrap();
+        db.0.lock()
+            .execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title)
+                 VALUES('omp', 's1', '/ws', 'f.jsonl', 1, 1, 'first message')",
+                [],
+            )
+            .unwrap();
+        // The join list_sessions runs: a session with no record has no model.
+        let read = || -> Option<String> {
+            let conn = db.0.lock();
+            conn.query_row(
+                "SELECT m.model FROM sessions s
+                 LEFT JOIN session_models m ON m.engine = s.engine AND m.session_id = s.session_id
+                 WHERE s.engine='omp' AND s.session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(), None, "no record yet");
+
+        db.remember_session_model("omp", "s1", "agentrouter qunyou/deepseek-v4-flash", 10)
+            .unwrap();
+        assert_eq!(
+            read().as_deref(),
+            Some("agentrouter qunyou/deepseek-v4-flash"),
+            "the provider-qualified id is what survives"
+        );
+
+        db.remember_session_model("omp", "s1", "薄荷/claude-opus-5", 20)
+            .unwrap();
+        assert_eq!(read().as_deref(), Some("薄荷/claude-opus-5"), "newest wins");
     }
 
     #[test]

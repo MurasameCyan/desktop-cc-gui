@@ -18,6 +18,9 @@ export interface SessionMeta {
   messageCount: number;
   pinned: boolean;
   customTitle: string | null;
+  /** Model this app last sent for the session ("provider/model"), absent when
+   * it never sent one — see ipc.rememberSessionModel. */
+  model?: string | null;
 }
 
 export type TodoStatus = "pending" | "active" | "complete" | "blocked" | "dropped";
@@ -617,6 +620,11 @@ export const ipc = {
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
     invoke<void>("rename_session", { engine, sessionId, title }),
+  /** Remember the model id this session ran ("provider/model", as the picker
+   * spells it) — the engine's own transcript keeps only the bare name, so
+   * this is what survives a restart or another client. */
+  rememberSessionModel: (engine: string, sessionId: string, model: string) =>
+    invoke<void>("remember_session_model", { engine, sessionId, model }),
   rescanSessions: () => invoke<void>("rescan_sessions"),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   addWorkspace: (path: string) => invoke<Workspace>("add_workspace", { path }),

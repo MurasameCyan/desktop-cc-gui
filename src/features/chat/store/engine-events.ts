@@ -131,8 +131,14 @@ function onModel(
   key: string,
   deps: EngineEventDeps,
 ) {
-  const model = typeof event.data === "string" ? event.data.trim() : "";
-  if (!model) return;
+  const reported = typeof event.data === "string" ? event.data.trim() : "";
+  if (!reported) return;
+  // The engine reports the bare model name; our own record spells it
+  // "provider/model" (see ipc.rememberSessionModel). Same model, more
+  // context — keep the qualified one instead of dropping the provider.
+  const current = deps.get().bySession[key]?.activeModel ?? "";
+  const model =
+    current === reported || current.endsWith(`/${reported}`) ? current : reported;
   updatePendingStreamModel(key, model);
   deps.set((s) => {
     const cur = s.bySession[key];
@@ -247,12 +253,33 @@ function onMessage(
   });
 }
 
+/** Model a local send resolved for a session key, held until the run reports
+ *  the native session id (`session` event) so the two can be remembered
+ *  together — the engine transcript only carries the bare model name, and the
+ *  new session's id is not known before that event. Only local sends fill
+ *  this: an observer must never write its own (bare) reading of a run. */
+const pendingSessionModels = new Map<string, string>();
+
+export function rememberModelForRun(
+  key: string,
+  model: string | null | undefined,
+) {
+  if (model) pendingSessionModels.set(key, model);
+}
+
 function onSession(
   event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
   const nativeId = event.data as string;
+  const sentModel = pendingSessionModels.get(key);
+  if (sentModel) {
+    pendingSessionModels.delete(key);
+    void ipc
+      .rememberSessionModel(event.engine, nativeId, sentModel)
+      .catch(() => {});
+  }
   // Resolve the workspace from the tab that owns this key — not from the
   // active tab. A first message sent on a background tab must not adopt the
   // foreground tab's workspace (the session would be orphaned there).
