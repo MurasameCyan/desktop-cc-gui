@@ -132,6 +132,7 @@ export const zh = {
     messageCollapse: "收起消息",
     agentStatusRunning: "运行中",
     agentStatusDone: "已完成",
+    agentDetailBack: "返回子代理列表",
     editedFiles: "已编辑 {{count}} 个文件",
     editedFiles_one: "已编辑 {{count}} 个文件",
     toolTypeTool: "工具",

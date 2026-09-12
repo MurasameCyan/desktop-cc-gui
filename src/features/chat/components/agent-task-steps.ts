@@ -122,8 +122,8 @@ export function subagentRefsFromArgs(args: unknown): {
       id,
       label: text(row.description) ?? id,
       agent: text(row.agent) ?? text(row.subagent_type),
-      // The instruction text is the useful detail; its first line is enough.
-      detail: task ? task.split("\n").find((line) => line.trim()) ?? undefined : undefined,
+      // The assignment is what the panel shows on click, so it stays whole.
+      detail: task,
     });
   }
   for (const entry of Array.isArray(record.ids) ? record.ids : []) {
@@ -131,6 +131,41 @@ export function subagentRefsFromArgs(args: unknown): {
     if (id) refs.push({ id });
   }
   return refs;
+}
+
+/** Job states a `hub` result reports about itself: `details.jobs` on a wait,
+ *  `details.peers` on a roster, `details.progress` on a dispatch. Anything not
+ *  running has stopped — parked and idle included, both mean "not working". */
+function jobStatesFromResult(result: unknown): Map<string, AgentTaskStepState> {
+  const states = new Map<string, AgentTaskStepState>();
+  if (!result || typeof result !== "object") return states;
+  const details = (result as Record<string, unknown>).details;
+  if (!details || typeof details !== "object") return states;
+  const buckets = ["jobs", "peers", "progress"].map((key) =>
+    (details as Record<string, unknown>)[key],
+  );
+  for (const bucket of buckets) {
+    if (!Array.isArray(bucket)) continue;
+    for (const entry of bucket) {
+      if (!entry || typeof entry !== "object") continue;
+      const row = entry as Record<string, unknown>;
+      const id = typeof row.id === "string" ? row.id.trim() : "";
+      if (!id) continue;
+      const status = typeof row.status === "string" ? row.status.toLowerCase() : "";
+      states.set(id, status === "running" ? "active" : "complete");
+    }
+  }
+  return states;
+}
+
+/** Tool name head of a tool row's label ("task · Dispatching…" → "task").
+ *  The tag a row falls back to when the harness names no agent kind: the
+ *  `task` tool writes `agent` on some dispatches (scout batches) and omits it
+ *  on others (task batches), and a row with no tag at all says nothing about
+ *  where it came from. */
+function toolHead(text: string): string | undefined {
+  const head = text.split("·")[0].trim().split(/[\s/\\]+/)[0];
+  return head && head.length <= 24 ? head : undefined;
 }
 
 /** Edit-class tool labels (write/edit/patch families) — the file
@@ -177,6 +212,32 @@ export function deriveAgentTaskSteps(
 ): AgentTaskStep[] {
   const turnStart = currentTurnStart(messages);
   const blockingSpawn = engine === "claude";
+
+  // Pass 1 — one state per named agent. A dispatch only *starts* agents, so
+  // its own "Spawned 3 background agents" result says nothing about finishing;
+  // the later `hub` snapshots are the only rows that do, and they override
+  // whatever the dispatch implied. Without this a settled spawn result left
+  // every agent reading 已完成 while the harness was still reporting them
+  // running.
+  const states = new Map<string, AgentTaskStepState>();
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role !== "tool") continue;
+    const refs = subagentRefsFromArgs(message.args);
+    if (refs.length > 0) {
+      const spawned = i >= turnStart && streaming ? "active" : "complete";
+      for (const ref of refs) {
+        if (!states.has(ref.id)) states.set(ref.id, spawned);
+      }
+    }
+    // Roster rows (`hub wait` / `hub jobs`) name no ids in their args — the
+    // statuses they report are the only place those ids appear.
+    for (const [id, state] of jobStatesFromResult(message.result)) {
+      states.set(id, state);
+    }
+  }
+
+  // Pass 2 — display order: one step per agent, first naming wins.
   const steps: AgentTaskStep[] = [];
   const seen = new Set<string>();
 
@@ -227,8 +288,8 @@ export function deriveAgentTaskSteps(
       steps.push({
         key: `${message.seq}:${ref.id}`,
         label: ref.label ?? ref.id,
-        state,
-        subagentType: ref.agent ?? info.subagentType,
+        state: states.get(ref.id) ?? state,
+        subagentType: ref.agent ?? info.subagentType ?? toolHead(message.text),
         detail: ref.detail ?? info.detail,
       });
     }

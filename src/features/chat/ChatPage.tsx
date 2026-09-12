@@ -172,6 +172,12 @@ export default function ChatPage() {
     <div
       className={cx(
         "relative flex h-dvh w-full overflow-hidden bg-background-secondary-default",
+        // Phones with `viewport-fit=cover` (index.html) lay the app under the
+        // status bar/notch: without the inset the tab strip — and with it the
+        // only way to switch sessions — sits behind the iOS chrome, which is
+        // where it kept disappearing (Chrome for iOS especially). Zero on
+        // desktop, so this only moves pixels on a notched device.
+        "pt-[env(safe-area-inset-top)]",
         NEEDS_TITLEBAR_HAIRLINE && "border-t border-separator-border",
         dragging && "cursor-col-resize select-none",
       )}
