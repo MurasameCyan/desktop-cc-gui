@@ -659,6 +659,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         const page = await ipc.loadSessionPage(engine, sessionId, 100);
         patchSession(set, key, {
           messages: page.messages,
+          subagentHistory: page.subagentHistory,
           nextBefore: page.nextBefore,
           loading: false,
           // Live "usage" events only cover fresh turns; a resumed session
@@ -1033,6 +1034,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
             ...(get().bySession[key] ?? EMPTY_SESSION).messages,
           ],
           nextBefore: page.nextBefore,
+          subagentHistory: page.subagentHistory,
           loading: false,
         });
       } catch {

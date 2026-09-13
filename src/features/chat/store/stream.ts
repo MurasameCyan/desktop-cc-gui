@@ -15,6 +15,8 @@ export interface QueuedMessage {
 
 export interface SessionState {
   messages: Message[];
+  /** Older delegation metadata kept outside the paginated message window. */
+  subagentHistory: Message[];
   nextBefore: number | null;
   loading: boolean;
   streaming: boolean;
@@ -39,6 +41,7 @@ export interface SessionState {
 
 export const EMPTY_SESSION: SessionState = {
   messages: [],
+  subagentHistory: [],
   nextBefore: null,
   loading: false,
   streaming: false,
