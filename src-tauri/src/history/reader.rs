@@ -51,9 +51,10 @@ pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Ses
         &state,
         "SELECT s.engine, s.session_id, s.workspace_path, s.file_path, s.file_size, s.file_mtime_ms,
                 s.title, s.preview, s.created_at, s.updated_at, s.message_count, s.pinned, s.custom_title,
-                m.model
+                m.model, e.effort
          FROM sessions s
          LEFT JOIN session_models m ON m.engine = s.engine AND m.session_id = s.session_id
+         LEFT JOIN session_efforts e ON e.engine = s.engine AND e.session_id = s.session_id
          ORDER BY COALESCE(s.updated_at, 0) DESC",
         |r| {
             Ok(SessionMeta {
@@ -71,6 +72,7 @@ pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Ses
                 pinned: r.get::<_, i64>(11)? != 0,
                 custom_title: r.get(12)?,
                 model: r.get(13)?,
+                effort: r.get(14)?,
             })
         },
     )
@@ -97,6 +99,29 @@ pub fn remember_session_model(
     state
         .db
         .remember_session_model(&engine, &session_id, &model, now)?;
+    state.sink.emit_sessions_changed();
+    Ok(())
+}
+
+/// Remember the reasoning effort a session ran, beside its model and for the
+/// same reason — see [`SessionMeta::effort`].
+#[tauri::command]
+pub fn remember_session_effort(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    session_id: String,
+    effort: String,
+) -> Result<(), String> {
+    if effort.trim().is_empty() {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    state
+        .db
+        .remember_session_effort(&engine, &session_id, &effort, now)?;
     state.sink.emit_sessions_changed();
     Ok(())
 }

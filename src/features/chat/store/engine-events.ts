@@ -259,12 +259,23 @@ function onMessage(
  *  new session's id is not known before that event. Only local sends fill
  *  this: an observer must never write its own (bare) reading of a run. */
 const pendingSessionModels = new Map<string, string>();
+/** Same hand-off for the reasoning level: it is chosen before the first send
+ *  of a new session and can only be filed under the id the `session` event
+ *  carries. */
+const pendingSessionEfforts = new Map<string, string>();
 
 export function rememberModelForRun(
   key: string,
   model: string | null | undefined,
 ) {
   if (model) pendingSessionModels.set(key, model);
+}
+
+export function rememberEffortForRun(
+  key: string,
+  effort: string | null | undefined,
+) {
+  if (effort) pendingSessionEfforts.set(key, effort);
 }
 
 function onSession(
@@ -278,6 +289,13 @@ function onSession(
     pendingSessionModels.delete(key);
     void ipc
       .rememberSessionModel(event.engine, nativeId, sentModel)
+      .catch(() => {});
+  }
+  const sentEffort = pendingSessionEfforts.get(key);
+  if (sentEffort) {
+    pendingSessionEfforts.delete(key);
+    void ipc
+      .rememberSessionEffort(event.engine, nativeId, sentEffort)
       .catch(() => {});
   }
   // Resolve the workspace from the tab that owns this key — not from the

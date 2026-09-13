@@ -34,6 +34,7 @@ import {
   moveStreamingFlag,
   patchSession,
   resolveSessionModel,
+  resolveSessionEffort,
   routeRun,
   runRouting,
   setStreamingFlag,
@@ -47,6 +48,7 @@ import {
   optimisticMeta,
   patchGrantBySeq,
   rememberModelForRun,
+  rememberEffortForRun,
   settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./store/engine-events";
@@ -210,7 +212,21 @@ export const useChatStore = create<ChatStore>((set, get) => {
         rememberModelForRun(key, model);
       }
     }
-    const effort = tab.effort ?? get().efforts[engine] ?? null;
+    const effort =
+      resolveSessionEffort(tab, get().bySession[key], get().efforts[engine]) ??
+      null;
+    // Remember the level the way the model is remembered: the picker follows
+    // the session, so a reopened session — here, in another window, or on the
+    // phone — keeps running the level it ran instead of the engine default.
+    if (effort) {
+      if (tab.sessionId) {
+        void ipc
+          .rememberSessionEffort(engine, tab.sessionId, effort)
+          .catch(() => {});
+      } else {
+        rememberEffortForRun(key, effort);
+      }
+    }
     // Optimistic user message.
     set((s) => ({
       streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
@@ -262,6 +278,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
         if (model) {
           void ipc
             .rememberSessionModel(engine, result.sessionId, model)
+            .catch(() => {});
+        }
+        if (effort) {
+          void ipc
+            .rememberSessionEffort(engine, result.sessionId, effort)
             .catch(() => {});
         }
         settleOrphanedRuns(set, routeRun(result.runId, newKey));
@@ -635,6 +656,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
       )?.model;
       if (remembered && !get().bySession[key]?.activeModel) {
         patchSession(set, key, { activeModel: remembered });
+      }
+      // Same for the reasoning level: the picker and the next send follow the
+      // session, so an unset level adopts the one this session last ran.
+      const rememberedEffort = get().sessions.find(
+        (x) => x.engine === engine && x.sessionId === sessionId,
+      )?.effort;
+      if (rememberedEffort && !get().bySession[key]?.activeEffort) {
+        patchSession(set, key, { activeEffort: rememberedEffort });
       }
       const syncEngine = engine !== get().activeEngine;
       if (syncEngine) writeStored(ENGINE_PREF_KEY, engine);

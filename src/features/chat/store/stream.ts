@@ -84,6 +84,29 @@ export function resolveSessionModel(
   return engineDefault;
 }
 
+/** The reasoning level one session runs with, most specific first: the tab's
+ * own pick, what the engine reported for this session, the level its history
+ * was written with, then the engine default. Mirrors [resolveSessionModel] —
+ * two omp sessions may run different levels, so the picker and the send read
+ * the session's level, never an engine-wide default. */
+export function resolveSessionEffort(
+  tab: { engine: string; effort?: string | null } | null | undefined,
+  session: Pick<SessionState, "activeEffort" | "messages"> | undefined,
+  engineDefault?: string,
+): string | undefined {
+  if (!tab) return engineDefault;
+  if (tab.effort) return tab.effort;
+  if (session?.activeEffort) return session.activeEffort;
+  const messages = session?.messages;
+  if (messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const effort = messages[i].effort;
+      if (effort) return effort;
+    }
+  }
+  return engineDefault;
+}
+
 /** Minimal store shape these helpers touch. */
 export interface BySessionSlice {
   bySession: Record<string, SessionState>;

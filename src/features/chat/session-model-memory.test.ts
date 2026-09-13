@@ -3,13 +3,14 @@ import { ipc, type SessionMeta } from "@/lib/ipc";
 import { useChatStore } from "./store";
 import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
 import { sessionKey } from "./store/persistence";
-import { EMPTY_SESSION, resolveSessionModel, runRouting } from "./store/stream";
+import { EMPTY_SESSION, resolveSessionModel, resolveSessionEffort, runRouting } from "./store/stream";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     rememberSessionModel: vi.fn(async () => {}),
+    rememberSessionEffort: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
     usageRecord: vi.fn(async () => {}),
   },
@@ -25,7 +26,7 @@ const KEY = sessionKey("omp", SID, WS);
 /** What the picker itself sent: the provider is part of the id. */
 const SENT = "agentrouter qunyou/deepseek-v4-flash";
 
-function meta(model?: string): SessionMeta {
+function meta(model?: string, effort?: string): SessionMeta {
   return {
     engine: "omp",
     sessionId: SID,
@@ -41,6 +42,7 @@ function meta(model?: string): SessionMeta {
     pinned: false,
     customTitle: null,
     model: model ?? null,
+    effort: effort ?? null,
   };
 }
 
@@ -141,5 +143,66 @@ describe("a session's provider and model memory", () => {
       deps(),
     );
     expect(useChatStore.getState().bySession[KEY]!.activeModel).toBe("glm-5.3");
+  });
+
+  it("adopts the reasoning level this session ran when it is opened", async () => {
+    useChatStore.setState({ sessions: [meta(SENT, "xhigh")] });
+
+    await useChatStore.getState().selectSession("omp", SID, WS);
+
+    // The reported gap: reopening showed (and sent) the engine default.
+    expect(useChatStore.getState().bySession[KEY]!.activeEffort).toBe("xhigh");
+  });
+
+  it("sends the session's level, not the engine default, and remembers it", async () => {
+    const tab = { engine: "omp", sessionId: SID, workspacePath: WS };
+    useChatStore.setState({
+      active: tab,
+      openTabs: [tab],
+      bySession: { [KEY]: { ...EMPTY_SESSION, activeEffort: "xhigh" } },
+      efforts: { omp: "medium" },
+    });
+
+    await useChatStore.getState().send("继续", []);
+
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: "xhigh" }),
+    );
+    expect(vi.mocked(ipc.rememberSessionEffort)).toHaveBeenCalledWith("omp", SID, "xhigh");
+    expect(
+      resolveSessionEffort(tab, useChatStore.getState().bySession[KEY], "medium"),
+    ).toBe("xhigh");
+  });
+
+  it("falls back to the engine default when the session never recorded a level", async () => {
+    const tab = { engine: "omp", sessionId: SID, workspacePath: WS };
+    useChatStore.setState({
+      active: tab,
+      openTabs: [tab],
+      bySession: { [KEY]: { ...EMPTY_SESSION } },
+      efforts: { omp: "medium" },
+    });
+
+    await useChatStore.getState().send("继续", []);
+
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: "medium" }),
+    );
+  });
+
+  it("files a brand-new session's level once the engine names it", async () => {
+    const tab = { engine: "omp", sessionId: null, workspacePath: WS, effort: "high" as const };
+    useChatStore.setState({ active: tab, openTabs: [tab], efforts: {} });
+
+    await useChatStore.getState().send("继续", []);
+    // No id yet: nothing to file the level under.
+    expect(vi.mocked(ipc.rememberSessionEffort)).not.toHaveBeenCalled();
+
+    handleEngineEvents(
+      [{ runId: "run-1", sessionId: null, engine: "omp", seq: 1, kind: "session", data: SID }],
+      deps(),
+    );
+
+    expect(vi.mocked(ipc.rememberSessionEffort)).toHaveBeenCalledWith("omp", SID, "high");
   });
 });

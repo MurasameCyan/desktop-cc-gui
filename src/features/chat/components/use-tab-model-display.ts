@@ -1,6 +1,15 @@
 import { useMemo } from "react";
-import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
+import { EFFORT_LEVELS, type EffortLevel } from "@/components/application/ai-chat/effort-levels";
 import { useChatStore, type ActiveSession } from "../store";
+
+/** Session records and history rows carry plain strings; anything that is not
+ *  one of the picker's stops (a hand-edited settings file, an engine that
+ *  reports its own vocabulary) is ignored instead of shown as a level. */
+function asEffortLevel(value: string | null | undefined): EffortLevel | undefined {
+  return value && (EFFORT_LEVELS as readonly string[]).includes(value)
+    ? (value as EffortLevel)
+    : undefined;
+}
 
 /** Model/effort the composer menus show for the active tab.
  *
@@ -49,8 +58,38 @@ export function useTabModelDisplay({
       models[activeEngine]
     );
   }, [active, activeEngine, sessionActiveModel, sessionHistoryModel, models]);
-  const tabEffort =
-    active && active.engine === activeEngine ? active.effort : undefined;
+  const sessionActiveEffort = useChatStore((s) =>
+    sessionKey ? (s.bySession[sessionKey]?.activeEffort ?? null) : null,
+  );
+  const sessionHistoryEffort = useChatStore((s) => {
+    if (!sessionKey) return null;
+    const messages = s.bySession[sessionKey]?.messages;
+    if (!messages) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const effort = messages[i].effort;
+      if (effort) return effort;
+    }
+    return null;
+  });
+  const tabEffort = useMemo(() => {
+    if (!active || active.engine !== activeEngine) return undefined;
+    // Same chain as the model: this tab's pick, then what the session ran,
+    // then the level its history was written with, then the engine default.
+    // Without the middle levels a reopened session showed (and sent) the
+    // engine default instead of the level that conversation uses.
+    return (
+      active.effort ||
+      asEffortLevel(sessionActiveEffort) ||
+      asEffortLevel(sessionHistoryEffort) ||
+      efforts[activeEngine]
+    );
+  }, [
+    active,
+    activeEngine,
+    sessionActiveEffort,
+    sessionHistoryEffort,
+    efforts,
+  ]);
   const displayModels = useMemo(
     () =>
       tabModel !== undefined ? { ...models, [activeEngine]: tabModel } : models,
