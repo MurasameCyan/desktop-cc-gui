@@ -270,6 +270,7 @@ export const ChatConversation = memo(function ChatConversation({
     pinModels,
     loadEarlier,
     removeQueued,
+    sendQueuedNow,
     clearQueue,
   } = useChatStore(
     useShallow((s) => ({
@@ -281,6 +282,7 @@ export const ChatConversation = memo(function ChatConversation({
       pinModels: s.pinModels,
       loadEarlier: s.loadEarlier,
       removeQueued: s.removeQueued,
+      sendQueuedNow: s.sendQueuedNow,
       clearQueue: s.clearQueue,
     })),
   );
@@ -411,6 +413,7 @@ export const ChatConversation = memo(function ChatConversation({
         workspaces={workspaces}
         queue={queue}
         onRemoveQueued={removeQueued}
+        onSendQueuedNow={sendQueuedNow}
         onClearQueued={clearQueue}
         imageError={imageError}
         branchError={branchError}

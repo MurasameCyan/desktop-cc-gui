@@ -79,6 +79,7 @@ export const en: Messages = {
     send: "Send",
     stop: "Stop",
     queueRemove: "Remove from queue",
+    queueSendNow: "Send",
     queueImages: "{{count}} images",
     queueTitle: "Queued messages",
     queueClear: "Clear all",

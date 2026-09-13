@@ -146,6 +146,9 @@ export interface ChatStore {
   queueMessage: (text: string, images: string[]) => void;
   /** Drop a queued message from the active session. */
   removeQueued: (id: string) => void;
+  /** Send one queued message now: it takes the head of the queue, and a
+   *  running turn is stopped so the send is not left behind it. */
+  sendQueuedNow: (id: string) => Promise<void>;
   /** Drop every queued message from the active session. */
   clearQueue: () => void;
   interrupt: () => Promise<void>;

@@ -297,6 +297,7 @@ export function ConversationFooter({
   workspaces,
   queue,
   onRemoveQueued,
+  onSendQueuedNow,
   onClearQueued,
   imageError,
   branchError,
@@ -329,6 +330,7 @@ export function ConversationFooter({
   workspaces: Workspace[];
   queue: QueuedMessage[];
   onRemoveQueued: (id: string) => void;
+  onSendQueuedNow: (id: string) => void;
   onClearQueued?: () => void;
   imageError: string | null;
   branchError: string | null;
@@ -372,7 +374,7 @@ export function ConversationFooter({
       <div
         className="flex w-full flex-col gap-2.5 bg-background-primary-default px-4 pt-2.5 pb-2"
       >
-        <MessageQueue queue={queue} onRemove={onRemoveQueued} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
+        <MessageQueue queue={queue} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
         <ErrorBanner message={imageError} onDismiss={onDismissImageError} />
         <ErrorBanner message={branchError} onDismiss={onDismissBranchError} />
         <AttachmentChips

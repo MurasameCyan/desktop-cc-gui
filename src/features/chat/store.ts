@@ -1154,6 +1154,40 @@ export const useChatStore = create<ChatStore>((set, get) => {
       });
     },
 
+    /** Jump the queue with one message. An engine takes one prompt at a time,
+     *  so "now" means stopping the turn in flight; the row moves to the head
+     *  and the stop's own park is lifted, so the exit drain sends this message
+     *  instead of waiting the turn out. The rows behind it follow on the next
+     *  settle. */
+    sendQueuedNow: async (id) => {
+      const { active } = get();
+      if (!active) return;
+      const key = sessionKey(
+        active.engine,
+        active.sessionId,
+        active.workspacePath,
+      );
+      const session = get().bySession[key];
+      const item = session?.queue.find((entry) => entry.id === id);
+      if (!item || !session) return;
+      const running = session.streaming;
+      set((s) => {
+        const prev = s.bySession[key] ?? EMPTY_SESSION;
+        return {
+          bySession: {
+            ...s.bySession,
+            [key]: {
+              ...prev,
+              queue: [item, ...prev.queue.filter((entry) => entry.id !== id)],
+              interrupted: false,
+            },
+          },
+        };
+      });
+      if (running) await get().interrupt();
+      drainQueue(key);
+    },
+
     interrupt: async () => {
       const { active } = get();
       if (!active) return;

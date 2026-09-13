@@ -118,6 +118,44 @@ describe("queued messages after a turn settles", () => {
     expect(queueOf()).toHaveLength(1);
   });
 
+  /** Jumping the queue: the chosen row goes first, and the turn in flight is
+   *  stopped because an engine takes one prompt at a time. */
+  it("sends the chosen row now and stops the running turn", async () => {
+    useChatStore.setState((s) => ({
+      bySession: {
+        ...s.bySession,
+        [KEY]: {
+          ...s.bySession[KEY],
+          queue: [
+            { id: "q-1", text: "继续", images: [], queuedAt: 0 },
+            { id: "q-2", text: "再看一遍", images: [], queuedAt: 1 },
+          ],
+        },
+      },
+    }));
+
+    await useChatStore.getState().sendQueuedNow("q-2");
+
+    expect(ipc.interruptSession).toHaveBeenCalled();
+    expect(ipc.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "再看一遍" }),
+    );
+    expect(queueOf().map((item) => item.text)).toEqual(["继续"]);
+  });
+
+  it("sends without stopping when no turn is running", async () => {
+    useChatStore.setState((s) => ({
+      bySession: { ...s.bySession, [KEY]: { ...s.bySession[KEY], streaming: false } },
+    }));
+
+    await useChatStore.getState().sendQueuedNow("q-1");
+
+    expect(ipc.interruptSession).not.toHaveBeenCalled();
+    expect(ipc.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "继续" }),
+    );
+  });
+
   /** A send that never becomes a turn reports no engine event, so the queue
    *  has to keep moving on its own or the rest waits forever. */
   it("keeps draining when the send itself fails", async () => {
