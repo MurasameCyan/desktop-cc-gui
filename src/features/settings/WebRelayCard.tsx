@@ -53,10 +53,9 @@ export function WebRelayCard({
   }, []);
 
   useTauriEvent(() =>
-    listenRelay((error) => {
-      // A give-up drops the session and carries the reason: keep it, so the
-      // dot can still explain itself once the switch is back to 连接中转.
-      if (error) setRelayError(error);
+    listenRelay(() => {
+      // The backend never gives up while the switch is on, so the event only
+      // says "the status moved" — the read below is what the dot paints.
       refreshRelay();
     }),
   );
