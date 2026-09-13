@@ -743,6 +743,7 @@ export const zh = {
     chartLabel: "按天堆叠的模型 token 消耗",
     chartTotal: "区间累计 {{tokens}}",
     tooltipTotal: "当天合计",
+    rangeTooltipTotal: "区间合计",
     rangeToday: "今日",
     rangeWeek: "本周",
     rangeMonth: "本月",

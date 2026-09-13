@@ -776,6 +776,7 @@ export const en: Messages = {
     chartLabel: "Daily tokens stacked by model",
     chartTotal: "Range total {{tokens}}",
     tooltipTotal: "Day total",
+    rangeTooltipTotal: "Range total",
     rangeToday: "Today",
     rangeWeek: "This week",
     rangeMonth: "This month",

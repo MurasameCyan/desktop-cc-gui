@@ -294,7 +294,12 @@ export function UsageSection() {
               {t("usage.chartTotal", { tokens: formatTokens(tokensOf(totals)) })}
             </span>
           </div>
-          <UsageChart rows={scoped} days={perDay.map((point) => point.day)} formatTokens={formatTokens} />
+          <UsageChart
+            rows={scoped}
+            days={perDay.map((point) => point.day)}
+            formatTokens={formatTokens}
+            axisLabel={t(RANGES.find((item) => item.id === range)?.labelKey ?? "usage.rangeToday")}
+          />
         </div>
       </SettingsCard>
 

@@ -12,7 +12,14 @@
 // recording both the provider-qualified launch slug and the engine's plain id.
 const pad = (n) => String(n).padStart(2, "0");
 const now = new Date();
-const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+const dayOf = (offset) => {
+  const d = new Date(now);
+  d.setDate(d.getDate() - offset);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+const today = dayOf(0);
+const yesterday = dayOf(1);
+const twoDaysAgo = dayOf(2);
 const state = {
   rows: [
     { day: today, engine: "omp", model: "agentrouter qunyou/deepseek-v4-flash", input: 12000, output: 3000, cacheRead: 0, cacheWrite: 0, requests: 4 },
@@ -21,6 +28,10 @@ const state = {
     // Cache-heavy turn: the four ledger parts are non-overlapping, so the
     // summary must read 累计 = 输入 + 输出 with 输入 = fresh + cache.
     { day: today, engine: "codex", model: "gpt-5-codex", input: 9000, output: 500, cacheRead: 7000, cacheWrite: 500, requests: 3 },
+    // Earlier days: the axis tooltip's 区间合计 must cover the whole selected
+    // range, so 今日 and 本周 have to disagree.
+    { day: yesterday, engine: "claude", model: "claude-opus-5", input: 40000, output: 8000, cacheRead: 0, cacheWrite: 0, requests: 5 },
+    { day: twoDaysAgo, engine: "codex", model: "gpt-5-codex", input: 30000, output: 2000, cacheRead: 0, cacheWrite: 0, requests: 2 },
   ],
   listeners: new Map(),
 };
