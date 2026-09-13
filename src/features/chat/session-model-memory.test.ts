@@ -11,6 +11,7 @@ vi.mock("@/lib/ipc", () => ({
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     rememberSessionModel: vi.fn(async () => {}),
     rememberSessionEffort: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
     rescanSessions: vi.fn(async () => {}),
     usageRecord: vi.fn(async () => {}),
   },
@@ -172,6 +173,26 @@ describe("a session's provider and model memory", () => {
     expect(
       resolveSessionEffort(tab, useChatStore.getState().bySession[KEY], "medium"),
     ).toBe("xhigh");
+  });
+
+  it("uses a refreshed session effort after another client changes it", async () => {
+    const tab = { engine: "omp", sessionId: SID, workspacePath: WS };
+    useChatStore.setState({
+      active: tab,
+      openTabs: [tab],
+      sessions: [meta(SENT, "xhigh")],
+      engines: [],
+      bySession: { [KEY]: { ...EMPTY_SESSION, activeEffort: "xhigh" } },
+      efforts: { omp: "medium" },
+    });
+    vi.mocked(ipc.listSessions).mockResolvedValueOnce([meta(SENT, "low")]);
+
+    await useChatStore.getState().refreshSessions();
+    await useChatStore.getState().send("继续", []);
+
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: "low" }),
+    );
   });
 
   it("falls back to the engine default when the session never recorded a level", async () => {

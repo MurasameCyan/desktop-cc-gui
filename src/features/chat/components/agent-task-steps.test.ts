@@ -31,15 +31,12 @@ describe("subagent counting", () => {
     expect(steps.every((s) => s.state === "active")).toBe(true);
   });
 
-  it("keeps the pill in step with a turn that reports four running", () => {
-    // The reported bug: a dispatch of three plus a wait on one more job is
-    // four in flight, while a per-call count showed two.
+  it("does not promote background jobs to subagents", () => {
     const steps = deriveAgentTaskSteps([DISPATCH, WAIT_EXTRA], true, "omp");
     expect(steps.map((s) => s.key)).toEqual([
       "2:CoreInvokeFilterParse",
       "2:IdolLiveDemosaic",
       "2:IdolLiveTranslate",
-      "5:bg_4",
     ]);
   });
 
@@ -58,6 +55,7 @@ describe("subagent counting", () => {
     expect(deriveAgentTaskSteps([tool(2, "hub · Checking background job roster", { op: "jobs" })], true, "omp")).toHaveLength(0);
   });
 
+<<<<<<< HEAD
   it("keeps agents named by a running hub snapshot active even when the host is not streaming", () => {
     const snapshot = tool(6, "hub · Waiting for workers", { op: "wait" }, {
       details: {
@@ -198,8 +196,11 @@ describe("subagent counting", () => {
     expect(deriveAgentTaskSteps([DISPATCH, running, unknown], false, "omp")[0].state).toBe("active");
   });
 
-  it("reads ids off both spellings", () => {
-    expect(subagentRefsFromArgs({ ids: ["bg_1", "bg_2"] }).map((r) => r.id)).toEqual(["bg_1", "bg_2"]);
+  it("reads named agents but ignores background-job ids", () => {
+    expect(subagentRefsFromArgs({ ids: ["bg_1", "bg_2"] })).toEqual([]);
+    expect(subagentRefsFromArgs({ ids: ["CoreInvokeFilterParse"] })).toEqual([
+      { id: "CoreInvokeFilterParse" },
+    ]);
     expect(subagentRefsFromArgs({ tasks: [{ id: "alpha" }] })[0]).toMatchObject({ id: "alpha", label: "alpha" });
     expect(subagentRefsFromArgs({ op: "jobs" })).toEqual([]);
   });

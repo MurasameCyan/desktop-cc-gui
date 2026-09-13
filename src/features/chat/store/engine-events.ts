@@ -10,6 +10,7 @@ import {
   migratePendingStream,
   moveStreamingFlag,
   patchSession,
+  resolveSessionEffort,
   resolveSessionModel,
   routeRun,
   runRouting,
@@ -110,20 +111,18 @@ function stampedModel(
   );
 }
 
-/** Effective reasoning effort for event-stamped rows: the session's activeEffort wins,
- * followed by the owning tab's per-tab override, then engine default. */
+/** Effective reasoning effort for event-stamped rows. Native-session state
+ * wins; a tab override is only valid before that session receives its id. */
 function stampedEffort(
   deps: EngineEventDeps,
   engine: string,
   key: string,
 ): string | null {
   const s = deps.get();
-  const sessionActive = s.bySession[key]?.activeEffort;
-  if (sessionActive) return sessionActive;
   const tab = s.openTabs.find(
     (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
   );
-  return (tab?.effort ?? s.efforts[engine]) || null;
+  return resolveSessionEffort(tab, s.bySession[key], s.efforts[engine]) || null;
 }
 
 function onModel(
@@ -329,7 +328,7 @@ function onSession(
       s.active.engine === event.engine &&
       s.active.sessionId === null &&
       s.active.workspacePath === workspacePath
-        ? { ...s.active, sessionId: nativeId }
+        ? { ...s.active, sessionId: nativeId, effort: undefined }
         : s.active;
     return { bySession, drafts, streamingByKey, active: activeNext };
   });
@@ -351,7 +350,7 @@ function onSession(
           return t;
         }
         stamped = true;
-        return { ...t, sessionId: nativeId };
+        return { ...t, sessionId: nativeId, effort: undefined };
       }),
     );
     persistTabs(openTabs, s.active);

@@ -138,7 +138,8 @@ export function subagentRefsFromArgs(args: unknown): {
   }
   for (const entry of array(record.ids)) {
     const id = text(entry);
-    if (id) refs.push({ id });
+    // hub background job handles are processes/waits, not delegated agents.
+    if (id && !/^bg_/i.test(id)) refs.push({ id });
   }
   return refs;
 }

@@ -376,4 +376,47 @@ describe("model selection is per session", () => {
       expect.objectContaining({ model: "claude-opus-5" }),
     );
   });
+  it("keeps an existing session's effort out of the engine default and sibling sessions", async () => {
+    const a = sess("s-a");
+    const b = sess("s-b");
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [a, b],
+      active: a,
+      efforts: { omp: "medium" },
+    });
+
+    await useChatStore.getState().setEffort("omp", "max");
+
+    expect(useChatStore.getState().efforts.omp).toBe("medium");
+    expect(vi.mocked(ipc.rememberSessionEffort)).toHaveBeenCalledWith(
+      "omp",
+      "s-a",
+      "max",
+    );
+    useChatStore.setState({ active: b });
+    await useChatStore.getState().send("next", []);
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ effort: "medium" }),
+    );
+  });
+
+  it("ignores a stale persisted tab effort for a native session", async () => {
+    const stale = { ...sess("s-a"), effort: "max" as const };
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [stale],
+      active: stale,
+      efforts: { omp: "medium" },
+      bySession: {
+        "omp/s-a": { ...EMPTY_SESSION, activeEffort: "low" },
+      },
+    });
+
+    await useChatStore.getState().send("next", []);
+
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: "low" }),
+    );
+  });
 });

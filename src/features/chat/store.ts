@@ -306,7 +306,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
                 return t;
               }
               stamped = true;
-              return { ...t, sessionId: result.sessionId };
+              return { ...t, sessionId: result.sessionId, effort: undefined };
             }),
           );
           // Only the active tab adopts the native id on `active`; a
@@ -316,7 +316,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
             s.active.engine === engine &&
             s.active.sessionId === null &&
             s.active.workspacePath === tab.workspacePath
-              ? { ...s.active, sessionId: result.sessionId }
+              ? { ...s.active, sessionId: result.sessionId, effort: undefined }
               : s.active;
           return {
             bySession,
@@ -535,7 +535,22 @@ export const useChatStore = create<ChatStore>((set, get) => {
 
     refreshSessions: async () => {
       const sessions = await ipc.listSessions().catch(() => null);
-      if (sessions) set({ sessions: visibleSessions(sessions, get().engines) });
+      if (!sessions) return;
+      set((s) => {
+        const visible = visibleSessions(sessions, s.engines);
+        const bySession = { ...s.bySession };
+        for (const meta of sessions) {
+          const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
+          const current = bySession[key];
+          if (!current) continue;
+          bySession[key] = {
+            ...current,
+            activeModel: meta.model ?? current.activeModel,
+            activeEffort: meta.effort ?? current.activeEffort,
+          };
+        }
+        return { sessions: visible, bySession };
+      });
     },
 
     refreshEngines: async () => {
@@ -668,22 +683,19 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const syncEngine = engine !== get().activeEngine;
       if (syncEngine) writeStored(ENGINE_PREF_KEY, engine);
       set((s) => {
-        // Reuse the stored tab so its per-tab model/effort overrides survive;
-        // a fresh object would drop them on every session switch.
+        // Native sessions read effort from SessionState/database. Strip the
+        // legacy per-tab field so an old localStorage value cannot shadow it.
         const stored = s.openTabs.find((t) =>
           sameTab(t, engine, sessionId, workspacePath),
         );
-        const tab: ActiveSession = stored ?? {
-          engine,
-          sessionId,
-          workspacePath,
-        };
-        const openTabs = stored ? s.openTabs : [...s.openTabs, tab];
+        const tab: ActiveSession = stored
+          ? { ...stored, effort: undefined }
+          : { engine, sessionId, workspacePath };
+        const openTabs = stored
+          ? s.openTabs.map((t) => (t === stored ? tab : t))
+          : [...s.openTabs, tab];
         persistTabs(openTabs, tab);
-        // Opening a session clears its unseen flag.
         const unseen = key in s.unseen ? omitKey(s.unseen, key) : s.unseen;
-        // The picker must follow the session's engine — otherwise the chip
-        // shows one CLI while sends go to another (same rule as pending tabs).
         return { openTabs, active: tab, unseen, activeEngine: engine };
       });
       const existing = get().bySession[key];
@@ -845,8 +857,16 @@ export const useChatStore = create<ChatStore>((set, get) => {
       set({ codexServiceTier: tier });
     },
     setEffort: async (engine, effort) => {
+      const active = get().active;
+      if (active?.engine === engine && active.sessionId) {
+        const key = sessionKey(engine, active.sessionId, active.workspacePath);
+        patchSession(set, key, { activeEffort: effort });
+        void ipc.rememberSessionEffort(engine, active.sessionId, effort).catch(() => {});
+        stampActiveTab({ effort: undefined });
+        return;
+      }
       set({ efforts: { ...get().efforts, [engine]: effort } });
-      if (get().active?.engine === engine) stampActiveTab({ effort });
+      if (active?.engine === engine) stampActiveTab({ effort });
       await persistSettings((settings) => ({
         defaultEfforts: { ...settings.defaultEfforts, [engine]: effort },
       }));

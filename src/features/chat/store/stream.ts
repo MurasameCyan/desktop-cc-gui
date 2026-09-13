@@ -84,18 +84,17 @@ export function resolveSessionModel(
   return engineDefault;
 }
 
-/** The reasoning level one session runs with, most specific first: the tab's
- * own pick, what the engine reported for this session, the level its history
- * was written with, then the engine default. Mirrors [resolveSessionModel] —
- * two omp sessions may run different levels, so the picker and the send read
- * the session's level, never an engine-wide default. */
+/** The reasoning level one session runs with. A native session owns its level
+ * in SessionState/database; only a not-yet-created tab may carry a starting
+ * override. This prevents stale persisted tab fields from shadowing a newer
+ * level recorded by another client. */
 export function resolveSessionEffort(
-  tab: { engine: string; effort?: string | null } | null | undefined,
+  tab: { engine: string; sessionId?: string | null; effort?: string | null } | null | undefined,
   session: Pick<SessionState, "activeEffort" | "messages"> | undefined,
   engineDefault?: string,
 ): string | undefined {
   if (!tab) return engineDefault;
-  if (tab.effort) return tab.effort;
+  if (tab.sessionId === null && tab.effort) return tab.effort;
   if (session?.activeEffort) return session.activeEffort;
   const messages = session?.messages;
   if (messages) {

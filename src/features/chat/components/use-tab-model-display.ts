@@ -73,12 +73,8 @@ export function useTabModelDisplay({
   });
   const tabEffort = useMemo(() => {
     if (!active || active.engine !== activeEngine) return undefined;
-    // Same chain as the model: this tab's pick, then what the session ran,
-    // then the level its history was written with, then the engine default.
-    // Without the middle levels a reopened session showed (and sent) the
-    // engine default instead of the level that conversation uses.
     return (
-      active.effort ||
+      (active.sessionId === null ? active.effort : undefined) ||
       asEffortLevel(sessionActiveEffort) ||
       asEffortLevel(sessionHistoryEffort) ||
       efforts[activeEngine]
