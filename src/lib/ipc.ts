@@ -503,6 +503,27 @@ export interface PluginInfo {
   installedAt: number;
   minAppVersion: string | null;
 }
+/** Marketplace listing row (plan §6.1): community-plugins.json merged with
+ *  plugins/<id>.json — the fields the market UI renders. */
+export interface MarketPlugin {
+  id: string;
+  repo: string;
+  name: string;
+  description: string;
+  author: string;
+  tier: "declarative" | "js";
+  version: string;
+  minAppVersion: string | null;
+  sdkVersion: string | null;
+  permissions: string[];
+}
+
+/** One installed marketplace plugin with a newer indexed version. */
+export interface PluginUpdate {
+  id: string;
+  currentVersion: string;
+  latestVersion: string;
+}
 
 export interface OfficialConfigFile {
   /** Absolute path — the pane label, and the write-back key. */
@@ -733,6 +754,13 @@ export const ipc = {
     invoke<void>("plugin_storage_set", { id, key, value }),
   pluginStorageDelete: (id: string, key: string) =>
     invoke<void>("plugin_storage_delete", { id, key }),
+  // plugin marketplace (Phase 3, plan §6) — install is desktop-only on the
+  // web bridge; fetch/checkUpdates ride the read-only whitelist.
+  pluginFetchIndex: (force = false) =>
+    invoke<MarketPlugin[]>("plugin_fetch_index", { force }),
+  pluginInstallFromMarketplace: (id: string) =>
+    invoke<PluginInfo>("plugin_install_from_marketplace", { id }),
+  pluginCheckUpdates: () => invoke<PluginUpdate[]>("plugin_check_updates"),
   // web access (start/stop are desktop-only; the bridge answers status too)
   webDevices: () => invoke<WebDevice[]>("web_devices"),
   webDeviceApprove: (id: string) => invoke<boolean>("web_device_approve", { id }),

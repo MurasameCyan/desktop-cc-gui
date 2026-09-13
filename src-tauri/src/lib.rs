@@ -207,6 +207,10 @@ pub fn run() {
             plugins::plugin_storage_get,
             plugins::plugin_storage_set,
             plugins::plugin_storage_delete,
+            // plugin marketplace (Phase 3, plan §6)
+            plugins::market::plugin_fetch_index,
+            plugins::market::plugin_install_from_marketplace,
+            plugins::market::plugin_check_updates,
             // engine
             engine::send_message,
             engine::interrupt_session,

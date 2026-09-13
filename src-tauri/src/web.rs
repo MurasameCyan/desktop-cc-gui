@@ -1597,6 +1597,10 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
             let a: PluginStorageGetArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_storage_get(app.state(), a.id, a.key))
         }
+        // Marketplace browsing is read-only too, so the web client renders
+        // the market page; plugin_install_from_marketplace stays desktop-only.
+        "plugin_fetch_index" => ser(crate::plugins::market::plugin_fetch_index(false).await),
+        "plugin_check_updates" => ser(crate::plugins::market::plugin_check_updates().await),
         _ => Err(format!("unknown command: {cmd}")),
     }
 }
