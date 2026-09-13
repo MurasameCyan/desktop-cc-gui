@@ -70,8 +70,9 @@ export function ChatSidebarFrame({
           !dragging &&
             "transition-[width] duration-200 ease-out motion-reduce:transition-none",
           // On phones the sidebar floats over the chat as a drawer instead of
-          // squishing the layout; the backdrop below dismisses it.
-          "max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl",
+          // squishing the layout. Absolute positioning bypasses ChatPage's
+          // padding, so the drawer needs its own top safe-area inset.
+          "max-md:absolute max-md:top-[env(safe-area-inset-top)] max-md:bottom-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl",
         )}
         repos={repos}
         sections={sections}

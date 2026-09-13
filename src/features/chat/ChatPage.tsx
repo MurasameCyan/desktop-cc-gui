@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useChatStore } from "./store";
 import { SessionTabStrip } from "./components/SessionTabStrip";
+import { ErrorBanner } from "./components/ErrorBanner";
 import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-chat-composer";
 import { AppStatusBar } from "@/components/application/app-status-bar/app-status-bar";
 import { isWeb } from "@/lib/platform";
@@ -246,22 +247,11 @@ export default function ChatPage() {
         />
 
         {actionError && (
-          <div
-            role="alert"
-            className="mx-4 mt-2 flex shrink-0 items-center gap-2 rounded-lg border border-border-error-default bg-background-tertiary-error px-3 py-2 text-body-regular text-text-error-primary"
-          >
-            <span className="min-w-0 flex-1 break-all">
-              {t("common.error")}: {actionError}
-            </span>
-            <button
-              type="button"
-              aria-label={t("common.close")}
-              onClick={dismissActionError}
-              className="shrink-0 cursor-pointer rounded p-0.5 hover:bg-background-tertiary-hover"
-            >
-              ×
-            </button>
-          </div>
+          <ErrorBanner
+            className="mx-4 mt-2"
+            message={`${t("common.error")}: ${actionError}`}
+            onDismiss={dismissActionError}
+          />
         )}
 
         <div
