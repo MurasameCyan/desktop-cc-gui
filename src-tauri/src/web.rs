@@ -9,7 +9,9 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{ConnectInfo, Query, State as AxumState, WebSocketUpgrade};
@@ -24,23 +26,61 @@ use tauri::Manager;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 
-
 use crate::event_sink::Emit;
 
 /// Managed inside AppState; holds the running server, if any.
 #[derive(Default)]
 pub struct WebAccessState {
     inner: Mutex<Option<Running>>,
+    transition: tokio::sync::Mutex<()>,
 }
 
 impl WebAccessState {
     /// Where the relay should dial (127.0.0.1:<port>) and the token its
     /// public URL carries, when the bridge is running.
     pub fn bridge_target(&self) -> Option<(u16, String)> {
-        let guard = self.inner.lock().ok()?;
-        guard
+        self.inner
+            .lock()
             .as_ref()
             .map(|running| (running.info.port, running.info.token.clone()))
+    }
+
+    fn take_if_token(&self, token: &str) -> Option<Running> {
+        let mut guard = self.inner.lock();
+        if guard
+            .as_ref()
+            .is_some_and(|running| running.info.token == token)
+        {
+            guard.take()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn lock_transition(&self) -> WebAccessTransition<'_> {
+        WebAccessTransition {
+            _guard: self.transition.lock().await,
+        }
+    }
+}
+
+pub(crate) struct WebAccessTransition<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl WebAccessTransition<'_> {
+    pub(crate) async fn ensure(
+        &self,
+        app: tauri::AppHandle,
+    ) -> Result<(WebAccessInfo, bool), String> {
+        ensure_web_access_locked(app).await
+    }
+
+    pub(crate) fn stop_if_token(&self, app: &tauri::AppHandle, token: &str) {
+        let state = app.state::<crate::AppState>();
+        if let Some(running) = state.web.take_if_token(token) {
+            stop_running(&state, running);
+        }
     }
 }
 
@@ -186,11 +226,20 @@ pub fn web_device_approve(app: tauri::AppHandle, id: String) -> Result<bool, Str
 #[tauri::command]
 pub async fn web_access_start(app: tauri::AppHandle) -> Result<WebAccessInfo, String> {
     let state = app.state::<crate::AppState>();
-    {
-        let guard = state.web.inner.lock().map_err(|e| e.to_string())?;
-        if let Some(running) = guard.as_ref() {
-            return Ok(running.info.clone());
-        }
+    let transition = state.web.lock_transition().await;
+    transition
+        .ensure(app.clone())
+        .await
+        .map(|(info, _created)| info)
+}
+
+/// Ensure the bridge exists and report whether this invocation published it.
+/// The ownership bit lets callers roll back only their own newly-created
+/// bridge when a later operation fails.
+async fn ensure_web_access_locked(app: tauri::AppHandle) -> Result<(WebAccessInfo, bool), String> {
+    let state = app.state::<crate::AppState>();
+    if let Some(running) = state.web.inner.lock().as_ref() {
+        return Ok((running.info.clone(), false));
     }
 
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -237,27 +286,44 @@ pub async fn web_access_start(app: tauri::AppHandle) -> Result<WebAccessInfo, St
         token,
         lan_ip,
     };
-    let mut guard = state.web.inner.lock().map_err(|e| e.to_string())?;
-    *guard = Some(Running {
+    let mut candidate = Some(Running {
         info: info.clone(),
         emit_id,
         shutdown: Some(shutdown_tx),
         stop_watch,
     });
-    Ok(info)
+    let existing = {
+        let mut guard = state.web.inner.lock();
+        if let Some(running) = guard.as_ref() {
+            Some(running.info.clone())
+        } else {
+            *guard = candidate.take();
+            None
+        }
+    };
+    if let Some(existing) = existing {
+        stop_running(&state, candidate.expect("unpublished bridge candidate"));
+        Ok((existing, false))
+    } else {
+        Ok((info, true))
+    }
+}
+
+fn stop_running(state: &crate::AppState, mut running: Running) {
+    // Close live sockets first (watch), then stop accepting (oneshot).
+    let _ = running.stop_watch.send(true);
+    if let Some(shutdown) = running.shutdown.take() {
+        let _ = shutdown.send(());
+    }
+    state.emitters.remove(running.emit_id);
 }
 
 #[tauri::command]
-pub fn web_access_stop(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn web_access_stop(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
-    let mut guard = state.web.inner.lock().map_err(|e| e.to_string())?;
-    if let Some(mut running) = guard.take() {
-        // Close live sockets first (watch), then stop accepting (oneshot).
-        let _ = running.stop_watch.send(true);
-        if let Some(shutdown) = running.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        state.emitters.remove(running.emit_id);
+    let _transition = state.web.lock_transition().await;
+    if let Some(running) = state.web.inner.lock().take() {
+        stop_running(&state, running);
     }
     Ok(())
 }
@@ -265,8 +331,8 @@ pub fn web_access_stop(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn web_access_status(app: tauri::AppHandle) -> Option<WebAccessInfo> {
     let state = app.state::<crate::AppState>();
-    let guard = state.web.inner.lock().ok()?;
-    guard.as_ref().map(|r| r.info.clone())
+    let guard = state.web.inner.lock();
+    guard.as_ref().map(|running| running.info.clone())
 }
 
 // ==================== Device gate ====================
@@ -1616,6 +1682,64 @@ mod tests {
             approved_at,
             name: None,
         }
+    }
+
+    #[test]
+    fn conditional_bridge_take_never_removes_a_replacement() {
+        let state = WebAccessState::default();
+        let running = |token: &str| Running {
+            info: WebAccessInfo {
+                url: format!("http://127.0.0.1/?token={token}"),
+                port: 1420,
+                token: token.to_string(),
+                lan_ip: "127.0.0.1".to_string(),
+            },
+            emit_id: 1,
+            shutdown: None,
+            stop_watch: watch::channel(false).0,
+        };
+
+        *state.inner.lock() = Some(running("new-owner"));
+        assert!(state.take_if_token("old-owner").is_none());
+        assert_eq!(state.bridge_target().unwrap().1, "new-owner");
+        assert!(state.take_if_token("new-owner").is_some());
+        assert!(state.bridge_target().is_none());
+    }
+
+    #[tokio::test]
+    async fn bridge_candidate_cannot_be_adopted_before_its_owner_rolls_back() {
+        let state = Arc::new(WebAccessState::default());
+        *state.inner.lock() = Some(Running {
+            info: WebAccessInfo {
+                url: "http://127.0.0.1/?token=candidate".into(),
+                port: 1420,
+                token: "candidate".into(),
+                lan_ip: "127.0.0.1".into(),
+            },
+            emit_id: 1,
+            shutdown: None,
+            stop_watch: watch::channel(false).0,
+        });
+        let owner = state.lock_transition().await;
+        let contender_state = Arc::clone(&state);
+        let contender = tokio::spawn(async move {
+            let _transition = contender_state.lock_transition().await;
+            contender_state.bridge_target()
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !contender.is_finished(),
+            "the candidate is not adoptable yet"
+        );
+        assert!(state.take_if_token("candidate").is_some());
+        drop(owner);
+
+        assert_eq!(
+            contender.await.unwrap(),
+            None,
+            "the later adopter sees the rolled-back state"
+        );
     }
 
     /// The relay path answers to the device list, never to the switch: an

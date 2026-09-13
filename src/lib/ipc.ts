@@ -73,6 +73,8 @@ export interface Message {
 export interface SessionPage {
   messages: Message[];
   nextBefore: number | null;
+  /** Delegation metadata before this page, restored from the session file. */
+  subagentHistory: Message[];
 }
 
 export interface Workspace {

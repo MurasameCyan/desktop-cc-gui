@@ -226,19 +226,27 @@ pub fn autostart_target(settings: &crate::settings::AppSettings) -> Option<(Stri
     Some((url.to_string(), key.to_string()))
 }
 
-/// Remember the switch position for the next launch. Best effort: a settings
-/// write failure must never take the running relay down with it.
-fn remember_relay_enabled(enabled: bool) {
-    let Ok(mut settings) = crate::settings::read_settings() else {
-        return;
-    };
-    if settings.web_relay_on == Some(enabled) {
-        return;
+fn persist_relay_state(
+    enabled: bool,
+    target: Option<(&str, &str)>,
+) -> Result<Option<String>, String> {
+    let mut settings = crate::settings::read_settings()?;
+    if let Some((url, key)) = target {
+        settings.web_relay_url = Some(url.to_string());
+        settings.web_relay_key = Some(key.to_string());
     }
     settings.web_relay_on = Some(enabled);
-    if let Err(error) = crate::settings::persist_settings(&mut settings) {
-        eprintln!("[relay] could not remember the switch position: {error}");
+    crate::settings::persist_settings_committed(&mut settings)
+}
+fn stop_relay_after_persist(
+    running: &mut Option<Running>,
+    persist: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
+    let warning = persist()?;
+    if let Some(running) = running.take() {
+        let _ = running.stop.send(true);
     }
+    Ok(warning)
 }
 
 #[tauri::command]
@@ -247,63 +255,81 @@ pub async fn web_relay_start(
     url: String,
     key: String,
 ) -> Result<RelayInfo, String> {
-    let state = app.state::<crate::AppState>();
-    // The relay forwards every request through the local bridge, so connecting
-    // it turns the bridge on rather than bouncing the user back to 内网访问 to
-    // hunt for the switch. `web_access_start` is idempotent when it already
-    // runs, and a remote device only reaches this command *through* the
-    // bridge, so the auto-start can only ever happen on the desktop.
-    if state.web.bridge_target().is_none() {
-        crate::web::web_access_start(app.clone()).await?;
-    }
-    let bridge_port = state
-        .web
-        .bridge_target()
-        .map(|(port, _)| port)
-        .ok_or("本机服务启动失败：中继无法转发")?;
-
+    let url = url.trim().to_string();
+    let key = key.trim().to_string();
     let agent = agent_url(&url, &key)?;
+    let state = app.state::<crate::AppState>();
+    let bridge_transition = state.web.lock_transition().await;
+    let (bridge, bridge_created) = bridge_transition.ensure(app.clone()).await?;
+    let bridge_port = bridge.port;
+    let bridge_token = bridge.token;
+
     let info = RelayInfo {
         url: phone_url(&url),
         agent_url: agent.clone(),
         connected: false,
         error: None,
     };
+    // Persist and publish under the same lock so start/stop linearize as one
+    // state transition. On failure an existing relay remains untouched.
     let (stop_tx, stop_rx) = watch::channel(false);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    {
+    let persisted = {
         let mut guard = state.relay.inner.lock();
-        if let Some(previous) = guard.take() {
-            let _ = previous.stop.send(true);
+        match persist_relay_state(true, Some((&url, &key))) {
+            Ok(warning) => {
+                if let Some(previous) = guard.take() {
+                    let _ = previous.stop.send(true);
+                }
+                *guard = Some(Running {
+                    info: info.clone(),
+                    stop: stop_tx,
+                    generation,
+                });
+                Ok(warning)
+            }
+            Err(error) => Err(error),
         }
-        *guard = Some(Running {
-            info: info.clone(),
-            stop: stop_tx,
-            generation,
-        });
+    };
+    let warning = match persisted {
+        Ok(warning) => warning,
+        Err(error) => {
+            if bridge_created {
+                bridge_transition.stop_if_token(&app, &bridge_token);
+            }
+            return Err(error);
+        }
+    };
+    if let Some(warning) = warning {
+        eprintln!("[relay] settings committed with warning: {warning}");
     }
 
     let handle = app.clone();
     tokio::spawn(async move {
         run_agent(handle, agent, bridge_port, stop_rx, generation).await;
     });
-    // Only after the switch is actually up: a failed start must not leave a
-    // remembered "on" that a relaunch would retry forever.
-    remember_relay_enabled(true);
     Ok(info)
 }
 
 #[tauri::command]
 pub fn web_relay_stop(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
-    let mut guard = state.relay.inner.lock();
-    if let Some(running) = guard.take() {
-        let _ = running.stop.send(true);
-    }
-    drop(guard);
-    remember_relay_enabled(false);
+    let persisted = {
+        let mut guard = state.relay.inner.lock();
+        // The durable switch is authoritative: if writing it fails, leave the
+        // published relay and its agent task untouched so restart cannot
+        // silently disagree with the current runtime.
+        stop_relay_after_persist(&mut guard, || persist_relay_state(false, None))
+    };
     broadcast_relay(&app);
-    Ok(())
+    match persisted {
+        Ok(Some(warning)) => {
+            eprintln!("[relay] settings committed with warning: {warning}");
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -855,6 +881,22 @@ async fn run_agent(
 }
 
 /// One connected agent socket: dispatch streams, pump frames until it dies.
+/// Queue one liveness probe. A full queue already proves the writer has work;
+/// only a Ping that actually entered the queue may arm the response timeout.
+fn queue_heartbeat(
+    out: &mpsc::Sender<OutFrame>,
+    ping_sent_at: &mut Option<tokio::time::Instant>,
+) -> bool {
+    match out.try_send(OutFrame::Ping) {
+        Ok(()) => {
+            *ping_sent_at = Some(tokio::time::Instant::now());
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 async fn serve(
     socket: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -905,13 +947,7 @@ async fn serve(
                 if ping_sent_at.take().is_some() {
                     break;
                 }
-                ping_sent_at = Some(tokio::time::Instant::now());
-                // A full channel means traffic is flowing, which is proof
-                // enough; only a closed one ends the loop.
-                if matches!(
-                    out_tx.try_send(OutFrame::Ping),
-                    Err(mpsc::error::TrySendError::Closed(_))
-                ) {
+                if !queue_heartbeat(&out_tx, &mut ping_sent_at) {
                     break;
                 }
                 continue;
@@ -1414,6 +1450,53 @@ mod tests {
         assert!(autostart_target(&settings).is_none(), "off stays off");
     }
 
+
+    #[test]
+    fn stop_persistence_failure_preserves_the_running_relay() {
+        let (stop, stop_rx) = watch::channel(false);
+        let mut running = Some(Running {
+            info: RelayInfo {
+                url: "https://relay.example".into(),
+                agent_url: "wss://relay.example/agent?key=KEY".into(),
+                connected: true,
+                error: None,
+            },
+            stop,
+            generation: 1,
+        });
+
+        let error = stop_relay_after_persist(&mut running, || {
+            Err("settings disk is read-only".to_string())
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "settings disk is read-only");
+        assert!(running.is_some(), "the live relay remains published");
+        assert!(!*stop_rx.borrow(), "the agent task was not stopped");
+
+        stop_relay_after_persist(&mut running, || {
+            Ok(Some("unrelated setting was rejected".to_string()))
+        })
+        .unwrap();
+        assert!(running.is_none(), "a committed stop removes the relay");
+        assert!(*stop_rx.borrow(), "a committed warning still stops the agent");
+    }
+
+    #[test]
+    fn full_outbound_queue_does_not_arm_heartbeat_timeout() {
+        let (out, _rx) = mpsc::channel(1);
+        assert!(
+            out.try_send(OutFrame::Ping).is_ok(),
+            "fill the only queue slot"
+        );
+        let mut ping_sent_at = None;
+
+        assert!(queue_heartbeat(&out, &mut ping_sent_at));
+        assert!(
+            ping_sent_at.is_none(),
+            "a Ping that never entered the queue cannot be awaited"
+        );
+    }
 
     #[test]
     fn redial_backoff_grows_then_caps() {

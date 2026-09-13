@@ -110,7 +110,17 @@ export function subagentRefsFromArgs(args: unknown): {
   const record = args as Record<string, unknown>;
   const refs: { id: string; label?: string; agent?: string; detail?: string }[] = [];
   const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
-  for (const entry of Array.isArray(record.tasks) ? record.tasks : []) {
+  const array = (value: unknown): unknown[] => {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== "string") return [];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+  for (const entry of array(record.tasks)) {
     if (!entry || typeof entry !== "object") continue;
     const row = entry as Record<string, unknown>;
     // `name` is the job id the run reports back ("CoreInvokeFilterParse");
@@ -126,16 +136,39 @@ export function subagentRefsFromArgs(args: unknown): {
       detail: task,
     });
   }
-  for (const entry of Array.isArray(record.ids) ? record.ids : []) {
+  for (const entry of array(record.ids)) {
     const id = text(entry);
     if (id) refs.push({ id });
   }
   return refs;
 }
 
+function agentState(status: unknown): AgentTaskStepState | undefined {
+  if (typeof status !== "string") return undefined;
+  switch (status.trim().toLowerCase()) {
+    case "active":
+    case "in_progress":
+    case "pending":
+    case "queued":
+    case "running":
+      return "active";
+    case "canceled":
+    case "cancelled":
+    case "complete":
+    case "completed":
+    case "failed":
+    case "idle":
+    case "parked":
+    case "stopped":
+      return "complete";
+    default:
+      return undefined;
+  }
+}
+
 /** Job states a `hub` result reports about itself: `details.jobs` on a wait,
- *  `details.peers` on a roster, `details.progress` on a dispatch. Anything not
- *  running has stopped — parked and idle included, both mean "not working". */
+ *  `details.peers` on a roster, `details.progress` on a dispatch. Unknown
+ *  states are ignored instead of being guessed terminal. */
 function jobStatesFromResult(result: unknown): Map<string, AgentTaskStepState> {
   const states = new Map<string, AgentTaskStepState>();
   if (!result || typeof result !== "object") return states;
@@ -150,12 +183,30 @@ function jobStatesFromResult(result: unknown): Map<string, AgentTaskStepState> {
       if (!entry || typeof entry !== "object") continue;
       const row = entry as Record<string, unknown>;
       const id = typeof row.id === "string" ? row.id.trim() : "";
-      if (!id) continue;
-      const status = typeof row.status === "string" ? row.status.toLowerCase() : "";
-      states.set(id, status === "running" ? "active" : "complete");
+      const state = agentState(row.status);
+      if (id && state) states.set(id, state);
     }
   }
   return states;
+}
+
+/** An unfiltered `hub jobs` result is the complete process-local roster. */
+function isCompleteJobsRoster(message: Message): boolean {
+  if (!message.result || typeof message.result !== "object") return false;
+  const details = (message.result as Record<string, unknown>).details;
+  if (!details || typeof details !== "object") return false;
+  const args = message.args && typeof message.args === "object"
+    ? message.args as Record<string, unknown>
+    : {};
+  const roster = details as Record<string, unknown>;
+  return roster.op === "jobs" &&
+    !Object.prototype.hasOwnProperty.call(args, "ids") &&
+    Array.isArray(roster.jobs) &&
+    roster.jobs.every((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const row = entry as Record<string, unknown>;
+      return typeof row.id === "string" && !!row.id.trim() && agentState(row.status) !== undefined;
+    });
 }
 
 /** Tool name head of a tool row's label ("task · Dispatching…" → "task").
@@ -230,11 +281,13 @@ export function deriveAgentTaskSteps(
         if (!states.has(ref.id)) states.set(ref.id, spawned);
       }
     }
-    // Roster rows (`hub wait` / `hub jobs`) name no ids in their args — the
-    // statuses they report are the only place those ids appear.
-    for (const [id, state] of jobStatesFromResult(message.result)) {
-      states.set(id, state);
+    const snapshot = jobStatesFromResult(message.result);
+    if (isCompleteJobsRoster(message)) {
+      for (const [id, state] of states) {
+        if (state === "active" && !snapshot.has(id)) states.set(id, "complete");
+      }
     }
+    for (const [id, state] of snapshot) states.set(id, state);
   }
 
   // Pass 2 — display order: one step per agent, first naming wins.
@@ -247,7 +300,11 @@ export function deriveAgentTaskSteps(
     // Naming ids is itself proof of delegation (`hub` waits carry a generic
     // "hub ·…" label the name heuristic cannot classify).
     const refs = subagentRefsFromArgs(message.args);
-    if (refs.length === 0 && !isSubagentToolLabel(message.text)) continue;
+    const declaresTaskList =
+      !!message.args &&
+      typeof message.args === "object" &&
+      Object.prototype.hasOwnProperty.call(message.args, "tasks");
+    if (refs.length === 0 && (declaresTaskList || !isSubagentToolLabel(message.text))) continue;
 
     const isCurrentTurn = i >= turnStart;
     let settled = !isCurrentTurn || !streaming;

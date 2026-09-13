@@ -127,16 +127,15 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
         // fallback used by Claude transcripts.
         if row.role == "__tool_result__" {
             if let Some(res) = row.result {
-                let by_id = row
-                    .tool_call_id
-                    .as_deref()
-                    .and_then(|id| call_rows.get(id).copied())
-                    .filter(|index| messages[*index].result.is_none());
-                let index = by_id.or_else(|| {
-                    messages
+                let index = match row.tool_call_id.as_deref() {
+                    Some(id) => call_rows
+                        .get(id)
+                        .copied()
+                        .filter(|index| messages[*index].result.is_none()),
+                    None => messages
                         .iter()
-                        .rposition(|m| m.role == "tool" && m.result.is_none())
-                });
+                        .rposition(|m| m.role == "tool" && m.result.is_none()),
+                };
                 if let Some(index) = index {
                     messages[index].result = Some(res);
                 }
@@ -1066,6 +1065,9 @@ mod tests {
             call("call_b"),
             // Out of order: `a` answers first even though `b` was called later.
             result("call_a", "## Still Running (1)", "running"),
+            // Replayed or unmatched results must not consume another call.
+            result("call_a", "duplicate", "failed"),
+            result("unknown_call", "unmatched", "failed"),
             result("call_b", "done", "completed"),
         ];
         let input = lines

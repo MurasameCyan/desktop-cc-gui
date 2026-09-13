@@ -12,6 +12,7 @@ import type { ActiveSession, QueuedMessage } from "../store";
 import { useChatStore } from "../store";
 import { ImageLightbox } from "./MessageImages";
 import { RunStatusStrip } from "./RunStatusStrip";
+import { ErrorBanner } from "./ErrorBanner";
 import { sessionKey } from "../store";
 import { ComposerSlotExtras } from "@/features/plugins/boundary/composer-slot-extras";
 import { COMPOSER_DRAFT_TOPIC, pluginBus } from "@/features/plugins/runtime/events";
@@ -29,33 +30,6 @@ function baseName(path: string): string {
 /** Composer attachment chip lightbox target: preview URL + display name. */
 type ZoomImage = { src: string; name: string } | null;
 
-/** Error banner row (image/branch failures); hidden with no message. */
-function ErrorBanner({
-  message,
-  onDismiss,
-}: {
-  message: string | null;
-  onDismiss: () => void;
-}) {
-  const { t } = useTranslation();
-  if (!message) return null;
-  return (
-    <div
-      role="alert"
-      className="flex items-center gap-2 rounded-lg border border-border-error-default bg-background-tertiary-error px-3 py-2 text-body-regular text-text-error-primary"
-    >
-      <span className="min-w-0 flex-1 break-all">{message}</span>
-      <button
-        type="button"
-        aria-label={t("common.close")}
-        onClick={onDismiss}
-        className="shrink-0 cursor-pointer rounded p-0.5 hover:bg-background-tertiary-hover"
-      >
-        ×
-      </button>
-    </div>
-  );
-}
 
 /** One attachment chip: thumbnail + name button zooms the preview, × removes. */
 function AttachmentChip({

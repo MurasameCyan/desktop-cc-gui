@@ -21,6 +21,7 @@ import {
 
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
+import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
 import { useComposerImages } from "./use-composer-images";
 import { useEngineModels } from "./use-engine-models";
@@ -61,32 +62,6 @@ const SessionTimeline = memo(function SessionTimeline({
   );
 });
 
-/** Session error banner above the timeline. */
-function SessionErrorBanner({
-  error,
-  onDismiss,
-}: {
-  error: string;
-  onDismiss: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div
-      role="alert"
-      className="mx-4 mt-3 flex items-center gap-2 rounded-lg border border-border-error-default bg-background-tertiary-error px-3 py-2 text-body-regular text-text-error-primary"
-    >
-      <span className="min-w-0 flex-1 break-all">{error}</span>
-      <button
-        type="button"
-        aria-label={t("common.close")}
-        onClick={onDismiss}
-        className="shrink-0 cursor-pointer rounded p-0.5 hover:bg-background-tertiary-hover"
-      >
-        ×
-      </button>
-    </div>
-  );
-}
 
 /** Composer menu slots (add / CLI / permission) plus the all-engines-disabled
  * state, memoized so per-keystroke draft updates don't rebuild the menus. */
@@ -413,8 +388,9 @@ export const ChatConversation = memo(function ChatConversation({
       {active && hasSession ? (
         <>
           {sessionError && (
-            <SessionErrorBanner
-              error={sessionError}
+            <ErrorBanner
+              className="mx-4 mt-3"
+              message={sessionError}
               onDismiss={() => dismissSessionError(key)}
             />
           )}

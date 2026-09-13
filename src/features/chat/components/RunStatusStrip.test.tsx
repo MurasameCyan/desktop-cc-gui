@@ -1,11 +1,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
 import { useChatStore } from "../store";
 import { useGitStore } from "@/features/git/store";
 import { RunStatusStrip } from "./RunStatusStrip";
 import { deriveTodoList } from "./agent-task-steps";
+import { ipc } from "@/lib/ipc";
 import type { Message, TodosPayload } from "@/lib/ipc";
 
 // React's act() environment flag — a well-known global the runtime can't
@@ -63,6 +64,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.restoreAllMocks();
 });
 
 async function renderStrip() {
@@ -86,6 +88,100 @@ function pill(label: string): Element {
 }
 
 describe("RunStatusStrip", () => {
+  it("restores older subagents with their session after switching and reopening", async () => {
+    const brief = "# Target\nReview relay recovery.\n# Acceptance\nReconnect without toggling.";
+    const history: Message[] = [
+      msg(1, "user", "Review the relay"),
+      {
+        ...msg(2, "tool", "task · Reviewing relay"),
+        args: { tasks: [{ name: "SavedReviewer", agent: "reviewer", task: brief }] },
+      },
+      {
+        ...msg(3, "tool", "hub · Waiting for review"),
+        args: { op: "wait" },
+        result: { details: { jobs: [{ id: "SavedReviewer", status: "completed" }] } },
+      },
+    ];
+    const savedPage = {
+      messages: [msg(201, "user", "Continue later"), msg(202, "assistant", "Ready")],
+      nextBefore: 201,
+      subagentHistory: history,
+    };
+    vi.spyOn(ipc, "loadSessionPage").mockImplementation(async (_engine, id, _limit, before) =>
+      structuredClone(id === "saved" ? before ? {
+        messages: history,
+        nextBefore: null,
+        subagentHistory: [],
+      } : savedPage : {
+        messages: [msg(1, "user", "Unrelated session")],
+        nextBefore: null,
+        subagentHistory: [],
+      }),
+    );
+    const open = async (id: string) => {
+      await act(async () => {
+        await useChatStore.getState().selectSession("omp", id, WS);
+        root.render(<RunStatusStrip key={id} sessionKey={`omp/${id}`} engine="omp" workspacePath={WS} />);
+      });
+    };
+
+    await open("saved");
+    await click(pill("子代理"));
+    const row = container.querySelector<HTMLButtonElement>("[data-agent-step-key]")!;
+    expect(row.textContent).toContain("SavedReviewer");
+    expect(row.textContent).toContain("reviewer");
+    expect(row.textContent).toContain("已完成");
+    await click(row);
+    expect(container.querySelector("[data-testid='subagent-detail-overlay'] pre")?.textContent).toBe(brief);
+
+    await open("other");
+    expect(container.querySelector("[data-testid='run-status-strip']")).toBeNull();
+    await open("saved");
+    expect(pill("子代理").textContent).toContain("1/1");
+
+    // Drop all frontend session state: reopening must reconstruct from history.
+    await act(async () => {
+      root.unmount();
+      useChatStore.setState({ bySession: {}, active: null });
+    });
+    root = createRoot(container);
+    await open("saved");
+    await click(pill("子代理"));
+    const restored = container.querySelector<HTMLButtonElement>("[data-agent-step-key]")!;
+    expect(restored.textContent).toContain("SavedReviewer");
+    expect(restored.textContent).toContain("已完成");
+    await click(restored);
+    expect(container.querySelector("[data-testid='subagent-detail-overlay'] pre")?.textContent).toBe(brief);
+
+    await act(async () => {
+      await useChatStore.getState().loadEarlier();
+    });
+    await click(container.querySelector("[aria-label='返回子代理列表']")!);
+    expect(pill("子代理").textContent).toContain("1/1");
+    expect(container.querySelectorAll("[data-agent-step-key]")).toHaveLength(1);
+    await act(async () => {
+      useChatStore.setState((state) => {
+        const session = state.bySession["omp/saved"];
+        return {
+          bySession: {
+            ...state.bySession,
+            "omp/saved": {
+              ...session,
+              streaming: true,
+              messages: [...session.messages, {
+                ...msg(203, "tool", "hub · Resuming saved reviewer"),
+                args: { op: "wait" },
+                result: { details: { jobs: [{ id: "SavedReviewer", status: "running" }] } },
+              }],
+            },
+          },
+        };
+      });
+    });
+    expect(container.querySelector("[data-agent-step-key]")?.textContent).toContain("运行中");
+    expect(pill("子代理").textContent).toContain("0/1");
+  });
+
   it("renders subagent count and edited git stats as pills", async () => {
     seed(TURN, true);
     await renderStrip();

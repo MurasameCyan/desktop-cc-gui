@@ -573,12 +573,19 @@ export const RunStatusStrip = memo(function RunStatusStrip({
   const messages = useChatStore((s) =>
     sessionKey ? (s.bySession[sessionKey]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES,
   );
+  const subagentHistory = useChatStore((s) =>
+    sessionKey ? (s.bySession[sessionKey]?.subagentHistory ?? EMPTY_MESSAGES) : EMPTY_MESSAGES,
+  );
   const streaming = useChatStore((s) =>
     sessionKey ? (s.bySession[sessionKey]?.streaming ?? false) : false,
   );
   const steps = useMemo(
-    () => deriveAgentTaskSteps(messages, streaming, engine),
-    [messages, streaming, engine],
+    () => deriveAgentTaskSteps(
+      subagentHistory.length ? [...subagentHistory, ...messages] : messages,
+      streaming,
+      engine,
+    ),
+    [subagentHistory, messages, streaming, engine],
   );
   const files = useMemo(() => deriveEditedFiles(messages), [messages]);
   const todos = useMemo(() => deriveTodoList(messages), [messages]);

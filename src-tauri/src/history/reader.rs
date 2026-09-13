@@ -9,6 +9,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 pub struct SessionPage {
     pub messages: Vec<Message>,
     pub next_before: Option<i64>,
+    /// Earlier delegation rows and turn boundaries, independent of paging.
+    pub subagent_history: Vec<Message>,
 }
 
 /// Lock the db, run a parameterless query, and collect rows through `map_row`.
@@ -162,6 +164,78 @@ fn cached_parse_session(engine: &str, path: &Path) -> Result<Arc<ParsedSession>,
     Ok(parsed)
 }
 
+/// Keep the inputs the subagent fold consumes, not old chat bodies or tool output.
+/// Turn boundaries remain so a reopened session never treats an old spawn as new.
+fn subagent_history(messages: &[Message]) -> Vec<Message> {
+    let mut history = Vec::new();
+    let mut last_user = None;
+    let mut needs_boundary = false;
+    for message in messages {
+        if message.role == "user" {
+            last_user = Some(message);
+            continue;
+        }
+        let delegation = message.role == "tool" && is_subagent_history_tool(message);
+        let boundary = needs_boundary && matches!(message.role.as_str(), "assistant" | "thinking");
+        if !delegation && !boundary {
+            continue;
+        }
+        if let Some(user) = last_user.take() {
+            history.push(subagent_history_row(user, false));
+        }
+        history.push(subagent_history_row(message, delegation));
+        needs_boundary = delegation;
+    }
+    if !history.is_empty() {
+        if let Some(user) = last_user {
+            history.push(subagent_history_row(user, false));
+        }
+    }
+    history
+}
+
+fn is_subagent_history_tool(message: &Message) -> bool {
+    if message.args.as_ref().is_some_and(|args| args.get("tasks").is_some() || args.get("ids").is_some()) {
+        return true;
+    }
+    if message.result.as_ref().and_then(|result| result.get("details")).is_some_and(|details| {
+        ["jobs", "peers", "progress"].iter().any(|key| details.get(key).is_some())
+            || details.get("op").and_then(serde_json::Value::as_str) == Some("jobs")
+    }) {
+        return true;
+    }
+    let head = message.text.split('·').next().unwrap_or_default().trim().to_ascii_lowercase();
+    let first = head.split(|c: char| c.is_whitespace() || c == '/' || c == '\\').next().unwrap_or_default().replace('-', "_");
+    matches!(first.as_str(), "task" | "agent" | "spawn" | "spawn_agent" | "spawn_subagent"
+        | "workflow" | "run_workflow" | "pipeline" | "dispatch" | "dispatch_agent" | "delegate")
+        || ["spawn agent", "agent swarm", "agent_swarm", "workflow", "subagent"].iter().any(|name| head.contains(name))
+}
+
+fn subagent_history_row(message: &Message, delegation: bool) -> Message {
+    Message {
+        seq: message.seq,
+        role: message.role.clone(),
+        text: if delegation { message.text.clone() } else { String::new() },
+        ts: None,
+        path: None,
+        args: if delegation { message.args.clone() } else { None },
+        // Status snapshots and result presence matter; the full output still
+        // lives in the paginated timeline and need not cross IPC twice.
+        result: if delegation {
+            message.result.as_ref().map(|result| match result.get("details") {
+                Some(details) => serde_json::json!({ "details": details }),
+                None => serde_json::Value::Bool(true),
+            })
+        } else { None },
+        todos: None,
+        usage: None,
+        model: None,
+        effort: None,
+        duration_ms: None,
+        images: Vec::new(),
+    }
+}
+
 /// Sync body of `load_session_page` (parsing multi-MB session files must not
 /// run on the IPC main thread).
 fn load_session_page_blocking(
@@ -175,7 +249,7 @@ fn load_session_page_blocking(
     let parsed = cached_parse_session(engine, &path)?;
     let limit = limit.unwrap_or(100).clamp(1, 500);
     let messages = &parsed.messages;
-    let (page, next_before) = match before_seq {
+    let (page, next_before, start) = match before_seq {
         Some(before) => {
             let end = messages
                 .iter()
@@ -187,7 +261,7 @@ fn load_session_page_blocking(
             } else {
                 None
             };
-            (messages[start..end].to_vec(), next)
+            (messages[start..end].to_vec(), next, start)
         }
         None => {
             let start = messages.len().saturating_sub(limit);
@@ -196,12 +270,13 @@ fn load_session_page_blocking(
             } else {
                 None
             };
-            (messages[start..].to_vec(), next)
+            (messages[start..].to_vec(), next, start)
         }
     };
     Ok(SessionPage {
         messages: page,
         next_before,
+        subagent_history: subagent_history(&messages[..start]),
     })
 }
 
@@ -503,4 +578,75 @@ pub fn remove_workspace(
     drop(conn);
     state.sink.emit_sessions_changed();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("ccgui-history-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn session_page_restores_subagents_older_than_the_visible_page() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("session.jsonl");
+        let db_path = scratch.0.join("app.db");
+        let brief = "# Target\nReview the relay.\n# Acceptance\nRecover without toggling.";
+        let mut lines = vec![
+            json!({"type":"message","message":{"role":"user","content":"Review"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{
+                "type":"toolCall","id":"dispatch","name":"task",
+                "arguments":{"tasks":[{"name":"SavedReviewer","agent":"reviewer","task":brief}]}
+            }]}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"dispatch",
+                "content":[{"type":"text","text":"Spawned"}],
+                "details":{"progress":[{"id":"SavedReviewer","status":"pending"}]}
+            }}),
+            json!({"type":"message","message":{"role":"assistant","content":[{
+                "type":"toolCall","id":"roster","name":"hub","arguments":{"op":"jobs"}
+            }]}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"roster",
+                "content":[{"type":"text","text":"Review complete"}],
+                "details":{"op":"jobs","jobs":[{"id":"SavedReviewer","status":"completed"}]}
+            }}),
+        ];
+        for i in 0..120 {
+            lines.push(json!({"type":"message","message":{"role":"assistant","content":format!("later {i}")}}));
+        }
+        std::fs::write(&path, lines.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        {
+            let db = crate::db::Db::open_at(&db_path).unwrap();
+            db.0.lock().execute(
+                "INSERT INTO sessions(engine,session_id,workspace_path,file_path,file_size,file_mtime_ms,title) VALUES('omp','saved','/ws',?1,1,1,'Review')",
+                rusqlite::params![path.to_string_lossy().as_ref()],
+            ).unwrap();
+        }
+        // Reopen the DB as a fresh process would, with no frontend roster cache.
+        let db = crate::db::Db::open_at(&db_path).unwrap();
+        let page = load_session_page_blocking(&db, "omp", "saved", Some(100), None).unwrap();
+        assert_eq!(page.messages.len(), 100);
+        assert!(page.messages.iter().all(|message| message.text.starts_with("later")));
+        let wire = serde_json::to_value(&page).unwrap();
+        let history = wire["subagentHistory"].as_array().expect("session history is independent of pagination");
+        let task = history.iter().find(|row| row["text"] == "task").unwrap();
+        assert_eq!(task["args"]["tasks"][0]["name"], "SavedReviewer");
+        assert_eq!(task["args"]["tasks"][0]["task"], brief);
+        let roster = history.iter().find(|row| row["text"] == "hub").unwrap();
+        assert_eq!(roster["result"]["details"]["jobs"][0]["status"], "completed");
+        let older = load_session_page_blocking(&db, "omp", "saved", Some(100), page.next_before).unwrap();
+        assert!(older.messages.iter().any(|row| row.text == "task"));
+    }
 }
