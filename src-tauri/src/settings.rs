@@ -430,10 +430,28 @@ pub fn update_app_settings<R: tauri::Runtime>(
     result
 }
 
-/// Validate + persist + apply. Shared by the UI command and internal writers
-/// (key rotation); on Err the settings were still written, and the message
-/// names what was rejected.
+/// Validate + persist + apply. The public command keeps reporting rejected
+/// fields as an error, even though the sanitized snapshot was committed.
 pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
+    match persist_settings_committed(settings)? {
+        Some(warning) => Err(warning),
+        None => Ok(()),
+    }
+}
+
+/// Persist a settings snapshot while distinguishing failures before the
+/// atomic write from warnings produced after the sanitized snapshot commits.
+pub(crate) fn persist_settings_committed(
+    settings: &mut AppSettings,
+) -> Result<Option<String>, String> {
+    let path = crate::paths::settings_path();
+    persist_settings_to(settings, &path)
+}
+
+fn persist_settings_to(
+    settings: &mut AppSettings,
+    path: &std::path::Path,
+) -> Result<Option<String>, String> {
     if settings
         .omp_openai_service_tier
         .as_deref()
@@ -454,7 +472,7 @@ pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
         settings.web_auth_key = None;
     }
     // Reject only the offending bin-override fields: the rest of the settings
-    // still persist, and the error names what was dropped.
+    // still persist, and the warning names what was dropped.
     let mut rejected = Vec::new();
     settings.bin_overrides.retain(|key, value| {
         let Some(text) = value.as_str() else {
@@ -482,19 +500,22 @@ pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
             }
         }
     }
-    let path = crate::paths::settings_path();
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     // Reject before persisting: an invalid proxy URL must not be saved (the
     // frontend rolls its drafts back on this error).
     crate::proxy::validate_proxy_settings(&settings)?;
-    atomic_write(&path, &content)?;
-    // Apply to this process's env so the next spawned child inherits it.
-    crate::proxy::apply_app_proxy_settings(&settings)?;
-    if rejected.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("rejected settings: {}", rejected.join("; ")))
+    atomic_write(path, &content)?;
+
+    let mut warnings = Vec::new();
+    if !rejected.is_empty() {
+        warnings.push(format!("rejected settings: {}", rejected.join("; ")));
     }
+    // The snapshot is already durable here. Keep any future apply failure in
+    // the committed-warning channel rather than misreporting it as a rollback.
+    if let Err(error) = crate::proxy::apply_app_proxy_settings(&settings) {
+        warnings.push(error);
+    }
+    Ok((!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
 /// A submitted pairing key is accepted only when one is configured and the two
@@ -538,8 +559,11 @@ pub fn consume_web_auth_key(app: &tauri::AppHandle, submitted: &str) -> Result<b
     if !spend_pair_key(&mut settings, submitted) {
         return Ok(false);
     }
-    persist_settings(&mut settings)?;
+    let warning = persist_settings_committed(&mut settings)?;
     announce_settings(app);
+    if let Some(warning) = warning {
+        eprintln!("[settings] pairing key committed with warning: {warning}");
+    }
     Ok(true)
 }
 
@@ -553,8 +577,11 @@ pub fn rotate_web_auth_key(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     settings.web_auth_key = Some(generate_pair_key());
-    persist_settings(&mut settings)?;
+    let warning = persist_settings_committed(&mut settings)?;
     announce_settings(app);
+    if let Some(warning) = warning {
+        eprintln!("[settings] pairing key rotation committed with warning: {warning}");
+    }
     Ok(())
 }
 
@@ -749,6 +776,54 @@ mod tests {
         )
         .unwrap();
         assert!(!scratch.path("settings.json").exists());
+    }
+
+    #[test]
+    fn committed_settings_warning_is_distinct_from_precommit_failure() {
+        let scratch = Scratch::new();
+        let path = scratch.path("settings.json");
+        let missing_bin = scratch.path("missing-claude");
+        let mut settings = AppSettings {
+            web_relay_on: Some(true),
+            web_relay_url: Some("https://relay.example".to_string()),
+            web_relay_key: Some("SAVED_KEY".to_string()),
+            ..AppSettings::default()
+        };
+        settings.bin_overrides.insert(
+            "claudeBin".to_string(),
+            Value::String(missing_bin.to_string_lossy().into_owned()),
+        );
+
+        let warning = persist_settings_to(&mut settings, &path)
+            .expect("a rejected binary is a committed warning")
+            .expect("the rejected field is reported");
+        assert!(warning.contains("claudeBin"));
+        let saved: AppSettings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!saved.bin_overrides.contains_key("claudeBin"));
+        assert_eq!(
+            crate::relay::autostart_target(&saved),
+            Some(("https://relay.example".to_string(), "SAVED_KEY".to_string())),
+            "the committed target and enabled switch survive the warning"
+        );
+    }
+
+    #[test]
+    fn invalid_proxy_is_reported_before_settings_are_committed() {
+        let scratch = Scratch::new();
+        let path = scratch.path("settings.json");
+        let mut settings = AppSettings {
+            system_proxy_enabled: true,
+            system_proxy_url: Some("file:///not-a-network-proxy".to_string()),
+            ..AppSettings::default()
+        };
+
+        let error = persist_settings_to(&mut settings, &path).unwrap_err();
+        assert!(error.contains("unsupported scheme"));
+        assert!(
+            !path.exists(),
+            "pre-commit validation must not write settings"
+        );
     }
 
     /// The key box shows `--------` while authorization is off; a placeholder

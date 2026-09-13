@@ -220,21 +220,26 @@ export function WebAccessSection() {
       .finally(() => setAuthBusy(false));
   }, []);
 
+  // Deployment only creates credentials; it must save them without changing
+  // the relay switch. Starting the relay persists target + switch atomically.
   const saveRelayFields = useCallback(async (url: string, key: string) => {
     const latest = await ipc.getAppSettings();
-    await ipc.updateAppSettings({ ...latest, webRelayUrl: url || null, webRelayKey: key || null });
+    await ipc.updateAppSettings({
+      ...latest,
+      webRelayUrl: url || null,
+      webRelayKey: key || null,
+    });
   }, []);
+
 
   const startRelay = useCallback(async () => {
     setRelayBusy(true);
     setRelayError(null);
     try {
       await ipc.webRelayStart(relayUrl.trim(), relayKey.trim());
-      await saveRelayFields(relayUrl.trim(), relayKey.trim());
       // Not the snapshot the command returned: the agent dials in milliseconds
-      // and pushes its `connected` event before that response lands, so
-      // writing the snapshot would paint 未连接 over a relay that is already
-      // up. The status read happens after both and is authoritative.
+      // and may push its `connected` event before that response lands. The
+      // status read after the backend's authoritative settings write wins.
       refreshRelay();
       // Connecting the relay started the local bridge (it forwards through
       // it): re-read the status so 内网访问 does not sit on a stale 已停止.
@@ -244,7 +249,7 @@ export function WebAccessSection() {
     } finally {
       setRelayBusy(false);
     }
-  }, [relayUrl, relayKey, saveRelayFields, refreshRelay]);
+  }, [relayUrl, relayKey, refreshRelay]);
 
   const stopRelay = useCallback(async () => {
     setRelayBusy(true);
