@@ -55,7 +55,6 @@ describe("subagent counting", () => {
     expect(deriveAgentTaskSteps([tool(2, "hub · Checking background job roster", { op: "jobs" })], true, "omp")).toHaveLength(0);
   });
 
-<<<<<<< HEAD
   it("keeps agents named by a running hub snapshot active even when the host is not streaming", () => {
     const snapshot = tool(6, "hub · Waiting for workers", { op: "wait" }, {
       details: {
