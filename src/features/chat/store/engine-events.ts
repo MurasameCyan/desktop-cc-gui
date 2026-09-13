@@ -486,6 +486,7 @@ function onError(
 ) {
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
+  const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const pending = drainPending(key);
   deps.set((s) => {
     const cur = s.bySession[key] ?? EMPTY_SESSION;
@@ -535,6 +536,11 @@ function onError(
   untrackRun(event.runId);
   dropRunUsage(event.runId);
   deps.markUnseenIfBackground(key);
+  // An error settles the turn exactly like done does — the messages typed
+  // behind it are the user's next step, and parking them here left the queue
+  // stuck until it was sent or cleared by hand. A stop is still the user's
+  // own call: that queue stays parked.
+  if (!prev.interrupted) deps.drainQueue(key);
 }
 
 /** Patch the grant state of one card row, located by its message seq. */

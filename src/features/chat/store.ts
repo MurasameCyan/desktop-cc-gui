@@ -349,6 +349,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
         streaming: false,
         turnStartedAt: null,
       });
+      // The send never became a turn, so no engine event will report one:
+      // without this the rest of the queue waits for a settle that is not
+      // coming. Each drain consumes one item, so a run of failures empties
+      // the queue instead of looping.
+      if (!get().bySession[key]?.interrupted) drainQueue(key);
     }
   }
 
