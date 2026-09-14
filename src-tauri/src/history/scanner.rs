@@ -242,7 +242,13 @@ fn qoder_encode_project_slug(path: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    value.replace('/', "-")
+    // Windows rejects a drive colon in a directory name (mkdir fails with
+    // `目录名称无效`, ERROR_DIRECTORY), so `C:\ws\proj` has to encode to
+    // `C--ws-proj`. The old `C:-ws-proj` could never exist on disk — and
+    // `Path::join` reads it as a *drive-relative* path, which replaced the
+    // whole base, sending both distributions to the process's working
+    // directory instead of their own home.
+    value.replace(['/', ':'], "-")
 }
 
 /// Candidate `<projects>/<slug>` dirs for one workspace — same spelling
@@ -1649,7 +1655,7 @@ mod tests {
     fn qoder_project_slug_matches_qodercli_encoding() {
         assert_eq!(qoder_encode_project_slug("/Users/foo/bar"), "-Users-foo-bar");
         assert_eq!(qoder_encode_project_slug("/Users/foo/bar/"), "-Users-foo-bar");
-        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C:-ws-proj");
+        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C--ws-proj");
         assert_eq!(qoder_encode_project_slug("/"), "-");
         assert_eq!(qoder_encode_project_slug(""), "");
     }
