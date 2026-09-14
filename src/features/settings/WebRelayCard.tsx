@@ -98,9 +98,10 @@ export function WebRelayCard({
   }, []);
 
   // Relay state dot: driven by the backend's own state, so a reconnect clears
-  // it by itself. The local message is the one a give-up hands over — by then
-  // the backend has already dropped the session, so this is the only thing
-  // left to explain the red dot on a switch that reads 连接中转 again.
+  // it by itself. The failure reason rides on RelayInfo.error from the status
+  // read — listenRelay carries no payload, it only says the status moved.
+  // relayError covers the failures that never reach backend state: local
+  // start/stop command errors.
   //
   // The dot doubles as the error surface: relay failures run long ("IO error:
   // 由于目标计算机积极拒绝，无法连接。 (os error 10061)") and an inline line

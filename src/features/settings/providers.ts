@@ -2,7 +2,7 @@
 
 import type { ProviderSection } from "@/lib/ipc";
 
-export const ENGINE_IDS = ["claude", "kimi", "grok", "codex", "pi", "omp", "dsh"] as const;
+export const ENGINE_IDS = ["claude", "kimi", "grok", "codex", "pi", "omp", "dsh", "agy"] as const;
 export type EngineId = (typeof ENGINE_IDS)[number];
 /** Official docs per engine — the CLI 管理 header "官方文档" link. */
 export const ENGINE_DOCS_URLS: Record<EngineId, string> = {
@@ -13,6 +13,7 @@ export const ENGINE_DOCS_URLS: Record<EngineId, string> = {
   pi: "https://pi.dev/docs/latest/usage",
   omp: "https://omp.sh",
   dsh: "https://github.com/deepseek-ai/dsh",
+  agy: "https://www.antigravity.google/docs/cli/headless/",
 };
 
 export const PSEUDO_LOCAL = "__local_settings_json__";

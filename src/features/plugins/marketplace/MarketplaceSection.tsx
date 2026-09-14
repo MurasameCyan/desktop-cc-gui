@@ -57,8 +57,8 @@ function DevelopCard() {
           {t("plugins.market.localTitle")}
         </span>
         <ol className="flex list-decimal flex-col gap-1 pl-5 text-body-medium text-text-secondary">
-          {localSteps.map((step, i) => (
-            <li key={i}>{step}</li>
+          {localSteps.map((step) => (
+            <li key={step}>{step}</li>
           ))}
         </ol>
         <LinkButton url={EXAMPLE_PLUGIN_URL} label={t("plugins.market.viewExample")} />
@@ -68,8 +68,8 @@ function DevelopCard() {
           {t("plugins.market.submitTitle")}
         </span>
         <ol className="flex list-decimal flex-col gap-1 pl-5 text-body-medium text-text-secondary">
-          {submitSteps.map((step, i) => (
-            <li key={i}>{step}</li>
+          {submitSteps.map((step) => (
+            <li key={step}>{step}</li>
           ))}
         </ol>
         <div className="flex flex-wrap items-center gap-2">
@@ -86,13 +86,53 @@ function DevelopCard() {
   );
 }
 
-function MarketRow({ entry }: { entry: MarketPlugin }) {
+/** Install/update affordance for one market row: spinner while this entry is
+ *  installing, a static badge once installed and current, otherwise the
+ *  install/update button. */
+function MarketRowAction({ entry }: { entry: MarketPlugin }) {
   const { t } = useTranslation();
-  const installed = usePluginsStore((s) => s.installed.find((p) => p.id === entry.id));
+  const installed = usePluginsStore((s) => s.installed.some((p) => p.id === entry.id));
   const update = useMarketplaceStore((s) => s.updates.find((u) => u.id === entry.id));
   const installing = useMarketplaceStore((s) => s.installing);
   const install = useMarketplaceStore((s) => s.install);
-  const busy = installing?.id === entry.id;
+
+  if (installing?.id === entry.id) {
+    return (
+      <span className={cx(ACTION_BUTTON, "cursor-wait opacity-70")}>
+        <Loader2 className="size-4 animate-spin" aria-hidden />
+        {installing.total > 0
+          ? t("plugins.installingPct", {
+              pct: Math.round((installing.done / installing.total) * 100),
+            })
+          : t("plugins.installing")}
+      </span>
+    );
+  }
+  if (installed && !update) {
+    return (
+      <span className={cx(BADGE, "text-text-tertiary")}>
+        {t("plugins.market.installed")}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      disabled={!!installing || isWeb}
+      title={isWeb ? t("plugins.market.desktopOnly") : undefined}
+      onClick={() => void install(entry.id)}
+      className={ACTION_BUTTON}
+    >
+      <Download className="size-4" aria-hidden />
+      {update
+        ? t("plugins.market.updateTo", { version: update.latestVersion })
+        : t("plugins.market.install")}
+    </button>
+  );
+}
+
+function MarketRow({ entry }: { entry: MarketPlugin }) {
+  const { t } = useTranslation();
 
   return (
     <div className="flex flex-col gap-1 px-4 py-3">
@@ -122,33 +162,7 @@ function MarketRow({ entry }: { entry: MarketPlugin }) {
             </span>
           )}
         </div>
-        {busy ? (
-          <span className={cx(ACTION_BUTTON, "cursor-wait opacity-70")}>
-            <Loader2 className="size-4 animate-spin" aria-hidden />
-            {installing.total > 0
-              ? t("plugins.installingPct", {
-                  pct: Math.round((installing.done / installing.total) * 100),
-                })
-              : t("plugins.installing")}
-          </span>
-        ) : installed && !update ? (
-          <span className={cx(BADGE, "text-text-tertiary")}>
-            {t("plugins.market.installed")}
-          </span>
-        ) : (
-          <button
-            type="button"
-            disabled={!!installing || isWeb}
-            title={isWeb ? t("plugins.market.desktopOnly") : undefined}
-            onClick={() => void install(entry.id)}
-            className={ACTION_BUTTON}
-          >
-            <Download className="size-4" aria-hidden />
-            {update
-              ? t("plugins.market.updateTo", { version: update.latestVersion })
-              : t("plugins.market.install")}
-          </button>
-        )}
+        <MarketRowAction entry={entry} />
       </div>
     </div>
   );

@@ -52,6 +52,10 @@ pub struct AppSettings {
     /// Per-app Codex Fast override (`service_tier`); None preserves ~/.codex.
     #[serde(default)]
     pub codex_service_tier: Option<String>,
+    /// Codex config/session home (`CODEX_HOME`). None keeps ~/.codex, or a
+    /// CODEX_HOME already present in the process environment at launch.
+    #[serde(default)]
+    pub codex_home: Option<String>,
     /// Require a pairing key before the bridge serves a browser (设置 → 远程
     /// 访问 → 启用授权). Off by default: on the LAN the token URL is enough.
     #[serde(default)]
@@ -78,6 +82,11 @@ pub struct AppSettings {
     /// "cmdEnter" (Cmd/Ctrl+Enter sends, Enter newline).
     #[serde(default = "default_composer_send_shortcut")]
     pub composer_send_shortcut: String,
+    /// Thinking-process row behavior once its thinking stream settles:
+    /// None/Some(true) = auto-fold (default), Some(false) = stay expanded
+    /// until the user folds it (设置 → 通用 → 行为 → 思考过程).
+    #[serde(default)]
+    pub thinking_auto_collapse: Option<bool>,
     /// Terminal shell override; None/empty = auto-detect from $SHELL/COMSPEC.
     /// Validated with the same spawn-target rules as bin overrides.
     #[serde(default)]
@@ -149,8 +158,10 @@ impl Default for AppSettings {
             default_efforts: HashMap::new(),
             omp_openai_service_tier: None,
             codex_service_tier: None,
+            codex_home: None,
             sidebar_thread_limit: default_sidebar_thread_limit(),
             composer_send_shortcut: default_composer_send_shortcut(),
+            thinking_auto_collapse: None,
             terminal_shell_path: None,
             dsh_host: None,
             dsh_port: None,
@@ -184,21 +195,70 @@ pub(crate) fn validate_bin_override(value: &str) -> Result<std::path::PathBuf, S
     }
     let canonical = std::fs::canonicalize(&path)
         .map_err(|e| format!("{}: cannot resolve ({e})", path.display()))?;
-    const TEMP_ROOTS: &[&str] = &[
-        "/tmp",
-        "/var/folders",
-        "/private/tmp",
-        "/private/var/folders",
-    ];
+    reject_temp_root(&canonical, "binaries")?;
+    Ok(canonical)
+}
+
+const TEMP_ROOTS: &[&str] = &[
+    "/tmp",
+    "/var/folders",
+    "/private/tmp",
+    "/private/var/folders",
+];
+
+fn reject_temp_root(path: &std::path::Path, kind: &str) -> Result<(), String> {
     for root in TEMP_ROOTS {
-        if canonical.starts_with(root) {
+        if path.starts_with(root) {
             return Err(format!(
-                "{}: binaries under {root} are not allowed",
-                canonical.display()
+                "{}: {kind} under {root} are not allowed",
+                path.display()
             ));
         }
     }
-    Ok(canonical)
+    Ok(())
+}
+
+/// Codex home override: absolute directory (may not exist yet). `~` is
+/// expanded. Same temp-dir refusal as bin overrides.
+fn validate_home_override(value: &str) -> Result<std::path::PathBuf, String> {
+    let expanded = crate::open_app::expand_user_path(value.trim())?;
+    if !expanded.is_absolute() {
+        return Err(format!("{}: not an absolute path", expanded.display()));
+    }
+    if expanded.exists() && !expanded.is_dir() {
+        return Err(format!("{}: not a directory", expanded.display()));
+    }
+    let check = if expanded.exists() {
+        std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone())
+    } else {
+        expanded.clone()
+    };
+    reject_temp_root(&check, "homes")?;
+    Ok(expanded)
+}
+
+/// Push `settings.codex_home` into this process's `CODEX_HOME` so every
+/// existing `engine_home(Some("CODEX_HOME"), ".codex")` call site — official
+/// config, history, skills, catalog probes, and spawned `codex` — sees the
+/// same directory. Clearing the setting only unsets an env we previously
+/// applied, so a launch-time `CODEX_HOME` survives.
+pub(crate) fn apply_codex_home(settings: &AppSettings) {
+    static APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Some(home) = settings
+        .codex_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(expanded) = validate_home_override(home) {
+            std::env::set_var("CODEX_HOME", expanded);
+            APPLIED.store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    if APPLIED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        std::env::remove_var("CODEX_HOME");
+    }
 }
 
 pub fn read_settings() -> Result<AppSettings, String> {
@@ -244,12 +304,17 @@ pub fn import_legacy_groups_once(db: &crate::db::Db) -> Result<(), String> {
             return Ok(());
         }
     }
-    import_legacy_groups_from(
-        db,
-        &crate::paths::settings_path(),
-        &crate::paths::legacy_settings_path(),
-        &crate::paths::legacy_workspaces_path(),
-    )?;
+    {
+        // Raw read-modify-write of settings.json: same write lock as every
+        // other writer, so a concurrent persist cannot be overwritten.
+        let _guard = settings_write_lock();
+        import_legacy_groups_from(
+            db,
+            &crate::paths::settings_path(),
+            &crate::paths::legacy_settings_path(),
+            &crate::paths::legacy_workspaces_path(),
+        )?;
+    }
     let conn = db.0.lock();
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('legacy_groups_import_v1', '1')",
@@ -423,16 +488,29 @@ pub fn update_app_settings<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     mut settings: AppSettings,
 ) -> Result<(), String> {
+    let prev_home = read_settings().ok().and_then(|s| s.codex_home);
     let result = persist_settings(&mut settings);
     // Other surfaces (the composer's proxy toggle) follow along without
     // re-reading settings.json.
     let _ = app.emit("settings://changed", ());
+    // persist_settings reports committed-with-warnings as Err; the home change
+    // is already on disk by then, so gate on the value, not on result.
+    if prev_home != settings.codex_home {
+        use tauri::Manager;
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            crate::history::scanner::spawn_scan(
+                std::sync::Arc::clone(&state.db),
+                std::sync::Arc::clone(&state.sink),
+            );
+        }
+    }
     result
 }
 
 /// Validate + persist + apply. The public command keeps reporting rejected
 /// fields as an error, even though the sanitized snapshot was committed.
 pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
+    let _guard = settings_write_lock();
     match persist_settings_committed(settings)? {
         Some(warning) => Err(warning),
         None => Ok(()),
@@ -441,6 +519,9 @@ pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
 
 /// Persist a settings snapshot while distinguishing failures before the
 /// atomic write from warnings produced after the sanitized snapshot commits.
+///
+/// Callers doing a read→modify→write must hold [`settings_write_lock`]
+/// across the whole cycle; this function only performs the write half.
 pub(crate) fn persist_settings_committed(
     settings: &mut AppSettings,
 ) -> Result<Option<String>, String> {
@@ -500,6 +581,15 @@ fn persist_settings_to(
             }
         }
     }
+    if let Some(home) = settings.codex_home.take() {
+        let trimmed = home.trim().to_string();
+        if !trimmed.is_empty() {
+            match validate_home_override(&trimmed) {
+                Ok(path) => settings.codex_home = Some(path.to_string_lossy().into_owned()),
+                Err(reason) => rejected.push(format!("codexHome: {reason}")),
+            }
+        }
+    }
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     // Reject before persisting: an invalid proxy URL must not be saved (the
     // frontend rolls its drafts back on this error).
@@ -515,6 +605,9 @@ fn persist_settings_to(
     if let Err(error) = crate::proxy::apply_app_proxy_settings(&settings) {
         warnings.push(error);
     }
+    // Infallible: an invalid home was already rejected above, and a stale
+    // value simply leaves CODEX_HOME untouched.
+    apply_codex_home(settings);
     Ok((!warnings.is_empty()).then(|| warnings.join("; ")))
 }
 
@@ -526,10 +619,17 @@ pub(crate) fn pairing_key_matches(expected: &str, submitted: &str) -> bool {
     !expected.is_empty() && !submitted.is_empty() && submitted.eq_ignore_ascii_case(expected)
 }
 
-/// Serialises the read-modify-write of the pairing key. settings.json has no
-/// other guard, so without this two devices posting the same code both read it
-/// before either rotation lands, and one code pairs both of them.
-static PAIR_KEY_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// Serialises every read-modify-write of settings.json. Without it two
+/// writers — a timed key rotation and a relay-switch persist, say — can each
+/// read the other's pre-write snapshot and the later write silently drops the
+/// earlier one's field. It also keeps the pairing key's compare-and-rotate
+/// atomic: two devices posting the same code must not both be admitted.
+static SETTINGS_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Hold across a full read→modify→persist of settings.json.
+pub(crate) fn settings_write_lock() -> parking_lot::MutexGuard<'static, ()> {
+    SETTINGS_WRITE_LOCK.lock()
+}
 
 /// Spend the pairing key on one device: rotates `settings` in place and
 /// answers whether the browser may be admitted. Pure, so the property that
@@ -554,7 +654,7 @@ fn spend_pair_key(settings: &mut AppSettings, submitted: &str) -> bool {
 /// must not be admitted — wrong key, or the switch is off and there is nothing
 /// to pair with.
 pub fn consume_web_auth_key(app: &tauri::AppHandle, submitted: &str) -> Result<bool, String> {
-    let _guard = PAIR_KEY_LOCK.lock();
+    let _guard = settings_write_lock();
     let mut settings = read_settings()?;
     if !spend_pair_key(&mut settings, submitted) {
         return Ok(false);
@@ -571,7 +671,7 @@ pub fn consume_web_auth_key(app: &tauri::AppHandle, submitted: &str) -> Result<b
 /// that settings moved. Used on a timer and by the 换一个 button, so a code
 /// never lingers even when nobody pairs with it.
 pub fn rotate_web_auth_key(app: &tauri::AppHandle) -> Result<(), String> {
-    let _guard = PAIR_KEY_LOCK.lock();
+    let _guard = settings_write_lock();
     let mut settings = read_settings()?;
     if !settings.web_auth_enabled {
         return Ok(());
@@ -838,6 +938,26 @@ mod tests {
         assert!(!pairing_key_matches("BCDF2345", "BCDF2346"));
     }
 
+    #[test]
+    fn home_override_expands_tilde_and_rejects_temp() {
+        // Tilde expansion is race-safe to assert directly: parallel scanner
+        // tests mutate HOME, so validating `~/...` here can spuriously hit
+        // the temp-root rejection.
+        let expanded = crate::open_app::expand_user_path("~/.codex-cli").unwrap();
+        assert!(expanded.is_absolute());
+        assert!(expanded.ends_with(".codex-cli"));
+
+        // A fixed absolute path outside any temp root validates as-is.
+        let ok = if cfg!(windows) {
+            r"C:\ccgui-codex-home-probe"
+        } else {
+            "/opt/ccgui-codex-home-probe"
+        };
+        assert_eq!(validate_home_override(ok).unwrap(), std::path::PathBuf::from(ok));
+        assert!(validate_home_override("/tmp/codex-home").is_err());
+        assert!(validate_home_override("relative/codex").is_err());
+    }
+
     /// The property the relay's whole gate rests on: a code opens exactly one
     /// pairing. The second device replaying the same string must be turned
     /// away, and the switch being off must admit nobody at all.
@@ -877,6 +997,9 @@ pub fn set_window_theme(
     app: tauri::AppHandle,
     dark: bool,
 ) -> Result<(), String> {
+    // Only Windows consumes these; reference unconditionally so macOS/Linux
+    // builds don't warn.
+    let _ = (&app, dark);
     #[cfg(target_os = "windows")]
     {
         use tauri::{Manager, Theme};

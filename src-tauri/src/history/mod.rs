@@ -1,3 +1,4 @@
+mod agy;
 mod codex_titles;
 mod extract;
 pub mod reader;

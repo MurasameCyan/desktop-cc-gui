@@ -174,6 +174,7 @@ export interface CliConfig {
   pi: ProviderSection;
   omp: ProviderSection;
   dsh: ProviderSection;
+  agy: ProviderSection;
 }
 
 export interface AppSettings {
@@ -193,6 +194,7 @@ export interface AppSettings {
   piBin: string | null;
   ompBin: string | null;
   dshBin: string | null;
+  agyBin: string | null;
   defaultModels: Record<string, string>;
   /** Per-engine user-added custom model ids (设置 → CLI → 自定义模型). */
   customModels: Record<string, string[]>;
@@ -200,10 +202,15 @@ export interface AppSettings {
   ompOpenaiServiceTier?: "default" | "priority" | null;
   /** Codex Fast override; null preserves ~/.codex/config.toml. */
   codexServiceTier?: "default" | "priority" | null;
+  /** Codex config/session home (`CODEX_HOME`); null uses ~/.codex. */
+  codexHome?: string | null;
   /** Max sessions listed per workspace in the sidebar (default 5). */
   sidebarThreadLimit: number;
   /** Composer send gesture: "enter" (Enter sends) or "cmdEnter" (⌘/Ctrl+Enter sends). */
   composerSendShortcut: string;
+  /** Thinking-process row behavior once its thinking settles: true/absent =
+   *  auto-fold (default), false = stay expanded until the user folds it. */
+  thinkingAutoCollapse?: boolean | null;
   /** Terminal shell override; null/empty = auto-detect. */
   terminalShellPath: string | null;
   /** DSH host address (default "127.0.0.1"). */

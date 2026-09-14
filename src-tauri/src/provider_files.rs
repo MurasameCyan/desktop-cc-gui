@@ -10,7 +10,7 @@
 //! | kimi   | `$KIMI_CODE_HOME/config.toml` (`~/.kimi-code`) | `[providers."ccgui"]` (type `openai`), `[models."ccgui"]`, `default_model` |
 //! | grok   | `$GROK_HOME/config.toml` (`~/.grok`) | `[endpoints]` base URLs, `[models].default`, `[model."<alias>"].api_key` |
 //!
-//! pi/omp/dsh keep providers display-only: applying them is a no-op.
+//! pi/omp/dsh/agy keep providers display-only: applying them is a no-op.
 //!
 //! Backup discipline: before the first managed write to a file, the original
 //! is snapshotted under `app_home()/provider-backups/<engine>/` (an `.absent`
@@ -46,7 +46,7 @@ pub fn apply(engine: &str, id: &str, provider: Option<&Value>) -> Result<(), Str
         "codex" => apply_codex(&targets[0], &targets[1], provider),
         "kimi" => apply_kimi(&targets[0], provider),
         "grok" => apply_grok(&targets[0], provider),
-        // pi/omp/dsh providers are display-only.
+        // pi/omp/dsh/agy providers are display-only.
         _ => Ok(()),
     }
 }
@@ -75,7 +75,7 @@ fn targets(engine: &str) -> Vec<Target> {
             "settings.json",
         )],
         "codex" => {
-            let home = home(Some("CODEX_HOME"), ".codex");
+            let home = crate::engine::codex_home();
             vec![
                 target(home.join("config.toml"), "config.toml"),
                 target(home.join("auth.json"), "auth.json"),
@@ -88,6 +88,10 @@ fn targets(engine: &str) -> Vec<Target> {
         "grok" => vec![target(
             home(Some("GROK_HOME"), ".grok").join("config.toml"),
             "config.toml",
+        )],
+        "agy" => vec![target(
+            crate::engine::agy::agy_home().join("settings.json"),
+            "settings.json",
         )],
         _ => Vec::new(),
     }
@@ -1109,6 +1113,8 @@ mod tests {
         apply("claude", DISABLED_PROVIDER_ID, Some(&p)).unwrap();
         assert!(dir.read_dir().unwrap().next().is_none());
         apply("pi", "some-id", Some(&p)).unwrap();
+        assert!(dir.read_dir().unwrap().next().is_none());
+        apply("agy", "some-id", Some(&p)).unwrap();
         assert!(dir.read_dir().unwrap().next().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

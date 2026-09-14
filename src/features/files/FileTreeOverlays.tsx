@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { ConfirmDialog, PromptDialog } from "@/components/dialogs";
-import { fileName } from "./store";
+import { fileName, useFilesStore } from "./store";
 import { FileTreeContextMenu } from "./FileTreeContextMenu";
 import type { FileTreeOperations } from "./useFileTreeOperations";
 
@@ -38,6 +38,7 @@ export function FileTreeOverlays({ ops }: { ops: FileTreeOperations }) {
           onClose={ops.closeMenu}
           onNewFile={ops.startNewFile}
           onNewFolder={ops.startNewFolder}
+          onSearchFiles={(dir) => useFilesStore.getState().openSearch(dir)}
           onCopy={ops.copyItem}
           onPaste={ops.paste}
           onDuplicate={ops.duplicate}

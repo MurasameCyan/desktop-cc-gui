@@ -8,6 +8,7 @@ import Pencil from "lucide-react/dist/esm/icons/pencil";
 import Link2 from "lucide-react/dist/esm/icons/link-2";
 import MessageSquarePlus from "lucide-react/dist/esm/icons/message-square-plus";
 import FolderOpen from "lucide-react/dist/esm/icons/folder-open";
+import Search from "lucide-react/dist/esm/icons/search";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
 import { ContextMenu, type ContextMenuEntry } from "@/components/context-menu";
 import { parentPath } from "./store";
@@ -30,6 +31,7 @@ export function FileTreeContextMenu({
   onClose,
   onNewFile,
   onNewFolder,
+  onSearchFiles,
   onCopy,
   onPaste,
   onDuplicate,
@@ -44,6 +46,8 @@ export function FileTreeContextMenu({
   onClose: () => void;
   onNewFile: (parentDir: string) => void;
   onNewFolder: (parentDir: string) => void;
+  /** Open the workspace file search scoped to `dir`. */
+  onSearchFiles: (dir: string) => void;
   onCopy: () => void;
   onPaste: (targetDir: string) => void;
   onDuplicate: () => void;
@@ -70,6 +74,9 @@ export function FileTreeContextMenu({
   const entries: (ContextMenuEntry | "separator")[] = [
     { id: "new-file", label: t("files.newFile"), icon: <FilePlus className="size-4" aria-hidden />, onSelect: () => onNewFile(targetDir) },
     { id: "new-folder", label: t("files.newFolder"), icon: <FolderPlus className="size-4" aria-hidden />, onSelect: () => onNewFolder(targetDir) },
+    // Offered for file rows too: `targetDir` is then the containing folder,
+    // and "search the folder this file lives in" is the useful action there.
+    { id: "search-files", label: t("files.searchFiles"), icon: <Search className="size-4" aria-hidden />, onSelect: () => onSearchFiles(targetDir) },
     { id: "copy", label: t("files.copyItem"), icon: <Copy className="size-4" aria-hidden />, onSelect: onCopy },
     { id: "paste", label: t("files.pasteItem"), icon: <ClipboardPaste className="size-4" aria-hidden />, disabled: pasteDisabled, onSelect: () => onPaste(targetDir) },
     { id: "duplicate", label: t("files.duplicateItem"), icon: <CopyPlus className="size-4" aria-hidden />, onSelect: onDuplicate },

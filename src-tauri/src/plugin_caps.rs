@@ -476,6 +476,10 @@ pub(crate) async fn plugin_exec_run(
     if let Some(env) = env {
         command.envs(env);
     }
+    // Windows：别让控制台子进程弹出窗口/在 Windows Terminal 开选项卡（宿主其它 spawn 点
+    // 都用了 hide_console，插件桥是唯一漏的；不加则插件每次 exec/spawn 都闪控制台）。
+    #[cfg(windows)]
+    crate::engine::hide_console(&mut command);
 
     let mut child = command
         .spawn()
@@ -537,6 +541,8 @@ pub(crate) async fn plugin_exec_spawn(
             if let Some(env) = env {
                 command.envs(env);
             }
+            #[cfg(windows)]
+            crate::engine::hide_console(&mut command);
             command
                 .spawn()
                 .map_err(|error| format!("{plugin_id}: failed to start {bin}: {error}"))?;
@@ -553,6 +559,8 @@ pub(crate) async fn plugin_exec_spawn(
             if let Some(env) = env {
                 command.envs(env);
             }
+            #[cfg(windows)]
+            crate::engine::hide_console(&mut command);
             let child = command
                 .spawn()
                 .map_err(|error| format!("{plugin_id}: failed to start {bin}: {error}"))?;

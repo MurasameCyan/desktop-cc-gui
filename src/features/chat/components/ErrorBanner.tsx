@@ -23,7 +23,7 @@ export function ErrorBanner({
     >
       <span
         tabIndex={0}
-        className="max-h-[min(8rem,12dvh)] min-w-0 flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-all [@media(max-height:500px)]:max-h-6"
+        className="max-h-32 max-h-[min(8rem,12dvh)] min-w-0 flex-1 overflow-y-auto overscroll-contain whitespace-pre-wrap break-all [@media(max-height:500px)]:max-h-6"
       >
         {message}
       </span>

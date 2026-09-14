@@ -36,7 +36,10 @@ export function ChatSidePanel({
     <div
       ref={panelRef}
       className={cx(
-        "relative hidden shrink-0 overflow-hidden xl:flex",
+        // Visibility is state-driven (width 0 when collapsed), never
+        // breakpoint-gated: a narrow window auto-collapses in ChatPage, but an
+        // explicit expand there must produce a real panel at any width.
+        "relative flex shrink-0 overflow-hidden",
         // Width transition for collapse/expand; disabled mid-drag
         // since resizes mutate style.width imperatively.
         !dragging &&

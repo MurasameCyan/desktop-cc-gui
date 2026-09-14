@@ -96,52 +96,91 @@ export function extractSubagentTaskInfo(message: Message): {
   return { label, subagentType, detail };
 }
 
-/** The subagents one delegation call names, in call order. A `task` call
- *  spells out the agents it spawns under `tasks[]`; a `hub` wait names the
- *  ids it is waiting on. A call that names none (a roster check, a bare
- *  delegation) is left to the caller as a single step of its own. */
-export function subagentRefsFromArgs(args: unknown): {
+export type SubagentRef = {
   id: string;
   label?: string;
   agent?: string;
   detail?: string;
-}[] {
+};
+
+const argText = (value: unknown) =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+/** Tool args reach the panel as the harness wrote them, and some runs encode
+ *  an array as its JSON text; a non-array, non-parsing value names nobody. */
+const argArray = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+/** The agents a `tasks[]` dispatch spells out. This is the only call shape
+ *  that states an agent's kind and assignment, so it is also the source every
+ *  later id-only reference inherits from. */
+function dispatchRefsFromArgs(args: unknown): SubagentRef[] {
   if (!args || typeof args !== "object") return [];
-  const record = args as Record<string, unknown>;
-  const refs: { id: string; label?: string; agent?: string; detail?: string }[] = [];
-  const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
-  const array = (value: unknown): unknown[] => {
-    if (Array.isArray(value)) return value;
-    if (typeof value !== "string") return [];
-    try {
-      const parsed: unknown = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  };
-  for (const entry of array(record.tasks)) {
+  const refs: SubagentRef[] = [];
+  for (const entry of argArray((args as Record<string, unknown>).tasks)) {
     if (!entry || typeof entry !== "object") continue;
     const row = entry as Record<string, unknown>;
     // `name` is the job id the run reports back ("CoreInvokeFilterParse");
     // older shapes only carry an id.
-    const id = text(row.name) ?? text(row.id) ?? text(row.label);
+    const id = argText(row.name) ?? argText(row.id) ?? argText(row.label);
     if (!id) continue;
-    const task = text(row.task) ?? text(row.prompt);
     refs.push({
       id,
-      label: text(row.description) ?? id,
-      agent: text(row.agent) ?? text(row.subagent_type),
+      label: argText(row.description) ?? id,
+      agent: argText(row.agent) ?? argText(row.subagent_type),
       // The assignment is what the panel shows on click, so it stays whole.
-      detail: task,
+      detail: argText(row.task) ?? argText(row.prompt),
     });
   }
-  for (const entry of array(record.ids)) {
-    const id = text(entry);
-    // hub background job handles are processes/waits, not delegated agents.
-    if (id && !/^bg_/i.test(id)) refs.push({ id });
-  }
   return refs;
+}
+
+/** The ids a coordination (`hub`) call names on its own — a wait, a cancel,
+ *  a targeted roster check. These say who is out there, never what kind of
+ *  agent it is or what it was told to do. */
+function waitIdsFromArgs(args: unknown): string[] {
+  if (!args || typeof args !== "object") return [];
+  const ids: string[] = [];
+  for (const entry of argArray((args as Record<string, unknown>).ids)) {
+    const id = argText(entry);
+    // hub background job handles are processes/waits, not delegated agents.
+    if (id && !/^bg_/i.test(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** The subagents one delegation call names, in call order. A `task` call
+ *  spells out the agents it spawns under `tasks[]`; a `hub` wait names the
+ *  ids it is waiting on. A call that names none (a roster check, a bare
+ *  delegation) is left to the caller as a single step of its own. */
+export function subagentRefsFromArgs(args: unknown): SubagentRef[] {
+  const refs = dispatchRefsFromArgs(args);
+  for (const id of waitIdsFromArgs(args)) refs.push({ id });
+  return refs;
+}
+
+/** The dispatch behind an id a `hub` call named on its own. The id the run
+ *  reports back is not always the name the dispatch asked for: a re-spawn is
+ *  disambiguated with a numeric suffix, so "PluginReview-2" is the runtime id
+ *  of the agent dispatched as "PluginReview". Only a trailing `-<digits>`
+ *  counts — looser prefix matching would let unrelated agents inherit each
+ *  other's kind and assignment. */
+function resolveDispatch(
+  id: string,
+  dispatched: Map<string, SubagentRef>,
+): SubagentRef | undefined {
+  const exact = dispatched.get(id);
+  if (exact) return exact;
+  const base = id.replace(/-\d+$/, "");
+  return base === id ? undefined : dispatched.get(base);
 }
 
 function agentState(status: unknown): AgentTaskStepState | undefined {
@@ -201,7 +240,9 @@ function isCompleteJobsRoster(message: Message): boolean {
     : {};
   const roster = details as Record<string, unknown>;
   return roster.op === "jobs" &&
-    !Object.prototype.hasOwnProperty.call(args, "ids") &&
+    // Any filter arg (`ids`, a future `status`, …) means a partial roster,
+    // not the complete one — only a bare `op`-only call qualifies.
+    Object.keys(args).every((key) => key === "op") &&
     Array.isArray(roster.jobs) &&
     roster.jobs.every((entry) => {
       if (!entry || typeof entry !== "object") return false;
@@ -214,10 +255,16 @@ function isCompleteJobsRoster(message: Message): boolean {
  *  The tag a row falls back to when the harness names no agent kind: the
  *  `task` tool writes `agent` on some dispatches (scout batches) and omits it
  *  on others (task batches), and a row with no tag at all says nothing about
- *  where it came from. */
+ *  where it came from.
+ *
+ *  `hub` is excluded: it is the coordination tool, not an agent kind, so a
+ *  wait-named agent whose dispatch cannot be resolved must render untagged
+ *  rather than claim a kind it never had.
+ */
 function toolHead(text: string): string | undefined {
   const head = text.split("·")[0].trim().split(/[\s/\\]+/)[0];
-  return head && head.length <= 24 ? head : undefined;
+  if (!head || head.length > 24) return undefined;
+  return head.toLowerCase() === "hub" ? undefined : head;
 }
 
 /** Edit-class tool labels (write/edit/patch families) — the file
@@ -265,13 +312,28 @@ export function deriveAgentTaskSteps(
   const turnStart = currentTurnStart(messages);
   const blockingSpawn = engine === "claude";
 
-  // Pass 1 — one state per named agent. A dispatch only *starts* agents, so
-  // its own "Spawned 3 background agents" result says nothing about finishing;
-  // the later `hub` snapshots are the only rows that do, and they override
-  // whatever the dispatch implied. Without this a settled spawn result left
-  // every agent reading 已完成 while the harness was still reporting them
-  // running.
+  // Pass 1 — one state per named agent, plus the identity index. A dispatch
+  // only *starts* agents, so its own "Spawned 3 background agents" result says
+  // nothing about finishing; the later `hub` snapshots are the only rows that
+  // do, and they override whatever the dispatch implied. Without this a
+  // settled spawn result left every agent reading 已完成 while the harness was
+  // still reporting them running.
   const states = new Map<string, AgentTaskStepState>();
+  // Every `tasks[]` entry, by the name its dispatch asked for: the only place
+  // an agent's kind and assignment are stated.
+  const dispatched = new Map<string, SubagentRef>();
+  // Ids a `hub` call names on its own, gathered before any remap decision: a
+  // wait naming both "PluginReview" and "PluginReview-2" is two live agents
+  // (an original and its re-spawn), not one agent under two names.
+  const waitNamed = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    for (const id of waitIdsFromArgs(message.args)) waitNamed.add(id);
+  }
+  // Dispatch name -> the id the runtime reported for it, when the harness
+  // disambiguated a re-spawn ("PluginReview" -> "PluginReview-2"). One agent,
+  // two names; the row shows the runtime one.
+  const runtimeIds = new Map<string, string>();
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
     if (message.role !== "tool") continue;
@@ -281,6 +343,20 @@ export function deriveAgentTaskSteps(
       for (const ref of refs) {
         if (!states.has(ref.id)) states.set(ref.id, spawned);
       }
+    }
+    for (const ref of dispatchRefsFromArgs(message.args)) {
+      if (!dispatched.has(ref.id)) dispatched.set(ref.id, ref);
+    }
+    // A dispatch always precedes the waits that name its agents, so the index
+    // is already populated by the time a suffixed id shows up.
+    for (const id of waitIdsFromArgs(message.args)) {
+      if (dispatched.has(id)) continue;
+      const base = id.replace(/-\d+$/, "");
+      if (base === id || !dispatched.has(base)) continue;
+      // The dispatch name is live in its own right, so the two are separate
+      // agents: the suffixed row stands alone rather than replacing the base.
+      if (waitNamed.has(base)) continue;
+      if (!runtimeIds.has(base)) runtimeIds.set(base, id);
     }
     const snapshot = jobStatesFromResult(message.result);
     if (isCompleteJobsRoster(message)) {
@@ -341,14 +417,22 @@ export function deriveAgentTaskSteps(
       continue;
     }
     for (const ref of refs) {
-      if (seen.has(ref.id)) continue;
+      // A re-spawn reports back under a disambiguated id, so the dispatch and
+      // the later wait are one agent under two names: the row carries the id
+      // the runtime actually reported, and both names are spent at once.
+      const runtimeId = runtimeIds.get(ref.id) ?? ref.id;
+      if (seen.has(ref.id) || seen.has(runtimeId)) continue;
       seen.add(ref.id);
+      seen.add(runtimeId);
+      // A `hub` call names ids and nothing else; kind and assignment come from
+      // the dispatch that spawned the id.
+      const source = ref.agent && ref.detail ? undefined : resolveDispatch(ref.id, dispatched);
       steps.push({
-        key: `${message.seq}:${ref.id}`,
-        label: ref.label ?? ref.id,
-        state: states.get(ref.id) ?? state,
-        subagentType: ref.agent ?? info.subagentType ?? toolHead(message.text),
-        detail: ref.detail ?? info.detail,
+        key: `${message.seq}:${runtimeId}`,
+        label: ref.label && ref.label !== ref.id ? ref.label : runtimeId,
+        state: states.get(runtimeId) ?? states.get(ref.id) ?? state,
+        subagentType: ref.agent ?? source?.agent ?? info.subagentType ?? toolHead(message.text),
+        detail: ref.detail ?? source?.detail ?? info.detail,
       });
     }
   }

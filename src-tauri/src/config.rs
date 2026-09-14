@@ -8,7 +8,7 @@ pub const LOCAL_PROVIDER_ID: &str = "__local_settings_json__";
 /// config" semantics, different spelling.
 pub(crate) const LEGACY_LOCAL_CONFIG_TOML_ID: &str = "__local_config_toml__";
 pub const DISABLED_PROVIDER_ID: &str = "__disabled__";
-pub const ENGINES: [&str; 7] = ["claude", "kimi", "grok", "codex", "pi", "omp", "dsh"];
+pub const ENGINES: [&str; 8] = ["claude", "kimi", "grok", "codex", "pi", "omp", "dsh", "agy"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderSection {
@@ -53,7 +53,7 @@ macro_rules! engine_sections {
     };
 }
 
-engine_sections!(claude, kimi, grok, codex, pi, omp, dsh);
+engine_sections!(claude, kimi, grok, codex, pi, omp, dsh, agy);
 
 #[derive(Default)]
 pub struct ConfigStore(pub Mutex<()>);

@@ -182,6 +182,23 @@ describe("RunStatusStrip", () => {
     expect(pill("子代理").textContent).toContain("0/1");
   });
 
+  it("moves focus into the subagent detail and back to its row", async () => {
+    seed(TURN, true);
+    await renderStrip();
+    await click(pill("子代理"));
+
+    const row = container.querySelector<HTMLButtonElement>("[data-agent-step-key]")!;
+    await click(row);
+    const back = container.querySelector<HTMLButtonElement>("[aria-label='返回子代理列表']");
+    expect(document.activeElement).toBe(back);
+
+    await click(back!);
+    const restored = container.querySelector<HTMLButtonElement>(
+      `[data-agent-step-key="${row.dataset.agentStepKey}"]`,
+    );
+    expect(document.activeElement).toBe(restored);
+  });
+
   it("renders subagent count and edited git stats as pills", async () => {
     seed(TURN, true);
     await renderStrip();

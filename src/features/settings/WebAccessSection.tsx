@@ -39,7 +39,12 @@ export function WebAccessSection() {
    *  ref, not state: it is only read by the tab's click handler, so a state
    *  update would redraw the page for nothing — accepting already re-renders
    *  via setPane/setRiskPrompt. */
-  const wanRiskAcceptedRef = useRef(readStoredBool(WAN_RISK_ACK_KEY, false));
+  const wanRiskAcceptedRef = useRef<boolean | null>(null);
+  if (wanRiskAcceptedRef.current === null) {
+    // Lazy init: useRef(readStoredBool(...)) would rebuild and discard the
+    // stored value on every render.
+    wanRiskAcceptedRef.current = readStoredBool(WAN_RISK_ACK_KEY, false);
+  }
   /** Which tab to reveal once the warning is accepted; null when no ask is
    *  pending. Kept separate from `pane` so declining leaves 内网访问 showing. */
   const [riskPrompt, setRiskPrompt] = useState<"wan" | null>(null);

@@ -43,6 +43,11 @@ const REDIAL_MAX_MS: u64 = 30_000;
 /// switch keeps reading 已连接; a ping that stays unanswered for a whole period
 /// drops the socket so the outer loop redials.
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// Deadline for one dial. `connect_async` has no built-in timeout, so a
+/// half-open Worker would otherwise park the agent task in the handshake
+/// forever and the stop watch would never be observed; a dial that outlives
+/// this is just a failed attempt and falls into the normal backoff.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Marks traffic that arrived through the relay: the bridge requires the
 /// pairing key for those requests only, so the LAN keeps upstream's model.
 pub const VIA_HEADER: &str = "x-ccgui-via";
@@ -226,6 +231,10 @@ pub fn autostart_target(settings: &crate::settings::AppSettings) -> Option<(Stri
     Some((url.to_string(), key.to_string()))
 }
 
+///
+/// Caller must hold `crate::settings::settings_write_lock()`: the read above
+/// and the persist below are one atomic read-modify-write, and start/stop
+/// linearize through that lock together with their state swap.
 fn persist_relay_state(
     enabled: bool,
     target: Option<(&str, &str)>,
@@ -238,12 +247,18 @@ fn persist_relay_state(
     settings.web_relay_on = Some(enabled);
     crate::settings::persist_settings_committed(&mut settings)
 }
+
+/// Stop half of the switch: persist first — the durable switch is
+/// authoritative, so if writing it fails the published relay and its agent
+/// task stay untouched and restart cannot silently disagree with the running
+/// state — then take the published relay down. Splitting it this way keeps
+/// the disk write outside the `relay.inner` critical section.
 fn stop_relay_after_persist(
-    running: &mut Option<Running>,
     persist: impl FnOnce() -> Result<Option<String>, String>,
+    take_running: impl FnOnce() -> Option<Running>,
 ) -> Result<Option<String>, String> {
     let warning = persist()?;
-    if let Some(running) = running.take() {
+    if let Some(running) = take_running() {
         let _ = running.stop.send(true);
     }
     Ok(warning)
@@ -270,14 +285,17 @@ pub async fn web_relay_start(
         connected: false,
         error: None,
     };
-    // Persist and publish under the same lock so start/stop linearize as one
-    // state transition. On failure an existing relay remains untouched.
     let (stop_tx, stop_rx) = watch::channel(false);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    // Persist and publish are one settings-lock section so start/stop
+    // linearize as a single state transition, while the disk write stays out
+    // of the relay.inner critical section. On failure an existing relay
+    // remains untouched.
     let persisted = {
-        let mut guard = state.relay.inner.lock();
+        let _settings_guard = crate::settings::settings_write_lock();
         match persist_relay_state(true, Some((&url, &key))) {
             Ok(warning) => {
+                let mut guard = state.relay.inner.lock();
                 if let Some(previous) = guard.take() {
                     let _ = previous.stop.send(true);
                 }
@@ -315,11 +333,11 @@ pub async fn web_relay_start(
 pub fn web_relay_stop(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
     let persisted = {
-        let mut guard = state.relay.inner.lock();
-        // The durable switch is authoritative: if writing it fails, leave the
-        // published relay and its agent task untouched so restart cannot
-        // silently disagree with the current runtime.
-        stop_relay_after_persist(&mut guard, || persist_relay_state(false, None))
+        let _settings_guard = crate::settings::settings_write_lock();
+        stop_relay_after_persist(
+            || persist_relay_state(false, None),
+            || state.relay.inner.lock().take(),
+        )
     };
     broadcast_relay(&app);
     match persisted {
@@ -804,9 +822,29 @@ where
         if *stop.borrow() {
             return None;
         }
-        match dial().await {
-            Ok(socket) => return Some(socket),
-            Err(error) => {
+        // Race the dial against the stop watch and its deadline: the switch
+        // ends the loop (biased so a socket won as the switch flips is never
+        // served), a hung handshake ends as one failed attempt.
+        let dialed = tokio::select! {
+            biased;
+            _ = stop.changed() => None,
+            result = tokio::time::timeout(CONNECT_TIMEOUT, dial()) => {
+                Some(match result {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(format!("连接超时（{} 秒）", CONNECT_TIMEOUT.as_secs())),
+                })
+            }
+        };
+        match dialed {
+            None => return None,
+            Some(Ok(socket)) => {
+                // The switch may have flipped while the handshake finished.
+                if *stop.borrow() {
+                    return None;
+                }
+                return Some(socket);
+            }
+            Some(Err(error)) => {
                 attempt = attempt.saturating_add(1);
                 on_failure(attempt, error);
             }
@@ -1059,6 +1097,20 @@ fn spawn_http(
     client: reqwest::Client,
 ) {
     tokio::spawn(async move {
+        // The path comes from a remote Open frame; only a real path keeps the
+        // 127.0.0.1 authority — `@host/…` would be parsed as userinfo and the
+        // request would leave the machine for a host of the caller's choice.
+        if !pending.path.starts_with('/') {
+            let _ = send(
+                &out,
+                &ClientFrame::Error {
+                    id,
+                    message: format!("请求路径无效：{}", pending.path),
+                },
+            )
+            .await;
+            return;
+        }
         let url = format!("http://127.0.0.1:{port}{}", pending.path);
         let method = reqwest::Method::from_bytes(pending.method.as_bytes())
             .unwrap_or(reqwest::Method::GET);
@@ -1454,7 +1506,7 @@ mod tests {
     #[test]
     fn stop_persistence_failure_preserves_the_running_relay() {
         let (stop, stop_rx) = watch::channel(false);
-        let mut running = Some(Running {
+        let mut slot = Some(Running {
             info: RelayInfo {
                 url: "https://relay.example".into(),
                 agent_url: "wss://relay.example/agent?key=KEY".into(),
@@ -1465,21 +1517,125 @@ mod tests {
             generation: 1,
         });
 
-        let error = stop_relay_after_persist(&mut running, || {
-            Err("settings disk is read-only".to_string())
-        })
+        let error = stop_relay_after_persist(
+            || Err("settings disk is read-only".to_string()),
+            || slot.take(),
+        )
         .unwrap_err();
 
         assert_eq!(error, "settings disk is read-only");
-        assert!(running.is_some(), "the live relay remains published");
+        assert!(slot.is_some(), "the live relay remains published");
         assert!(!*stop_rx.borrow(), "the agent task was not stopped");
 
-        stop_relay_after_persist(&mut running, || {
-            Ok(Some("unrelated setting was rejected".to_string()))
-        })
+        stop_relay_after_persist(
+            || Ok(Some("unrelated setting was rejected".to_string())),
+            || slot.take(),
+        )
         .unwrap();
-        assert!(running.is_none(), "a committed stop removes the relay");
+        assert!(slot.is_none(), "a committed stop removes the relay");
         assert!(*stop_rx.borrow(), "a committed warning still stops the agent");
+    }
+
+    /// A dial that never answers must not park the agent task: the deadline
+    /// turns the hang into one reported failure and the loop redials.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_dial_times_out_and_is_retried() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        let dialed = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dialed);
+        let dial = move || {
+            let attempt = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            let stop = stop_tx.clone();
+            async move {
+                if attempt >= 2 {
+                    let _ = stop.send(true);
+                }
+                // A half-open Worker: the handshake never answers.
+                std::future::pending::<Result<(), String>>().await
+            }
+        };
+        let failures = Arc::new(Mutex::new(Vec::<String>::new()));
+        let reported = Arc::clone(&failures);
+
+        let outcome = redial_until_connected(&mut stop, dial, move |_, error| {
+            reported.lock().push(error);
+        })
+        .await;
+
+        assert!(outcome.is_none(), "only stop ends the loop");
+        assert_eq!(dialed.load(Ordering::SeqCst), 2, "the timed-out dial was retried");
+        assert!(
+            failures.lock()[0].contains("超时"),
+            "the hang is reported as a timeout"
+        );
+    }
+
+    /// The stop watch must win over a dial that never answers — otherwise
+    /// switching the relay off leaves the agent task parked in the handshake.
+    #[tokio::test(start_paused = true)]
+    async fn the_switch_cancels_a_hung_dial() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        let dial = || std::future::pending::<Result<(), String>>();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let _ = stop_tx.send(true);
+        });
+
+        let started = tokio::time::Instant::now();
+        let outcome = redial_until_connected(&mut stop, dial, |_, _| {}).await;
+
+        assert!(outcome.is_none(), "a stopped dial never publishes a socket");
+        assert!(
+            started.elapsed() < CONNECT_TIMEOUT,
+            "the switch ended the dial long before the deadline"
+        );
+    }
+
+    /// A handshake that completes as the switch flips must not be served:
+    /// the socket is dropped, not published.
+    #[tokio::test]
+    async fn a_socket_won_as_the_switch_flips_is_not_published() {
+        let (stop_tx, mut stop) = watch::channel(false);
+        let dial = move || {
+            let stop = stop_tx.clone();
+            async move {
+                let _ = stop.send(true);
+                tokio::task::yield_now().await;
+                Ok::<u8, String>(7)
+            }
+        };
+
+        let outcome = redial_until_connected(&mut stop, dial, |_, _| {}).await;
+
+        assert!(outcome.is_none(), "stop beats a late success");
+    }
+
+    /// A path that is not a path must never leave 127.0.0.1: `@host/…` in an
+    /// Open frame would otherwise be parsed as userinfo and the local request
+    /// would go to a host of the remote's choosing.
+    #[tokio::test]
+    async fn a_remote_path_that_is_not_a_path_is_rejected() {
+        let (out, mut rx) = mpsc::channel(1);
+        spawn_http(
+            7,
+            PendingHttp {
+                method: "GET".into(),
+                path: "@169.254.169.254/latest/meta-data".into(),
+                headers: HashMap::new(),
+                body: Vec::new(),
+            },
+            9, // nothing listens; the request must never be attempted
+            out,
+            reqwest::Client::new(),
+        );
+
+        let Some(OutFrame::Text(text)) = rx.recv().await else {
+            panic!("an invalid path answers with an error frame");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame["t"], "error");
+        assert_eq!(frame["id"], 7);
+        assert!(frame["message"].as_str().unwrap().contains("路径"));
     }
 
     #[test]

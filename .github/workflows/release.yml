@@ -102,7 +102,20 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ vars.CODESIGN_IDENTITY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm exec tauri build --bundles app,dmg
+        # bundle_dmg.sh (AppleScript/Finder + hdiutil) is known-flaky on
+        # headless runners — tauri recommends retrying rather than failing
+        # the whole build. cargo reuse keeps a retry cheap (~16 min compile
+        # is incremental on the second attempt).
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm exec tauri build --bundles app,dmg; then
+              exit 0
+            fi
+            echo "::warning::tauri build attempt $attempt failed; retrying"
+          done
+          echo "::error::tauri build failed after 3 attempts"
+          exit 1
 
       - name: Notarize and staple DMG
         run: |
@@ -221,7 +234,7 @@ jobs:
           test -n "$APPIMAGE"
           mkdir -p "$HOME/.tauri"
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY_B64" > "$HOME/.tauri/ccgui.key"
-          pnpm exec tauri signer sign -- \
+          pnpm exec tauri signer sign \
             -f "$HOME/.tauri/ccgui.key" \
             -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
             "$APPIMAGE"

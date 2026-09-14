@@ -36,8 +36,8 @@ const PROGRESS_LINE_CAP: usize = 1000;
 /// stuck installer buffered unboundedly for up to INSTALL_TIMEOUT.
 const CAPTURE_CAP_BYTES: usize = 1024 * 1024;
 
-/// npm-distributed engines → registry package. Grok CLI ships via its own
-/// installer script (no npm distribution), so it gets a local-version probe
+/// npm-distributed engines → registry package. Grok / agy ship via their own
+/// installer scripts (no npm distribution), so they get a local-version probe
 /// only — no latest probe and no install/update action.
 fn npm_package(engine: &str) -> Option<&'static str> {
     match engine {
@@ -116,7 +116,7 @@ fn claude_update_kind(bin: &str) -> &'static str {
 }
 
 fn update_kind(engine: &str, bin: &str) -> Option<&'static str> {
-    if engine == "claude" {
+    if engine == "claude" || engine == "codex" {
         return Some(claude_update_kind(bin));
     }
     npm_package(engine).map(|_| "npm")
@@ -224,7 +224,7 @@ pub async fn cli_update_plan(engine: String) -> Result<CliUpdatePlan, String> {
             (std::iter::once(program).chain(args).collect(), Vec::new())
         }
         Some("native") => {
-            let (program, args) = claude_native_argv();
+            let (program, args) = native_install_argv(&engine);
             (
                 std::iter::once(program.to_string())
                     .chain(args.iter().map(|a| a.to_string()))
@@ -261,7 +261,7 @@ pub async fn cli_update(
             let package = npm_package(&engine).expect("npm kind implies package");
             run_npm_install(package, &reporter).await?;
         }
-        Some("native") => run_claude_native_install(&reporter).await?,
+        Some("native") => run_native_install(&engine, &reporter).await?,
         _ => return Err(format!("{engine} 不支持一键安装/更新。")),
     }
     // Fresh local version after the install.
@@ -288,6 +288,15 @@ fn npm_install_argv(package: &str) -> (String, Vec<String>) {
     (npm, args)
 }
 
+/// Official installer argv for a native-channel engine (claude / codex).
+fn native_install_argv(engine: &str) -> (&'static str, Vec<&'static str>) {
+    if engine == "codex" {
+        codex_native_argv()
+    } else {
+        claude_native_argv()
+    }
+}
+
 /// Claude native-channel argv (official install script; handles both fresh
 /// installs and in-place updates).
 fn claude_native_argv() -> (&'static str, Vec<&'static str>) {
@@ -306,6 +315,28 @@ fn claude_native_argv() -> (&'static str, Vec<&'static str>) {
         (
             "bash",
             vec!["-lc", "curl -fsSL https://claude.ai/install.sh | bash"],
+        )
+    }
+}
+
+/// Codex standalone installer: updates `~/.local/bin/codex` (or
+/// `$CODEX_INSTALL_DIR`) in place instead of forcing an npm global copy.
+fn codex_native_argv() -> (&'static str, Vec<&'static str>) {
+    if cfg!(target_os = "windows") {
+        (
+            "powershell",
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://chatgpt.com/codex/install.ps1 | iex",
+            ],
+        )
+    } else {
+        (
+            "bash",
+            vec!["-lc", "curl -fsSL https://chatgpt.com/codex/install.sh | bash"],
         )
     }
 }
@@ -335,10 +366,10 @@ async fn run_npm_install(package: &str, reporter: &ProgressReporter) -> Result<(
     Ok(())
 }
 
-/// Claude native channel: the official install script handles both fresh
+/// Native channel: the official install script handles both fresh
 /// installs and in-place updates.
-async fn run_claude_native_install(reporter: &ProgressReporter) -> Result<(), String> {
-    let (program, args) = claude_native_argv();
+async fn run_native_install(engine: &str, reporter: &ProgressReporter) -> Result<(), String> {
+    let (program, args) = native_install_argv(engine);
     let mut command = Command::new(program);
     command.args(args);
     let output = run_streaming(&mut command, INSTALL_TIMEOUT, reporter)
@@ -605,6 +636,7 @@ mod tests {
             assert!(npm_package(engine).is_some(), "{engine} missing package");
         }
         assert_eq!(npm_package("grok"), None);
+        assert_eq!(npm_package("agy"), None);
     }
 
     #[cfg(unix)]
@@ -675,9 +707,19 @@ mod tests {
         assert_eq!(update_kind("dsh", "/usr/local/bin/dsh"), Some("npm"));
         // grok has no lifecycle action.
         assert_eq!(update_kind("grok", "/usr/local/bin/grok"), None);
-        // claude: a node_modules path means the npm distribution.
+        assert_eq!(update_kind("agy", "/usr/local/bin/agy"), None);
+        // claude / codex: a node_modules path means the npm distribution;
+        // anything else uses the official standalone installer.
         assert_eq!(
             update_kind("claude", "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+            Some("npm")
+        );
+        assert_eq!(update_kind("codex", "/usr/local/bin/codex"), Some("native"));
+        assert_eq!(
+            update_kind(
+                "codex",
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js"
+            ),
             Some("npm")
         );
     }

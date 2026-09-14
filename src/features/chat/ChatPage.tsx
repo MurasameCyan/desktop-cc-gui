@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useChatStore } from "./store";
 import { SessionTabStrip } from "./components/SessionTabStrip";
@@ -12,6 +12,7 @@ import { useTerminalStore } from "@/features/terminal/store";
 import { useGitStore } from "@/features/git/store";
 import { ipc } from "@/lib/ipc";
 import { cx } from "@/utils/cx";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { useLayoutPanels } from "./use-layout-panels";
 import { commandRegistry } from "@ccgui/plugin-sdk";
 import { keywords } from "@/features/commands/builtins";
@@ -34,6 +35,13 @@ const NEEDS_TITLEBAR_HAIRLINE =
   !isWeb &&
   typeof navigator !== "undefined" &&
   /windows/i.test(navigator.userAgent);
+
+// Below Tailwind's xl breakpoint the side panel and the chat column cannot
+// both be comfortable, so the panel defaults to collapsed there. It stays
+// expandable: the titlebar toggle renders at every width.
+const PANEL_MEDIA = "(max-width: 1279px)";
+// Floor reserved for the chat column when clamping the panel width.
+const CHAT_MIN_WIDTH = 320;
 
 export default function ChatPage() {
   const { t } = useTranslation();
@@ -67,6 +75,45 @@ export default function ChatPage() {
     sidebarResizerRef,
   } = useLayoutPanels();
 
+  // Narrow windows default to a collapsed panel. The override is local and
+  // deliberately NOT persisted: toggling while narrow must not clobber the
+  // wide-window preference, and every breakpoint crossing re-applies the
+  // default while an explicit expand sticks until the next crossing.
+  const narrowPanel = useMediaQuery(PANEL_MEDIA);
+  const [narrowPanelExpanded, setNarrowPanelExpanded] = useState(false);
+  useEffect(() => {
+    setNarrowPanelExpanded(false);
+  }, [narrowPanel]);
+  const panelCollapsedEffective = narrowPanel
+    ? !narrowPanelExpanded
+    : panelCollapsed;
+  const handleTogglePanel = useCallback(() => {
+    if (narrowPanel) setNarrowPanelExpanded((prev) => !prev);
+    else togglePanelCollapsed();
+  }, [narrowPanel, togglePanelCollapsed]);
+  // The persisted width can exceed what is left beside the sidebar, so clamp
+  // it for rendering only: storage keeps the user's width, and drags still
+  // mutate style.width imperatively against the real min/max. Measured off
+  // the center row rather than window.innerWidth because the sidebar overlays
+  // the content below md instead of taking layout space.
+  const centerRowRef = useRef<HTMLDivElement>(null);
+  const [centerRowWidth, setCenterRowWidth] = useState(0);
+  useEffect(() => {
+    const el = centerRowRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() =>
+      setCenterRowWidth(el.getBoundingClientRect().width),
+    );
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // Before the first measurement centerRowWidth is 0; fall back to the stored
+  // width so the panel does not flash collapsed on mount.
+  const panelWidthEffective =
+    centerRowWidth > 0
+      ? Math.min(panelWidth, Math.max(0, centerRowWidth - CHAT_MIN_WIDTH))
+      : panelWidth;
+
   // Layout toggles registered as palette commands (plan §4.2 #9): the toggles
   // live in this hook instance, so registration happens here where they're in
   // scope. ChatPage stays mounted for the app's lifetime; the cleanup keeps
@@ -77,7 +124,7 @@ export default function ChatPage() {
         id: "builtin:toggleSidePanel",
         title: () => t("commands.toggleSidePanel"),
         keywords: keywords("commands.toggleSidePanelKeywords"),
-        run: togglePanelCollapsed,
+        run: handleTogglePanel,
       }),
       commandRegistry.register({
         id: "builtin:toggleSidebar",
@@ -87,7 +134,7 @@ export default function ChatPage() {
       }),
     ];
     return () => disposers.forEach((d) => d());
-  }, [t, togglePanelCollapsed, toggleSidebarCollapsed]);
+  }, [t, handleTogglePanel, toggleSidebarCollapsed]);
   const {
     tabItems,
     activeTabKey,
@@ -179,6 +226,8 @@ export default function ChatPage() {
         // where it kept disappearing (Chrome for iOS especially). Zero on
         // desktop, so this only moves pixels on a notched device.
         "pt-[env(safe-area-inset-top)]",
+        // Same for the home indicator: it overlays AppStatusBar otherwise.
+        "pb-[env(safe-area-inset-bottom)]",
         NEEDS_TITLEBAR_HAIRLINE && "border-t border-separator-border",
         dragging && "cursor-col-resize select-none",
       )}
@@ -236,9 +285,9 @@ export default function ChatPage() {
                 workspacePath={active.workspacePath}
                 panelTab={panelTab}
                 onPanelTabChange={setPanelTab}
-                panelCollapsed={panelCollapsed}
-                onTogglePanelCollapsed={togglePanelCollapsed}
-                panelWidth={panelWidth}
+                panelCollapsed={panelCollapsedEffective}
+                onTogglePanelCollapsed={handleTogglePanel}
+                panelWidth={panelWidthEffective}
                 panelHeaderRef={panelHeaderRef}
                 dragging={dragging}
               />
@@ -257,6 +306,7 @@ export default function ChatPage() {
         <div
           id="center-tabpanel"
           role="tabpanel"
+          ref={centerRowRef}
           className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
         >
           <ChatCenterPane
@@ -274,8 +324,8 @@ export default function ChatPage() {
           <ChatSidePanel
             active={active}
             panelRef={panelRef}
-            panelWidth={panelWidth}
-            panelCollapsed={panelCollapsed}
+            panelWidth={panelWidthEffective}
+            panelCollapsed={panelCollapsedEffective}
             dragging={dragging}
             panelTab={panelTab}
             onResizeStart={handleResizeStart("panel")}

@@ -28,10 +28,11 @@
 //! tables in $GROK_HOME/config.toml with `[models].default` leading — the
 //! same entries the CLI's own /model menu lists. The CLI-maintained
 //! models_cache.json holds the relay's /v1/models ids, which `-m` cannot
-//! resolve, so it is deliberately not a source. Remaining
-//! engines are filled by the frontend from the configured provider channels
-//! instead.
+//! resolve, so it is deliberately not a source. agy is `agy models` TSV
+//! (`id<TAB>name`). Remaining engines are filled by the frontend from the
+//! configured provider channels instead.
 
+mod agy;
 mod claude;
 mod codex;
 mod grok;
@@ -119,6 +120,7 @@ pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String>
         "claude" => Ok(claude_catalog()),
         "pi" | "omp" => Ok(pi_family_catalog(&engine).await),
         "dsh" => dsh_catalog().await,
+        "agy" => Ok(agy_catalog().await),
         // Unknown engine: no CLI-sourced catalog — the frontend fills the
         // picker from the configured provider channels.
         _ => Ok(EngineCatalog::authoritative(Vec::new())),
@@ -130,6 +132,12 @@ pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String>
 /// provider with `default` carrying the host's current model. Never spawns
 /// the host — a down host is an error so the frontend keeps whatever catalog
 /// it already has instead of blanking the picker.
+async fn agy_catalog() -> EngineCatalog {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, "agy");
+    agy::agy_catalog(&bin).await
+}
+
 async fn dsh_catalog() -> Result<EngineCatalog, String> {
     let settings = crate::settings::read_settings().unwrap_or_default();
     let origin = crate::dsh_host::configured_origin(&settings);

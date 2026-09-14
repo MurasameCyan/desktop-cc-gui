@@ -11,6 +11,9 @@ pub struct ParsedSession {
 /// Parse a native session file into the minimal message list. Bad lines are
 /// skipped individually.
 pub fn parse_session_file(engine: &str, path: &Path) -> Result<ParsedSession, String> {
+    if engine == "agy" {
+        return Ok(super::agy::parse_agy_session(path));
+    }
     let reader = open_line_reader(engine, path)?;
     Ok(collect_session(
         reader,
@@ -34,6 +37,9 @@ pub struct ScanSummary {
 /// user turns (whose data URLs are skipped here) fall out of the count —
 /// the sidebar counts text, and the reader path stays authoritative.
 pub fn scan_summary_file(engine: &str, path: &Path) -> Result<ScanSummary, String> {
+    if engine == "agy" {
+        return Ok(super::agy::scan_agy_summary(path));
+    }
     let reader = open_line_reader(engine, path)?;
     let mut acc = ScanAcc::default();
     walk_lines(

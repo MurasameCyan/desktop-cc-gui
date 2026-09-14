@@ -195,6 +195,15 @@ describe("subagent counting", () => {
     expect(deriveAgentTaskSteps([DISPATCH, running, unknown], false, "omp")[0].state).toBe("active");
   });
 
+  it("does not settle agents from a filtered (partial) jobs roster", () => {
+    const running = tool(3, "hub", { op: "wait" }, {
+      details: { jobs: [{ id: "CoreInvokeFilterParse", status: "running" }] },
+    });
+    const filtered = tool(4, "hub", { op: "jobs", status: "running" }, {
+      details: { op: "jobs", jobs: [] },
+    });
+    expect(deriveAgentTaskSteps([DISPATCH, running, filtered], false, "omp")[0].state).toBe("active");
+  });
   it("reads named agents but ignores background-job ids", () => {
     expect(subagentRefsFromArgs({ ids: ["bg_1", "bg_2"] })).toEqual([]);
     expect(subagentRefsFromArgs({ ids: ["CoreInvokeFilterParse"] })).toEqual([
@@ -202,5 +211,96 @@ describe("subagent counting", () => {
     ]);
     expect(subagentRefsFromArgs({ tasks: [{ id: "alpha" }] })[0]).toMatchObject({ id: "alpha", label: "alpha" });
     expect(subagentRefsFromArgs({ op: "jobs" })).toEqual([]);
+  });
+
+  it("resolves a re-spawn's suffixed id back to the dispatch that named it", () => {
+    // The reported bug: two review agents, one shown as `reviewer` with its
+    // assignment and the other as a bare `hub` with no detail, because the
+    // runtime reported it back under a disambiguated id the dispatch's
+    // `tasks[]` never spelled out.
+    const dispatch = tool(2, "task · Dispatching reviewers", {
+      tasks: [
+        { agent: "reviewer", name: "HostLifecycleReview", task: "# Target\nReview host lifecycle." },
+        { agent: "reviewer", name: "PluginReview", task: "# Target\nReview the plugin surface." },
+      ],
+    });
+    const wait = tool(3, "hub · Waiting for the reviewers", {
+      ids: ["HostLifecycleReview", "PluginReview-2"],
+      op: "wait",
+    });
+
+    expect(
+      deriveAgentTaskSteps([dispatch, wait], true, "omp").map(
+        ({ label, subagentType, detail }) => ({ label, subagentType, detail }),
+      ),
+    ).toEqual([
+      {
+        label: "HostLifecycleReview",
+        subagentType: "reviewer",
+        detail: "# Target\nReview host lifecycle.",
+      },
+      // The row keeps the id the runtime reported, and inherits nothing but
+      // the kind and the assignment.
+      {
+        label: "PluginReview-2",
+        subagentType: "reviewer",
+        detail: "# Target\nReview the plugin surface.",
+      },
+    ]);
+  });
+
+  it("keeps a base name and its suffixed sibling apart when both are live", () => {
+    // A suffix only means "same agent, re-spawned" when the base name is gone.
+    // Here the wait names both, so two agents really are out there: they stay
+    // two rows, and the re-spawn still inherits the kind and assignment of the
+    // dispatch its name derives from.
+    const dispatch = tool(2, "task · Dispatching a reviewer", {
+      tasks: [{ agent: "reviewer", name: "PluginReview", task: "# Target\nReview the plugin surface." }],
+    });
+    const wait = tool(3, "hub · Waiting for the reviewers", {
+      ids: ["PluginReview", "PluginReview-2"],
+      op: "wait",
+    });
+
+    expect(
+      deriveAgentTaskSteps([dispatch, wait], true, "omp").map(
+        ({ label, subagentType, detail }) => ({ label, subagentType, detail }),
+      ),
+    ).toEqual([
+      {
+        label: "PluginReview",
+        subagentType: "reviewer",
+        detail: "# Target\nReview the plugin surface.",
+      },
+      {
+        label: "PluginReview-2",
+        subagentType: "reviewer",
+        detail: "# Target\nReview the plugin surface.",
+      },
+    ]);
+  });
+
+  it("does not let unrelated names inherit each other's assignment", () => {
+    // Only a trailing `-<digits>` is a disambiguation suffix. Anything looser
+    // would hand one agent's kind and task text to a different agent.
+    const dispatch = tool(2, "task · Dispatching a reviewer", {
+      tasks: [{ agent: "reviewer", name: "PluginReview", task: "# Target\nReview the plugin surface." }],
+    });
+    const wait = tool(3, "hub · Waiting for the worker", { ids: ["PluginReviewWorker"], op: "wait" });
+
+    const steps = deriveAgentTaskSteps([dispatch, wait], true, "omp");
+    expect(steps.map((s) => s.label)).toEqual(["PluginReview", "PluginReviewWorker"]);
+    expect(steps[1].subagentType).toBeUndefined();
+    expect(steps[1].detail).toBeUndefined();
+  });
+
+  it("leaves a row untagged rather than tagging it with the coordination tool", () => {
+    // `hub` is how the host waits on agents, never a kind of agent, so an id
+    // no dispatch ever named gets no tag at all.
+    const wait = tool(2, "hub · Waiting for a stray worker", { ids: ["StrayWorker"], op: "wait" });
+    const steps = deriveAgentTaskSteps([wait], true, "omp");
+    expect(steps.map(({ label, subagentType }) => ({ label, subagentType }))).toEqual([
+      { label: "StrayWorker", subagentType: undefined },
+    ]);
   });
 });

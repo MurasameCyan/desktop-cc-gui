@@ -8,6 +8,13 @@ import AlertCircle from "lucide-react/dist/esm/icons/alert-circle";
 import CornerDownRight from "lucide-react/dist/esm/icons/corner-down-right";
 import { cx } from "@/utils/cx";
 import { useCopied } from "@/hooks/use-copied";
+import {
+  computeDiffLines,
+  parseEditArgs,
+  parsePatchLines,
+  type DiffLine,
+  type EditArgs,
+} from "./edit-line-stats";
 
 export interface ToolPayloadViewerProps {
   toolName: string;
@@ -38,163 +45,6 @@ function isBashTool(name: string): boolean {
     lower.includes("command") ||
     lower.includes("exec")
   );
-}
-
-/** Parse arguments of Edit tool ({ old_string, new_string, file_path }). */
-interface EditArgs {
-  filePath?: string;
-  oldString?: string;
-  newString?: string;
-  content?: string;
-  patch?: string;
-}
-
-function parseEditArgs(args: unknown): EditArgs | null {
-  if (!args || typeof args !== "object") return null;
-  const obj = args as Record<string, unknown>;
-  const filePath =
-    typeof obj.file_path === "string"
-      ? obj.file_path
-      : typeof obj.filePath === "string"
-        ? obj.filePath
-        : typeof obj.path === "string"
-          ? obj.path
-          : undefined;
-
-  const oldString =
-    typeof obj.old_string === "string"
-      ? obj.old_string
-      : typeof obj.oldString === "string"
-        ? obj.oldString
-        : undefined;
-
-  const newString =
-    typeof obj.new_string === "string"
-      ? obj.new_string
-      : typeof obj.newString === "string"
-        ? obj.newString
-        : undefined;
-
-  const content = typeof obj.content === "string" ? obj.content : undefined;
-  const patch =
-    typeof obj.patch === "string"
-      ? obj.patch
-      : typeof obj.diff === "string"
-        ? obj.diff
-        : undefined;
-
-  if (!oldString && !newString && !content && !patch) return null;
-  return { filePath, oldString, newString, content, patch };
-}
-
-interface DiffLine {
-  type: "add" | "del" | "ctx" | "header";
-  text: string;
-  oldLineNo?: number;
-  newLineNo?: number;
-}
-
-/** Compute a simple unified diff line set from old and new strings. */
-function computeDiffLines(oldStr?: string, newStr?: string): DiffLine[] {
-  const oldLines = oldStr !== undefined ? oldStr.split("\n") : [];
-  const newLines = newStr !== undefined ? newStr.split("\n") : [];
-  const lines: DiffLine[] = [];
-
-  let oldIdx = 1;
-  let newIdx = 1;
-
-  if (oldStr !== undefined && (newStr === undefined || newStr === "")) {
-    // Pure deletion
-    for (const l of oldLines) {
-      lines.push({ type: "del", text: l, oldLineNo: oldIdx++ });
-    }
-    return lines;
-  }
-
-  if (newStr !== undefined && (oldStr === undefined || oldStr === "")) {
-    // Pure addition
-    for (const l of newLines) {
-      lines.push({ type: "add", text: l, newLineNo: newIdx++ });
-    }
-    return lines;
-  }
-
-  // Find common prefix
-  let startCommon = 0;
-  while (
-    startCommon < oldLines.length &&
-    startCommon < newLines.length &&
-    oldLines[startCommon] === newLines[startCommon]
-  ) {
-    lines.push({
-      type: "ctx",
-      text: oldLines[startCommon],
-      oldLineNo: oldIdx++,
-      newLineNo: newIdx++,
-    });
-    startCommon++;
-  }
-
-  // Find common suffix
-  let oldEnd = oldLines.length - 1;
-  let newEnd = newLines.length - 1;
-  const suffixLines: DiffLine[] = [];
-  while (
-    oldEnd >= startCommon &&
-    newEnd >= startCommon &&
-    oldLines[oldEnd] === newLines[newEnd]
-  ) {
-    suffixLines.unshift({
-      type: "ctx",
-      text: oldLines[oldEnd],
-      oldLineNo: oldEnd + 1,
-      newLineNo: newEnd + 1,
-    });
-    oldEnd--;
-    newEnd--;
-  }
-
-  // Changed lines in the middle
-  for (let i = startCommon; i <= oldEnd; i++) {
-    lines.push({ type: "del", text: oldLines[i], oldLineNo: oldIdx++ });
-  }
-  for (let j = startCommon; j <= newEnd; j++) {
-    lines.push({ type: "add", text: newLines[j], newLineNo: newIdx++ });
-  }
-
-  return [...lines, ...suffixLines];
-}
-
-/** Parse unified patch format (e.g. @@ ... @@). */
-function parsePatchLines(patch: string): DiffLine[] {
-  const rawLines = patch.split("\n");
-  const lines: DiffLine[] = [];
-  let oldLine = 1;
-  let newLine = 1;
-
-  for (const raw of rawLines) {
-    if (raw.startsWith("@@")) {
-      lines.push({ type: "header", text: raw });
-      const m = raw.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) {
-        oldLine = parseInt(m[1], 10);
-        newLine = parseInt(m[2], 10);
-      }
-    } else if (raw.startsWith("-")) {
-      lines.push({ type: "del", text: raw.slice(1), oldLineNo: oldLine++ });
-    } else if (raw.startsWith("+")) {
-      lines.push({ type: "add", text: raw.slice(1), newLineNo: newLine++ });
-    } else {
-      const text = raw.startsWith(" ") ? raw.slice(1) : raw;
-      lines.push({
-        type: "ctx",
-        text,
-        oldLineNo: oldLine++,
-        newLineNo: newLine++,
-      });
-    }
-  }
-  return lines;
 }
 
 /** Git Diff-style file change viewer. */

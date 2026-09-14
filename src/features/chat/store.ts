@@ -337,7 +337,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
             firstLineTitle(prompt),
           ),
         );
-      } else {
+      } else if (!runRouting.has(result.runId)) {
+        // The engine can announce its session id while the invoke is in
+        // flight; onSession rekeys the run to the native key then, and
+        // routing it back to the pre-send key would strand the live turn
+        // there while the tab renders the native key.
         settleOrphanedRuns(set, routeRun(result.runId, key));
       }
       // Stop pressed while this send was still in flight: interrupt() ran
@@ -435,6 +439,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     workspaceAliases: {},
     archivedWorkspaces: [],
     sendShortcut: "enter",
+    thinkingAutoCollapse: true,
     bySession: {},
     streamingByKey: {},
     unseen: {},
@@ -528,6 +533,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
             workspaceAliases: settings.workspaceAliases ?? {},
             archivedWorkspaces: settings.archivedWorkspaces ?? [],
             sendShortcut: settings.composerSendShortcut ?? "enter",
+            thinkingAutoCollapse: settings.thinkingAutoCollapse ?? true,
           }),
         )
         .catch(() => {});
@@ -1042,6 +1048,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
     setSendShortcut: (shortcut) => {
       set({ sendShortcut: shortcut });
+    },
+    setThinkingAutoCollapse: (autoCollapse) => {
+      set({ thinkingAutoCollapse: autoCollapse });
     },
 
     setDraft: (key, text) => {

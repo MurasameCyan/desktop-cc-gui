@@ -308,21 +308,31 @@ function onSession(
   const workspacePath =
     tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
+  // The event can resolve straight to the native key when it beat the send
+  // response (the run had no routing entry yet). The turn rows and streaming
+  // flag still sit under the pending key then; migrate from there instead of
+  // orphaning them on a key nothing renders.
+  const pendingKey = sessionKey(event.engine, null, workspacePath);
+  const fromKey = deps.get().bySession[key]
+    ? key
+    : pendingKey !== key && deps.get().bySession[pendingKey]
+      ? pendingKey
+      : key;
   settleOrphanedRuns(deps.set, routeRun(event.runId, newKey));
   // Unflushed stream chunks sit under the pre-migration key; move them too.
-  migratePendingStream(key, newKey);
+  migratePendingStream(fromKey, newKey);
   // Migrate pending key -> native key.
   deps.set((s) => {
-    const prev = s.bySession[key];
+    const prev = s.bySession[fromKey];
     if (!prev) return {};
     const bySession = { ...s.bySession, [newKey]: prev };
-    if (key !== newKey) delete bySession[key];
+    if (fromKey !== newKey) delete bySession[fromKey];
     const drafts = { ...s.drafts };
-    if (key in drafts) {
-      drafts[newKey] = drafts[key];
-      delete drafts[key];
+    if (fromKey in drafts) {
+      drafts[newKey] = drafts[fromKey];
+      delete drafts[fromKey];
     }
-    const streamingByKey = moveStreamingFlag(s.streamingByKey, key, newKey);
+    const streamingByKey = moveStreamingFlag(s.streamingByKey, fromKey, newKey);
     const activeNext =
       s.active &&
       s.active.engine === event.engine &&

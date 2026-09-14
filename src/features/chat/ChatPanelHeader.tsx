@@ -55,87 +55,91 @@ export function ChatPanelHeader({
     const timer = setTimeout(() => setRefreshed(false), 1000);
     return () => clearTimeout(timer);
   }, [treeRefreshing]);
+  // One toggle for both directions; labels/icons follow the collapsed state.
+  const toggleLabel = t(
+    panelCollapsed ? "openApp.expandPanel" : "openApp.collapsePanel",
+  );
   return (
     <div className="flex h-full items-center">
       <HeaderOpenActions workspacePath={workspacePath} />
+      {
+        // Deliberately outside the xl-gated chrome below: that wrapper is
+        // display:none on narrow windows, and the toggle used to vanish with
+        // it, leaving no way to bring the panel back without resizing the
+        // window. Rendered before the chrome so the chrome keeps its
+        // flush-right edge and its border stays continuous with the panel's.
+      }
+      <button
+        type="button"
+        title={toggleLabel}
+        aria-label={toggleLabel}
+        onClick={onTogglePanelCollapsed}
+        className={cx(PANEL_TOGGLE_CLASSES, "mx-1.5")}
+      >
+        {panelCollapsed ? (
+          <PanelRightOpen className="size-4" aria-hidden />
+        ) : (
+          <PanelRightClose className="size-4" aria-hidden />
+        )}
+      </button>
+      {
+        // Panel chrome (tab pills + refresh) lives in the titlebar: same
+        // width as the panel below, border-l continuing the panel's left
+        // edge. Always mounted so width animates in sync with the panel;
+        // stays put in changes mode so its pills remain reachable.
+      }
       <div className="hidden h-full items-center xl:flex">
-        {
-          // Panel header lives in the titlebar: same width as the
-          // panel below, border-l continuing the panel's left edge.
-          // Always mounted so width animates in sync with the panel;
-          // stays put in changes mode so its pills remain reachable.
+        <div
+          ref={panelHeaderRef}
+          className={cx(
+            "flex h-full items-center justify-end overflow-hidden",
+            // Width is mutated imperatively during panel drags.
+            !dragging &&
+              "transition-[width] duration-200 ease-out motion-reduce:transition-none",
+            !panelCollapsed && "border-l border-separator-border",
+          )}
+          style={{ width: panelCollapsed ? 0 : panelWidth }}
+        >
           <div
-            ref={panelHeaderRef}
-            className={cx(
-              "flex h-full items-center justify-end overflow-hidden",
-              // Width is mutated imperatively during panel drags.
-              !dragging &&
-                "transition-[width] duration-200 ease-out motion-reduce:transition-none",
-              !panelCollapsed && "border-l border-separator-border",
-            )}
-            style={{ width: panelCollapsed ? 0 : panelWidth }}
+            className="flex h-full shrink-0 items-center gap-2 px-3"
+            style={{ width: panelWidth }}
           >
-            <div
-              className="flex h-full shrink-0 items-center gap-2 px-3"
-              style={{ width: panelWidth }}
-            >
-              <PillTabList>
-                {panelTabs.map((tab) => (
-                  <PillTab
-                    key={tab.id}
-                    icon={tab.icon}
-                    isSelected={activeTab === tab.id}
-                    onSelect={() => onPanelTabChange(tab.id)}
-                  >
-                    {tab.label()}
-                  </PillTab>
-                ))}
-              </PillTabList>
-              {activeTab === "files" && (
-                <button
-                  type="button"
-                  title={t("common.refresh")}
-                  aria-label={t("common.refresh")}
-                  disabled={treeRefreshing}
-                  onClick={() => void useFilesStore.getState().refreshTree()}
-                  className={cx(PANEL_TOGGLE_CLASSES, "disabled:opacity-50")}
+            <PillTabList>
+              {panelTabs.map((tab) => (
+                <PillTab
+                  key={tab.id}
+                  icon={tab.icon}
+                  isSelected={activeTab === tab.id}
+                  onSelect={() => onPanelTabChange(tab.id)}
                 >
-                  {refreshed ? (
-                    <Check
-                      className="size-4 text-notification-success-foreground"
-                      aria-hidden
-                    />
-                  ) : (
-                    <RefreshCw
-                      className={cx("size-4", treeRefreshing && "animate-spin")}
-                      aria-hidden
-                    />
-                  )}
-                </button>
-              )}
+                  {tab.label()}
+                </PillTab>
+              ))}
+            </PillTabList>
+            {activeTab === "files" && (
               <button
                 type="button"
-                title={t("openApp.collapsePanel")}
-                aria-label={t("openApp.collapsePanel")}
-                onClick={onTogglePanelCollapsed}
-                className={cx(PANEL_TOGGLE_CLASSES, "ml-auto")}
+                title={t("common.refresh")}
+                aria-label={t("common.refresh")}
+                disabled={treeRefreshing}
+                onClick={() => void useFilesStore.getState().refreshTree()}
+                className={cx(PANEL_TOGGLE_CLASSES, "disabled:opacity-50")}
               >
-                <PanelRightClose className="size-4" aria-hidden />
+                {refreshed ? (
+                  <Check
+                    className="size-4 text-notification-success-foreground"
+                    aria-hidden
+                  />
+                ) : (
+                  <RefreshCw
+                    className={cx("size-4", treeRefreshing && "animate-spin")}
+                    aria-hidden
+                  />
+                )}
               </button>
-            </div>
+            )}
           </div>
-        }
-        {panelCollapsed && (
-          <button
-            type="button"
-            title={t("openApp.expandPanel")}
-            aria-label={t("openApp.expandPanel")}
-            onClick={onTogglePanelCollapsed}
-            className={cx(PANEL_TOGGLE_CLASSES, "mx-1.5")}
-          >
-            <PanelRightOpen className="size-4" aria-hidden />
-          </button>
-        )}
+        </div>
       </div>
     </div>
   );
