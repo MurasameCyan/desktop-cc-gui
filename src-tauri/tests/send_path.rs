@@ -56,7 +56,7 @@ fn build_app(
         processes: Arc::new(ProcessRegistry::default()),
         emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
         web: ccgui_next_lib::web::WebAccessState::default(),
-        dsh_host: ccgui_next_lib::dsh_host::DshHostState::default(),
+        dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
     };
     app.manage(state);
     app.manage(ConfigStore::default());
@@ -94,6 +94,7 @@ async fn send_message_streams_events_end_to_end() {
         workspace.to_string_lossy().to_string(),
         None,
         "hi".to_string(),
+        Vec::new(),
         None,
         None,
         None,
@@ -200,6 +201,7 @@ sleep 60
         workspace.to_string_lossy().to_string(),
         None,
         "hi".to_string(),
+        Vec::new(),
         None,
         None,
         None,
@@ -282,7 +284,7 @@ fn ipc_send_message_accepts_camel_case_args() {
         processes: Arc::new(ProcessRegistry::default()),
         emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
         web: ccgui_next_lib::web::WebAccessState::default(),
-        dsh_host: ccgui_next_lib::dsh_host::DshHostState::default(),
+        dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
     });
     app.manage(ConfigStore::default());
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -301,6 +303,7 @@ fn ipc_send_message_accepts_camel_case_args() {
                 "workspacePath": workspace.to_string_lossy(),
                 "sessionId": null,
                 "prompt": "hi",
+                "promptContributions": [],
                 "imagePaths": null,
                 "model": null,
             })),
@@ -362,6 +365,7 @@ echo '{"type":"agent_end"}'
             workspace.to_string_lossy().into(),
             None,
             "hi".into(),
+            Vec::new(),
             None,
             None,
             None,

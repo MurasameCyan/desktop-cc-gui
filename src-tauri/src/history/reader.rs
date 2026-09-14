@@ -1,6 +1,6 @@
 use super::{parse_session_file, Message, ParsedSession, SessionMeta};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -85,10 +85,13 @@ fn session_file_path(
     .map_err(|_| format!("session not found: {engine}/{session_id}"))
 }
 
-/// Parsed sessions keyed by (path, size, mtime_ms): paging re-slices a cached
-/// parse instead of re-reading the file. Bounded two ways: 32 entries and a
-/// ~128MB byte budget (image data URLs make entries heavy).
-static PARSED_CACHE: LazyLock<Mutex<HashMap<(PathBuf, i64, i64), Arc<ParsedSession>>>> =
+/// Parsed sessions keyed by (path, size, mtime_ms, accepted-frame signature):
+/// paging re-slices a cached parse instead of re-reading the file. The
+/// signature belongs in the key because recording a newly accepted frame
+/// changes what the parse must hide while the file's stat key is unchanged.
+/// Bounded two ways: 32 entries and a ~128MB byte budget (image data URLs
+/// make entries heavy).
+static PARSED_CACHE: LazyLock<Mutex<HashMap<(PathBuf, i64, i64, String), Arc<ParsedSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PARSED_CACHE_BYTES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
 
@@ -109,16 +112,26 @@ fn parsed_footprint(parsed: &ParsedSession) -> usize {
         .sum()
 }
 
-fn cached_parse_session(engine: &str, path: &Path) -> Result<Arc<ParsedSession>, String> {
+fn cached_parse_session(
+    engine: &str,
+    path: &Path,
+    accepted_frames: &HashSet<String>,
+    accepted_signature: &str,
+) -> Result<Arc<ParsedSession>, String> {
     let Some((size, mtime_ms)) = super::stat_signature(path) else {
         // Unstattable file: let the parse produce the real error.
-        return parse_session_file(engine, path).map(Arc::new);
+        return parse_session_file(engine, path, accepted_frames).map(Arc::new);
     };
-    let key = (path.to_path_buf(), size, mtime_ms);
+    let key = (
+        path.to_path_buf(),
+        size,
+        mtime_ms,
+        accepted_signature.to_string(),
+    );
     if let Some(hit) = PARSED_CACHE.lock().map_err(|e| e.to_string())?.get(&key) {
         return Ok(Arc::clone(hit));
     }
-    let parsed = Arc::new(parse_session_file(engine, path)?);
+    let parsed = Arc::new(parse_session_file(engine, path, accepted_frames)?);
     let footprint = parsed_footprint(&parsed);
     let mut cache = PARSED_CACHE.lock().map_err(|e| e.to_string())?;
     let mut bytes = PARSED_CACHE_BYTES.lock().map_err(|e| e.to_string())?;
@@ -143,7 +156,8 @@ fn load_session_page_blocking(
     before_seq: Option<i64>,
 ) -> Result<SessionPage, String> {
     let path = session_file_path(db, engine, session_id)?;
-    let parsed = cached_parse_session(engine, &path)?;
+    let (accepted_frames, accepted_signature) = db.accepted_internal_frames(engine, session_id)?;
+    let parsed = cached_parse_session(engine, &path, &accepted_frames, &accepted_signature)?;
     let limit = limit.unwrap_or(100).clamp(1, 500);
     let messages = &parsed.messages;
     let (page, next_before) = match before_seq {
@@ -267,13 +281,23 @@ fn delete_session_blocking(
 ) -> Result<(), String> {
     let path = session_file_path(db, engine, session_id)?;
     delete_session_disk(engine, &path)?;
-    let conn = db.0.lock();
-    conn.execute(
+    let mut conn = db.0.lock();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // The recorded frame identities are scoped to this session and become
+    // unreachable with it. Every scan reads and hashes the whole table, so
+    // leaving them behind would tax every later scan for the life of the
+    // install.
+    tx.execute(
+        "DELETE FROM accepted_internal_frames WHERE engine=?1 AND session_id=?2",
+        rusqlite::params![engine, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
         "DELETE FROM sessions WHERE engine=?1 AND session_id=?2",
         rusqlite::params![engine, session_id],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -329,6 +353,114 @@ pub fn rename_session(
 #[tauri::command]
 pub fn rescan_sessions(state: tauri::State<'_, crate::AppState>) {
     super::scanner::spawn_scan(Arc::clone(&state.db), Arc::clone(&state.sink));
+}
+
+/// Frames recorded for one session. A long-lived session can accept a snapshot
+/// every turn; this bounds what one session contributes to the table. The
+/// earliest identities are the ones kept — evicting one would unhide a frame
+/// the user has already stopped seeing.
+const MAX_RECORDED_FRAMES_PER_SESSION: i64 = 5_000;
+
+/// Ceiling across every session. The per-session cap alone bounds nothing
+/// globally, because the scope is chosen by the caller; every scan reads and
+/// hashes this whole table, so unbounded growth is a permanent tax.
+const MAX_RECORDED_FRAMES_TOTAL: i64 = 100_000;
+
+/// Longest native session id an identity is scoped to. Native ids are short
+/// (uuid-like), so this only rejects abuse.
+const MAX_RECORDED_SESSION_ID_LEN: usize = 128;
+
+/// Normalize and bound the scope one recorded identity is stored under: the
+/// engine must be one this app runs, and the session id must be short enough
+/// to be a native id. Without both, a caller could turn the table into
+/// arbitrary unbounded storage that slows every later scan.
+fn recordable_frame_scope(engine: &str, session_id: &str) -> Result<(String, String), String> {
+    let engine = engine.trim();
+    let session_id = session_id.trim();
+    if !crate::config::ENGINES.contains(&engine) {
+        return Err(format!("unknown engine: {engine}"));
+    }
+    if session_id.is_empty() || session_id.len() > MAX_RECORDED_SESSION_ID_LEN {
+        return Err("session id is empty or longer than a native id".to_string());
+    }
+    Ok((engine.to_string(), session_id.to_string()))
+}
+
+/// Record the identity of one internal frame a live capture validator accepted.
+/// The frame itself stays in the native transcript; only its hash is stored, so
+/// the history parser can hide exactly the frames the user was never meant to
+/// see while unrecorded look-alikes, malformed frames, and model prose stay
+/// visible.
+///
+/// The host re-derives the identity from the frame bytes rather than trusting
+/// the caller, and bounds the scope it will store. It cannot verify *which*
+/// capture accepted the frame — validators run in the renderer — so this is a
+/// trusted-caller command: the plugin bridge's allowlist covers only its
+/// http/exec commands and rejects this one.
+#[tauri::command]
+pub async fn record_accepted_internal_frame(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    session_id: String,
+    frame: String,
+) -> Result<(), String> {
+    let (engine, session_id) = recordable_frame_scope(&engine, &session_id)?;
+    let Some(frame_hash) = super::recordable_internal_frame_hash(&frame) else {
+        return Err("frame is not one complete internal frame with a JSON payload".to_string());
+    };
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    let stale_summary = tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
+        let conn = db.0.lock();
+        let (for_session, total): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM accepted_internal_frames
+                      WHERE engine=?1 AND session_id=?2),
+                    (SELECT COUNT(*) FROM accepted_internal_frames)",
+                rusqlite::params![engine, session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        // At capacity the identity cannot be stored, so the frame will be
+        // visible again on reload: report it instead of answering success,
+        // which would look identical to a stored identity.
+        if for_session >= MAX_RECORDED_FRAMES_PER_SESSION || total >= MAX_RECORDED_FRAMES_TOTAL {
+            return Err(format!(
+                "accepted-frame table is at capacity for {engine}/{session_id}"
+            ));
+        }
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash) VALUES(?1, ?2, ?3)",
+                rusqlite::params![engine, session_id, frame_hash],
+            )
+            .map_err(|error| error.to_string())?
+            != 0;
+        if !inserted {
+            return Ok(false);
+        }
+        // Only an indexed session has a stored summary that now hides fewer
+        // frames than it should. One the scanner has never reached derives its
+        // summary from the identity set current at that time, so rescanning for
+        // it here would be pure amplification.
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE engine=?1 AND session_id=?2",
+                rusqlite::params![engine, session_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(indexed > 0)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if stale_summary {
+        // This session's stored summary still hides only the previously
+        // recorded frames; rebuild it from the enlarged identity set.
+        super::scanner::spawn_scan(Arc::clone(&state.db), Arc::clone(&sink));
+    }
+    Ok(())
 }
 
 // ==================== Workspaces ====================
@@ -465,6 +597,14 @@ pub fn remove_workspace(
     conn.execute("DELETE FROM workspaces WHERE id=?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     if let Some(path) = path {
+        // Same cleanup as delete_session: these identities are scoped to
+        // sessions that no longer exist.
+        conn.execute(
+            "DELETE FROM accepted_internal_frames WHERE (engine, session_id) IN
+             (SELECT engine, session_id FROM sessions WHERE workspace_path=?1)",
+            rusqlite::params![path],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM sessions WHERE workspace_path=?1",
             rusqlite::params![path],
@@ -474,4 +614,156 @@ pub fn remove_workspace(
     drop(conn);
     state.sink.emit_sessions_changed();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ccgui-reader-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One omp rollout whose assistant turn carries two look-alike frames.
+    fn write_session(path: &Path, workspace: &Path, text: &str) {
+        let lines = [
+            serde_json::json!({"type": "title", "v": 1, "title": "t"}),
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": "sid-1",
+                "timestamp": "2026-09-05T07:13:57.946Z",
+                "cwd": workspace.to_string_lossy(),
+            }),
+            serde_json::json!({
+                "type": "message",
+                "timestamp": "2026-09-05T07:14:06.682Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            }),
+            serde_json::json!({
+                "type": "message",
+                "timestamp": "2026-09-05T07:14:07.682Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            }),
+        ];
+        let body = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{body}\n")).unwrap();
+    }
+
+    /// The page a restored conversation renders hides exactly the frames a live
+    /// capture validator accepted, and recording a new identity re-derives the
+    /// page instead of serving the parse cached under the older identity set.
+    #[test]
+    fn session_page_hides_only_recorded_internal_frames() {
+        let home = scratch_dir("page-frames");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let file = home.join("s.jsonl");
+        let recorded = "<CCGUI_INTERNAL_abcdefgh>{\"pluginId\":\"bridge\"}</CCGUI_INTERNAL_abcdefgh>";
+        let unrecorded = "<CCGUI_INTERNAL_zzzzzzzz>{\"pluginId\":\"other\"}</CCGUI_INTERNAL_zzzzzzzz>";
+        write_session(&file, &workspace, &format!("answer {recorded} tail {unrecorded}"));
+
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms)
+                 VALUES('omp', 'sid-1', ?1, ?2, 1, 1)",
+                rusqlite::params![
+                    workspace.to_string_lossy(),
+                    file.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Nothing recorded yet: both frames are ordinary model output.
+        let page = load_session_page_blocking(&db, "omp", "sid-1", None, None).unwrap();
+        let assistant = |page: &SessionPage| {
+            page.messages
+                .iter()
+                .find(|m| m.role == "assistant")
+                .expect("assistant row")
+                .text
+                .clone()
+        };
+        assert_eq!(
+            assistant(&page),
+            format!("answer {recorded} tail {unrecorded}")
+        );
+
+        // Recording one identity hides that frame only. The first page was
+        // cached under the empty identity set, so a cache keyed on file stat
+        // alone would still serve the stale text here.
+        db.record_accepted_internal_frame_hash(
+            "omp",
+            "sid-1",
+            &super::super::internal_frame_hash(recorded),
+        )
+        .unwrap();
+        let page = load_session_page_blocking(&db, "omp", "sid-1", None, None).unwrap();
+        assert_eq!(assistant(&page), format!("answer  tail {unrecorded}"));
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The scope one identity is stored under is bounded: only engines this app
+    /// runs, and only ids short enough to be native session ids. Without both,
+    /// the table becomes arbitrary storage that taxes every later scan.
+    #[test]
+    fn recorded_frame_scope_rejects_unknown_engines_and_oversized_ids() {
+        assert_eq!(
+            recordable_frame_scope(" omp ", " sid-1 ").unwrap(),
+            ("omp".to_string(), "sid-1".to_string())
+        );
+        assert!(recordable_frame_scope("not-an-engine", "sid-1").is_err());
+        assert!(recordable_frame_scope("omp", "").is_err());
+        assert!(
+            recordable_frame_scope("omp", &"x".repeat(MAX_RECORDED_SESSION_ID_LEN + 1)).is_err()
+        );
+    }
+
+    /// Deleting a conversation drops the identities scoped to it. They can never
+    /// match another session's frames again, and every scan re-reads and hashes
+    /// the whole table, so orphans are a permanent tax.
+    #[test]
+    fn deleting_a_session_drops_its_recorded_frame_identities() {
+        let home = scratch_dir("delete-frames");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let file = home.join("s.jsonl");
+        write_session(&file, &workspace, "answer");
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms)
+                 VALUES('omp', 'sid-1', ?1, ?2, 1, 1)",
+                rusqlite::params![workspace.to_string_lossy(), file.to_string_lossy()],
+            )
+            .unwrap();
+        }
+        db.record_accepted_internal_frame_hash("omp", "sid-1", &"a".repeat(64))
+            .unwrap();
+        db.record_accepted_internal_frame_hash("omp", "kept", &"b".repeat(64))
+            .unwrap();
+
+        delete_session_blocking(&db, "omp", "sid-1").unwrap();
+
+        assert!(db.accepted_internal_frames("omp", "sid-1").unwrap().0.is_empty());
+        assert_eq!(db.accepted_internal_frames("omp", "kept").unwrap().0.len(), 1);
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
 }

@@ -451,6 +451,37 @@ export interface PluginInfo {
   minAppVersion: string | null;
 }
 
+export interface PluginWorkspaceMetadata {
+  id: string;
+  path: string;
+  gitBranch?: string;
+  gitHead?: string;
+  dirty?: boolean;
+}
+
+export type PluginDocumentStorageLocationKind = "data" | "program" | "custom";
+
+/** Raw Rust response. The context boundary drops writable and renames
+ * displayPath to the SDK's path field. */
+export interface PluginDocumentStorageLocationResponse {
+  kind: PluginDocumentStorageLocationKind;
+  displayPath: string;
+  writable: boolean;
+}
+
+export interface PluginDocumentReadResponse {
+  content: string;
+  version: string;
+}
+
+export type PluginDocumentWriteResponse =
+  | { status: "written"; version: string }
+  | { status: "conflict"; currentVersion: string | null };
+
+export type PluginDocumentRemoveResponse =
+  | { status: "removed" }
+  | { status: "conflict"; currentVersion: string | null };
+
 export interface OfficialConfigFile {
   /** Absolute path — the pane label, and the write-back key. */
   path: string;
@@ -532,6 +563,13 @@ export const ipc = {
     workspacePath: string;
     sessionId: string | null;
     prompt: string;
+    promptContributions: Array<{
+      id: string;
+      content: string;
+      placement: "system-tail" | "request-tail";
+      visibility: "internal";
+      persistence: "turn" | "session";
+    }>;
     imagePaths: string[] | null;
     model: string | null;
     effort: string | null;
@@ -540,6 +578,10 @@ export const ipc = {
   interruptSession: (sessionId: string) =>
     invoke<boolean>("interrupt_session", { sessionId }),
   listEngines: () => invoke<EngineInfo[]>("list_engines"),
+  /** Record a complete internal frame already accepted by its live capture
+   * validator, so history reload can hide only that exact frame. */
+  recordAcceptedInternalFrame: (engine: string, sessionId: string, frame: string) =>
+    invoke<void>("record_accepted_internal_frame", { engine, sessionId, frame }),
   /** Persist a clipboard image to app home; returns its absolute path so it
    * can flow through the same path-based image pipeline as picked files. */
   savePastedImage: (dataBase64: string, extension: string) =>
@@ -670,6 +712,51 @@ export const ipc = {
     invoke<void>("plugin_storage_set", { id, key, value }),
   pluginStorageDelete: (id: string, key: string) =>
     invoke<void>("plugin_storage_delete", { id, key }),
+  pluginWorkspaceMetadata: (pluginId: string, workspacePath: string) =>
+    invoke<PluginWorkspaceMetadata>("workspace_metadata", { pluginId, workspacePath }),
+  pluginDocumentStorageGetLocation: (pluginId: string) =>
+    invoke<PluginDocumentStorageLocationResponse>("plugin_document_storage_get_location", {
+      pluginId,
+    }),
+  pluginDocumentStorageSelectLocation: (
+    pluginId: string,
+    kind: PluginDocumentStorageLocationKind,
+    customPath: string | null,
+  ) =>
+    invoke<PluginDocumentStorageLocationResponse>("plugin_document_storage_select_location", {
+      pluginId,
+      kind,
+      customPath,
+    }),
+  pluginDocumentStorageReadText: (pluginId: string, relativePath: string) =>
+    invoke<PluginDocumentReadResponse | null>("plugin_document_storage_read_text", {
+      pluginId,
+      relativePath,
+    }),
+  pluginDocumentStorageWriteTextAtomic: (
+    pluginId: string,
+    relativePath: string,
+    content: string,
+    expectedVersion: string | null,
+  ) =>
+    invoke<PluginDocumentWriteResponse>("plugin_document_storage_write_text_atomic", {
+      pluginId,
+      relativePath,
+      content,
+      expectedVersion,
+    }),
+  pluginDocumentStorageRemove: (
+    pluginId: string,
+    relativePath: string,
+    expectedVersion: string | null,
+  ) =>
+    invoke<PluginDocumentRemoveResponse>("plugin_document_storage_remove", {
+      pluginId,
+      relativePath,
+      expectedVersion,
+    }),
+  pluginDocumentStorageList: (pluginId: string, prefix?: string) =>
+    invoke<string[]>("plugin_document_storage_list", { pluginId, prefix: prefix ?? null }),
   // web access (start/stop are desktop-only; the bridge answers status too)
   webAccessStart: () => invoke<WebAccessInfo>("web_access_start"),
   webAccessStop: () => invoke<void>("web_access_stop"),

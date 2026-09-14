@@ -62,10 +62,14 @@ fn is_valid_id(id: &str) -> bool {
     if bytes.len() < 2 || bytes.len() > 64 {
         return false;
     }
-    (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes[1..]
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    id.split('.').all(|segment| {
+        let bytes = segment.as_bytes();
+        !bytes.is_empty()
+            && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+            && bytes[1..]
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    })
 }
 
 pub(crate) fn require_valid_id(id: &str) -> Result<(), String> {
@@ -73,7 +77,7 @@ pub(crate) fn require_valid_id(id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{id}: invalid plugin id (want ^[a-z0-9][a-z0-9-]{{1,63}}$)"
+            "{id}: invalid plugin id (want safe point-separated lowercase segments, 2..64 bytes)"
         ))
     }
 }
@@ -190,13 +194,53 @@ mod tests {
     #[test]
     fn id_charset_matches_contract() {
         assert!(is_valid_id("usage-stats"));
+        assert!(is_valid_id("ccgui.client-context-bridge"));
+        assert!(is_valid_id("a.b-c.1d"));
         assert!(is_valid_id("a1"));
         assert!(!is_valid_id("a")); // too short
         assert!(!is_valid_id("Abc")); // uppercase
         assert!(!is_valid_id("-ab")); // leading dash
         assert!(!is_valid_id("a_b")); // underscore not allowed
+        assert!(!is_valid_id("a..b")); // empty segment
+        assert!(!is_valid_id("a.")); // trailing empty segment
+        assert!(!is_valid_id(".a")); // leading empty segment
         assert!(!is_valid_id("../evil")); // traversal
         assert!(!is_valid_id(&"a".repeat(65))); // too long
+    }
+
+    /// H10: the id grammar lives in packages/plugin-sdk/spec/permissions.json
+    /// (`pluginIdShapes`) and is authoritative for both the SDK validator and
+    /// this host. The vectors are compared byte for byte so the two can never
+    /// drift apart again.
+    #[test]
+    fn plugin_id_shapes_match_the_shared_spec() {
+        let spec: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../packages/plugin-sdk/spec/permissions.json"
+        ))
+        .expect("permissions spec JSON is valid");
+        let shapes = spec["pluginIdShapes"]
+            .as_object()
+            .expect("permissions spec carries pluginIdShapes");
+        let collect = |key: &str| -> Vec<String> {
+            shapes[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("pluginIdShapes.{key} is an array"))
+                .iter()
+                .map(|entry| entry.as_str().expect("id vectors are strings").to_string())
+                .collect()
+        };
+        let valid = collect("valid");
+        let invalid = collect("invalid");
+        assert!(valid.len() >= 5 && invalid.len() >= 5, "id vectors shrank");
+        for id in &valid {
+            assert!(is_valid_id(id), "spec-valid plugin id rejected: {id:?}");
+        }
+        for id in &invalid {
+            assert!(!is_valid_id(id), "spec-invalid plugin id accepted: {id:?}");
+        }
+        assert!(require_valid_id("ab").is_ok());
+        assert!(require_valid_id("a").unwrap_err().contains("2..64"));
+        assert!(is_valid_id(&"a".repeat(64)));
     }
 
     #[test]

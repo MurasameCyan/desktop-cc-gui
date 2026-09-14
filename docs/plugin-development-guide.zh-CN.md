@@ -37,9 +37,9 @@ CC GUI 插件是一个**托管在 GitHub 上的独立仓库**，通过 GitHub Re
 - 读取宿主提供的只读事件（如用量统计 `usage://updated`）
 - 在自己的 KV 命名空间里持久化数据
 
-插件**不能**：
+插件**不得**（由安装期评审 + 权限门面共同约束，见 §7）：
 
-- 直接调用 Tauri IPC（`window.__TAURI__` 在插件加载前已被移除）
+- 直接调用 Tauri IPC（`window.__TAURI__` 在插件加载前已被移除——这是收敛面，不是不可绕过的沙箱，见 §7）
 - 访问文件系统、终端、其他插件的数据
 - 未经 `network` 权限声明就发起网络请求
 - 新增 AI 引擎或 Rust 命令（编译期固化，不在插件能力面内）
@@ -112,8 +112,8 @@ ccgui-plugin-hello/
 ```jsonc
 {
   // ── 必填 ──────────────────────────────
-  "id": "usage-stats",              // 全局唯一，小写字母/数字/连字符，^([a-z0-9]+-)*[a-z0-9]+$，
-                                    // 禁止与已有插件重名、禁止以 "ccgui-" 开头（官方保留）
+  "id": "usage-stats",              // 全局唯一；小写字母/数字/连字符的点分段，总长 ≤ 64，
+                                    // 例如 vendor.usage-stats；禁止空段、路径分隔符、`.`、`..`
   "name": "用量统计",                // 显示名，≤ 30 字符
   "version": "1.2.0",               // semver，必须与 Release tag 一致
   "minAppVersion": "1.1.0",         // 最低宿主版本，低于此版本的 App 不加载本插件
@@ -124,10 +124,10 @@ ccgui-plugin-hello/
   "license": "MIT",
 
   // ── 可选 ──────────────────────────────
-  "permissions": [                  // 缺省 = 无权限，见 §7
+  "permissions": [                  // 必填；仅声明实际使用的能力，见 §7
     "storage",
     "ui:settings-section",
-    "events:usage"
+    "events"
   ],
   "contributes": {                  // 声明式贡献点（Tier-0 全靠它；JS 插件也可静态声明）
     "settingsSections": [{ "key": "usage", "titleKey": "usage.title", "icon": "chart" }],
@@ -171,12 +171,11 @@ ccgui-plugin-hello/
 import type { PluginContext } from '@ccgui/plugin-sdk';
 
 export default function activate(ctx: PluginContext): void | (() => void) {
-  // 注册你的贡献。所有 ctx.*.register* 返回 Disposer，
-  // 运行时自动记录，卸载时逆序调用——你不需要手动管理。
-  ctx.ui.registerSettingsSection({ key: 'hello', titleKey: 'hello.title', component: HelloSection });
+  // 所有 register* 都返回 Disposer；宿主在卸载时也会逆序兜底回收。
+  ctx.ui.registerSettingsSection({ key: 'hello', label: () => 'Hello', component: HelloSection });
 
-  // 也可返回一个总清理函数（可选），在所有注册项 dispose 之后调用
-  return () => { /* 停定时器、取消订阅等 */ };
+  // 也可返回总清理函数，负责停止插件自行创建的定时器等副作用。
+  return () => { /* stop timers, cancel subscriptions */ };
 }
 ```
 
@@ -192,48 +191,49 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 interface PluginContext {
   readonly pluginId: string;
   readonly version: string;
+  readonly react: typeof import('react');
+
+  hooks: {
+    registerSessionHooks(hooks: SessionHooks): Disposer;
+    registerTurnHooks(hooks: TurnHooks): Disposer;
+    registerRuntimeSwitchHooks(hooks: RuntimeSwitchHooks): Disposer;
+  };
+  workspace: { getMetadata(): Promise<{ id: string; path: string }> };
+  documentStorage: DocumentStorage;
 
   ui: {
-    registerSettingsSection(d: SettingsSectionDef): Disposer;   // 设置页新 section
-    registerPanelTab(d: PanelTabDef): Disposer;                 // 右侧面板新 tab
-    registerComposerSlot(slot: 'addMenu' | 'cliMenu' | 'permissionMenu', d: SlotDef): Disposer;
+    registerSettingsSection(d: SettingsSectionDef): Disposer;
+    registerAddMenuRow(d: AddMenuRowDef): Disposer;
+    registerComposerSlot(d: ComposerSlotDef): Disposer;
+    registerPanelTab(d: PanelTabDef): Disposer;
     registerStatusBarItem(d: StatusBarItemDef): Disposer;
-    registerCommand(d: CommandDef): Disposer;                   // 命令面板（⌘K）
-    registerMarkdownRenderer(d: MarkdownRendererDef): Disposer; // 自定义消息渲染组件
-    registerPage(d: PageDef): Disposer;                         // 整页路由
+    registerCommand(d: CommandDef): Disposer;
+    registerMarkdownRenderer(d: MarkdownRendererDef): Disposer;
+    registerPage(d: PageDef): Disposer;
+    registerTimelineRowRenderer(d: TimelineRowRendererDef): Disposer;
   };
-
-  theme: {
-    injectCss(css: string): Disposer;          // 注入 <style data-plugin="你的id">
-    setTokens(tokens: Record<string, string>): Disposer;  // 覆盖 BoardUI 语义 token
-  };
-
-  i18n: {
-    addBundle(lang: string, ns: string, resources: object): Disposer;
-  };
-
-  storage: {                                   // 每插件隔离 KV（sqlite）
+  theme: { injectCss(css: string): Disposer; setTokens(tokens: ThemeTokens): Disposer };
+  i18n: { addBundle(lang: string, ns: string, resources: object): Disposer };
+  storage: {
     get<T>(key: string): Promise<T | null>;
-    set(key: string, value: unknown): Promise<void>;   // value 须可 JSON 序列化，单键 ≤ 256KB
+    set(key: string, value: unknown): Promise<void>;
+    delete(key: string): Promise<void>;
   };
-
-  events: {
-    on(topic: string, cb: (data: unknown) => void): Disposer;
-    emit(topic: string, data: unknown): void;  // 仅能以 "plugin:<你的id>:" 前缀发事件
-  };
-
-  host: { readonly appVersion: string; readonly locale: string; readonly theme: 'light' | 'dark' };
+  events: { on(topic: string, cb: (data: unknown) => void): Disposer; emit(topic: string, data: unknown): void };
+  bridge: { invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> };
+  host: { appVersion: string; sdkVersion: string; locale: string; isWeb: boolean };
 }
 ```
 
-### 6.3 宿主事件（只读数据源）
+生命周期 hook 按插件注册顺序调用且逐插件隔离错误；`beforeTurn` 与 `beforeSwitch` 最多等待 2 秒，超时或异常均不阻断聊天或客户端切换。`beforeTurn` 可返回 `PromptContribution[]` 及内部消息捕获声明。内部提示不会进入 CCGUI 聊天画布、乐观用户消息或标题；当 CLI 无真正 system channel 时，`system-tail` 会降级为带清晰标记的 request tail，因此仍可能进入 CLI 自身原生历史。
 
-| 事件 topic | 载荷 | 所需权限 |
-|---|---|---|
-| `usage://updated` | `{ engine, sessionId, inputTokens, outputTokens, cost? }` | `events:usage` |
-| `session://changed` | `{ workspaceId, sessionId, action }` | `events:session` |
+`ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
 
-> 想消费这里没有的宿主数据？到索引仓开 issue 提议新事件，不要试图绕过 SDK 抓 DOM/store——那是拒审理由。
+### 6.3 标准化运行时事件（只读）
+
+`TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
+
+> 想消费这里没有的宿主事实？到索引仓开 issue 提议通用事件，不要绕过 SDK 抓 DOM/store。
 
 ### 6.4 UI 组件纪律
 
@@ -246,17 +246,23 @@ interface PluginContext {
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:panel-tab`、`ui:composer-slot`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`） | 对应 UI 扩展点 | 低 |
-| `theme` | 注入 CSS / 覆盖 token | 低（Tier-0 隐含拥有） |
-| `i18n` | 注册语言资源 | 低 |
-| `events:usage` / `events:session` | 订阅对应宿主事件 | 中（涉及用户行为数据，需在 description 说明用途） |
-| `network` + `networkDomains: ["api.example.com"]` | `fetch` 访问**声明的域名**（白名单，逐个审核） | 高（必须说明每个域名的用途；通配域名一律拒审） |
+| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`） | 对应 UI 扩展点 | 低 |
+| `theme` / `i18n` / `events` | 样式 token、语言资源、插件事件总线 | 低 |
+| `session.lifecycle.read` | 观察 session 新建、恢复、关闭 | 中 |
+| `runtime.events.read` | 读取标准化运行时事实 | 中 |
+| `runtime.switch.observe` | 观察切换前后生命周期；失败不阻断切换 | 中 |
+| `workspace.metadata.read` | 读取稳定 workspace ID 与绝对路径 | 中 |
+| `plugin.storage` | 使用受控文档存储和位置选择 | 中 |
+| `prompt.contribute.internal` | 向有效 CLI 请求加入用户不可见的内部提示，并接收捕获的内部消息 | 高（安装时必须明确告知） |
+| `network:none` / `network:<host>[:port或范围]` | 声明无网络，或授权宿主代理访问精确 host | 高 |
+| `exec:<bin>` | 授权宿主执行精确裸命令名 | 高 |
 
-**规则**：
+1. 未声明的权限调用会被门面拒绝并记录——这是**评审/DX 门**（拦截误用、给评审提供可审计面），不是技术强制边界；市场版本新增权限必须显著提示用户。
+2. 网络和进程能力仅经 `ctx.bridge.invoke` 的宿主代理命令执行；插件没有原始 `fetch`，`network`/`exec` 授权不接受通配符或路径。
+3. `prompt.contribute.internal` 的内容对 CCGUI 用户界面不可见，必须按不可信数据处理；nonce 只做 turn 关联，不构成认证。
+4. 申请用不到的权限会被 CI 标记，审核员会要求删减。
 
-1. 未声明的权限调用 = 运行时被门面拒绝并记录；市场上架后新增权限必须在 PR diff 中显著提示用户。
-2. `network` 请求由宿主代理发出并校验域名白名单；插件永远拿不到原始 `fetch`。
-3. 申请用不到的权限会被 CI 标记，审核员会要求删减。
+> **权限模型的性质（务必理解）**：JS 插件与宿主 UI **同源**运行在同一 webview 中。`ctx` 权限门面与 Rust 侧桥命令的安装/启用/授权校验是**评审与开发体验（DX）门**——拦截误用与意外越权，并为市场评审提供可审计面，**不是技术强制沙箱**：同源 JS 仍可通过异步续体、React 事件 handler、同源 iframe 等绕过门面直接触达 IPC，Tauri IPC 也无法在进程内区分宿主 UI 与插件 JS。真正的边界是**安装期评审 + 隔离/隔离区（quarantine）+ 卸载与生命周期追踪**；彻底的进程级隔离属后续架构演进。因此插件作者须以「最小权限、诚实声明」自律，评审员以 manifest 声明与实际行为的一致性为准。
 
 ## 8. 声明式插件（Tier-0）规范
 
@@ -414,9 +420,9 @@ App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三�
 
 ## 13. 用户数据与安全规范
 
-1. **最小采集**：只拿实现功能必需的数据；`events:usage`/`events:session` 数据**禁止外发**，只能本地展示/聚合。
+1. **最小采集**：只拿实现功能必需的数据；session、runtime 和 workspace 数据禁止无授权外发。
 2. **secret 字段**（`ccgui:role: "secret"`）仅写入不回显，存于每插件隔离 KV；禁止把 secret 打到日志。
-3. **网络请求**：仅限声明域名；禁止把用户对话内容、文件路径、API key 作为请求参数发出。
+3. **网络请求**：仅限 `network:<host>[:port或范围]` 授权；禁止把用户对话内容、文件路径、API key 作为请求参数外发。
 4. **依赖供应链**：构建期依赖锁定（lockfile 入库）；Release 产物必须由模板 Action 从源码构建——**禁止手工上传本地构建的产物**（CI 会比对）。
 5. 发现安全漏洞：向索引仓 Security Advisory 私密报告，48h 内响应；确认后下架受影响版本。
 
@@ -429,7 +435,7 @@ A：到索引仓开 issue 描述场景。宿主每版本评估扩展 SDK；SDK �
 A：能，但全部在构建期打进单文件 bundle（注意 2MB 硬上限）。运行时禁止加载任何外部模块。
 
 **Q：为什么插件不能直接用 `fetch`？**
-A：CSP 与信任模型要求所有网络 IO 走宿主代理并校验域名白名单。声明 `network` + `networkDomains` 即可获得受控 `fetch`。
+A：CSP 与信任模型要求网络 IO 走 `ctx.bridge.invoke` 的宿主代理，并用 `network:<host>[:port或范围]` 精确授权。
 
 **Q：AI 生成的插件能上架吗？**
 A：可以，与人工插件同标准审核；上架前请在 PR 里注明「含 AI 生成代码」。未上架的 AI 生成插件按 Tier-2 个人插件在本地使用（生成时会向你展示代码 diff 与权限清单，确认后生效）。

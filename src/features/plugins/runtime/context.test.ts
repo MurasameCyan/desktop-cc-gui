@@ -1,5 +1,10 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
-import { createPluginContext, injectBundleCss, type PluginContextBackend } from "./context";
+import {
+  createPluginContext,
+  DocumentStorageConflictError,
+  injectBundleCss,
+  type PluginContextBackend,
+} from "./context";
 import type { PluginContext } from "@ccgui/plugin-sdk";
 import {
   addMenuRegistry,
@@ -14,8 +19,20 @@ import {
 } from "@ccgui/plugin-sdk";
 import { pluginBus } from "./events";
 import type { PluginManifest } from "@ccgui/plugin-sdk";
+import { dispatchSessionCreated, dispatchRuntimeEvent } from "./hooks";
 
-function fakeStorage(): PluginContextBackend & { data: Map<string, unknown>; bridgeInvoke: Mock } {
+function fakeStorage(): PluginContextBackend & {
+  data: Map<string, unknown>;
+  bridgeInvoke: Mock;
+  workspaceMetadata: Mock;
+  pickDirectory: Mock;
+  documentStorageGetLocation: Mock;
+  documentStorageSelectLocation: Mock;
+  documentStorageReadText: Mock;
+  documentStorageWriteTextAtomic: Mock;
+  documentStorageRemove: Mock;
+  documentStorageList: Mock;
+} {
   const data = new Map<string, unknown>();
   return {
     data,
@@ -23,6 +40,25 @@ function fakeStorage(): PluginContextBackend & { data: Map<string, unknown>; bri
     get: async (id, key) => data.get(`${id}:${key}`) ?? null,
     set: async (id, key, value) => void data.set(`${id}:${key}`, value),
     delete: async (id, key) => void data.delete(`${id}:${key}`),
+    workspaceMetadata: vi.fn(async () => ({ id: "workspace-id", path: "C:/work" })),
+    pickDirectory: vi.fn(async () => "C:/chosen"),
+    documentStorageGetLocation: vi.fn(async () => ({
+      kind: "data" as const,
+      displayPath: "C:/data/plugin-data/test-plugin",
+      writable: true,
+    })),
+    documentStorageSelectLocation: vi.fn(async (_id, kind, customPath) => ({
+      kind,
+      displayPath: `${customPath ?? "C:/data"}/plugin-data/test-plugin`,
+      writable: true,
+    })),
+    documentStorageReadText: vi.fn(async () => ({ content: "saved", version: "v1" })),
+    documentStorageWriteTextAtomic: vi.fn(async () => ({
+      status: "written" as const,
+      version: "v2",
+    })),
+    documentStorageRemove: vi.fn(async () => ({ status: "removed" as const })),
+    documentStorageList: vi.fn(async () => ["one.txt"]),
   };
 }
 
@@ -154,6 +190,207 @@ describe("createPluginContext", () => {
     expect(settingsRegistry.get("plugin:test-plugin")).toBeUndefined();
     expect(addMenuRegistry.get("plugin:test-plugin")).toBeUndefined();
     expect(document.head.querySelector('style[data-plugin="test-plugin"]')).toBeNull();
+  });
+
+  it("gates hook groups precisely, tracks registrations, and disposal stops delivery", async () => {
+    const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => denied.ctx.hooks.registerSessionHooks({})).toThrow(/session\.lifecycle\.read/);
+    expect(() => denied.ctx.hooks.registerTurnHooks({ onRuntimeEvent: () => {} })).toThrow(
+      /runtime\.events\.read/,
+    );
+    expect(() =>
+      createPluginContext(manifest(["runtime.events.read"]), fakeStorage(), {
+        appVersion: "1.0.0",
+      }).ctx.hooks.registerTurnHooks({ beforeTurn: () => undefined }),
+    ).toThrow(/prompt\.contribute\.internal/);
+    expect(() => denied.ctx.hooks.registerRuntimeSwitchHooks({})).toThrow(
+      /runtime\.switch\.observe/,
+    );
+
+    const sessionSeen = vi.fn();
+    const runtimeSeen = vi.fn();
+    const handle = createPluginContext(
+      manifest(["session.lifecycle.read", "runtime.events.read"]),
+      fakeStorage(),
+      { appVersion: "1.0.0" },
+    );
+    const stopSession = handle.ctx.hooks.registerSessionHooks({ onCreated: sessionSeen });
+    const stopTurn = handle.ctx.hooks.registerTurnHooks({ onRuntimeEvent: runtimeSeen });
+    expect(handle.disposers).toEqual([stopSession, stopTurn]);
+
+    const base = {
+      engine: "claude",
+      sessionId: null,
+      workspace: { id: "workspace-id", path: "C:/work" },
+      occurredAt: "2026-09-13T00:00:00.000Z",
+    } as const;
+    dispatchSessionCreated(base);
+    dispatchRuntimeEvent({
+      eventId: "event-1",
+      runId: "run-1",
+      turnId: "turn-1",
+      engine: base.engine,
+      sessionId: base.sessionId,
+      workspaceId: base.workspace.id,
+      workspacePath: base.workspace.path,
+      occurredAt: "2026-09-13T00:00:00.000Z",
+      kind: "assistant-completed",
+    });
+    await Promise.resolve();
+    expect(sessionSeen).toHaveBeenCalledTimes(1);
+    expect(runtimeSeen).toHaveBeenCalledTimes(1);
+
+    stopSession();
+    stopTurn();
+    dispatchSessionCreated(base);
+    dispatchRuntimeEvent({
+      eventId: "event-2",
+      runId: "run-2",
+      turnId: "turn-2",
+      engine: base.engine,
+      sessionId: base.sessionId,
+      workspaceId: base.workspace.id,
+      workspacePath: base.workspace.path,
+      occurredAt: "2026-09-13T00:00:01.000Z",
+      kind: "assistant-completed",
+    });
+    await Promise.resolve();
+    expect(sessionSeen).toHaveBeenCalledTimes(1);
+    expect(runtimeSeen).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes workspace metadata and document storage through the plugin namespace", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(
+      manifest(["workspace.metadata.read", "plugin.storage"]),
+      backend,
+      { appVersion: "1.0.0" },
+    );
+
+    await expect(ctx.workspace.getMetadata()).resolves.toEqual({
+      id: "workspace-id",
+      path: "C:/work",
+    });
+    expect(backend.workspaceMetadata).toHaveBeenCalledWith("test-plugin");
+
+    await expect(ctx.documentStorage.getLocation()).resolves.toEqual({
+      kind: "data",
+      path: "C:/data/plugin-data/test-plugin",
+    });
+    await expect(ctx.documentStorage.readText("state.json")).resolves.toEqual({
+      content: "saved",
+      version: "v1",
+    });
+    await expect(ctx.documentStorage.writeTextAtomic("state.json", "next", "v1")).resolves.toEqual({
+      version: "v2",
+    });
+    await ctx.documentStorage.remove("state.json");
+    await expect(ctx.documentStorage.list("state")).resolves.toEqual(["one.txt"]);
+
+    expect(backend.documentStorageGetLocation).toHaveBeenCalledWith("test-plugin");
+    expect(backend.documentStorageReadText).toHaveBeenCalledWith("test-plugin", "state.json");
+    expect(backend.documentStorageWriteTextAtomic).toHaveBeenCalledWith(
+      "test-plugin",
+      "state.json",
+      "next",
+      "v1",
+    );
+    expect(backend.documentStorageRemove).toHaveBeenCalledWith("test-plugin", "state.json", null);
+    expect(backend.documentStorageList).toHaveBeenCalledWith("test-plugin", "state");
+  });
+
+  it("forwards an explicit remove expectedVersion and defaults an omitted one to null", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["plugin.storage"]), backend, {
+      appVersion: "1.0.0",
+    });
+
+    // A caller holding a read version deletes conditionally (CAS): the opaque
+    // token must reach the backend, not be hardcoded to null.
+    await ctx.documentStorage.remove("state.json", "v2");
+    expect(backend.documentStorageRemove).toHaveBeenLastCalledWith(
+      "test-plugin",
+      "state.json",
+      "v2",
+    );
+
+    await ctx.documentStorage.remove("state.json");
+    expect(backend.documentStorageRemove).toHaveBeenLastCalledWith(
+      "test-plugin",
+      "state.json",
+      null,
+    );
+
+    backend.documentStorageRemove.mockResolvedValueOnce({
+      status: "conflict",
+      currentVersion: "v3",
+    });
+    await expect(ctx.documentStorage.remove("state.json", "v2")).rejects.toMatchObject({
+      name: "DocumentStorageConflictError",
+      code: "DOCUMENT_STORAGE_CONFLICT",
+      currentVersion: "v3",
+    });
+  });
+
+  it("uses the host chooser only for custom document storage and preserves cancellation", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["plugin.storage"]), backend, {
+      appVersion: "1.0.0",
+    });
+
+    await expect(ctx.documentStorage.selectLocation("program")).resolves.toEqual({
+      kind: "program",
+      path: "C:/data/plugin-data/test-plugin",
+    });
+    expect(backend.pickDirectory).not.toHaveBeenCalled();
+    expect(backend.documentStorageSelectLocation).toHaveBeenLastCalledWith(
+      "test-plugin",
+      "program",
+      null,
+    );
+
+    await expect(ctx.documentStorage.selectLocation("custom")).resolves.toEqual({
+      kind: "custom",
+      path: "C:/chosen/plugin-data/test-plugin",
+    });
+    expect(backend.pickDirectory).toHaveBeenCalledTimes(1);
+    expect(backend.documentStorageSelectLocation).toHaveBeenLastCalledWith(
+      "test-plugin",
+      "custom",
+      "C:/chosen",
+    );
+
+    backend.pickDirectory.mockResolvedValueOnce(null);
+    await expect(ctx.documentStorage.selectLocation("custom")).rejects.toThrow(/cancelled/i);
+    expect(backend.documentStorageSelectLocation).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects structured document CAS conflicts as a typed error", async () => {
+    const backend = fakeStorage();
+    backend.documentStorageWriteTextAtomic.mockResolvedValueOnce({
+      status: "conflict",
+      currentVersion: "v2",
+    });
+    const { ctx } = createPluginContext(manifest(["plugin.storage"]), backend, {
+      appVersion: "1.0.0",
+    });
+
+    const write = ctx.documentStorage.writeTextAtomic("state.json", "stale", "v1");
+    await expect(write).rejects.toBeInstanceOf(DocumentStorageConflictError);
+    await expect(write).rejects.toMatchObject({
+      name: "DocumentStorageConflictError",
+      code: "DOCUMENT_STORAGE_CONFLICT",
+      currentVersion: "v2",
+    });
+  });
+
+  it("rejects workspace and document access before calling the backend when permissions are absent", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest([]), backend, { appVersion: "1.0.0" });
+    await expect(ctx.workspace.getMetadata()).rejects.toThrow(/workspace\.metadata\.read/);
+    await expect(ctx.documentStorage.getLocation()).rejects.toThrow(/plugin\.storage/);
+    expect(backend.workspaceMetadata).not.toHaveBeenCalled();
+    expect(backend.documentStorageGetLocation).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -91,22 +91,29 @@ fn main() {
     let biggest = {
         let conn = db.0.lock();
         conn.query_row(
-            "SELECT engine, file_path, file_size FROM sessions ORDER BY file_size DESC LIMIT 1",
+            "SELECT engine, session_id, file_path, file_size FROM sessions
+             ORDER BY file_size DESC LIMIT 1",
             [],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
                 ))
             },
         )
         .ok()
     };
-    if let Some((engine, path, size)) = biggest {
+    if let Some((engine, session_id, path, size)) = biggest {
         let start = Instant::now();
-        let parsed =
-            parse_session_file(&engine, std::path::Path::new(&path)).expect("parse biggest");
+        // The reader hides only frames this session recorded, so the smoke
+        // path must read with the same set the app would.
+        let (accepted, _signature) = db
+            .accepted_internal_frames(&engine, &session_id)
+            .expect("accepted frames");
+        let parsed = parse_session_file(&engine, std::path::Path::new(&path), &accepted)
+            .expect("parse biggest");
         println!(
             "reader: {engine} {} bytes -> {} messages in {:?} ({})",
             size,

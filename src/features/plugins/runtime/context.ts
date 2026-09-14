@@ -21,7 +21,13 @@ import type {
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
+  WorkspaceMetadata,
 } from "@ccgui/plugin-sdk";
+import {
+  registerRuntimeSwitchHooks,
+  registerSessionHooks,
+  registerTurnHooks,
+} from "./hooks";
 import { assertPluginEmitTopic, pluginBus } from "./events";
 import { runAsPlugin } from "./hardening";
 
@@ -33,11 +39,48 @@ export interface PluginStorageBackend {
   delete(id: string, key: string): Promise<void>;
 }
 
-/** Full backend seam the context needs: KV storage plus the bridge invoke
- *  (grant-checked below, then routed through the host's transport by the
- *  loader's IPC-backed implementation). */
+export type DocumentStorageLocationResponse = {
+  kind: "data" | "program" | "custom";
+  displayPath: string;
+  writable: boolean;
+};
+
+export type DocumentStorageWriteResponse =
+  | { status: "written"; version: string }
+  | { status: "conflict"; currentVersion: string | null };
+
+export type DocumentStorageRemoveResponse =
+  | { status: "removed" }
+  | { status: "conflict"; currentVersion: string | null };
+
+/** Full backend seam the context needs. Every method accepts pluginId first;
+ * the loader binds these calls to IPC and tests bind minimal fakes. */
 export interface PluginContextBackend extends PluginStorageBackend {
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
+  workspaceMetadata(id: string): Promise<WorkspaceMetadata>;
+  pickDirectory(): Promise<string | null>;
+  documentStorageGetLocation(id: string): Promise<DocumentStorageLocationResponse>;
+  documentStorageSelectLocation(
+    id: string,
+    kind: "data" | "program" | "custom",
+    customPath: string | null,
+  ): Promise<DocumentStorageLocationResponse>;
+  documentStorageReadText(
+    id: string,
+    relativePath: string,
+  ): Promise<{ content: string; version: string } | null>;
+  documentStorageWriteTextAtomic(
+    id: string,
+    relativePath: string,
+    content: string,
+    expectedVersion: string | null,
+  ): Promise<DocumentStorageWriteResponse>;
+  documentStorageRemove(
+    id: string,
+    relativePath: string,
+    expectedVersion: string | null,
+  ): Promise<DocumentStorageRemoveResponse>;
+  documentStorageList(id: string, prefix?: string): Promise<string[]>;
 }
 
 export interface PluginHandle {
@@ -48,6 +91,21 @@ export interface PluginHandle {
    *  reversed — outermost effects unwind before the registrations they were
    *  built on. */
   disposers: Disposer[];
+}
+
+export class DocumentStorageConflictError extends Error {
+  readonly code = "DOCUMENT_STORAGE_CONFLICT";
+
+  constructor(readonly currentVersion: string | null) {
+    super(
+      `document storage version conflict (current: ${currentVersion ?? "missing"})`,
+    );
+    this.name = "DocumentStorageConflictError";
+  }
+}
+
+function sdkLocation(location: DocumentStorageLocationResponse) {
+  return { kind: location.kind, path: location.displayPath };
 }
 
 const REMOTE_CSS = /@import|url\(\s*['"]?https?:/i;
@@ -128,6 +186,78 @@ export function createPluginContext(
     pluginId: id,
     version: manifest.version,
     react: React,
+    hooks: {
+      registerSessionHooks(hooks) {
+        requirePermission("session.lifecycle.read");
+        return track(registerSessionHooks(id, hooks));
+      },
+      registerTurnHooks(hooks) {
+        if (hooks.onRuntimeEvent || hooks.afterTurn) {
+          requirePermission("runtime.events.read");
+        }
+        if (hooks.beforeTurn || hooks.onInternalMessage) {
+          requirePermission("prompt.contribute.internal");
+        }
+        return track(registerTurnHooks(id, hooks));
+      },
+      registerRuntimeSwitchHooks(hooks) {
+        requirePermission("runtime.switch.observe");
+        return track(registerRuntimeSwitchHooks(id, hooks));
+      },
+    },
+    workspace: {
+      async getMetadata() {
+        requirePermission("workspace.metadata.read");
+        return backend.workspaceMetadata(id);
+      },
+    },
+    documentStorage: {
+      async getLocation() {
+        requirePermission("plugin.storage");
+        return sdkLocation(await backend.documentStorageGetLocation(id));
+      },
+      async selectLocation(kind) {
+        requirePermission("plugin.storage");
+        let customPath: string | null = null;
+        if (kind === "custom") {
+          customPath = await backend.pickDirectory();
+          if (customPath === null) throw new Error("document storage directory selection cancelled");
+        }
+        return sdkLocation(await backend.documentStorageSelectLocation(id, kind, customPath));
+      },
+      async readText(relativePath) {
+        requirePermission("plugin.storage");
+        return backend.documentStorageReadText(id, relativePath);
+      },
+      async writeTextAtomic(relativePath, content, expectedVersion) {
+        requirePermission("plugin.storage");
+        const result = await backend.documentStorageWriteTextAtomic(
+          id,
+          relativePath,
+          content,
+          expectedVersion,
+        );
+        if (result.status === "conflict") {
+          throw new DocumentStorageConflictError(result.currentVersion);
+        }
+        return { version: result.version };
+      },
+      async remove(relativePath, expectedVersion) {
+        requirePermission("plugin.storage");
+        const result = await backend.documentStorageRemove(
+          id,
+          relativePath,
+          expectedVersion ?? null,
+        );
+        if (result.status === "conflict") {
+          throw new DocumentStorageConflictError(result.currentVersion);
+        }
+      },
+      async list(prefix) {
+        requirePermission("plugin.storage");
+        return backend.documentStorageList(id, prefix);
+      },
+    },
     ui: {
       registerSettingsSection(def) {
         requirePermission("ui:settings-section");

@@ -1,26 +1,15 @@
 use super::{same_or_child, scan_summary_file, stat_signature, ScanSummary, SessionFile};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Bump when title derivation changes so unchanged files still re-title.
-const TITLE_VERSION: &str = "7";
-
-/// Titles matching these prefixes were derived before envelope stripping
-/// existed; one migration pass re-derives them even when files are unchanged.
-const NOISE_TITLE_WHERE: &str = "title LIKE '<file %' ESCAPE '\\'
-     OR title LIKE '[Image #%' ESCAPE '\\'
-     OR title LIKE '<user\\_info%' ESCAPE '\\'
-     OR title LIKE '<user\\_query%' ESCAPE '\\'
-     OR title LIKE '# AGENTS.md instructions%'
-     OR title LIKE '<environment\\_context%' ESCAPE '\\'
-     OR title LIKE '<agents-instructions%'
-     OR title LIKE '<skill>%'
-     OR title LIKE '<recommended\\_plugins%' ESCAPE '\\'
-     OR title LIKE '<command-message%'
-     OR title LIKE '<command-name%'
-     OR title LIKE '<INSTRUCTIONS>%'";
+/// Bump when indexed title or preview derivation changes so unchanged files
+/// are rebuilt from the current normalized history rows. v9: internal frames
+/// are hidden only when a live capture validator recorded their identity, so
+/// summaries derived by the older "any JSON-valid frame" guess are stale.
+const TITLE_VERSION: &str = "9";
 
 /// Bounded head peek: parse up to `max_lines` JSON lines from the head of a
 /// file (plain or zstd). Reads in 16 KiB chunks and stops as soon as
@@ -472,10 +461,19 @@ fn gather_candidates(workspaces: &[String]) -> Vec<Candidate> {
     candidates
 }
 
-/// Stat every candidate and fold (path, size, mtime) into one signature.
-fn stat_all(workspaces: &[String], candidates: &[Candidate]) -> (Vec<Option<(i64, i64)>>, String) {
+/// Stat every candidate and fold (path, size, mtime) into one signature. The
+/// recorded accepted-frame table signature folds in too: recording a new frame
+/// identity changes derived history without touching any session file, and a
+/// matching global signature would otherwise skip the scan entirely.
+fn stat_all(
+    workspaces: &[String],
+    candidates: &[Candidate],
+    accepted_signature: &str,
+) -> (Vec<Option<(i64, i64)>>, String) {
     let mut signature_hasher = Sha256::new();
     signature_hasher.update(format!("v{}|", crate::db::CACHE_VERSION).as_bytes());
+    signature_hasher.update(accepted_signature.as_bytes());
+    signature_hasher.update(b"|");
     for w in workspaces {
         signature_hasher.update(w.as_bytes());
         signature_hasher.update(b"|");
@@ -494,8 +492,7 @@ fn stat_all(workspaces: &[String], candidates: &[Candidate]) -> (Vec<Option<(i64
 }
 
 /// Tier-1 gate (brief lock): a matching global signature means nothing
-/// changed and the scan short-circuits. Also decides whether the one-time
-/// title re-derivation migration is still pending.
+/// changed unless indexed summaries were produced by an older derivation.
 struct Tier1 {
     signature: String,
     retitle_pending: bool,
@@ -520,20 +517,10 @@ fn tier1_gate(db: &crate::db::Db, signature: String) -> Result<Option<Tier1>, St
             |r| r.get(0),
         )
         .ok();
-    // One-time migration: titles derived before envelope stripping
-    // (`<file …` / `[Image #…` / `<user_info>`) or rows with no timestamps
-    // force a single re-derivation even when files are unchanged.
-    let retitle_pending = title_version.as_deref() != Some(TITLE_VERSION)
-        && conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM sessions WHERE {NOISE_TITLE_WHERE} OR updated_at IS NULL"
-                ),
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(|e| e.to_string())?
-            > 0;
+    // A summary derivation change invalidates every indexed title and preview:
+    // their old values cannot reliably identify which normalization rule is
+    // missing (for example, a visible prefix followed by a host-only tail).
+    let retitle_pending = title_version.as_deref() != Some(TITLE_VERSION);
     if previous.as_deref() == Some(signature.as_str()) && row_count > 0 && !retitle_pending {
         return Ok(None);
     }
@@ -543,60 +530,60 @@ fn tier1_gate(db: &crate::db::Db, signature: String) -> Result<Option<Tier1>, St
     }))
 }
 
-/// Prefetch (brief lock) the stored per-file stat keys and, while the
-/// re-title migration runs, the paths whose titles are still noise. Lets the
-/// parse phase decide "unchanged" without holding the db lock.
+/// One indexed session file as the db currently records it.
+/// `accepted_signature` identifies the recorded internal-frame set that
+/// produced its stored title/preview, so a newly recorded identity re-derives
+/// exactly the sessions it can affect.
+struct IndexedFile {
+    size: i64,
+    mtime_ms: i64,
+    engine: String,
+    session_id: String,
+    accepted_signature: String,
+}
+
+/// Prefetch (brief lock) the stored per-file index state and, while a summary
+/// migration runs, mark every indexed path stale. Parsing remains lock-free.
 fn prefetch_stat_keys(
     db: &crate::db::Db,
     retitle_pending: bool,
-) -> Result<
-    (
-        std::collections::HashMap<String, (i64, i64)>,
-        std::collections::HashSet<String>,
-    ),
-    String,
-> {
+) -> Result<(std::collections::HashMap<String, IndexedFile>, HashSet<String>), String> {
     let conn = db.0.lock();
     let mut stmt = conn
-        .prepare("SELECT file_path, file_size, file_mtime_ms FROM sessions")
+        .prepare(
+            "SELECT file_path, file_size, file_mtime_ms, engine, session_id,
+                    accepted_frames_signature
+             FROM sessions",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
+                IndexedFile {
+                    size: r.get(1)?,
+                    mtime_ms: r.get(2)?,
+                    engine: r.get(3)?,
+                    session_id: r.get(4)?,
+                    accepted_signature: r.get(5)?,
+                },
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut stats = std::collections::HashMap::new();
     for row in rows {
         match row {
-            Ok((path, size, mtime)) => {
-                stats.insert(path, (size, mtime));
+            Ok((path, indexed)) => {
+                stats.insert(path, indexed);
             }
             Err(e) => eprintln!("[scanner] skipping undecodable session stat row: {e}"),
         }
     }
-    let mut stale = std::collections::HashSet::new();
-    if retitle_pending {
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT file_path FROM sessions WHERE {NOISE_TITLE_WHERE} OR updated_at IS NULL"
-            ))
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            match row {
-                Ok(path) => {
-                    stale.insert(path);
-                }
-                Err(e) => eprintln!("[scanner] skipping undecodable stale-title row: {e}"),
-            }
-        }
-    }
+    let stale = if retitle_pending {
+        stats.keys().cloned().collect()
+    } else {
+        HashSet::new()
+    };
     Ok((stats, stale))
 }
 
@@ -609,21 +596,36 @@ struct PreparedUpsert {
     path_str: String,
     size: i64,
     mtime_ms: i64,
+    /// Signature of the recorded frame identities this summary was derived
+    /// from; stored so the next scan can tell a stale summary from a fresh one.
+    accepted_signature: String,
     summary: ScanSummary,
 }
 
 fn prepare_candidate(
     cand: &Candidate,
     sig: (i64, i64),
-    stat_keys: &std::collections::HashMap<String, (i64, i64)>,
-    stale_paths: &std::collections::HashSet<String>,
+    stat_keys: &std::collections::HashMap<String, IndexedFile>,
+    stale_paths: &HashSet<String>,
     workspaces: &[String],
+    accepted: &crate::db::AcceptedFrameIndex,
 ) -> Option<PreparedUpsert> {
     let (size, mtime_ms) = sig;
     let path_str = cand.path.to_string_lossy().to_string();
-    // Unchanged on disk (stat key match) and not pending re-title: reuse.
-    if stat_keys.get(&path_str) == Some(&sig) && !stale_paths.contains(&path_str) {
-        return None;
+    // Unchanged on disk, derived from the same recorded frame identities, and
+    // not pending re-title: reuse. The stored row names the session, so this
+    // check costs no head peek.
+    if let Some(indexed) = stat_keys.get(&path_str) {
+        let current = accepted
+            .get(indexed.engine.as_str())
+            .and_then(|sessions| sessions.get(indexed.session_id.as_str()))
+            .map_or("", |set| set.signature.as_str());
+        if (indexed.size, indexed.mtime_ms) == sig
+            && indexed.accepted_signature == current
+            && !stale_paths.contains(&path_str)
+        {
+            return None;
+        }
     }
     // Identify the session (peek only for head-keyed engines).
     let (session_id, workspace_path) = match (&cand.known_id, &cand.known_workspace) {
@@ -642,7 +644,12 @@ fn prepare_candidate(
             (id, cwd)
         }
     };
-    let summary = scan_summary_file(cand.engine, &cand.path).ok()?;
+    let empty = crate::db::AcceptedFrameSet::default();
+    let accepted_set = accepted
+        .get(cand.engine)
+        .and_then(|sessions| sessions.get(session_id.as_str()))
+        .unwrap_or(&empty);
+    let summary = scan_summary_file(cand.engine, &cand.path, &accepted_set.hashes).ok()?;
     Some(PreparedUpsert {
         engine: cand.engine,
         session_id,
@@ -650,6 +657,7 @@ fn prepare_candidate(
         path_str,
         size,
         mtime_ms,
+        accepted_signature: accepted_set.signature.clone(),
         summary,
     })
 }
@@ -694,8 +702,13 @@ fn prune_codex_subagent_sessions(db: &crate::db::Db) -> Result<bool, String> {
 }
 
 /// Phase B (one lock, one transaction): upsert every prepared row, then
-/// record the signature that makes the next scan a short-circuit.
-fn upsert_rows(db: &crate::db::Db, rows: &[PreparedUpsert], tier1: &Tier1) -> Result<(), String> {
+/// record the global scan markers only when every stale title was rebuilt.
+fn upsert_rows(
+    db: &crate::db::Db,
+    rows: &[PreparedUpsert],
+    tier1: &Tier1,
+    advance_markers: bool,
+) -> Result<(), String> {
     let mut conn = db.0.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for row in rows {
@@ -705,8 +718,8 @@ fn upsert_rows(db: &crate::db::Db, rows: &[PreparedUpsert], tier1: &Tier1) -> Re
         let created_at = row.summary.first_ts.or(Some(row.mtime_ms));
         let updated_at = row.summary.last_ts.or(Some(row.mtime_ms));
         tx.execute(
-            "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title, preview, created_at, updated_at, message_count)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+            "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title, preview, created_at, updated_at, message_count, accepted_frames_signature)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(engine, session_id) DO UPDATE SET
                 workspace_path=excluded.workspace_path,
                 file_path=excluded.file_path,
@@ -716,7 +729,8 @@ fn upsert_rows(db: &crate::db::Db, rows: &[PreparedUpsert], tier1: &Tier1) -> Re
                 preview=excluded.preview,
                 created_at=COALESCE(sessions.created_at, excluded.created_at),
                 updated_at=excluded.updated_at,
-                message_count=excluded.message_count",
+                message_count=excluded.message_count,
+                accepted_frames_signature=excluded.accepted_frames_signature",
             rusqlite::params![
                 row.engine,
                 row.session_id,
@@ -729,22 +743,25 @@ fn upsert_rows(db: &crate::db::Db, rows: &[PreparedUpsert], tier1: &Tier1) -> Re
                 created_at,
                 updated_at,
                 row.summary.message_count,
+                row.accepted_signature,
             ],
         )
         .map_err(|e| e.to_string())?;
     }
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES('stat_signature', ?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        rusqlite::params![tier1.signature],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.execute(
-        "INSERT INTO meta(key, value) VALUES('title_version', ?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [TITLE_VERSION],
-    )
-    .map_err(|e| e.to_string())?;
+    if advance_markers {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('stat_signature', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            rusqlite::params![tier1.signature],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('title_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [TITLE_VERSION],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -757,7 +774,8 @@ fn scan_inner(
 ) -> Result<ScanReport, String> {
     let workspaces = db.workspace_paths()?;
     let candidates = gather_candidates(&workspaces);
-    let (stats, signature) = stat_all(&workspaces, &candidates);
+    let (accepted, accepted_signature) = db.accepted_internal_frame_index()?;
+    let (stats, signature) = stat_all(&workspaces, &candidates, &accepted_signature);
     let Some(tier1) = tier1_gate(db, signature)? else {
         let pruned = prune_codex_subagent_sessions(db)?;
         if super::codex_titles::sync(db)? || pruned {
@@ -783,6 +801,7 @@ fn scan_inner(
     }
     let mut rows = Vec::new();
     let mut reused = 0usize;
+    let mut retitle_complete = true;
     for (index, (cand, sig)) in candidates.iter().zip(stats.iter()).enumerate() {
         let processed = index + 1;
         if processed % step == 0 {
@@ -792,13 +811,24 @@ fn scan_inner(
                 finished: false,
             });
         }
+        let path_str = cand.path.to_string_lossy().to_string();
+        let stale = stale_paths.contains(&path_str);
         let Some(sig) = sig else {
+            if stale {
+                retitle_complete = false;
+            }
             continue;
         };
-        match prepare_candidate(cand, *sig, &stat_keys, &stale_paths, &workspaces) {
+        match prepare_candidate(cand, *sig, &stat_keys, &stale_paths, &workspaces, &accepted) {
             Some(row) => rows.push(row),
             None => {
-                if stat_keys.get(&cand.path.to_string_lossy().to_string()) == Some(sig) {
+                if stale {
+                    retitle_complete = false;
+                }
+                if stat_keys
+                    .get(&path_str)
+                    .is_some_and(|indexed| (indexed.size, indexed.mtime_ms) == *sig)
+                {
                     reused += 1;
                 }
             }
@@ -807,7 +837,12 @@ fn scan_inner(
 
     // Phase B: the db lock is held only for the upsert transaction.
     let reparsed = rows.len();
-    upsert_rows(db, &rows, &tier1)?;
+    upsert_rows(
+        db,
+        &rows,
+        &tier1,
+        !tier1.retitle_pending || retitle_complete,
+    )?;
     prune_codex_subagent_sessions(db)?;
     super::codex_titles::sync(db)?;
     on_changed();
@@ -1023,13 +1058,14 @@ mod tests {
         std::fs::write(
             sessions_dir.join("s.jsonl"),
             format!(
-                "{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n",
                 "{\"type\":\"title\",\"v\":1,\"title\":\"t\"}",
                 format!(
                     "{{\"type\":\"session\",\"version\":3,\"id\":\"sid-1\",\"timestamp\":\"2026-09-05T07:13:57.946Z\",\"cwd\":\"{}\"}}",
                     workspace.display().to_string().replace('\\', "\\\\")
                 ),
                 "{\"type\":\"message\",\"timestamp\":\"2026-09-05T07:14:06.682Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}",
+                "{\"type\":\"message\",\"timestamp\":\"2026-09-05T07:14:07.682Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\\n<CCGUI_INTERNAL_abcdefgh>{\\\"pluginId\\\":\\\"bridge\\\"}</CCGUI_INTERNAL_abcdefgh>\"}]}}",
             ),
         )
         .map_err(|e| e.to_string())?;
@@ -1046,41 +1082,52 @@ mod tests {
         }
         let report = scan_with(&db, || {})?;
         assert_eq!(report.reparsed, 1);
-        let title: String = {
+        let (title, preview): (String, String) = {
             let conn = db.0.lock();
             conn.query_row(
-                "SELECT title FROM sessions WHERE engine='omp' AND session_id='sid-1'",
+                "SELECT title, preview FROM sessions WHERE engine='omp' AND session_id='sid-1'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| e.to_string())?
         };
+        // This rollout's frame was never recorded by a live capture validator,
+        // so history keeps it visible: an unrecorded look-alike is model output,
+        // not a host-hidden frame.
+        let frame = "<CCGUI_INTERNAL_abcdefgh>{\"pluginId\":\"bridge\"}</CCGUI_INTERNAL_abcdefgh>";
         assert_eq!(title, "hello");
+        assert_eq!(preview, format!("answer\n{frame}"));
 
-        // Simulate a v6 cache with an unchanged rollout and an injected title.
-        // The migration must bypass both stat caches and preserve custom titles.
+        // Simulate an older cache with an unchanged rollout whose summary still
+        // carries the host-only request tail and hides a frame no validator ever
+        // accepted. The summary migration must bypass both stat caches and
+        // preserve custom titles.
         {
             let conn = db.0.lock();
             conn.execute(
-                "UPDATE sessions SET title='<recommended_plugins>plugins', custom_title='My title'",
-                [],
+                "UPDATE sessions SET title=?1, preview=?2, custom_title='My title'",
+                rusqlite::params![
+                    "hello\n\n[CCGUI internal request-tail]\nsecret",
+                    "answer",
+                ],
             )
             .map_err(|e| e.to_string())?;
-            conn.execute("UPDATE meta SET value='6' WHERE key='title_version'", [])
+            conn.execute("UPDATE meta SET value='7' WHERE key='title_version'", [])
                 .map_err(|e| e.to_string())?;
         }
         let report = scan_with(&db, || {})?;
         assert_eq!(report.reparsed, 1);
         {
             let conn = db.0.lock();
-            let (title, custom): (String, String) = conn
+            let (title, preview, custom): (String, String, String) = conn
                 .query_row(
-                    "SELECT title, custom_title FROM sessions WHERE session_id='sid-1'",
+                    "SELECT title, preview, custom_title FROM sessions WHERE session_id='sid-1'",
                     [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .map_err(|e| e.to_string())?;
             assert_eq!(title, "hello");
+            assert_eq!(preview, format!("answer\n{frame}"));
             assert_eq!(custom, "My title");
             let version: String = conn
                 .query_row(
@@ -1092,6 +1139,142 @@ mod tests {
             assert_eq!(version, TITLE_VERSION);
         }
         assert_eq!(scan_with(&db, || {})?.reparsed, 0);
+
+        // Recording the frame's identity is itself a summary input: the next
+        // scan re-derives this session even though the file never changed, and
+        // only then is the frame hidden.
+        assert!(db
+            .record_accepted_internal_frame_hash(
+                "omp",
+                "sid-1",
+                &crate::history::internal_frame_hash(frame),
+            )
+            .map_err(|e| e.to_string())?);
+        assert_eq!(scan_with(&db, || {})?.reparsed, 1);
+        {
+            let conn = db.0.lock();
+            let preview: String = conn
+                .query_row(
+                    "SELECT preview FROM sessions WHERE session_id='sid-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(preview, "answer");
+        }
+        assert_eq!(scan_with(&db, || {})?.reparsed, 0);
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn retitle_migration_retries_after_partial_parse_failure() -> Result<(), String> {
+        let home = scratch_dir("scan-retitle-retry");
+        let workspace = home.join("ws");
+        let sessions_dir = home.join(".omp").join("agent").join("sessions").join("-ws");
+        std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+
+        let session_contents = |id: &str, title: &str| {
+            format!(
+                "{}\n{}\n",
+                format!(
+                    "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-09-05T07:13:57.946Z\",\"cwd\":\"{}\"}}",
+                    workspace.display().to_string().replace('\\', "\\\\")
+                ),
+                format!(
+                    "{{\"type\":\"message\",\"timestamp\":\"2026-09-05T07:14:06.682Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"{title}\"}}]}}}}"
+                )
+            )
+        };
+        let valid_path = sessions_dir.join("valid.jsonl");
+        let retry_path = sessions_dir.join("retry.jsonl");
+        std::fs::write(&valid_path, session_contents("valid", "valid title"))
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&retry_path, session_contents("retry", "repaired title"))
+            .map_err(|e| e.to_string())?;
+
+        let _guard = HomeGuard::set(&home);
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        assert_eq!(scan_with(&db, || {})?.reparsed, 2);
+        let original_signature: String = {
+            let conn = db.0.lock();
+            conn.query_row(
+                "SELECT value FROM meta WHERE key='stat_signature'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
+
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "UPDATE sessions SET title='<recommended_plugins>stale' WHERE session_id IN ('valid', 'retry')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute("UPDATE meta SET value='7' WHERE key='title_version'", [])
+                .map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&retry_path, "not a session\n").map_err(|e| e.to_string())?;
+        let workspace_paths = vec![workspace.to_string_lossy().to_string()];
+        let (_, malformed_signature) =
+            stat_all(&workspace_paths, &gather_candidates(&workspace_paths), "");
+        assert_ne!(malformed_signature, original_signature);
+
+        let partial = scan_with(&db, || {})?;
+        assert_eq!(partial.reparsed, 1);
+        {
+            let conn = db.0.lock();
+            let (version, signature, valid_title, retry_title): (String, String, String, String) = conn
+                .query_row(
+                    "SELECT
+                        (SELECT value FROM meta WHERE key='title_version'),
+                        (SELECT value FROM meta WHERE key='stat_signature'),
+                        (SELECT title FROM sessions WHERE session_id='valid'),
+                        (SELECT title FROM sessions WHERE session_id='retry')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(version, "7");
+            assert_eq!(signature, original_signature);
+            assert_eq!(valid_title, "valid title");
+            assert_eq!(retry_title, "<recommended_plugins>stale");
+        }
+
+        std::fs::write(&retry_path, session_contents("retry", "repaired title"))
+            .map_err(|e| e.to_string())?;
+        scan_with(&db, || {})?;
+        {
+            let conn = db.0.lock();
+            let (version, signature, retry_title): (String, String, String) = conn
+                .query_row(
+                    "SELECT
+                        (SELECT value FROM meta WHERE key='title_version'),
+                        (SELECT value FROM meta WHERE key='stat_signature'),
+                        (SELECT title FROM sessions WHERE session_id='retry')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            let (_, repaired_signature) =
+                stat_all(&workspace_paths, &gather_candidates(&workspace_paths), "");
+            assert_eq!(version, TITLE_VERSION);
+            assert_eq!(signature, repaired_signature);
+            assert_eq!(retry_title, "repaired title");
+        }
+
         drop(db);
         std::fs::remove_dir_all(&home).ok();
         Ok(())

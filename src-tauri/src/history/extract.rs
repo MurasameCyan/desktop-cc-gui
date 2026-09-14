@@ -1,5 +1,7 @@
 use super::{content_text, parse_ts_ms_str, Message};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -9,11 +11,16 @@ pub struct ParsedSession {
 
 /// Parse a native session file into the minimal message list. Bad lines are
 /// skipped individually.
-pub fn parse_session_file(engine: &str, path: &Path) -> Result<ParsedSession, String> {
+pub fn parse_session_file(
+    engine: &str,
+    path: &Path,
+    accepted_internal_frames: &HashSet<String>,
+) -> Result<ParsedSession, String> {
     let reader = open_line_reader(engine, path)?;
     Ok(collect_session(
         reader,
         &extractor_for(engine, ImageMode::Collect),
+        accepted_internal_frames,
     ))
 }
 
@@ -32,12 +39,17 @@ pub struct ScanSummary {
 /// each row into a bounded accumulator instead of a Vec<Message>. Image-only
 /// user turns (whose data URLs are skipped here) fall out of the count —
 /// the sidebar counts text, and the reader path stays authoritative.
-pub fn scan_summary_file(engine: &str, path: &Path) -> Result<ScanSummary, String> {
+pub fn scan_summary_file(
+    engine: &str,
+    path: &Path,
+    accepted_internal_frames: &HashSet<String>,
+) -> Result<ScanSummary, String> {
     let reader = open_line_reader(engine, path)?;
     let mut acc = ScanAcc::default();
     walk_lines(
         reader,
         &extractor_for(engine, ImageMode::SkipDataUrls),
+        accepted_internal_frames,
         |row| {
             acc.accept(row);
         },
@@ -77,7 +89,12 @@ fn extractor_for(engine: &str, images: ImageMode) -> LineExtractor<'static> {
 
 /// Line-loop skeleton shared by the full parse and the scan summary: decode
 /// one NDJSON line, extract rows, normalize, hand each to `consume`.
-fn walk_lines(reader: impl BufRead, extract: &LineExtractor<'_>, mut consume: impl FnMut(LineRow)) {
+fn walk_lines(
+    reader: impl BufRead,
+    extract: &LineExtractor<'_>,
+    accepted_internal_frames: &HashSet<String>,
+    mut consume: impl FnMut(LineRow),
+) {
     for line in reader.lines() {
         let Ok(line) = line else { continue };
         let trimmed = line.trim();
@@ -88,7 +105,7 @@ fn walk_lines(reader: impl BufRead, extract: &LineExtractor<'_>, mut consume: im
             continue;
         };
         for row in extract(&value) {
-            let Some(row) = normalize_extracted_row(row) else {
+            let Some(row) = normalize_extracted_row(row, accepted_internal_frames) else {
                 continue;
             };
             consume(row);
@@ -96,11 +113,15 @@ fn walk_lines(reader: impl BufRead, extract: &LineExtractor<'_>, mut consume: im
     }
 }
 
-fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedSession {
+fn collect_session(
+    reader: impl BufRead,
+    extract: &LineExtractor<'_>,
+    accepted_internal_frames: &HashSet<String>,
+) -> ParsedSession {
     let mut messages = Vec::<Message>::new();
     let mut seq = 0i64;
     let mut last_user_ts: Option<i64> = None;
-    walk_lines(reader, extract, |row| {
+    walk_lines(reader, extract, accepted_internal_frames, |row| {
         // Usage-only marker (codex token_count or claude compact_boundary): fold
         // onto the last assistant message instead of creating an empty row.
         if row.role == "__usage__" {
@@ -408,14 +429,113 @@ impl LineRow {
 }
 
 type LineRows = Vec<LineRow>;
+const INTERNAL_PROMPT_MARKERS: [&str; 2] = [
+    "\n\n[CCGUI internal system-tail]\n",
+    "\n\n[CCGUI internal request-tail]\n",
+];
 
-/// Drop injected context turns and unwrap `<user_query>` so every engine's
-/// message list (and therefore titles) share one envelope cleaner.
-fn normalize_extracted_row(mut row: LineRow) -> Option<LineRow> {
+fn strip_internal_prompt_tail(text: &str) -> &str {
+    INTERNAL_PROMPT_MARKERS
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .map_or(text, |index| &text[..index])
+}
+
+fn valid_internal_nonce(nonce: &str) -> bool {
+    (1..=128).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// Identity of one internal frame: the exact bytes the engine wrote.
+pub fn internal_frame_hash(frame: &str) -> String {
+    format!("{:x}", Sha256::digest(frame.as_bytes()))
+}
+
+/// Largest frame the host will ever record an identity for. A capture may
+/// declare a smaller `maxBytes`; this is the absolute ceiling that keeps a
+/// hostile/buggy caller from filling the table with arbitrary text.
+pub const MAX_RECORDED_FRAME_BYTES: usize = 64 * 1024;
+
+/// Accept `frame` only when it is exactly one complete internal frame with a
+/// JSON payload, and return its identity. The IPC command is reachable by any
+/// enabled plugin, so the host re-derives this instead of trusting the caller.
+pub fn recordable_internal_frame_hash(frame: &str) -> Option<String> {
+    const OPEN: &str = "<CCGUI_INTERNAL_";
+    if frame.len() > MAX_RECORDED_FRAME_BYTES {
+        return None;
+    }
+    let rest = frame.strip_prefix(OPEN)?;
+    let open_end = rest.find('>')?;
+    let nonce = &rest[..open_end];
+    if !valid_internal_nonce(nonce) {
+        return None;
+    }
+    let close = format!("</CCGUI_INTERNAL_{nonce}>");
+    let payload = rest[open_end + 1..].strip_suffix(&close)?;
+    // A second close tag inside the payload would make the recorded identity
+    // cover more than the frame the parser will later find.
+    if payload.contains(&close) {
+        return None;
+    }
+    serde_json::from_str::<Value>(payload).ok()?;
+    Some(internal_frame_hash(frame))
+}
+
+fn strip_recorded_internal_frames(text: &str, accepted_internal_frames: &HashSet<String>) -> String {
+    const OPEN: &str = "<CCGUI_INTERNAL_";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let candidate = &rest[start..];
+        let Some(open_end) = candidate.find('>') else {
+            out.push_str(candidate);
+            rest = "";
+            break;
+        };
+        let nonce = &candidate[OPEN.len()..open_end];
+        if !valid_internal_nonce(nonce) {
+            out.push_str(&candidate[..open_end + 1]);
+            rest = &candidate[open_end + 1..];
+            continue;
+        }
+        let close = format!("</CCGUI_INTERNAL_{nonce}>");
+        let payload_start = open_end + 1;
+        let Some(close_offset) = candidate[payload_start..].find(&close) else {
+            out.push_str(candidate);
+            rest = "";
+            break;
+        };
+        let frame_end = payload_start + close_offset + close.len();
+        let frame = &candidate[..frame_end];
+        if !accepted_internal_frames.contains(&internal_frame_hash(frame)) {
+            out.push_str(frame);
+        }
+        rest = &candidate[frame_end..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+
+/// Remove host-only prompt tails and only those internal frames whose exact
+/// identities were accepted by a live capture validator.
+fn normalize_extracted_row(
+    mut row: LineRow,
+    accepted_internal_frames: &HashSet<String>,
+) -> Option<LineRow> {
+    if row.role == "assistant" {
+        row.text = strip_recorded_internal_frames(&row.text, accepted_internal_frames);
+        return (!row.text.trim().is_empty() || !row.images.is_empty()).then_some(row);
+    }
     if row.role != "user" {
         return Some(row);
     }
-    let text = super::clean_user_turn(&row.text);
+    let visible = strip_internal_prompt_tail(&row.text);
+    let text = super::clean_user_turn(visible);
     if super::is_injected_user_context(&text) {
         return None;
     }
@@ -960,6 +1080,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalization_hides_internal_prompt_contributions_from_user_history() {
+        let row = LineRow::new(
+            "user",
+            "visible request\n\n[CCGUI internal request-tail]\nsecret handoff\n\n[CCGUI internal request-tail]\nsemantic protocol".into(),
+            None,
+        );
+
+        let normalized = normalize_extracted_row(row, &HashSet::new()).expect("visible user row");
+        assert_eq!(normalized.text, "visible request");
+    }
+
+    #[test]
+    fn normalization_hides_only_recorded_internal_frames_from_assistant_history() {
+        let accepted = "<CCGUI_INTERNAL_n-1>{\"ok\":true}</CCGUI_INTERNAL_n-1>";
+        let unrecorded = "<CCGUI_INTERNAL_n-2>{\"ok\":true}</CCGUI_INTERNAL_n-2>";
+        let row = LineRow::new(
+            "assistant",
+            format!("visible {accepted} keep {unrecorded}"),
+            None,
+        );
+        let accepted_frames = HashSet::from([internal_frame_hash(accepted)]);
+
+        assert_eq!(
+            normalize_extracted_row(row, &accepted_frames)
+                .expect("visible assistant row")
+                .text,
+            format!("visible  keep {unrecorded}")
+        );
+
+        let malformed = LineRow::new(
+            "assistant",
+            "keep <CCGUI_INTERNAL_n-1>{bad}</CCGUI_INTERNAL_n-1>".into(),
+            None,
+        );
+        assert_eq!(
+            normalize_extracted_row(malformed, &accepted_frames)
+                .expect("unrecorded malformed frame remains visible")
+                .text,
+            "keep <CCGUI_INTERNAL_n-1>{bad}</CCGUI_INTERNAL_n-1>"
+        );
+    }
+
+    #[test]
     fn pi_family_line_extracts_thinking_in_order() {
         let line: Value = serde_json::json!({
             "type": "message",
@@ -1249,7 +1412,7 @@ mod tests {
         });
         let context_rows = extract_grok_line(&context);
         assert_eq!(context_rows.len(), 1);
-        assert!(normalize_extracted_row(context_rows.into_iter().next().unwrap()).is_none());
+        assert!(normalize_extracted_row(context_rows.into_iter().next().unwrap(), &HashSet::new()).is_none());
 
         let query: Value = serde_json::json!({
             "type": "user",
@@ -1261,7 +1424,7 @@ mod tests {
         });
         let rows = extract_grok_line(&query);
         assert_eq!(rows.len(), 1);
-        let normalized = normalize_extracted_row(rows.into_iter().next().unwrap()).unwrap();
+        let normalized = normalize_extracted_row(rows.into_iter().next().unwrap(), &HashSet::new()).unwrap();
         assert_eq!(normalized.role, "user");
         assert_eq!(normalized.text, "Grok CLI 的历史记录怎么没出现？");
 
@@ -1270,7 +1433,7 @@ mod tests {
             "please look at <user_info> in grok logs, not the typed <user_query>".into(),
             None,
         );
-        let kept = normalize_extracted_row(mentioned).unwrap();
+        let kept = normalize_extracted_row(mentioned, &HashSet::new()).unwrap();
         assert_eq!(
             kept.text,
             "please look at <user_info> in grok logs, not the typed <user_query>"

@@ -47,6 +47,14 @@ pub struct PluginInfo {
 pub struct PluginsState {
     pub plugins: HashMap<String, PluginRecord>,
     pub kv_tombstones: HashMap<String, i64>,
+    pub document_storage: HashMap<String, DocumentStorageSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DocumentStorageSelection {
+    pub(crate) kind: String,
+    pub(crate) custom_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +169,25 @@ pub(crate) fn record_enabled_permissions(
         .get(id)
         .ok_or_else(|| format!("{id}: plugin is not installed"))?;
     Ok((record.enabled, record.permissions.clone()))
+}
+
+pub(crate) fn plugin_access(id: &str) -> Result<(bool, bool, Vec<String>), String> {
+    record_access(&state_path(), id)
+}
+
+/// (enabled, quarantined, permissions) for an explicitly given state file —
+/// the injectable half of `plugin_access`, so command gates can be tested
+/// against a scratch plugins.json.
+pub(crate) fn record_access(
+    path: &Path,
+    id: &str,
+) -> Result<(bool, bool, Vec<String>), String> {
+    let state = read_state(path)?;
+    let record = state
+        .plugins
+        .get(id)
+        .ok_or_else(|| format!("{id}: plugin is not installed"))?;
+    Ok((record.enabled, record.quarantined, record.permissions.clone()))
 }
 
 pub(crate) fn list_plugins(

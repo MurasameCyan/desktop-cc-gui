@@ -6,7 +6,7 @@
  * 插件仓用法（包未发布 npm 前的过渡方案）：复制本文件为插件仓的
  * `src/ccgui-plugin.d.ts`，首行版本戳必须与所用宿主 SDK 一致。
  *
- * @ccgui/plugin-sdk v0.3.1
+ * @ccgui/plugin-sdk v0.4.0
  */
 
 /** 宿主实现的 SDK 契约版本。 */
@@ -20,6 +20,11 @@ export type PluginTier = "declarative" | "js";
 
 /** 插件入口唯一约定：main.js 默认导出本函数。 */
 export type PluginActivate = (ctx: PluginContext) => void | (() => void);
+/** Validates safe lowercase point-separated plugin ids: 2..=64 bytes total,
+ *  each segment `[a-z0-9][a-z0-9-]*`. Byte-for-byte identical to the Rust
+ *  install-time check. */
+export declare function isValidPluginId(id: string): boolean;
+
 
 export interface JsonSchemaProperty {
   type?: "string" | "number" | "integer" | "boolean";
@@ -41,7 +46,7 @@ export interface PluginManifest {
   name: string;
   version: string;
   minAppVersion?: string;
-  /** SDK 兼容区间："^0.3" / "~0.3.0" / ">=0.3.0" / 精确 / "*"（缺省不校验）。 */
+  /** SDK 兼容区间："^0.4" / "~0.4.0" / ">=0.4.0" / 精确 / "*"（缺省不校验）。 */
   sdkVersion?: string;
   author?: string;
   description?: string;
@@ -63,6 +68,193 @@ export interface PluginManifest {
 export type ComposerSlotId = "addMenu" | "cliMenu" | "permissionMenu";
 
 export type ComponentLike<P = Record<string, never>> = (props: P) => unknown;
+export interface WorkspaceMetadata {
+  id: string;
+  path: string;
+  gitBranch?: string;
+  gitHead?: string;
+  dirty?: boolean;
+}
+
+export interface PromptContribution {
+  id: string;
+  content: string;
+  placement: "system-tail" | "request-tail";
+  visibility: "internal";
+  persistence: "turn" | "session";
+  /** Called synchronously by the host exactly once after the engine accepts a
+   * launch carrying this contribution. It is not called when launch fails or
+   * when the byte budget rejects the contribution. Callback failures are
+   * isolated and do not fail the accepted launch. */
+  onAccepted?: () => void;
+}
+
+export interface InternalMessageCapture {
+  channel: string;
+  nonce?: string;
+  maxBytes: number;
+  /** Synchronous predicate the host calls on each candidate frame's parsed
+   *  payload, inline while parsing. Return true to let the host hide the frame
+   *  from the transcript and deliver it to the plugin; returning false (or
+   *  throwing) keeps the frame visible. NOT authoritative — the payload is
+   *  still untrusted, so the plugin must validate again in
+   *  `onInternalMessage`. Must be synchronous: it gates visibility before the
+   *  async delivery can run. */
+  validate?: (payload: unknown) => boolean;
+}
+
+export interface BeforeTurnResult {
+  promptContributions?: PromptContribution[];
+  internalMessageCapture?: InternalMessageCapture;
+}
+
+interface SessionEventBase {
+  engine: string;
+  sessionId: string | null;
+  workspace: WorkspaceMetadata;
+  occurredAt: string;
+}
+
+export interface SessionCreatedEvent extends SessionEventBase {}
+export interface SessionRestoredEvent extends SessionEventBase { sessionId: string }
+export interface SessionClosedEvent extends SessionEventBase {}
+
+interface TurnEventBase {
+  runId: string;
+  turnId: string;
+  engine: string;
+  sessionId: string | null;
+  workspace: WorkspaceMetadata;
+  occurredAt: string;
+}
+
+export interface BeforeTurnEvent extends TurnEventBase {}
+export interface AfterTurnEvent extends TurnEventBase {
+  status: "completed" | "cancelled" | "failed";
+  error?: string;
+}
+export interface InternalMessageEvent extends TurnEventBase {
+  channel: string;
+  nonce?: string;
+  payload: unknown;
+}
+
+export interface RuntimeSwitchEvent {
+  sourceEngine: string;
+  targetEngine: string;
+  sourceSessionId: string | null;
+  targetSessionId: string | null;
+  workspace: WorkspaceMetadata;
+  occurredAt: string;
+}
+
+interface NormalizedRuntimeEventBase {
+  eventId: string;
+  runId: string;
+  turnId: string;
+  engine: string;
+  sessionId: string | null;
+  workspaceId: string;
+  workspacePath: string;
+  occurredAt: string;
+}
+
+export interface FileChangedEvent extends NormalizedRuntimeEventBase {
+  kind: "file-changed";
+  path: string;
+  /** `touched`（适配器可确定的最弱事实）：引擎报告了针对该路径的修改类
+   *  工具调用；不断言是创建、修改还是删除。 */
+  change: "created" | "modified" | "deleted" | "touched";
+}
+/** 引擎已发起该命令：本事件不含结果，退出码未知；结果由同一工具行的
+ *  command-finished 声明。 */
+export interface CommandStartedEvent extends NormalizedRuntimeEventBase {
+  kind: "command-started";
+  command: string;
+  cwd: string;
+  startedAt: string;
+}
+export interface CommandFinishedEvent extends NormalizedRuntimeEventBase {
+  kind: "command-finished";
+  command: string;
+  cwd: string;
+  /** 仅引擎在同一工具消息里给出结构化数字退出码时才有值；null 表示结果
+   *  里没有退出码，status 随之是 unknown。 */
+  exitCode: number | null;
+  startedAt?: string;
+  finishedAt: string;
+  status: "completed" | "failed" | "cancelled" | "unknown";
+}
+export interface ToolFinishedEvent extends NormalizedRuntimeEventBase {
+  kind: "tool-finished";
+  toolName: string;
+  status: "completed" | "failed" | "cancelled" | "unknown";
+}
+export interface AssistantCompletedEvent extends NormalizedRuntimeEventBase {
+  kind: "assistant-completed";
+}
+export interface TurnCancelledEvent extends NormalizedRuntimeEventBase {
+  kind: "turn-cancelled";
+}
+export interface TurnFailedEvent extends NormalizedRuntimeEventBase {
+  kind: "turn-failed";
+  error?: string;
+}
+export interface RuntimeExitedEvent extends NormalizedRuntimeEventBase {
+  kind: "runtime-exited";
+  exitCode: number | null;
+}
+
+export type NormalizedRuntimeEvent =
+  | FileChangedEvent
+  | CommandStartedEvent
+  | CommandFinishedEvent
+  | ToolFinishedEvent
+  | AssistantCompletedEvent
+  | TurnCancelledEvent
+  | TurnFailedEvent
+  | RuntimeExitedEvent;
+
+export interface SessionHooks {
+  onCreated?(event: SessionCreatedEvent): void | Promise<void>;
+  onRestored?(event: SessionRestoredEvent): void | Promise<void>;
+  onClosed?(event: SessionClosedEvent): void | Promise<void>;
+}
+export interface TurnHooks {
+  beforeTurn?(event: BeforeTurnEvent): BeforeTurnResult | void | Promise<BeforeTurnResult | void>;
+  onRuntimeEvent?(event: NormalizedRuntimeEvent): void;
+  afterTurn?(event: AfterTurnEvent): void | Promise<void>;
+  onInternalMessage?(event: InternalMessageEvent): void | Promise<void>;
+}
+export interface RuntimeSwitchHooks {
+  beforeSwitch?(event: RuntimeSwitchEvent): void | Promise<void>;
+  afterSwitch?(event: RuntimeSwitchEvent): void | Promise<void>;
+}
+
+export type DocumentStorageLocationKind = "data" | "program" | "custom";
+export interface ResolvedDocumentStorageLocation {
+  kind: DocumentStorageLocationKind;
+  path: string;
+}
+export interface DocumentReadResult { content: string; version: string }
+export interface DocumentWriteResult { version: string }
+export interface DocumentStorage {
+  getLocation(): Promise<ResolvedDocumentStorageLocation>;
+  selectLocation(kind: DocumentStorageLocationKind): Promise<ResolvedDocumentStorageLocation>;
+  readText(relativePath: string): Promise<DocumentReadResult | null>;
+  /** expectedVersion=null requires the document not to exist. */
+  writeTextAtomic(
+    relativePath: string,
+    content: string,
+    expectedVersion: string | null,
+  ): Promise<DocumentWriteResult>;
+  /** Delete a document. Pass the opaque version from the last read for a
+   *  conditional (CAS) delete; omit/null deletes unconditionally. A stale
+   *  version rejects with a conflict. */
+  remove(relativePath: string, expectedVersion?: string | null): Promise<void>;
+  list(prefix?: string): Promise<string[]>;
+}
+
 
 /** 插件唯一能力门面（plan §5.2）。每个 register* 需要对应权限声明，
  *  返回 Disposer；未显式回收也由宿主 disposer 栈兜底。 */
@@ -72,6 +264,17 @@ export interface PluginContext {
   /** 宿主共享 React：宿主树容器组件经它创建（createElement/useRef/...）；
    *  插件自有子树用自己的 createRoot 挂进容器（双段挂载模式）。 */
   react: typeof import("react");
+  hooks: {
+    registerSessionHooks(hooks: SessionHooks): Disposer;
+    registerTurnHooks(hooks: TurnHooks): Disposer;
+    registerRuntimeSwitchHooks(hooks: RuntimeSwitchHooks): Disposer;
+  };
+  workspace: {
+    /** 稳定的宿主登记工作区身份（权限 workspace.metadata.read）。 */
+    getMetadata(): Promise<WorkspaceMetadata>;
+  };
+  /** 插件隔离的 CAS 文本文档存储（权限 plugin.storage）。 */
+  documentStorage: DocumentStorage;
   ui: {
     /** 设置页 section（权限 ui:settings-section）。 */
     registerSettingsSection(def: {

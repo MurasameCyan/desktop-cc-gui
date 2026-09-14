@@ -1,7 +1,13 @@
 # @ccgui/plugin-sdk changelog
 
-## Unreleased (0.3.2)
+## 0.4.0 — 2026-09-13
 
+- 新增通用 session/turn/runtime-switch hooks、标准化运行时事件、内部提示贡献与消息捕获、稳定 workspace metadata，以及 opaque-version CAS 文档存储契约。
+- 新增六项细粒度权限：`session.lifecycle.read`、`runtime.events.read`、`runtime.switch.observe`、`prompt.contribute.internal`、`workspace.metadata.read`、`plugin.storage`。
+- **`documentStorage.remove` 支持条件删除**：新增可选 `expectedVersion`，与 `writeTextAtomic` 一样走 CAS——传入最近一次读取的 opaque 版本即条件删除，版本过期抛 `DOCUMENT_STORAGE_CONFLICT` 并保留新文件；省略/传 `null` 为无条件删除。
+- **`InternalMessageCapture.validate`**：新增可选**同步**谓词 `(payload: unknown) => boolean`，宿主在同一帧解析处调用以决定是否隐藏该帧并投递插件；拒绝或抛错则保留可见。**非权威**——payload 仍不可信，插件须在 `onInternalMessage` 再校验。
+- **提示接纳与 VCS 元数据**：`PromptContribution.onAccepted` 在贡献通过字节预算后由宿主同步、仅调用一次（异常隔离且不撤销贡献）；`WorkspaceMetadata` 新增可选 `gitBranch`、`gitHead`、`dirty`，仅由宿主为 Git 工作区提供。
+- **插件 ID 语法与 Rust 逐字节对齐**：总长（字节）`2..=64`，点分段每段 `[a-z0-9][a-z0-9-]*`（此前 SDK 允许单字符 id 且拒绝段尾连字符，与 Rust 的安装期校验分歧）。向量 `pluginIdShapes` 入 `spec/permissions.json`，TS/Rust 共享。
 - **spec 单一事实源**：`KNOWN_PERMISSIONS` 改为从包内 `spec/permissions.json` 生成；
   授权形状/放行测试向量由 TS、Rust（include_str!）、模板校验脚本三方共享，漂移在 CI 暴露。
 - **模块拆分**：`src/index.ts` 拆为 manifest / permissions / version / registry / context

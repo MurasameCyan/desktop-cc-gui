@@ -15,7 +15,7 @@ pub mod resolve;
 pub(crate) use resolve::command_for_binary;
 
 use crate::event_sink;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,10 +34,53 @@ pub(crate) fn hide_console(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptPlacement {
+    SystemTail,
+    RequestTail,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptContribution {
+    pub id: String,
+    pub content: String,
+    pub placement: PromptPlacement,
+    pub visibility: String,
+    pub persistence: String,
+}
+
+fn effective_prompt(prompt: &str, contributions: Vec<PromptContribution>) -> String {
+    let mut effective = prompt.to_string();
+    for (placement, label) in [
+        (PromptPlacement::SystemTail, "system-tail"),
+        (PromptPlacement::RequestTail, "request-tail"),
+    ] {
+        for contribution in contributions.iter().filter(|contribution| {
+            matches!(
+                (&contribution.placement, &placement),
+                (PromptPlacement::SystemTail, PromptPlacement::SystemTail)
+                    | (PromptPlacement::RequestTail, PromptPlacement::RequestTail)
+            )
+        }) {
+            if contribution.visibility != "internal" || contribution.content.trim().is_empty() {
+                continue;
+            }
+            effective.push_str("\n\n[CCGUI internal ");
+            effective.push_str(label);
+            effective.push_str("]\n");
+            effective.push_str(&contribution.content);
+        }
+    }
+    effective
+}
+
 pub struct SendRequest {
     pub session_id: Option<String>,
     pub workspace: PathBuf,
     pub prompt: String,
+    pub prompt_contributions: Vec<PromptContribution>,
     pub images: Vec<String>,
     pub model: Option<String>,
     /// Reasoning effort ("low" | "medium" | "high" | "xhigh" | "max" | "ultra"); engines without an
@@ -88,6 +131,8 @@ pub enum EngineEvent {
         todos: Option<TodosPayload>,
         args: Option<Value>,
         result: Option<Value>,
+        /// Opaque adapter identity shared by the call and its result.
+        tool_call_id: Option<String>,
         patch: bool,
     },
     /// Native session id became known.
@@ -157,6 +202,14 @@ pub(crate) fn parse_tool_args_value(value: &Value) -> Option<Value> {
 
 /// Tool-call start: name plus parsed args (path / todos derived from args).
 pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
+    tool_call_message_with_id(name, args, None)
+}
+
+pub(crate) fn tool_call_message_with_id(
+    name: impl Into<String>,
+    args: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
     let name = name.into();
     let args = args.and_then(parse_tool_args_value);
     let todos = args.as_ref().and_then(parse_todo_args);
@@ -167,19 +220,29 @@ pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -
         todos,
         args,
         result: None,
+        tool_call_id: tool_call_id.map(str::to_string),
         patch: false,
     }
 }
 
 /// Same as [`tool_call_message`] but patches the matching in-flight tool row.
 pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
-    match tool_call_message(name, args) {
+    tool_call_patch_with_id(name, args, None)
+}
+
+pub(crate) fn tool_call_patch_with_id(
+    name: impl Into<String>,
+    args: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
+    match tool_call_message_with_id(name, args, tool_call_id) {
         EngineEvent::Message {
             role,
             text,
             path,
             todos,
             args,
+            tool_call_id,
             ..
         } => EngineEvent::Message {
             role,
@@ -188,6 +251,7 @@ pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> 
             todos,
             args,
             result: None,
+            tool_call_id,
             patch: true,
         },
         other => other,
@@ -196,6 +260,14 @@ pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> 
 
 /// Patches execution result onto the matching in-flight tool row.
 pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>) -> EngineEvent {
+    tool_result_patch_with_id(name, result, None)
+}
+
+pub(crate) fn tool_result_patch_with_id(
+    name: impl Into<String>,
+    result: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
     EngineEvent::Message {
         role: "tool".to_string(),
         text: name.into(),
@@ -203,6 +275,7 @@ pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>)
         todos: None,
         args: None,
         result: result.cloned(),
+        tool_call_id: tool_call_id.map(str::to_string),
         patch: true,
     }
 }
@@ -216,6 +289,7 @@ pub(crate) fn assistant_message(text: String) -> EngineEvent {
         todos: None,
         args: None,
         result: None,
+        tool_call_id: None,
         patch: false,
     }
 }
@@ -888,6 +962,7 @@ fn prepare_launch(
     workspace_path: &str,
     session_id: Option<String>,
     prompt: String,
+    prompt_contributions: Vec<PromptContribution>,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
@@ -910,7 +985,8 @@ fn prepare_launch(
     let req = SendRequest {
         session_id: session_id.filter(|s| !s.trim().is_empty()),
         workspace: PathBuf::from(workspace_path),
-        prompt,
+        prompt: effective_prompt(&prompt, prompt_contributions),
+        prompt_contributions: Vec::new(),
         images: image_paths.unwrap_or_default(),
         model,
         effort,
@@ -1107,6 +1183,7 @@ impl TurnCore {
                 todos,
                 args,
                 result,
+                tool_call_id,
                 patch,
             } => {
                 let mut payload = serde_json::json!({ "role": role, "text": text });
@@ -1123,6 +1200,9 @@ impl TurnCore {
                 }
                 if let Some(result) = result {
                     payload["result"] = result;
+                }
+                if let Some(tool_call_id) = tool_call_id {
+                    payload["toolCallId"] = Value::String(tool_call_id);
                 }
                 if patch {
                     payload["patch"] = Value::Bool(true);
@@ -1461,6 +1541,7 @@ pub async fn send_message(
     workspace_path: String,
     session_id: Option<String>,
     prompt: String,
+    prompt_contributions: Vec<PromptContribution>,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
@@ -1476,6 +1557,7 @@ pub async fn send_message(
         &workspace_path,
         session_id,
         prompt,
+        prompt_contributions,
         image_paths,
         model,
         effort,
@@ -1680,6 +1762,39 @@ pub async fn interrupt_session(
 }
 
 #[cfg(test)]
+mod prompt_contribution_tests {
+    use super::*;
+
+    #[test]
+    fn internal_contributions_append_after_the_visible_prompt_in_stable_order() {
+        let prompt = effective_prompt(
+            "visible",
+            vec![
+                PromptContribution {
+                    id: "system".into(),
+                    content: "system context".into(),
+                    placement: PromptPlacement::SystemTail,
+                    visibility: "internal".into(),
+                    persistence: "turn".into(),
+                },
+                PromptContribution {
+                    id: "request".into(),
+                    content: "request context".into(),
+                    placement: PromptPlacement::RequestTail,
+                    visibility: "internal".into(),
+                    persistence: "turn".into(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            prompt,
+            "visible\n\n[CCGUI internal system-tail]\nsystem context\n\n[CCGUI internal request-tail]\nrequest context"
+        );
+    }
+}
+
+#[cfg(test)]
 mod permission_tests {
     use super::*;
 
@@ -1688,6 +1803,7 @@ mod permission_tests {
             session_id: None,
             workspace: PathBuf::from("/tmp"),
             prompt: "hi".to_string(),
+            prompt_contributions: Vec::new(),
             images: Vec::new(),
             model: None,
             effort: None,
