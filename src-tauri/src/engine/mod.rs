@@ -103,6 +103,9 @@ pub enum EngineEvent {
     /// Non-terminal engine notice (e.g. an upstream 429 the CLI is
     /// retrying): surfaced to the UI, but the turn is still running.
     Warn(String),
+    /// One model attempt ended, but the CLI may retry or compact next.
+    /// Keep its outcome for EOF; unlike Error/Done, this never ends the run.
+    AttemptEnd { error: Option<String> },
     /// The CLI is backing off before re-issuing a request (claude
     /// `system/api_retry`, omp `auto_retry_start`). Distinct from `Warn`
     /// because the UI shows it as live progress ("重试中 2/5") in the run
@@ -1130,8 +1133,9 @@ struct TurnState {
     native_session_id: Option<String>,
     saw_done: bool,
     saw_error: bool,
+    attempt_error: Option<String>,
     // NOTE: TurnState lives for the whole process (one run_reader per
-    // spawn), so once saw_error is set every later Done in this process
+    // spawn), so once saw_error is set every later event in this process
     // is suppressed. That is correct for the current one-process-per-turn
     // engines (omp --print, codex exec); a future multi-turn-per-process
     // engine must reset this per turn instead.
@@ -1145,6 +1149,7 @@ impl TurnState {
             native_session_id: preassigned,
             saw_done: false,
             saw_error: false,
+            attempt_error: None,
             saw_any_output: false,
         }
     }
@@ -1215,6 +1220,11 @@ impl TurnCore {
     }
 
     fn dispatch_event(&self, state: &mut TurnState, event: EngineEvent) {
+        // Killing the child after an Error races with already-buffered stdout.
+        // No late retry/content event may revive that terminal run.
+        if state.saw_error {
+            return;
+        }
         match event {
             EngineEvent::Delta(text) => state.push(
                 &self.sink,
@@ -1265,6 +1275,7 @@ impl TurnCore {
                     payload,
                 )
             }
+            EngineEvent::AttemptEnd { error } => state.attempt_error = error,
             EngineEvent::SessionId(id) => self.adopt_session_id(state, &id, true),
             EngineEvent::Usage(usage) => {
                 state.push(&self.sink, &self.run_id, &self.engine_id, "usage", usage)
@@ -1347,13 +1358,6 @@ impl TurnCore {
                 );
             }
             EngineEvent::Done { session_id, usage } => {
-                // A Done after a terminal Error must never reach the UI: it
-                // clears the error banner and flips a failed turn back to
-                // "success" in the footer. Engines can emit both in one
-                // flush (omp: turn_end error, then agent_end done).
-                if state.saw_error {
-                    return;
-                }
                 state.saw_done = true;
                 if let Some(id) = session_id {
                     self.adopt_session_id(state, &id, false);
@@ -1574,14 +1578,16 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
                 "done",
                 serde_json::json!({ "usage": null }),
             );
-        } else if failed || !state.saw_any_output {
-            let mut message = format!(
-                "{} exited with status {}",
-                ctx.core.engine_id,
-                status
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            );
+        } else if failed || !state.saw_any_output || state.attempt_error.is_some() {
+            let mut message = state.attempt_error.take().unwrap_or_else(|| {
+                format!(
+                    "{} exited with status {}",
+                    ctx.core.engine_id,
+                    status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )
+            });
             if !stderr_tail.is_empty() {
                 message.push_str(&format!(": {stderr_tail}"));
             }
@@ -2183,6 +2189,109 @@ mod permission_tests {
             None,
         ] {
             assert!(argv(&e, &req(mode)).contains(&"--always-approve".to_string()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_lifecycle_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct CollectingEmitter(Mutex<Vec<Value>>);
+
+    impl event_sink::Emit for CollectingEmitter {
+        fn emit_json(&self, _name: &str, raw_json: &str) {
+            self.0.lock().unwrap().extend(serde_json::from_str::<Vec<Value>>(raw_json).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_error_cannot_be_followed_by_live_retry_events() {
+        let emitter = Arc::new(CollectingEmitter::default());
+        let core = TurnCore {
+            sink: event_sink::EventSink::new(emitter.clone()),
+            registry: Arc::new(ProcessRegistry::default()),
+            engine_id: "omp".to_string(),
+            run_id: "settled-run".to_string(),
+        };
+        let mut state = TurnState::new(Some("session".to_string()));
+        for event in [
+            EngineEvent::Error("retry exhausted".to_string()),
+            EngineEvent::Retry { attempt: 1, max: 50, message: "socket closed".to_string() },
+            EngineEvent::Warn("late request error".to_string()),
+            EngineEvent::Done { session_id: None, usage: None },
+        ] {
+            core.dispatch_event(&mut state, event);
+        }
+        core.sink.flush();
+        let events = emitter.0.lock().unwrap();
+        let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["error"], "a settled run must not send live events");
+    }
+
+    async fn replay_cli_output(lines: &[Value]) -> Vec<Value> {
+        let path = std::env::temp_dir().join(format!("ccgui-retry-{}.jsonl", uuid::Uuid::new_v4()));
+        let mut text = lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap();
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "cat" });
+        if cfg!(windows) {
+            command.args(["/d", "/c", "type"]);
+        }
+        let mut child = command.arg(&path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let emitter = Arc::new(CollectingEmitter::default());
+        let ctx = RunContext {
+            core: TurnCore {
+                sink: event_sink::EventSink::new(emitter.clone()),
+                registry: Arc::new(ProcessRegistry::default()),
+                engine_id: "omp".to_string(),
+                run_id: "pipe-retry-run".to_string(),
+            },
+            engine_impl: Box::new(pi_family::omp()),
+            pid: child.id().unwrap(),
+            preassigned_session_id: Some("session".to_string()),
+            initial_model: None,
+            child: Arc::new(TokioMutex::new(child)),
+            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cleanup_files: vec![path],
+            stderr_buf: Arc::new(Mutex::new(String::new())),
+        };
+        run_reader(stdout, ctx).await;
+        let events = std::mem::take(&mut *emitter.0.lock().unwrap());
+        events
+    }
+
+    #[tokio::test]
+    async fn legacy_agent_end_can_retry_and_recover_before_eof() {
+        let events = replay_cli_output(&[
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"socket closed"}}),
+            serde_json::json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"socket closed"}]}),
+            serde_json::json!({"type":"auto_retry_start","attempt":1,"maxAttempts":50}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"recovered"}}),
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}),
+            serde_json::json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}]}),
+        ]).await;
+        let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["retry", "delta", "done"]);
+        assert_eq!(events[1]["data"], "recovered");
+    }
+
+    #[tokio::test]
+    async fn clean_eof_preserves_a_final_model_failure() {
+        for failure in [
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"401 Invalid token"}}),
+            serde_json::json!({"type":"auto_retry_end","success":false,"finalError":"socket closed"}),
+        ] {
+            let events = replay_cli_output(&[failure]).await;
+            let last = events.last().unwrap();
+            assert_eq!(last["kind"], "error", "clean process exit must not turn a failed request into success");
+            assert!(matches!(last["data"].as_str(), Some("401 Invalid token" | "socket closed")));
+            assert!(!events.iter().any(|event| event["kind"] == "done"));
         }
     }
 }

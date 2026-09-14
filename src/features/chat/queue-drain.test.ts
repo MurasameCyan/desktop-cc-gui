@@ -13,7 +13,7 @@ vi.mock("@/lib/ipc", () => ({
     listWorkspaces: vi.fn(async () => []),
     listSessions: vi.fn(async () => []),
     listEngines: vi.fn(async () => []),
-    sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
+    sendMessage: vi.fn(async () => ({ runId: `queued-run-${++runCounter}`, sessionId: null })),
     interruptSession: vi.fn(async () => true),
     rememberSessionModel: vi.fn(async () => {}),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
@@ -36,6 +36,8 @@ vi.mock("@/lib/events", () => ({
 const WS = "/tmp/ws";
 const KEY = sessionKey("claude", "s-1", WS);
 const TAB = { engine: "claude", sessionId: "s-1", workspacePath: WS };
+let runCounter = 0;
+let runId: string;
 
 /** Settle the turn and let the synchronous drain run: sendPrompt reaches
  *  `ipc.sendMessage` before its first await, so one microtask turn is enough. */
@@ -48,7 +50,7 @@ async function settle(kind: "done" | "error", interrupted = false) {
   }));
   deliver?.([
     {
-      runId: "run-1",
+      runId,
       sessionId: "s-1",
       engine: "claude",
       seq: 9,
@@ -70,6 +72,7 @@ describe("queued messages after a turn settles", () => {
   });
 
   beforeEach(() => {
+    runId = `queue-run-${++runCounter}`;
     vi.clearAllMocks();
     localStorage.clear();
     useChatStore.setState({

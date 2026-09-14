@@ -3,7 +3,7 @@ import type { EngineEventPayload } from "@/lib/events";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
-    sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
+    sendMessage: vi.fn(async () => ({ runId, sessionId: null })),
     interruptSession: vi.fn(async () => true),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
     getAppSettings: vi.fn(async () => ({})),
@@ -42,6 +42,8 @@ const { runRouting } = await import("./store/stream");
 const WS = "/tmp/ws";
 const PENDING = sessionKey("codex", null, WS);
 const NATIVE = sessionKey("codex", "tid-1", WS);
+let runCounter = 0;
+let runId: string;
 
 function deps(): EngineEventDeps {
   return {
@@ -61,10 +63,11 @@ function ev(
   data: unknown,
   sessionId: string | null = "tid-1",
 ): EngineEventPayload {
-  return { runId: "run-1", sessionId, engine: "codex", seq, kind, data };
+  return { runId, sessionId, engine: "codex", seq, kind, data };
 }
 
 function resetStore() {
+  runId = `codex-settle-${++runCounter}`;
   localStorage.clear();
   vi.clearAllMocks();
   runRouting.clear();
@@ -121,7 +124,7 @@ describe("codex turn settling", () => {
       deps(),
     );
 
-    resolveSend({ runId: "run-1", sessionId: null });
+    resolveSend({ runId, sessionId: null });
     await inflight;
     handleEngineEvents([ev("done", 3, { usage: null })], deps());
 

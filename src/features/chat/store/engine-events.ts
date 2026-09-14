@@ -418,15 +418,16 @@ export function settleOrphanedRuns(
 ) {
   if (orphaned.length === 0) return;
   for (const [runId] of orphaned) dropRunUsage(runId);
+  for (const [, key] of orphaned) retryingKeys.delete(key);
   set((s) => {
     let streamingByKey = s.streamingByKey;
     let bySession = s.bySession;
     for (const [, key] of orphaned) {
       streamingByKey = setStreamingFlag(streamingByKey, key, false);
       const cur = bySession[key];
-      if (cur?.streaming) {
+      if (cur?.streaming || cur?.retry) {
         if (bySession === s.bySession) bySession = { ...s.bySession };
-        bySession[key] = { ...cur, streaming: false, turnStartedAt: null };
+        bySession[key] = { ...cur, streaming: false, turnStartedAt: null, retry: null };
       }
     }
     return { bySession, streamingByKey };
@@ -853,6 +854,12 @@ function adoptObservedRun(
   }
 }
 
+// Retain terminal run identities after routing is removed. A delayed retry
+// can otherwise fall back to sessionId and masquerade as a new observed run.
+// Bound this history; real new turns always carry a fresh runId.
+const settledRuns = new Map<string, "done" | "error">();
+const MAX_SETTLED_RUNS = 256;
+
 /** Resolve an event's session key (run routing, then session-id match) and
  * dispatch to the per-kind handler. */
 export function handleEngineEvents(
@@ -860,6 +867,10 @@ export function handleEngineEvents(
   deps: EngineEventDeps,
 ) {
   for (const event of events) {
+    const settled = settledRuns.get(event.runId);
+    // EOF stderr/failure can follow Done. Keep that diagnostic, but never
+    // adopt the run again or drain its queue a second time.
+    if (settled && !(settled === "done" && (event.kind === "warn" || event.kind === "error"))) continue;
     const state = deps.get();
     let key = runRouting.get(event.runId);
     if (key) touchRun(event.runId);
@@ -874,6 +885,12 @@ export function handleEngineEvents(
       }
     }
     if (!key) continue;
+    if (event.kind === "done" || event.kind === "error") {
+      settledRuns.set(event.runId, event.kind);
+      if (settledRuns.size > MAX_SETTLED_RUNS) {
+        settledRuns.delete(settledRuns.keys().next().value!);
+      }
+    }
 
     // Engine events reach every attached client, but the running flag is set
     // by the sender's own send path — so an observer (a phone watching the
@@ -881,7 +898,7 @@ export function handleEngineEvents(
     // adopt any run still talking, let done/error settle it below. A denial
     // is excluded on purpose: the CLI has stopped to ask, and the grant
     // card's resend has to stay available while it waits.
-    if (event.kind !== "done" && event.kind !== "error" && event.kind !== "permission_denied") {
+    if (!settled && event.kind !== "done" && event.kind !== "error" && event.kind !== "permission_denied") {
       adoptObservedRun(event, key, deps);
     }
 
@@ -902,7 +919,8 @@ export function handleEngineEvents(
         onUsage(event, key, deps);
         break;
       case "error":
-        onError(event, key, deps);
+        if (settled === "done") onWarn(event, key, deps);
+        else onError(event, key, deps);
         break;
       case "warn":
         onWarn(event, key, deps);

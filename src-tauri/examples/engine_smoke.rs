@@ -118,6 +118,14 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
                 EngineEvent::Usage(u) => println!("  usage: {u}"),
                 EngineEvent::Error(e) => println!("  ERROR: {e}"),
                 EngineEvent::Warn(e) => println!("  warn: {e}"),
+                EngineEvent::Retry { attempt, max, message } => {
+                    println!("  retry {attempt}/{max}: {message}");
+                }
+                EngineEvent::AttemptEnd { error } => {
+                    if let Some(error) = error {
+                        println!("  attempt failed (CLI may recover): {error}");
+                    }
+                }
                 EngineEvent::PermissionDenied { tool, path, .. } => {
                     println!("  permission denied: tool={tool:?} path={path:?}")
                 }
