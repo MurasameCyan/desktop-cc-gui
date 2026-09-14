@@ -1,8 +1,31 @@
-import { useCallback, useEffect, useRef, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type MutableRefObject,
+  type RefObject,
+} from "react";
 import type { Message } from "@/lib/ipc";
 
 /** Distance from the scroll tail within which the user counts as "at bottom". */
 const BOTTOM_THRESHOLD_PX = 100;
+
+/** Momentum keeps firing scroll events after the finger lifts; hold the touch
+ *  intent window open this long past the last one so the resting position is
+ *  what decides follow vs. pause. */
+const TOUCH_IDLE_MS = 150;
+
+/** Tail-follow state and controls shared by the timeline's scroll consumers:
+ *  the pin effects, the anchor rail and the jump-to-bottom button. */
+export interface ScrollFollow {
+  /** Whether the viewport currently sits at the tail. */
+  atBottomRef: MutableRefObject<boolean>;
+  /** Set when the user deliberately scrolled away from the tail. */
+  userPausedRef: MutableRefObject<boolean>;
+  isFollowing: () => boolean;
+  scrollToBottom: () => void;
+  resumeFollow: () => void;
+}
 
 /** Stick-to-bottom intent model (ported from the reference chat UI): wheel-up
  * pauses following, scrolling back down to the bottom resumes it; programmatic
@@ -11,7 +34,7 @@ export function useScrollFollow({
   scrollRef,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
-}) {
+}): ScrollFollow {
   // Sampling geometry at content-change time misfires in a virtualized
   // list: a freshly mounted tool row still has the 72px estimated height,
   // so scrollHeight is stale and a "near bottom" check reads wrong. Track
@@ -57,12 +80,46 @@ export function useScrollFollow({
     // those programmatic shifts as intent silently unfollowed the tail right
     // after opening a session. Wheel pause/resume stays in the wheel handler.
     let scrollbarDrag = false;
+    // Touch (the web-remote UI on a phone) produces neither wheel deltas nor
+    // a scrollbar press, so without this branch the follow state stayed at
+    // its initial "at bottom" forever and every append, stream flush and row
+    // re-measurement yanked the viewport back to the tail while the user was
+    // reading history. A touch drag IS user intent, and its direction carries
+    // the same meaning as a wheel delta.
+    let touchIntent = false;
+    let touchIdle = 0;
+    let lastScrollTop = el.scrollTop;
+    const isTouch = (e: PointerEvent) =>
+      e.pointerType === "touch" || e.pointerType === "pen";
+    const clearTouchIdle = () => {
+      clearTimeout(touchIdle);
+      touchIdle = 0;
+    };
+    const armTouchIdle = () => {
+      clearTouchIdle();
+      touchIdle = window.setTimeout(() => {
+        touchIdle = 0;
+        touchIntent = false;
+      }, TOUCH_IDLE_MS);
+    };
     const handlePointerDown = (e: PointerEvent) => {
+      if (isTouch(e)) {
+        clearTouchIdle();
+        touchIntent = true;
+        lastScrollTop = el.scrollTop;
+        return;
+      }
       // Scrollbar chrome sits outside the padding box: a press with offsets
       // beyond clientWidth/clientHeight landed on the track or thumb.
       scrollbarDrag = e.offsetX > el.clientWidth || e.offsetY > el.clientHeight;
     };
-    const endScrollbarDrag = () => {
+    const endPointerDrag = (e: PointerEvent) => {
+      // Lifting the finger does not end the gesture: momentum scrolling is
+      // still the user's, so the window closes on scroll idle instead.
+      if (isTouch(e)) {
+        if (touchIntent) armTouchIdle();
+        return;
+      }
       scrollbarDrag = false;
     };
 
@@ -71,11 +128,30 @@ export function useScrollFollow({
       if (scrollRaf) return;
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = 0;
-        // Programmatic pins must not read as user intent; an explicit
-        // wheel-up pause is cleared only by the wheel handler, otherwise a
-        // scroll event from that same gesture (still within the threshold)
-        // would immediately un-pause.
-        if (autoScrollingRef.current || userPausedRef.current) return;
+        // Programmatic pins must not read as user intent.
+        if (autoScrollingRef.current) return;
+        // Touch drag and its momentum tail: up pauses following, back down to
+        // the bottom resumes it. Checked before the pause early-return so a
+        // finger can undo its own pause, and gated on direction so the
+        // virtualizer's measurement compensation cannot silently re-follow.
+        if (touchIntent) {
+          armTouchIdle();
+          const top = el.scrollTop;
+          const delta = top - lastScrollTop;
+          lastScrollTop = top;
+          if (delta < 0) {
+            userPausedRef.current = true;
+            atBottomRef.current = false;
+          } else if (delta > 0 && distanceFromBottom() < BOTTOM_THRESHOLD_PX) {
+            userPausedRef.current = false;
+            atBottomRef.current = true;
+          }
+          return;
+        }
+        // An explicit wheel-up pause is cleared only by the wheel handler,
+        // otherwise a scroll event from that same gesture (still within the
+        // threshold) would immediately un-pause.
+        if (userPausedRef.current) return;
         if (!scrollbarDrag) return;
         atBottomRef.current = distanceFromBottom() < BOTTOM_THRESHOLD_PX;
       });
@@ -103,16 +179,17 @@ export function useScrollFollow({
     el.addEventListener("scroll", handleScroll, { passive: true });
     el.addEventListener("wheel", handleWheel, { passive: true });
     el.addEventListener("pointerdown", handlePointerDown, { passive: true });
-    window.addEventListener("pointerup", endScrollbarDrag);
-    window.addEventListener("pointercancel", endScrollbarDrag);
+    window.addEventListener("pointerup", endPointerDrag);
+    window.addEventListener("pointercancel", endPointerDrag);
     return () => {
       el.removeEventListener("scroll", handleScroll);
       el.removeEventListener("wheel", handleWheel);
       el.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("pointerup", endScrollbarDrag);
-      window.removeEventListener("pointercancel", endScrollbarDrag);
+      window.removeEventListener("pointerup", endPointerDrag);
+      window.removeEventListener("pointercancel", endPointerDrag);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (wheelRaf) cancelAnimationFrame(wheelRaf);
+      clearTouchIdle();
     };
   }, [scrollRef]);
 
