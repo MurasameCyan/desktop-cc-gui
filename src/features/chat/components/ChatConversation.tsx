@@ -30,12 +30,9 @@ import { useComposerActions } from "./use-composer-actions";
 import type { EngineInfo, Workspace } from "@/lib/ipc";
 import type { OmpServiceTier } from "@/lib/omp-service-tier";
 import { EmptyState } from "@/components/base/empty-state";
-import { parseUsage } from "../usage";
+import { ASSUMED_CONTEXT_WINDOW, parseUsage } from "../usage";
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
-
-/** Assumed context window when the engine does not report one. */
-const CONTEXT_WINDOW_TOKENS = 200_000;
 
 /** Message list with its own bySession subscription: stream flushes swap the
  * messages array once per animation frame, and this boundary keeps that
@@ -329,14 +326,15 @@ export const ChatConversation = memo(function ChatConversation({
     [pendingEngines],
   );
 
-  // Conversation-reported window (Codex token_count) wins; catalog is only
-  // a fallback for engines that never send one.
+  // Conversation-reported window (Codex token_count, Claude's modelUsage)
+  // wins; the model catalog is the fallback for engines that never report
+  // one, and the shared constant is the last resort.
   const contextMax =
     parseUsage(sessionUsage)?.contextWindow ||
     (catalogs[activeEngine]?.models ?? []).find(
       (m) => m.id === displayModels[activeEngine],
     )?.contextWindow ||
-    CONTEXT_WINDOW_TOKENS;
+    ASSUMED_CONTEXT_WINDOW;
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;

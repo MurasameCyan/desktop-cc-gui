@@ -1,3 +1,14 @@
+/**
+ * Denominator for the context gauge when nothing real is known: neither the
+ * engine's own report nor the model catalog supplied a window.
+ *
+ * It is a last resort, not a default. Every engine that knows its window
+ * reports it — Codex through its rollout/`debug models`, Claude through the
+ * `modelUsage` map on its result line — so a value here means the engine said
+ * nothing, and the gauge is a guess (pi, agy and dsh today).
+ */
+export const ASSUMED_CONTEXT_WINDOW = 200_000;
+
 export interface ParsedUsage {
   input: number;
   output: number;
