@@ -179,7 +179,14 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
     let event_type = envelope.kind.as_str();
     if !matches!(
         event_type,
-        "session" | "tool_execution_start" | "tool_execution_end" | "message_end" | "turn_end" | "agent_end"
+        "session"
+            | "tool_execution_start"
+            | "tool_execution_end"
+            | "message_end"
+            | "turn_end"
+            | "agent_end"
+            | "auto_retry_start"
+            | "auto_retry_end"
     ) {
         return;
     }
@@ -235,6 +242,37 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             if let Some(error) = nested_error_text(&value, &["message"]) {
                 out.push(EngineEvent::Warn(error));
             }
+        }
+        "auto_retry_start" => {
+            // The CLI is backing off before re-issuing the request (provider
+            // 5xx / stream-envelope failures). Live progress, not an error:
+            // the run status line renders "重试中 x/y" and the next content
+            // event clears it.
+            out.push(EngineEvent::Retry {
+                attempt: value.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                max: value
+                    .get("maxAttempts")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                message: value
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+        "auto_retry_end" => {
+            // Explicit "stop showing it": a retry that recovered without
+            // emitting new content would otherwise leave the indicator up
+            // until the turn settles. A failure surfaces through
+            // turn_end/agent_end as a terminal Error.
+            out.push(EngineEvent::Retry {
+                attempt: 0,
+                max: 0,
+                message: String::new(),
+            });
         }
         "turn_end" | "agent_end" => {
             // omp nests the failure in `message.errorMessage` on every one
@@ -450,6 +488,82 @@ mod tests {
         match &out[0] {
             EngineEvent::Message { todos, .. } => assert!(todos.is_none()),
             _ => panic!("expected tool message"),
+        }
+    }
+
+    /// The live path's only reliable todo source for this tool. Two real
+    /// gaps it covers: the start event carries no `args` for `todo` (so the
+    /// list would stay stale until the session was reloaded), and a
+    /// phase-wide `done` names a PHASE, which no task-keyed patch could
+    /// apply. `abandoned` is omp's own spelling for a dropped task and must
+    /// not read as still-to-do.
+    #[test]
+    fn tool_execution_end_carries_the_authoritative_todo_snapshot() {
+        let line = serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "tool_5",
+            "toolName": "todo",
+            "result": {
+                "content": [{"type": "text", "text": "Remaining items (1)"}],
+                "details": {
+                    "phases": [
+                        {"name": "scaffold", "tasks": [
+                            {"content": "scan files", "status": "completed"},
+                            {"content": "write code", "status": "running"}
+                        ]},
+                        {"name": "verify", "tasks": [
+                            {"content": "run tests", "status": "pending"},
+                            {"content": "update snapshots", "status": "abandoned"},
+                            {"content": "await review", "status": "blocked", "blocker": "waiting on user"}
+                        ]}
+                    ],
+                    "storage": "session"
+                }
+            }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[0] {
+            EngineEvent::Message {
+                todos: Some(todos),
+                patch,
+                ..
+            } => {
+                // A full post-op list, not a delta: it replaces what the row holds.
+                assert!(todos.replace);
+                assert!(*patch, "must land on the in-flight todo row");
+                let seen: Vec<(&str, &str)> = todos
+                    .items
+                    .iter()
+                    .map(|i| (i.content.as_str(), i.status.as_str()))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    [
+                        ("scan files", "complete"),
+                        ("write code", "active"),
+                        ("run tests", "pending"),
+                        ("update snapshots", "dropped"),
+                        ("await review", "blocked"),
+                    ]
+                );
+            }
+            other => panic!("expected a todo snapshot patch, got {other:?}"),
+        }
+
+        // A non-todo tool's result carries no list.
+        let line = serde_json::json!({
+            "type": "tool_execution_end",
+            "toolName": "bash",
+            "result": {"content": [{"type": "text", "text": "ok"}]}
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[0] {
+            EngineEvent::Message { todos, .. } => assert!(todos.is_none()),
+            other => panic!("expected tool result patch, got {other:?}"),
         }
     }
 

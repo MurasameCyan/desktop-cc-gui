@@ -506,6 +506,8 @@ jobs:
           PY
           )
 
+          # Decimal rollover: patch rolls 1.0.9 -> 1.1.0, minor rolls
+          # 1.9.9 -> 2.0.0 (each segment carries at 10).
           NEXT_VERSION=$(python3 - <<'PY' "$VERSION"
           import sys
 
@@ -515,7 +517,14 @@ jobs:
               raise SystemExit("Expected version like X.Y.Z")
 
           major, minor, patch = (int(p) for p in parts)
-          print(f"{major}.{minor}.{patch + 1}")
+          patch += 1
+          if patch >= 10:
+              patch = 0
+              minor += 1
+          if minor >= 10:
+              minor = 0
+              major += 1
+          print(f"{major}.{minor}.{patch}")
           PY
           )
 
@@ -542,13 +551,13 @@ jobs:
           cargo.write_text(text)
           PY
 
-          git checkout -b "chore/bump-version-${NEXT_VERSION}"
+          git checkout -b "v${NEXT_VERSION}"
           git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
           git commit -m "chore: bump version to ${NEXT_VERSION}"
-          git push origin "chore/bump-version-${NEXT_VERSION}"
+          git push origin "v${NEXT_VERSION}"
 
           gh pr create \
             --title "chore: bump version to ${NEXT_VERSION}" \
             --body "Post-release version bump to ${NEXT_VERSION}." \
             --base main \
-            --head "chore/bump-version-${NEXT_VERSION}"
+            --head "v${NEXT_VERSION}"

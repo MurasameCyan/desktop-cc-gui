@@ -447,6 +447,17 @@ export const MessageTimeline = memo(function MessageTimeline({
                     model={activeModelFormatted}
                     effort={activeEffortFormatted}
                     usage={liveUsage}
+                    retry={
+                      session.retry
+                        ? session.retry.max > 0
+                          ? t("chat.retrying", {
+                              attempt: session.retry.attempt,
+                              max: session.retry.max,
+                            })
+                          : t("chat.retryingNoMax", { attempt: session.retry.attempt })
+                        : null
+                    }
+                    retryDetail={session.retry?.message || null}
                   />
                 ) : (
                   <TimelineRowView

@@ -112,6 +112,8 @@ export const zh = {
     archivedWorkspaces: "已归档 ({{count}})",
     selectSession: "选择或新建一个会话开始",
     thinking: "响应中",
+    retrying: "重试中 {{attempt}}/{{max}}",
+    retryingNoMax: "重试中 {{attempt}}",
     thinkingProcess: "思考过程",
     thinkingCount: "思考 {{count}} 次",
     processSummary: "思考 {{thinking}} 次 工具调用 {{tools}} 次",

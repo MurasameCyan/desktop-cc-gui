@@ -161,11 +161,18 @@ function onModel(
   });
 }
 
+/** Sessions whose run is inside a provider-retry backoff. Kept out of the
+ *  store read path on purpose: the delta handlers test this set (O(1)) rather
+ *  than reading `bySession` for every streamed token. */
+const retryingKeys = new Set<string>();
+
 function onDelta(
   event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
+  // Content resumed: a re-issued request succeeded, so the retry chip goes.
+  if (retryingKeys.has(key)) clearRetry(key, deps);
   bufferStreamPart(
     key,
     "delta",
@@ -181,6 +188,8 @@ function onThinking(
   key: string,
   deps: EngineEventDeps,
 ) {
+  // Content resumed: a re-issued request succeeded, so the retry chip goes.
+  if (retryingKeys.has(key)) clearRetry(key, deps);
   bufferStreamPart(
     key,
     "thinking",
@@ -196,6 +205,8 @@ function onMessage(
   key: string,
   deps: EngineEventDeps,
 ) {
+  // Content resumed: a re-issued request succeeded, so the retry chip goes.
+  if (retryingKeys.has(key)) clearRetry(key, deps);
   const data = event.data as {
     role: string;
     text: string;
@@ -511,6 +522,8 @@ function onError(
   key: string,
   deps: EngineEventDeps,
 ) {
+  retryingKeys.delete(key);
+  if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
@@ -668,7 +681,46 @@ function onWarn(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   patchSession(deps.set, key, { error: event.data as string });
 }
 
+/**
+ * Live provider-retry progress (claude `system/api_retry`, codex
+ * `Reconnecting... n/m`, omp `auto_retry_start`). Shown in the run status
+ * line as "重试中 x/y" — deliberately NOT the error banner: the CLI is
+ * backing off and will re-issue the request, so this is progress. An attempt
+ * of 0 (or a retry-end event) clears it; so does the next content event.
+ */
+function onRetry(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+  const data = (event.data ?? {}) as {
+    attempt?: unknown;
+    max?: unknown;
+    message?: unknown;
+  };
+  const attempt = typeof data.attempt === "number" ? data.attempt : 0;
+  if (attempt <= 0) {
+    clearRetry(key, deps);
+    return;
+  }
+  retryingKeys.add(key);
+  patchSession(deps.set, key, {
+    retry: {
+      attempt,
+      max: typeof data.max === "number" ? data.max : 0,
+      message: typeof data.message === "string" ? data.message : "",
+    },
+  });
+}
+
+/** Drop the indicator once the re-issued request produces content. A
+ *  recovered retry ends with output, so this lands before any explicit end
+ *  event and the chip never lingers over a healthy stream. */
+function clearRetry(key: string, deps: EngineEventDeps) {
+  retryingKeys.delete(key);
+  if (!deps.get().bySession[key]?.retry) return;
+  patchSession(deps.set, key, { retry: null });
+}
+
 function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+  retryingKeys.delete(key);
+  if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const data = event.data as { usage: unknown };
   // Occupancy for the context meter: the newest single report (claude's one
@@ -854,6 +906,9 @@ export function handleEngineEvents(
         break;
       case "warn":
         onWarn(event, key, deps);
+        break;
+      case "retry":
+        onRetry(event, key, deps);
         break;
       case "permission_denied":
         onPermissionDenied(event, key, deps);
