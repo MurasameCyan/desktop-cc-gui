@@ -332,9 +332,16 @@ fn opencode_data_roots(workspace: &Path) -> Vec<PathBuf> {
     if let Some(dir) = dirs::data_dir() {
         roots.push(dir.join("opencode"));
     }
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".local").join("share").join("opencode"));
-    }
+    // `dirs::home_dir()` reads the Windows Known Folder API, which ignores
+    // HOME/USERPROFILE, so a scratch home never reached this root. Same split
+    // `paths::home_dir` already applies for the v0.9 legacy homes; production
+    // resolves identically either way.
+    roots.push(
+        crate::paths::home_dir()
+            .join(".local")
+            .join("share")
+            .join("opencode"),
+    );
     roots.push(workspace.join(".opencode"));
     let mut deduped: Vec<PathBuf> = Vec::new();
     for root in roots {
