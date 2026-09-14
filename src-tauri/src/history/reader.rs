@@ -388,11 +388,17 @@ pub async fn load_session_page(
 /// "delete then resurrect" on the next scan.
 fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
     match engine {
-        "claude" | "codex" | "pi" | "omp" | "agy" => match std::fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("remove {}: {e}", path.display())),
+        "claude" | "codex" | "pi" | "omp" | "agy" | "qoder" | "qoder-cn" => {
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("remove {}: {e}", path.display())),
+            }
         },
+        // opencode: the db row points at `storage/session/<project>/<id>.json`;
+        // the transcript also lives in `storage/message/<id>/` and one
+        // `storage/part/<msg>/` dir per message — all under the same storage root.
+        "opencode" => delete_opencode_session_disk(path),
         _ => {
             // kimi: .../<sessionDir>/agents/main/wire.jsonl -> <sessionDir>
             // grok: .../<sessionDir>/chat_history.jsonl -> <sessionDir>
@@ -445,6 +451,62 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
             }
         }
     }
+}
+
+/// Remove one OpenCode session's storage tree: the metadata file (`path` =
+/// `…/storage/session/<project>/<id>.json`), the `storage/message/<id>/`
+/// dir, and the `storage/part/<msg>/` dirs of its messages. The layout check
+/// (`…/storage/session/*/*.json`) anchors the removal so a corrupt db row
+/// can never point remove_dir_all at an arbitrary tree — same guard as the
+/// kimi/grok arm above.
+fn delete_opencode_session_disk(path: &Path) -> Result<(), String> {
+    let session_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let storage = path
+        .parent()
+        .and_then(|project| project.parent())
+        .filter(|session_root| session_root.file_name().and_then(|n| n.to_str()) == Some("session"))
+        .and_then(|session_root| session_root.parent());
+    let structure_ok = session_id.starts_with("ses_")
+        && path.extension().and_then(|e| e.to_str()) == Some("json")
+        && storage.is_some_and(|root| root.join("session").is_dir());
+    let Some(storage) = storage.filter(|_| structure_ok) else {
+        eprintln!(
+            "[history] refusing opencode disk delete outside storage/session layout: {}",
+            path.display()
+        );
+        return Ok(());
+    };
+    // Part dirs are keyed by message id, so collect them before the message
+    // dir goes away.
+    let message_dir = storage.join("message").join(session_id);
+    let mut message_ids: Vec<std::ffi::OsString> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&message_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Some(stem) = p.file_stem() {
+                    message_ids.push(stem.to_os_string());
+                }
+            }
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("remove {}: {e}", path.display())),
+    }
+    if message_dir.is_dir() {
+        std::fs::remove_dir_all(&message_dir)
+            .map_err(|e| format!("remove {}: {e}", message_dir.display()))?;
+    }
+    for id in message_ids {
+        let part_dir = storage.join("part").join(&id);
+        if part_dir.is_dir() {
+            std::fs::remove_dir_all(&part_dir)
+                .map_err(|e| format!("remove {}: {e}", part_dir.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Sync body of `delete_session` (disk + db work off the main thread).
@@ -783,5 +845,54 @@ mod tests {
             let fresh = serde_json::to_value(subagent_history(&messages[..start])).unwrap();
             assert_eq!(cut, fresh, "start={start}");
         }
+    }
+
+    /// qoder sessions are a single jsonl — the plain remove_file arm.
+    #[test]
+    fn delete_qoder_removes_single_file() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("sess-1.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        delete_session_disk("qoder", &path).unwrap();
+        assert!(!path.exists());
+    }
+
+    /// opencode spreads a session over session/message/part; deleting the
+    /// metadata file must take the message dir and its part dirs, and leave
+    /// other sessions' trees alone.
+    #[test]
+    fn delete_opencode_removes_storage_tree() {
+        let scratch = Scratch::new();
+        let storage = scratch.0.join("data").join("storage");
+        let meta = storage.join("session").join("proj1").join("ses_x.json");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(&meta, "{}").unwrap();
+        let msg_dir = storage.join("message").join("ses_x");
+        std::fs::create_dir_all(&msg_dir).unwrap();
+        std::fs::write(msg_dir.join("msg_1.json"), "{}").unwrap();
+        let part_dir = storage.join("part").join("msg_1");
+        std::fs::create_dir_all(&part_dir).unwrap();
+        std::fs::write(part_dir.join("prt_1.json"), "{}").unwrap();
+        let other_part_dir = storage.join("part").join("msg_other");
+        std::fs::create_dir_all(&other_part_dir).unwrap();
+        std::fs::write(other_part_dir.join("prt_9.json"), "{}").unwrap();
+
+        delete_session_disk("opencode", &meta).unwrap();
+        assert!(!meta.exists());
+        assert!(!msg_dir.exists());
+        assert!(!part_dir.exists());
+        assert!(other_part_dir.exists());
+    }
+
+    /// A path outside the storage/session layout is refused (db corruption
+    /// must never aim remove_dir_all at an arbitrary tree).
+    #[test]
+    fn delete_opencode_refuses_unexpected_layout() {
+        let scratch = Scratch::new();
+        let stray = scratch.0.join("random").join("ses_x.json");
+        std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        std::fs::write(&stray, "{}").unwrap();
+        delete_session_disk("opencode", &stray).unwrap();
+        assert!(stray.exists());
     }
 }

@@ -47,6 +47,7 @@ fn npm_package(engine: &str) -> Option<&'static str> {
         "pi" => Some("@earendil-works/pi-coding-agent"),
         "omp" => Some("@oh-my-pi/pi-coding-agent"),
         "dsh" => Some("@deepseek-ai/dsh"),
+        "opencode" => Some("opencode-ai"),
         _ => None,
     }
 }
@@ -632,11 +633,15 @@ mod tests {
 
     #[test]
     fn npm_package_covers_every_npm_engine() {
-        for engine in ["claude", "kimi", "codex", "pi", "omp", "dsh"] {
+        for engine in ["claude", "kimi", "codex", "pi", "omp", "dsh", "opencode"] {
             assert!(npm_package(engine).is_some(), "{engine} missing package");
         }
         assert_eq!(npm_package("grok"), None);
         assert_eq!(npm_package("agy"), None);
+        // qodercli/qoderclicn ship via their own installer (like grok/agy):
+        // no npm lifecycle.
+        assert_eq!(npm_package("qoder"), None);
+        assert_eq!(npm_package("qoder-cn"), None);
     }
 
     #[cfg(unix)]

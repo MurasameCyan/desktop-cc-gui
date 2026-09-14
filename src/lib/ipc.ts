@@ -175,6 +175,9 @@ export interface CliConfig {
   omp: ProviderSection;
   dsh: ProviderSection;
   agy: ProviderSection;
+  opencode: ProviderSection;
+  qoder: ProviderSection;
+  "qoder-cn": ProviderSection;
 }
 
 export interface AppSettings {
@@ -195,6 +198,9 @@ export interface AppSettings {
   ompBin: string | null;
   dshBin: string | null;
   agyBin: string | null;
+  opencodeBin: string | null;
+  qoderBin: string | null;
+  qoderCnBin: string | null;
   defaultModels: Record<string, string>;
   /** Per-engine user-added custom model ids (设置 → CLI → 自定义模型). */
   customModels: Record<string, string[]>;

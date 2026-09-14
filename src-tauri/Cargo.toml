@@ -57,6 +57,12 @@ serde_yaml = "0.9"
 # rustls so it never touches the vendored-openssl stack or WebKit networking.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "json"] }
 
+[target.'cfg(windows)'.dependencies]
+# Live User/Machine PATH for CLI discovery: a GUI process inherits the PATH
+# snapshot of its launcher, so engine::resolve re-reads the registry at
+# detection time to see CLIs installed while the app is running.
+winreg = "0.55"
+
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 # `start_paused`/`time::advance` in the relay retry tests: their backoff is

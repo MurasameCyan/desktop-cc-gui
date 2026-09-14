@@ -232,6 +232,194 @@ fn discover_kimi_in(base: &Path, workspace: &Path) -> Vec<SessionFile> {
     out
 }
 
+/// `/Users/foo/bar` → `-Users-foo-bar` (qodercli project dir names; reference
+/// engine/qoder_history.rs::encode_qoder_project_slug).
+fn qoder_encode_project_slug(path: &str) -> String {
+    let mut value = path.trim().replace('\\', "/");
+    while value.ends_with('/') && value.len() > 1 {
+        value.pop();
+    }
+    if value.is_empty() {
+        return String::new();
+    }
+    value.replace('/', "-")
+}
+
+/// Candidate `<projects>/<slug>` dirs for one workspace — same spelling
+/// spread as [`claude_project_dirs`] (raw / trailing-trimmed / canonical).
+fn qoder_project_dirs(base: &Path, workspace: &Path) -> Vec<PathBuf> {
+    fn push(
+        out: &mut Vec<PathBuf>,
+        seen: &mut std::collections::HashSet<String>,
+        base: &Path,
+        spelling: &str,
+    ) {
+        let slug = qoder_encode_project_slug(spelling);
+        if !slug.is_empty() && seen.insert(slug.clone()) {
+            out.push(base.join(slug));
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let raw = workspace.to_string_lossy().to_string();
+    let trimmed = raw.trim_end_matches(['/', '\\']).to_string();
+    push(&mut out, &mut seen, base, &raw);
+    push(&mut out, &mut seen, base, &trimmed);
+    for spelling in [&raw, &trimmed] {
+        if let Ok(canonical) = std::fs::canonicalize(spelling) {
+            let canonical = strip_verbatim_prefix(&canonical.to_string_lossy()).to_string();
+            push(&mut out, &mut seen, base, &canonical);
+        }
+    }
+    out
+}
+
+/// Qoder sessions: `<config-home>/projects/<cwd-slug>/<sessionId>.jsonl`, one
+/// claude-shaped NDJSON file per session (reference qoder_history.rs). Each
+/// distribution (Global `~/.qoder` / CN `~/.qoder-cn`) owns an independent
+/// home. Slug-keyed per workspace, so discovery is a handful of readdirs.
+fn discover_qoder(
+    workspace: &Path,
+    distribution: crate::engine::qoder::QoderDistribution,
+) -> Vec<SessionFile> {
+    let base =
+        crate::engine::engine_home(None, distribution.default_config_dir_name()).join("projects");
+    let mut out = Vec::new();
+    let mut seen_sessions = std::collections::HashSet::new();
+    for dir in qoder_project_dirs(&base, workspace) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !seen_sessions.insert(stem.to_string()) {
+                continue;
+            }
+            out.push(SessionFile {
+                engine: distribution.engine_id(),
+                session_id: stem.to_string(),
+                workspace_path: workspace.to_string_lossy().to_string(),
+                file_path: path,
+            });
+        }
+    }
+    out
+}
+
+/// OpenCode data roots holding `storage/{session,message,part}/…` and
+/// `opencode.db` (reference commands_opencode_catalog.rs
+/// ::opencode_data_candidate_roots).
+fn opencode_data_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("OPENCODE_HOME") {
+        roots.push(PathBuf::from(home));
+    }
+    if let Some(dir) = dirs::data_local_dir() {
+        roots.push(dir.join("opencode"));
+    }
+    if let Some(dir) = dirs::data_dir() {
+        roots.push(dir.join("opencode"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".local").join("share").join("opencode"));
+    }
+    roots.push(workspace.join(".opencode"));
+    let mut deduped: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if !deduped.contains(&root) {
+            deduped.push(root);
+        }
+    }
+    deduped
+}
+
+// OpenCode scan budgets. Session metadata files are ~400 bytes of pretty
+// JSON; the caps exist so a bloated storage tree costs a bounded readdir
+// count plus a few KB per file, never an unbounded walk (the repo has a
+// 287MB-scan incident in its history).
+const MAX_OPENCODE_PROJECT_DIRS: usize = 64;
+const MAX_OPENCODE_SESSION_FILES: usize = 512;
+const MAX_OPENCODE_META_BYTES: u64 = 64 * 1024;
+
+/// Parse a small JSON file (opencode pretty-prints, so line readers do not
+/// apply), reading at most `max_bytes`. Truncated or invalid JSON → None.
+fn read_small_json(path: &Path, max_bytes: u64) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = String::new();
+    file.take(max_bytes).read_to_string(&mut buf).ok()?;
+    serde_json::from_str(&buf).ok()
+}
+
+/// OpenCode sessions: `<root>/storage/session/<projectId>/<sessionId>.json`
+/// (shape verified against opencode 1.1.16 on disk: `{id, projectID,
+/// directory, title, time:{created,updated}}`). Attribution comes from the
+/// metadata's `directory` field — the projectId dir is a content hash, not
+/// a path encoding, so the tiny metadata file must be read (bounded above).
+fn discover_opencode(workspace: &Path) -> Vec<SessionFile> {
+    let mut out = Vec::new();
+    let mut seen_sessions = std::collections::HashSet::new();
+    for root in opencode_data_roots(workspace) {
+        let session_root = root.join("storage").join("session");
+        let Ok(projects) = std::fs::read_dir(&session_root) else {
+            continue;
+        };
+        for (index, project) in projects.flatten().enumerate() {
+            if index >= MAX_OPENCODE_PROJECT_DIRS {
+                break;
+            }
+            let project_dir = project.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&project_dir) else {
+                continue;
+            };
+            for (index, file) in files.flatten().enumerate() {
+                if index >= MAX_OPENCODE_SESSION_FILES {
+                    break;
+                }
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(meta) = read_small_json(&path, MAX_OPENCODE_META_BYTES) else {
+                    continue;
+                };
+                let directory = meta
+                    .get("directory")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if directory.is_empty() || !same_or_child(Path::new(directory), workspace) {
+                    continue;
+                }
+                let session_id = meta
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                    .unwrap_or_default();
+                if session_id.is_empty() || !seen_sessions.insert(session_id.clone()) {
+                    continue;
+                }
+                out.push(SessionFile {
+                    engine: "opencode",
+                    session_id,
+                    workspace_path: workspace.to_string_lossy().to_string(),
+                    file_path: path,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn grok_url_decode(encoded: &str) -> String {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -655,6 +843,9 @@ fn gather_candidates(workspaces: &[String]) -> Vec<Candidate> {
             .chain(discover_kimi(&workspace))
             .chain(discover_grok(&workspace))
             .chain(discover_agy(&workspace))
+            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global))
+            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Cn))
+            .chain(discover_opencode(&workspace))
         {
             if seen_paths.insert(file.file_path.clone()) {
                 candidates.push(Candidate {
@@ -1450,6 +1641,92 @@ mod tests {
         let found = discover_grok(&workspace);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].session_id, "g1");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn qoder_project_slug_matches_qodercli_encoding() {
+        assert_eq!(qoder_encode_project_slug("/Users/foo/bar"), "-Users-foo-bar");
+        assert_eq!(qoder_encode_project_slug("/Users/foo/bar/"), "-Users-foo-bar");
+        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C:-ws-proj");
+        assert_eq!(qoder_encode_project_slug("/"), "-");
+        assert_eq!(qoder_encode_project_slug(""), "");
+    }
+
+    #[test]
+    fn discover_qoder_finds_workspace_sessions_by_slug() {
+        let home = scratch_dir("discover-qoder");
+        let workspace = home.join("ws").join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let slug = qoder_encode_project_slug(&workspace.to_string_lossy());
+        let dir = home.join(".qoder").join("projects").join(&slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sess-1.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "qoder");
+        assert_eq!(found[0].session_id, "sess-1");
+        assert_eq!(found[0].workspace_path, workspace.to_string_lossy());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn discover_qoder_cn_reads_the_cn_home() {
+        let home = scratch_dir("discover-qoder-cn");
+        let workspace = home.join("ws").join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let slug = qoder_encode_project_slug(&workspace.to_string_lossy());
+        let dir = home.join(".qoder-cn").join("projects").join(&slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sess-cn.jsonl"), "{}\n").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Cn);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "qoder-cn");
+        assert_eq!(found[0].session_id, "sess-cn");
+        // The CN distribution never reads the Global home.
+        assert!(
+            discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global).is_empty()
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// OpenCode session metadata jsons are matched to the workspace by their
+    /// `directory` field; the project dir name is a content hash.
+    #[test]
+    fn discover_opencode_matches_directory_field() {
+        let home = scratch_dir("discover-opencode");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let project = home.join(".local/share/opencode/storage/session/b8119e41");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = |id: &str, directory: &str| {
+            serde_json::json!({
+                "id": id, "projectID": "b8119e41", "directory": directory,
+                "title": "t", "time": {"created": 1, "updated": 2}
+            })
+            .to_string()
+        };
+        std::fs::write(
+            project.join("ses_a.json"),
+            session("ses_a", &workspace.to_string_lossy()),
+        )
+        .unwrap();
+        std::fs::write(project.join("ses_b.json"), session("ses_b", "/elsewhere")).unwrap();
+        std::fs::write(project.join("broken.json"), "{ not json").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_opencode(&workspace);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "opencode");
+        assert_eq!(found[0].session_id, "ses_a");
 
         std::fs::remove_dir_all(&home).ok();
     }

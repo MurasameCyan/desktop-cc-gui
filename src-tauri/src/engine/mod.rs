@@ -9,8 +9,11 @@ pub mod grok;
 pub mod images;
 pub mod kimi;
 pub mod models;
+pub mod opencode;
 pub mod pi_family;
 pub mod pi_family_auth;
+pub mod qoder;
+mod qoder_session;
 pub mod resolve;
 
 pub(crate) use resolve::command_for_binary;
@@ -506,6 +509,13 @@ pub fn engine_by_id(id: &str) -> Option<Box<dyn Engine>> {
         "omp" => Some(Box::new(pi_family::omp())),
         "dsh" => Some(Box::new(dsh::DshEngine)),
         "agy" => Some(Box::new(agy::AgyEngine)),
+        "opencode" => Some(Box::new(opencode::OpenCodeEngine)),
+        "qoder" => Some(Box::new(qoder::QoderEngine::new(
+            qoder::QoderDistribution::Global,
+        ))),
+        "qoder-cn" => Some(Box::new(qoder::QoderEngine::new(
+            qoder::QoderDistribution::Cn,
+        ))),
         _ => None,
     }
 }
@@ -914,6 +924,17 @@ fn codex_bin_from_home(settings: &crate::settings::AppSettings) -> Option<String
     candidate.exists().then(|| resolve::resolve_launchable_cli_binary(&candidate.to_string_lossy()))
 }
 
+/// CLI binary name behind an engine id, when they differ: qoder's engine ids
+/// name the product/distribution, but only the `qodercli*` binaries speak
+/// ACP (the `qoder` binary is the IDE launcher and is rejected at spawn).
+pub(crate) fn cli_binary_name(engine_id: &str) -> &str {
+    match engine_id {
+        "qoder" => qoder::QoderDistribution::Global.cli_name(),
+        "qoder-cn" => qoder::QoderDistribution::Cn.cli_name(),
+        _ => engine_id,
+    }
+}
+
 pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &str) -> String {
     // An explicit bin override always wins: it predates the codex-home row
     // (hidden for codex in the UI), and a stale codexBin in an upgraded
@@ -936,7 +957,7 @@ pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &st
             return from_home;
         }
     }
-    resolve::resolve_launchable_cli_binary(engine_id)
+    resolve::resolve_launchable_cli_binary(cli_binary_name(engine_id))
 }
 
 #[tauri::command]
@@ -952,7 +973,7 @@ pub fn list_engines() -> Vec<EngineInfo> {
                     crate::settings::validate_bin_override(custom).is_ok()
                 }
                 _ if *id == "codex" && codex_bin_from_home(&settings).is_some() => true,
-                _ => resolve::find_cli_binary(id, None).is_some(),
+                _ => resolve::find_cli_binary(cli_binary_name(id), None).is_some(),
             };
             EngineInfo {
                 id: id.to_string(),
@@ -1811,13 +1832,19 @@ async fn send_host_stream(
         run_id: run_id.clone(),
     };
     let resume_session_id = launch.req.session_id.clone();
-    let task = tokio::spawn(dsh_session::run_host_turn(
-        core,
-        launch.req,
-        state.dsh_host.clone(),
-        killed,
-        pid,
-    ));
+    let task = match engine.as_str() {
+        "dsh" => tokio::spawn(dsh_session::run_host_turn(
+            core,
+            launch.req,
+            state.dsh_host.clone(),
+            killed,
+            pid,
+        )),
+        "qoder" | "qoder-cn" => tokio::spawn(qoder_session::run_acp_turn(
+            core, launch.req, launch.bin, killed, pid,
+        )),
+        _ => unreachable!("send_host_stream only routes drives_own_transport engines: {engine}"),
+    };
     let _ = reader_abort.set(task.abort_handle());
     Ok(SendResult {
         run_id,

@@ -176,9 +176,28 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn bin_override(&self, engine: &str) -> Option<&str> {
         self.bin_overrides
-            .get(&format!("{engine}Bin"))
+            .get(&bin_override_key(engine))
             .and_then(Value::as_str)
     }
+}
+
+/// Settings key for an engine's bin override: `{engine}Bin` in camelCase,
+/// so hyphenated engine ids read the key the frontend actually writes
+/// ("qoder-cn" → `qoderCnBin`, not `qoder-cnBin`).
+fn bin_override_key(engine: &str) -> String {
+    let mut key = String::with_capacity(engine.len() + 3);
+    let mut uppercase_next = false;
+    for ch in engine.chars() {
+        if ch == '-' {
+            uppercase_next = true;
+        } else if std::mem::take(&mut uppercase_next) {
+            key.extend(ch.to_uppercase());
+        } else {
+            key.push(ch);
+        }
+    }
+    key.push_str("Bin");
+    key
 }
 
 /// A bin override is a spawn target, so it must be a stable absolute path —
@@ -698,6 +717,13 @@ fn announce_settings(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bin_override_key_camel_cases_hyphenated_engine_ids() {
+        assert_eq!(bin_override_key("claude"), "claudeBin");
+        assert_eq!(bin_override_key("qoder"), "qoderBin");
+        assert_eq!(bin_override_key("qoder-cn"), "qoderCnBin");
+    }
 
     struct Scratch(std::path::PathBuf);
 

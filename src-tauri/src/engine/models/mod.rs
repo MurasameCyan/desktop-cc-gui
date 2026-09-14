@@ -29,15 +29,21 @@
 //! same entries the CLI's own /model menu lists. The CLI-maintained
 //! models_cache.json holds the relay's /v1/models ids, which `-m` cannot
 //! resolve, so it is deliberately not a source. agy is `agy models` TSV
-//! (`id<TAB>name`). Remaining engines are filled by the frontend from the
-//! configured provider channels instead.
+//! (`id<TAB>name`). OpenCode lists `provider/model` ids via `opencode
+//! models` (ANSI table), with a generated fallback catalog when the probe
+//! cannot run. Qoder has no list subcommand: its catalog only exists on the
+//! ACP session/new result, so a temp-dir handshake probes it on demand and
+//! caches the last success. Remaining engines are filled by the frontend
+//! from the configured provider channels instead.
 
 mod agy;
 mod claude;
 mod codex;
 mod grok;
 mod kimi;
+mod opencode;
 mod pi;
+mod qoder;
 
 /// Claude launch-time model resolution: picker alias → the custom id its
 /// ANTHROPIC_DEFAULT_<FAMILY>_MODEL override maps to (pass-through when
@@ -121,6 +127,9 @@ pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String>
         "pi" | "omp" => Ok(pi_family_catalog(&engine).await),
         "dsh" => dsh_catalog().await,
         "agy" => Ok(agy_catalog().await),
+        "opencode" => Ok(opencode_catalog().await),
+        "qoder" => qoder_catalog("qoder").await,
+        "qoder-cn" => qoder_catalog("qoder-cn").await,
         // Unknown engine: no CLI-sourced catalog — the frontend fills the
         // picker from the configured provider channels.
         _ => Ok(EngineCatalog::authoritative(Vec::new())),
@@ -136,6 +145,18 @@ async fn agy_catalog() -> EngineCatalog {
     let settings = crate::settings::read_settings().unwrap_or_default();
     let bin = super::engine_bin(&settings, "agy");
     agy::agy_catalog(&bin).await
+}
+
+async fn opencode_catalog() -> EngineCatalog {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, "opencode");
+    opencode::opencode_catalog(&bin).await
+}
+
+async fn qoder_catalog(engine: &'static str) -> Result<EngineCatalog, String> {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, engine);
+    qoder::qoder_catalog(engine, &bin).await
 }
 
 async fn dsh_catalog() -> Result<EngineCatalog, String> {

@@ -2,7 +2,7 @@ use super::{content_text, parse_ts_ms_str, Message};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct ParsedSession {
     pub messages: Vec<Message>,
@@ -13,6 +13,9 @@ pub struct ParsedSession {
 pub fn parse_session_file(engine: &str, path: &Path) -> Result<ParsedSession, String> {
     if engine == "agy" {
         return Ok(super::agy::parse_agy_session(path));
+    }
+    if engine == "opencode" {
+        return Ok(parse_opencode_session(path));
     }
     let reader = open_line_reader(engine, path)?;
     Ok(collect_session(
@@ -39,6 +42,9 @@ pub struct ScanSummary {
 pub fn scan_summary_file(engine: &str, path: &Path) -> Result<ScanSummary, String> {
     if engine == "agy" {
         return Ok(super::agy::scan_agy_summary(path));
+    }
+    if engine == "opencode" {
+        return Ok(scan_opencode_summary(path));
     }
     let reader = open_line_reader(engine, path)?;
     let mut acc = ScanAcc::default();
@@ -104,6 +110,15 @@ fn walk_lines(reader: impl BufRead, extract: &LineExtractor<'_>, mut consume: im
 }
 
 fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedSession {
+    let mut rows = Vec::new();
+    walk_lines(reader, extract, |row| rows.push(row));
+    fold_rows(rows)
+}
+
+/// Shared fold over extracted rows (usage markers, tool-result pairing,
+/// durations, seq numbering) — opencode feeds it from its storage-tree walk
+/// instead of an NDJSON line reader.
+fn fold_rows(rows: Vec<LineRow>) -> ParsedSession {
     let mut messages = Vec::<Message>::new();
     let mut seq = 0i64;
     let mut last_user_ts: Option<i64> = None;
@@ -111,7 +126,7 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
     // so pairing them back up by the latest row still missing one mislabels
     // parallel calls; the id is what actually names the call.
     let mut call_rows: HashMap<String, usize> = HashMap::new();
-    walk_lines(reader, extract, |row| {
+    for row in rows {
         // Usage-only marker (codex token_count or claude compact_boundary): fold
         // onto the last assistant message instead of creating an empty row.
         if row.role == "__usage__" {
@@ -126,7 +141,7 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
                 }
                 last.usage = new_usage;
             }
-            return;
+            continue;
         }
         // Tool result marker: fold onto its named call when the transcript
         // carries toolCallId, else retain the legacy latest-unresolved
@@ -146,10 +161,10 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
                     messages[index].result = Some(res);
                 }
             }
-            return;
+            continue;
         }
         if row.text.trim().is_empty() && row.images.is_empty() {
-            return;
+            continue;
         }
         let parsed_ts = row.ts.as_deref().and_then(super::parse_ts_ms_str);
         if row.role == "user" {
@@ -185,7 +200,7 @@ fn collect_session(reader: impl BufRead, extract: &LineExtractor<'_>) -> ParsedS
         if let Some(id) = call_id {
             call_rows.insert(id, messages.len() - 1);
         }
-    });
+    }
     ParsedSession { messages }
 }
 
@@ -459,6 +474,7 @@ fn extract_line_messages(engine: &str, value: &Value, images: ImageMode) -> Line
         "grok" => extract_grok_line(value),
         "codex" => extract_codex_line(value, images),
         "pi" | "omp" => extract_pi_family_line(value, images),
+        "qoder" | "qoder-cn" => extract_qoder_line(value, images),
         _ => Vec::new(),
     }
 }
@@ -538,9 +554,9 @@ fn extract_codex_line(value: &Value, images: ImageMode) -> LineRows {
 
 /// Flush buffered assistant text ahead of a toolCall/thinking part so the
 /// timeline keeps calls where they actually happened.
-fn pi_flush_text(out: &mut LineRows, text: &mut String, ts: &Option<String>) {
+fn pi_flush_text(out: &mut LineRows, text: &mut String, ts: &Option<String>, role: &str) {
     if !text.trim().is_empty() {
-        out.push(LineRow::new("assistant", std::mem::take(text), ts.clone()));
+        out.push(LineRow::new(role, std::mem::take(text), ts.clone()));
     }
 }
 
@@ -554,7 +570,7 @@ fn pi_assistant_part(part: &Value, out: &mut LineRows, text: &mut String, ts: &O
             }
         }
         Some("toolCall") => {
-            pi_flush_text(out, text, ts);
+            pi_flush_text(out, text, ts, "assistant");
             let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
             let intent = part.get("intent").and_then(Value::as_str);
             let arguments = part.get("arguments");
@@ -572,7 +588,7 @@ fn pi_assistant_part(part: &Value, out: &mut LineRows, text: &mut String, ts: &O
             });
         }
         Some("thinking") => {
-            pi_flush_text(out, text, ts);
+            pi_flush_text(out, text, ts, "assistant");
             if let Some(t) = part.get("thinking").and_then(Value::as_str) {
                 out.push(LineRow::new("thinking", t.to_string(), ts.clone()));
             }
@@ -1001,6 +1017,367 @@ fn extract_grok_line(value: &Value) -> LineRows {
         }
         _ => Vec::new(),
     }
+}
+
+// ==================== Qoder ====================
+
+/// Qoder jsonl records are Claude-shaped (`type`, `message.content`, `uuid`,
+/// `timestamp`) with three extras (reference engine/qoder_history.rs):
+/// `isSidechain` marks subagent transcripts, `toolUseResult` envelopes carry
+/// tool output, and the typed prompt is mirrored under `humanInput.text`.
+fn qoder_is_sidechain(value: &Value) -> bool {
+    match value.get("isSidechain") {
+        Some(Value::Bool(true)) => true,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+/// A `toolUseResult` user record: forward its tool_result blocks, keeping the
+/// call id so results pair with their call instead of arrival order.
+fn qoder_tool_result_rows(value: &Value, ts: &Option<String>) -> LineRows {
+    let mut out = Vec::new();
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return out;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        out.push(LineRow {
+            tool_call_id: block
+                .get("tool_use_id")
+                .or_else(|| block.get("toolUseId"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            result: block.get("content").cloned(),
+            ..LineRow::new("__tool_result__", String::new(), ts.clone())
+        });
+    }
+    out
+}
+
+fn extract_qoder_line(value: &Value, images: ImageMode) -> LineRows {
+    if qoder_is_sidechain(value) {
+        return Vec::new();
+    }
+    let line_type = type_str(value);
+    if line_type != "user" && line_type != "assistant" {
+        return Vec::new();
+    }
+    let ts = ts_string(value, &["timestamp"]);
+    if line_type == "user" && value.get("toolUseResult").is_some() {
+        return qoder_tool_result_rows(value, &ts);
+    }
+    let mut rows = extract_claude_line(value, images);
+    if line_type == "assistant" {
+        // Stamp tool rows with their tool_use block ids (emitted in block
+        // order by the claude walk) so qoder's id-keyed toolUseResult
+        // envelopes pair by id, not arrival order.
+        let mut call_ids = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .filter_map(|b| b.get("id").and_then(Value::as_str));
+        for row in rows.iter_mut() {
+            if row.role == "tool" {
+                row.tool_call_id = call_ids.next().map(str::to_string);
+            }
+        }
+    }
+    if !rows.is_empty() || line_type != "user" {
+        return rows;
+    }
+    // The typed prompt also lives under humanInput.text; use it when the
+    // claude-shaped message.content carried nothing.
+    match value
+        .get("humanInput")
+        .and_then(|input| input.get("text"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(text) if !text.is_empty() => vec![LineRow::new("user", text.to_string(), ts)],
+        _ => Vec::new(),
+    }
+}
+
+// ==================== OpenCode ====================
+
+/// OpenCode stores one session as a JSON tree under `<data>/storage/`:
+/// `session/<projectId>/<sessionId>.json` (metadata: id, directory, title,
+/// time), `message/<sessionId>/<messageId>.json` (role, time, model), and
+/// `part/<messageId>/<partId>.json` (text / reasoning / tool / step-finish).
+/// Shapes verified against ~/.local/share/opencode/storage (opencode 1.1.16)
+/// and the reference delete path (commands_opencode_catalog.rs removes
+/// `storage/<parent>/<id>[.json]`). The db row points at the session
+/// metadata file; everything else hangs off it.
+fn opencode_storage_root(session_meta: &Path) -> Option<PathBuf> {
+    let project_dir = session_meta.parent()?;
+    let session_dir = project_dir.parent()?;
+    if session_dir.file_name()?.to_str()? != "session" {
+        return None;
+    }
+    Some(session_dir.parent()?.to_path_buf())
+}
+
+// Tree-walk budgets: a real session is tens of messages; the caps keep a
+// corrupt/huge tree from turning one sidebar refresh into a disk crawl.
+const MAX_OPENCODE_MESSAGES: usize = 4096;
+const MAX_OPENCODE_PARTS_PER_MESSAGE: usize = 512;
+/// Scan-mode cap on one part file — tool outputs run to MB and the scanner
+/// only keeps title/preview/count.
+const SCAN_OPENCODE_PART_BYTES: u64 = 256 * 1024;
+
+/// Read one small JSON file; `byte_cap` bounds the read (truncated JSON
+/// fails to parse and is skipped).
+fn read_json_file(path: &Path, byte_cap: Option<u64>) -> Option<Value> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = String::new();
+    match byte_cap {
+        Some(cap) => {
+            file.take(cap).read_to_string(&mut buf).ok()?;
+        }
+        None => {
+            file.read_to_string(&mut buf).ok()?;
+        }
+    }
+    serde_json::from_str(&buf).ok()
+}
+
+/// Sorted `.json` entries of `dir`, capped.
+fn opencode_list_json(dir: &Path, cap: usize) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                paths.push(path);
+            }
+        }
+    }
+    // msg_/prt_ ids are timestamp-prefixed, so name order is chronological.
+    paths.sort();
+    paths.truncate(cap);
+    paths
+}
+
+/// Epoch-millis field as the string form `LineRow.ts` carries.
+fn opencode_ts(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| value.get(k).and_then(Value::as_i64))
+        .map(|ms| ms.to_string())
+}
+
+/// `step-finish` tokens → the claude-shaped usage object the context bar reads.
+fn opencode_usage(part: &Value) -> Option<Value> {
+    let tokens = part.get("tokens")?;
+    let input = tokens.get("input").and_then(Value::as_i64).unwrap_or(0);
+    let output = tokens.get("output").and_then(Value::as_i64).unwrap_or(0);
+    let reasoning = tokens.get("reasoning").and_then(Value::as_i64).unwrap_or(0);
+    let cache_read = tokens
+        .get("cache")
+        .and_then(|c| c.get("read"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let cache_write = tokens
+        .get("cache")
+        .and_then(|c| c.get("write"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    Some(serde_json::json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "total_tokens": input + output + reasoning,
+    }))
+}
+
+/// Walk the storage tree behind one session-metadata file into extracted
+/// rows. `part_byte_cap` bounds per-part reads (scan mode); None reads fully
+/// (reader mode).
+fn opencode_rows(session_meta: &Path, images: ImageMode, part_byte_cap: Option<u64>) -> LineRows {
+    let mut out = Vec::new();
+    let Some(storage) = opencode_storage_root(session_meta) else {
+        return out;
+    };
+    let Some(session_id) = session_meta.file_stem().and_then(|s| s.to_str()) else {
+        return out;
+    };
+    let message_dir = storage.join("message").join(session_id);
+    // Sort by time.created (name order only works while ids stay
+    // timestamp-prefixed); stable fallback is the filename.
+    let mut messages: Vec<(i64, PathBuf, Value)> = opencode_list_json(&message_dir, MAX_OPENCODE_MESSAGES)
+        .into_iter()
+        .filter_map(|path| {
+            let value = read_json_file(&path, None)?;
+            let created = value
+                .get("time")
+                .and_then(|t| t.get("created"))
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            Some((created, path, value))
+        })
+        .collect();
+    messages.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, _, message) in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if role != "user" && role != "assistant" {
+            continue;
+        }
+        let Some(message_id) = message.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let time = message.get("time");
+        let created_ms = time.and_then(|t| t.get("created")).and_then(Value::as_i64);
+        let created = created_ms.map(|ms| ms.to_string());
+        let duration_ms = time
+            .and_then(|t| t.get("completed"))
+            .and_then(Value::as_i64)
+            .zip(created_ms)
+            .and_then(|(completed, created)| (completed >= created).then_some(completed - created));
+        let model = message
+            .get("model")
+            .and_then(|m| m.get("modelID"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        // Parts carry the content. Text accumulates per message so several
+        // text parts land as one row; reasoning/tool parts flush it first,
+        // keeping calls where they happened.
+        let mut text = String::new();
+        let mut collected_images: Vec<String> = Vec::new();
+        let mut message_rows: Vec<LineRow> = Vec::new();
+        // step-finish usage lands after the message's own text row exists;
+        // buffered here and attached below (a mid-loop __usage__ row would
+        // fold onto the *previous* message's assistant row).
+        let mut pending_usage: Option<Value> = None;
+        let part_dir = storage.join("part").join(message_id);
+        for part_path in opencode_list_json(&part_dir, MAX_OPENCODE_PARTS_PER_MESSAGE) {
+            let Some(part) = read_json_file(&part_path, part_byte_cap) else {
+                continue;
+            };
+            let part_ts = part
+                .get("time")
+                .and_then(|t| opencode_ts(t, &["start"]))
+                .or_else(|| created.clone());
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        text.push_str(t);
+                    }
+                }
+                Some("reasoning") => {
+                    pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        if !t.trim().is_empty() {
+                            message_rows.push(LineRow::new("thinking", t.to_string(), part_ts));
+                        }
+                    }
+                }
+                Some("tool") => {
+                    pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
+                    let name = part
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .to_string();
+                    let state = part.get("state");
+                    let input = state.and_then(|s| s.get("input"));
+                    let output = state
+                        .and_then(|s| s.get("output"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    message_rows.push(LineRow {
+                        path: input.and_then(crate::engine::tool_path_arg),
+                        args: input.and_then(crate::engine::parse_tool_args_value),
+                        todos: input.and_then(crate::engine::parse_todo_args),
+                        tool_call_id: part
+                            .get("callID")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        result: if output.trim().is_empty() {
+                            None
+                        } else {
+                            Some(Value::String(output.to_string()))
+                        },
+                        ..LineRow::new("tool", name, part_ts)
+                    });
+                }
+                Some("step-finish") => {
+                    if let Some(usage) = opencode_usage(&part) {
+                        pending_usage = Some(usage);
+                    }
+                }
+                // [INFERENCE] shape from upstream opencode: image attachments
+                // arrive as `{type:"file", mime, url}` with a data URL.
+                Some("file") if images == ImageMode::Collect => {
+                    let is_image = part
+                        .get("mime")
+                        .and_then(Value::as_str)
+                        .is_some_and(|mime| mime.starts_with("image/"));
+                    if is_image {
+                        if let Some(url) = part.get("url").and_then(Value::as_str) {
+                            collected_images.push(url.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !text.trim().is_empty() || !collected_images.is_empty() {
+            message_rows.push(LineRow {
+                model,
+                duration_ms,
+                images: collected_images,
+                ..LineRow::new(role, text, created)
+            });
+        }
+        if let Some(usage) = pending_usage {
+            // Attach to this message's own last content row (the flushed text
+            // when present); fall back to the shared __usage__ fold.
+            match message_rows
+                .iter_mut()
+                .rev()
+                .find(|row| row.role == role || row.role == "thinking")
+            {
+                Some(row) => row.usage = Some(usage),
+                None => message_rows.push(LineRow {
+                    usage: Some(usage),
+                    ..LineRow::new("__usage__", String::new(), None)
+                }),
+            }
+        }
+        for row in message_rows {
+            let Some(row) = normalize_extracted_row(row) else {
+                continue;
+            };
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn parse_opencode_session(path: &Path) -> ParsedSession {
+    fold_rows(opencode_rows(path, ImageMode::Collect, None))
+}
+
+fn scan_opencode_summary(path: &Path) -> ScanSummary {
+    let mut acc = ScanAcc::default();
+    for row in opencode_rows(path, ImageMode::SkipDataUrls, Some(SCAN_OPENCODE_PART_BYTES)) {
+        acc.accept(row);
+    }
+    acc.finish()
 }
 
 #[cfg(test)]
@@ -1444,5 +1821,176 @@ mod tests {
         let usage = rows[0].usage.as_ref().expect("usage object");
         assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(8038));
         assert_eq!(usage.get("total_tokens").and_then(Value::as_i64), Some(8038));
+    }
+
+    #[test]
+    fn qoder_line_skips_sidechains_and_reads_user_prompt() {
+        let sidechain = serde_json::json!({
+            "type": "user", "uuid": "hidden", "isSidechain": true,
+            "humanInput": {"text": "hidden prompt"},
+            "message": {"content": "hidden prompt"}
+        });
+        assert!(extract_qoder_line(&sidechain, ImageMode::Collect).is_empty());
+        let sidechain_str = serde_json::json!({
+            "type": "assistant", "isSidechain": "true",
+            "message": {"content": "hidden answer"}
+        });
+        assert!(extract_qoder_line(&sidechain_str, ImageMode::Collect).is_empty());
+
+        let user = serde_json::json!({
+            "type": "user", "uuid": "user-1", "timestamp": "2026-08-22T00:00:00Z",
+            "humanInput": {"text": "first prompt"},
+            "message": {"content": "first prompt"}
+        });
+        let rows = extract_qoder_line(&user, ImageMode::Collect);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].text, "first prompt");
+    }
+
+    #[test]
+    fn qoder_human_input_is_user_text_fallback() {
+        let line = serde_json::json!({
+            "type": "user", "uuid": "u1", "timestamp": "2026-08-22T00:00:00Z",
+            "humanInput": {"text": "typed body"}
+        });
+        let rows = extract_qoder_line(&line, ImageMode::Collect);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].text, "typed body");
+    }
+
+    /// qoder's toolUseResult envelope pairs with its tool_use call by id —
+    /// parallel calls finishing out of order must not cross-label.
+    #[test]
+    fn qoder_tool_result_pairs_with_call_id() {
+        let call = |id: &str| {
+            serde_json::json!({
+                "type": "assistant", "uuid": id, "timestamp": "2026-08-22T00:00:01Z",
+                "message": {"content": [
+                    {"type": "tool_use", "id": id, "name": "Read", "input": {"path": "README.md"}}
+                ]}
+            })
+        };
+        let result = |id: &str, body: &str| {
+            serde_json::json!({
+                "type": "user", "timestamp": "2026-08-22T00:00:02Z",
+                "toolUseResult": {"ok": true},
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": id, "content": body}
+                ]}
+            })
+        };
+        let lines = vec![
+            call("tool-a"),
+            call("tool-b"),
+            result("tool-b", "body b"),
+            result("tool-a", "body a"),
+        ];
+        let input = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let extractor: LineExtractor<'_> =
+            Box::new(|value: &Value| extract_qoder_line(value, ImageMode::Collect));
+        let parsed = collect_session(std::io::Cursor::new(input), &extractor);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.messages[0].result, Some(serde_json::json!("body a")));
+        assert_eq!(parsed.messages[1].result, Some(serde_json::json!("body b")));
+    }
+
+    /// OpenCode fixture tree: storage/session + message + part jsons, shaped
+    /// like opencode 1.1.16 on disk.
+    fn opencode_fixture() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ccgui-extract-{}", uuid::Uuid::new_v4()));
+        let storage = dir.join("storage");
+        let meta = storage.join("session").join("proj1").join("ses_x.json");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(
+            &meta,
+            serde_json::json!({
+                "id": "ses_x", "projectID": "proj1", "directory": "/ws",
+                "title": "t", "time": {"created": 1_700_000_000_000i64, "updated": 1_700_000_004_000i64}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let write = |path: PathBuf, value: Value| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, value.to_string()).unwrap();
+        };
+        write(
+            storage.join("message/ses_x/msg_1000.json"),
+            serde_json::json!({"id": "msg_1000", "sessionID": "ses_x", "role": "user",
+                "time": {"created": 1_700_000_000_000i64}}),
+        );
+        write(
+            storage.join("part/msg_1000/prt_01.json"),
+            serde_json::json!({"id": "prt_01", "sessionID": "ses_x", "messageID": "msg_1000",
+                "type": "text", "text": "hello opencode"}),
+        );
+        write(
+            storage.join("message/ses_x/msg_2000.json"),
+            serde_json::json!({"id": "msg_2000", "sessionID": "ses_x", "role": "assistant",
+                "time": {"created": 1_700_000_001_000i64, "completed": 1_700_000_002_000i64},
+                "model": {"providerID": "anthropic", "modelID": "claude-sonnet-4-5"}}),
+        );
+        write(
+            storage.join("part/msg_2000/prt_01.json"),
+            serde_json::json!({"id": "prt_01", "sessionID": "ses_x", "messageID": "msg_2000",
+                "type": "reasoning", "text": "ponder"}),
+        );
+        write(
+            storage.join("part/msg_2000/prt_02.json"),
+            serde_json::json!({"id": "prt_02", "sessionID": "ses_x", "messageID": "msg_2000",
+                "type": "tool", "callID": "c1", "tool": "read",
+                "state": {"status": "completed", "input": {"path": "src/main.rs"}, "output": "file body"}}),
+        );
+        write(
+            storage.join("part/msg_2000/prt_03.json"),
+            serde_json::json!({"id": "prt_03", "sessionID": "ses_x", "messageID": "msg_2000",
+                "type": "text", "text": "done", "time": {"start": 1_700_000_001_900i64}}),
+        );
+        write(
+            storage.join("part/msg_2000/prt_04.json"),
+            serde_json::json!({"id": "prt_04", "sessionID": "ses_x", "messageID": "msg_2000",
+                "type": "step-finish",
+                "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 1, "write": 2}}}),
+        );
+        (dir, meta)
+    }
+
+    #[test]
+    fn opencode_parse_reads_storage_tree() {
+        let (dir, meta) = opencode_fixture();
+        let parsed = parse_session_file("opencode", &meta).unwrap();
+        let roles: Vec<&str> = parsed.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "thinking", "tool", "assistant"]);
+        assert_eq!(parsed.messages[0].text, "hello opencode");
+        assert_eq!(parsed.messages[2].text, "read");
+        assert_eq!(parsed.messages[2].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(parsed.messages[2].result, Some(serde_json::json!("file body")));
+        let answer = &parsed.messages[3];
+        assert_eq!(answer.text, "done");
+        assert_eq!(answer.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(answer.duration_ms, Some(1000));
+        // step-finish tokens fold onto the last assistant message.
+        let usage = answer.usage.as_ref().expect("usage folded");
+        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(10));
+        assert_eq!(usage.get("cache_read_input_tokens").and_then(Value::as_i64), Some(1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn opencode_scan_summary_from_storage_tree() {
+        let (dir, meta) = opencode_fixture();
+        let summary = scan_summary_file("opencode", &meta).unwrap();
+        assert_eq!(summary.title, "hello opencode");
+        assert_eq!(summary.preview, "done");
+        assert_eq!(summary.first_ts, Some(1_700_000_000_000));
+        assert_eq!(summary.last_ts, Some(1_700_000_001_000));
+        assert_eq!(summary.message_count, 4);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

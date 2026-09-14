@@ -6,16 +6,54 @@ name: Release
 # whose latest.json feeds every installed client's background check.
 on:
   workflow_dispatch:
+    # Required gate: the run only proceeds when the typed version matches
+    # tauri.conf.json. A bare "Run workflow" click fails fast in preflight
+    # instead of publishing whatever version main happens to carry.
+    inputs:
+      version:
+        description: "要发布的版本号，须与 src-tauri/tauri.conf.json 一致（如 1.0.1）"
+        required: true
+        type: string
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
+  preflight:
+    name: verify version input
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Validate requested version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::版本号格式应为 X.Y.Z，收到: '$INPUT_VERSION'"
+            exit 1
+          fi
+          CONFIG_VERSION=$(python3 -c "import json,pathlib;print(json.loads(pathlib.Path('src-tauri/tauri.conf.json').read_text())['version'])")
+          if [ "$INPUT_VERSION" != "$CONFIG_VERSION" ]; then
+            echo "::error::输入版本 ($INPUT_VERSION) 与 tauri.conf.json ($CONFIG_VERSION) 不一致，终止发版"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${INPUT_VERSION}" > /dev/null 2>&1; then
+            echo "::error::tag v${INPUT_VERSION} 已存在，说明该版本已发布过，终止发版"
+            exit 1
+          fi
+          echo "version check ok: v${INPUT_VERSION}"
+
   build_macos:
     name: macos (${{ matrix.arch }})
     runs-on: ${{ matrix.platform }}
     environment: release
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +200,7 @@ jobs:
     name: appimage (x86_64)
     runs-on: ubuntu-24.04
     environment: release
+    needs: preflight
     steps:
       - uses: actions/checkout@v4
 
@@ -250,6 +289,7 @@ jobs:
     name: windows (x64)
     runs-on: windows-latest
     environment: release
+    needs: preflight
     steps:
       - uses: actions/checkout@v4
 
@@ -414,6 +454,14 @@ jobs:
 
           appimages = list(artifacts_dir.rglob("*.AppImage"))
 
+          # GitHub sanitizes uploaded asset names (spaces become dots — e.g.
+          # "CC GUI_1.0.1_x64-setup.exe" is stored as "CC.GUI_..."), while
+          # tauri emits bundles with the literal productName ("CC GUI").
+          # latest.json must point at the sanitized name or the updater's
+          # download step 404s (v1.0.0/v1.0.1 Windows+Linux hit this).
+          def asset_name(name):
+            return name.replace(" ", ".")
+
           def detect_arch(name):
             lowered = name.lower()
             if "aarch64" in lowered or "arm64" in lowered:
@@ -429,7 +477,7 @@ jobs:
             sig_path = appimage.with_suffix(appimage.suffix + ".sig")
             if sig_path.exists():
               platforms[f"linux-{arch}"] = {
-                "url": f"https://github.com/zhukunpenglinyutong/desktop-cc-gui/releases/download/v${VERSION}/{appimage.name}",
+                "url": f"https://github.com/zhukunpenglinyutong/desktop-cc-gui/releases/download/v${VERSION}/{asset_name(appimage.name)}",
                 "signature": sig_path.read_text().strip(),
               }
 
@@ -438,7 +486,7 @@ jobs:
             sig_path = Path(str(nsis_exe) + ".sig")
             if sig_path.exists():
               platforms["windows-x86_64"] = {
-                "url": f"https://github.com/zhukunpenglinyutong/desktop-cc-gui/releases/download/v${VERSION}/{nsis_exe.name}",
+                "url": f"https://github.com/zhukunpenglinyutong/desktop-cc-gui/releases/download/v${VERSION}/{asset_name(nsis_exe.name)}",
                 "signature": sig_path.read_text().strip(),
               }
               break
