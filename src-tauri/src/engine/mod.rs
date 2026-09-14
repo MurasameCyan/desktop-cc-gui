@@ -100,6 +100,18 @@ pub enum EngineEvent {
     /// Non-terminal engine notice (e.g. an upstream 429 the CLI is
     /// retrying): surfaced to the UI, but the turn is still running.
     Warn(String),
+    /// The CLI is backing off before re-issuing a request (claude
+    /// `system/api_retry`, omp `auto_retry_start`). Distinct from `Warn`
+    /// because the UI shows it as live progress ("重试中 2/5") in the run
+    /// status line rather than as an error banner; cleared by the next
+    /// content event or by the turn settling.
+    Retry {
+        attempt: u64,
+        /// The CLI's own retry budget; 0 when it does not report one.
+        max: u64,
+        /// Human-readable reason (HTTP status / provider message).
+        message: String,
+    },
     /// A tool call was denied by the CLI's permission system (headless mode
     /// cannot prompt). `path` is the denied absolute path when the denial
     /// text or tool input carries one — the UI offers a directory grant for
@@ -133,6 +145,20 @@ pub struct TodoItem {
 pub struct TodosPayload {
     pub items: Vec<TodoItem>,
     pub replace: bool,
+}
+
+/// Normalize a CLI's todo status onto the four the UI renders. Every CLI
+/// spells these differently (claude `in_progress`, omp `running`/`active`,
+/// `abandoned` for a dropped task), and a status the UI does not know reads
+/// as "pending" - showing finished or abandoned work as still to do.
+fn todo_status(raw: Option<&str>) -> &'static str {
+    match raw.unwrap_or("") {
+        "in_progress" | "running" | "active" => "active",
+        "completed" | "complete" | "done" => "complete",
+        "blocked" => "blocked",
+        "dropped" | "cancelled" | "abandoned" | "deleted" => "dropped",
+        _ => "pending",
+    }
 }
 
 /// Drop empty / null payloads so the UI does not render a blank args panel.
@@ -195,13 +221,62 @@ pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> 
     }
 }
 
-/// Patches execution result onto the matching in-flight tool row.
+/// Todo state echoed by the todo tool's own result (`details.phases`).
+///
+/// This is the authoritative snapshot: omp answers every todo call (init,
+/// start, done, block, append, view) with the complete post-op list, where
+/// each phase carries its tasks and their current status. Reading it avoids
+/// two live-path gaps at once — the start event carries no `args` for this
+/// tool, and `done`/`block` may name a PHASE instead of one task, which a
+/// task-keyed patch could never apply. `replace: true` because the payload
+/// is a full list, not a delta.
+pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
+    let phases = result
+        .get("details")
+        .and_then(|d| d.get("phases"))
+        .and_then(Value::as_array)?;
+    let mut items = Vec::new();
+    for phase in phases {
+        let Some(tasks) = phase.get("tasks").and_then(Value::as_array) else {
+            continue;
+        };
+        for task in tasks {
+            let Some(content) = task
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let status = todo_status(task.get("status").and_then(Value::as_str));
+            items.push(TodoItem {
+                id: None,
+                content: content.to_string(),
+                status: status.to_string(),
+            });
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(TodosPayload {
+        items,
+        replace: true,
+    })
+}
+
+/// Patches execution result onto the matching in-flight tool row. A todo
+/// tool's result carries the full list (`details.phases`), so it doubles as
+/// an authoritative todo snapshot — the live path's only reliable source for
+/// this tool (see [`parse_todo_result`]).
 pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>) -> EngineEvent {
+    let todos = result.and_then(parse_todo_result);
     EngineEvent::Message {
         role: "tool".to_string(),
         text: name.into(),
         path: None,
-        todos: None,
+        todos,
         args: None,
         result: result.cloned(),
         patch: true,
@@ -278,12 +353,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
                     .filter_map(|key| entry.get(key).and_then(Value::as_str))
                     .map(|s| s.trim())
                     .find(|s| !s.is_empty())?;
-                let status = match entry.get("status").and_then(Value::as_str).unwrap_or("") {
-                    "in_progress" | "running" | "active" => "active",
-                    "completed" | "complete" | "done" => "complete",
-                    "blocked" => "blocked",
-                    _ => "pending",
-                };
+                let status = todo_status(entry.get("status").and_then(Value::as_str));
                 let id = entry
                     .get("id")
                     .or_else(|| entry.get("taskId"))
@@ -310,12 +380,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
         .filter(|s| !s.is_empty())
     {
         if args.get("taskId").is_none() && args.get("op").is_none() {
-            let status = match args.get("status").and_then(Value::as_str).unwrap_or("") {
-                "in_progress" | "running" | "active" => "active",
-                "completed" | "complete" | "done" => "complete",
-                "blocked" => "blocked",
-                _ => "pending",
-            };
+            let status = todo_status(args.get("status").and_then(Value::as_str));
             return Some(TodosPayload {
                 items: vec![TodoItem {
                     id: None,
@@ -340,13 +405,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("");
-        let status = match args.get("status").and_then(Value::as_str).unwrap_or("") {
-            "in_progress" | "running" | "active" => "active",
-            "completed" | "complete" | "done" => "complete",
-            "blocked" => "blocked",
-            "deleted" => "dropped",
-            _ => "pending",
-        };
+        let status = todo_status(args.get("status").and_then(Value::as_str));
         return Some(TodosPayload {
             items: vec![TodoItem {
                 id: Some(task_id.to_string()),
@@ -374,6 +433,13 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
             })
         }
         "start" | "done" | "block" | "unblock" | "drop" => {
+            // `task` names ONE item. A phase-wide op names a `phase` instead
+            // (the CLI pairs it with an empty `items` array) and must NOT be
+            // emitted here: the frontend matches patches by `content`, so a
+            // phase name would find no item and get APPENDED as a phantom
+            // row. Phase-wide moves travel via the tool's own result
+            // snapshot (`parse_todo_result`), which always carries the
+            // complete post-op list.
             let task = args.get("task").and_then(Value::as_str)?;
             let status = match op {
                 "start" => "active",
@@ -1216,6 +1282,23 @@ impl TurnCore {
                     &self.engine_id,
                     "warn",
                     Value::String(error),
+                );
+            }
+            EngineEvent::Retry {
+                attempt,
+                max,
+                message,
+            } => {
+                // Not terminal: the CLI is backing off and will re-issue the
+                // request. The frontend renders it as live progress in the
+                // run status line (not as an error banner) and clears it on
+                // the next content event.
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "retry",
+                    serde_json::json!({ "attempt": attempt, "max": max, "message": message }),
                 );
             }
             EngineEvent::PermissionDenied {

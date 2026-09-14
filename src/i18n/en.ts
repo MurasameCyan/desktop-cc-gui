@@ -122,6 +122,8 @@ export const en: Messages = {
     archivedWorkspaces: "Archived ({{count}})",
     selectSession: "Select or start a session",
     thinking: "Responding",
+    retrying: "Retrying {{attempt}}/{{max}}",
+    retryingNoMax: "Retrying {{attempt}}",
     thinkingProcess: "Thinking process",
     thinkingCount: "Thinking ×{{count}}",
     processSummary: "Thinking ×{{thinking}} · {{tools}} tool calls",

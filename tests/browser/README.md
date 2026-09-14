@@ -37,3 +37,11 @@ Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles
 expand/collapse, and a short message is never clamped. No model or session.
+
+Open `/tests/browser/retry-progress.html` to check the tail indicator's
+provider-retry chip. The buttons cycle no-retry, claude `api_retry 3/10`,
+codex `Reconnecting 1/5` and an omp retry with no reported ceiling: the chip
+must read `重试中 x/y` (or `重试中 x` when the CLI reports no max) in the
+warning tone at the end of the meta row, carry the provider's own reason as
+its tooltip, and be absent entirely when nothing is being retried. No model,
+no IPC, no saved conversation.

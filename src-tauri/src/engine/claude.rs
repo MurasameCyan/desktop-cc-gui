@@ -127,12 +127,20 @@ impl Engine for ClaudeEngine {
         match event_type {
             "system" => {
                 push_session_id(&value, "session_id", out);
-                // api_retry precedes minutes of silent exponential backoff
-                // (10 attempts, 30s+ delays); surface it as a non-terminal
-                // warning so the UI shows progress instead of a dead spinner.
                 let subtype = value.get("subtype").and_then(Value::as_str);
                 if subtype == Some("api_retry") {
-                    out.push(EngineEvent::Warn(format_api_retry(&value)));
+                    // Live progress, not an error: the CLI backs off for
+                    // minutes (10 attempts, 30s+ delays) and then continues.
+                    // The run status line shows "重试中 x/y"; the detail
+                    // rides along for its tooltip.
+                    out.push(EngineEvent::Retry {
+                        attempt: value.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                        max: value
+                            .get("max_retries")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        message: format_api_retry(&value),
+                    });
                 } else if subtype == Some("compact_boundary") {
                     if let Some(post_tokens) = value
                         .get("compactMetadata")
@@ -669,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn api_retry_system_event_warns_without_settling() {
+    fn api_retry_system_event_reports_progress_without_settling() {
         let line = serde_json::json!({
             "type": "system",
             "subtype": "api_retry",
@@ -685,12 +693,16 @@ mod tests {
         ClaudeEngine::new().parse_line(&line, &mut out);
         assert_eq!(out.len(), 2);
         match &out[1] {
-            EngineEvent::Warn(msg) => {
-                assert!(msg.contains("529"), "{msg}");
-                assert!(msg.contains("3/10"), "{msg}");
-                assert!(msg.contains("9.6s"), "{msg}");
+            EngineEvent::Retry {
+                attempt,
+                max,
+                message,
+            } => {
+                assert_eq!((*attempt, *max), (3, 10));
+                assert!(message.contains("529"), "{message}");
+                assert!(message.contains("9.6s"), "{message}");
             }
-            _ => panic!("expected retry warning"),
+            other => panic!("expected retry progress, got {other:?}"),
         }
     }
 
@@ -709,8 +721,10 @@ mod tests {
         let mut out = Vec::new();
         ClaudeEngine::new().parse_line(&line, &mut out);
         match &out[0] {
-            EngineEvent::Warn(msg) => assert!(msg.starts_with("API error;"), "{msg}"),
-            _ => panic!("expected retry warning"),
+            EngineEvent::Retry { message, .. } => {
+                assert!(message.starts_with("API error;"), "{message}")
+            }
+            other => panic!("expected retry progress, got {other:?}"),
         }
     }
 

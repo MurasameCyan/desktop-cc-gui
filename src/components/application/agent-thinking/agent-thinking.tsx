@@ -47,6 +47,13 @@ export interface AgentThinkingProps {
   /** Engine-reported token usage for the running turn ("↑12.3k ↓412"),
    *  refreshed as the CLI reports it. */
   usage?: string | null;
+  /** Live provider-retry progress, pre-localized (e.g. "重试中 2/5"). Shown
+   *  at the end of the meta row: the CLI is backing off and will re-issue the
+   *  request, so this is progress rather than a failure. */
+  retry?: string | null;
+  /** The provider's own reason for the retry ("HTTP 502", "stream
+   *  disconnected"), revealed on hover. */
+  retryDetail?: string | null;
 }
 
 const TONE_COLORS: Record<AgentThinkingTone, string> = {
@@ -300,6 +307,8 @@ export function AgentThinking({
   model,
   effort,
   usage,
+  retry,
+  retryDetail,
 }: AgentThinkingProps) {
   const color = TONE_COLORS[tone ?? VARIANT_TONE[variant]];
 
@@ -318,7 +327,7 @@ export function AgentThinking({
       >
         {label}
       </span>
-      {(showTimer || model || effort || usage) && (
+      {(showTimer || model || effort || usage || retry) && (
         <div className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary tabular-nums">
           {showTimer && (
             <ElapsedTimer
@@ -342,6 +351,17 @@ export function AgentThinking({
             <>
               <span aria-hidden className="text-text-tertiary">·</span>
               <span>{effort}</span>
+            </>
+          )}
+          {retry && (
+            <>
+              <span aria-hidden className="text-text-tertiary">·</span>
+              {/* Progress, not an error: a retry that recovers is invisible
+                  apart from this chip, and one that fails surfaces as the
+                  turn's own error banner. */}
+              <span title={retryDetail ?? undefined} className="text-text-warning-primary">
+                {retry}
+              </span>
             </>
           )}
         </div>
