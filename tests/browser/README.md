@@ -37,3 +37,14 @@ Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles
 expand/collapse, and a short message is never clamped. No model or session.
+
+Open `/tests/browser/touch-scroll-follow.html` in a **touch-emulated** viewport
+(390x844) to check the timeline's tail-follow intent on a phone, where the
+web-remote UI runs. Swipe up into history and the fixture's refs must read
+`following: false`; growing the list (the `grow` button stands in for streaming
+and tool rows) must then leave the viewport where the reader left it, not pull
+it back to the tail. Swiping back down to the bottom resumes following, and the
+next growth pins to the tail again. Both hooks under test (`useScrollFollow`,
+`useTailPin`) are the production ones; the rows are static, so no model, no IPC
+and no saved conversation. Note the refs are not reactive — read them through
+the `window.__live()` probe, not the rendered readout.
