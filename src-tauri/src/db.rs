@@ -355,11 +355,13 @@ impl Db {
         engine: &str,
         session_id: &str,
         frame_hash: &str,
+        workspace_path: &str,
     ) -> Result<bool, String> {
         let conn = self.0.lock();
         conn.execute(
-            "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash) VALUES(?1, ?2, ?3)",
-            rusqlite::params![engine, session_id, frame_hash],
+            "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash, workspace_path)
+             VALUES(?1, ?2, ?3, ?4)",
+            rusqlite::params![engine, session_id, frame_hash, workspace_path],
         )
         .map(|changed| changed != 0)
         .map_err(|error| error.to_string())
@@ -684,10 +686,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             value TEXT NOT NULL,
             PRIMARY KEY(plugin_id, key)
         );
+        -- `workspace_path` is the workspace the frame was accepted in. A
+        -- remote session has no `sessions` row, so a purge that joins through
+        -- it can never reach these identities; the column is what lets
+        -- removing a workspace reclaim them.
         CREATE TABLE IF NOT EXISTS accepted_internal_frames(
             engine TEXT NOT NULL,
             session_id TEXT NOT NULL,
             frame_hash TEXT NOT NULL,
+            workspace_path TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(engine, session_id, frame_hash)
         );
         CREATE TABLE IF NOT EXISTS session_models(
@@ -778,6 +785,22 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .any(|name| name == "meta");
     if !has_meta {
         conn.execute("ALTER TABLE workspaces ADD COLUMN meta TEXT", [])?;
+    }
+
+    // Additive migration: recorded frame identities carry the workspace they
+    // were accepted in. Remote sessions never get a `sessions` row, so without
+    // this the workspace purge cannot reach their rows and the table grows
+    // until the global cap rejects every later recording.
+    let has_frame_workspace = conn
+        .prepare("PRAGMA table_info(accepted_internal_frames)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .flatten()
+        .any(|name| name == "workspace_path");
+    if !has_frame_workspace {
+        conn.execute(
+            "ALTER TABLE accepted_internal_frames ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1054,13 +1077,13 @@ mod tests {
         let second = "b".repeat(64);
 
         assert!(db
-            .record_accepted_internal_frame_hash("claude", "s1", &first)
+            .record_accepted_internal_frame_hash("claude", "s1", &first, "C:/repo")
             .unwrap());
         assert!(!db
-            .record_accepted_internal_frame_hash("claude", "s1", &first)
+            .record_accepted_internal_frame_hash("claude", "s1", &first, "C:/repo")
             .unwrap());
         assert!(db
-            .record_accepted_internal_frame_hash("claude", "s1", &second)
+            .record_accepted_internal_frame_hash("claude", "s1", &second, "C:/repo")
             .unwrap());
 
         let (hashes, signature) = db.accepted_internal_frames("claude", "s1").unwrap();

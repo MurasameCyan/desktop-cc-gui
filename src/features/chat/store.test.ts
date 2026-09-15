@@ -584,6 +584,8 @@ describe("generic plugin chat lifecycle", () => {
     useChatStore.setState({ workspaces: [REGISTERED_WORKSPACE], activeEngine: "claude" });
     useChatStore.getState().startNewChat(WS);
     const accepted = vi.fn();
+    const afterTurn = vi.fn();
+    const beforeTurns: string[] = [];
     const contribution = {
       id: "handoff",
       content: "internal handoff",
@@ -593,17 +595,32 @@ describe("generic plugin chat lifecycle", () => {
       onAccepted: accepted,
     };
     const dispose = registerTurnHooks("test.acceptance", {
-      beforeTurn: () => ({ promptContributions: [contribution] }),
+      beforeTurn: (event) => {
+        beforeTurns.push(event.turnId);
+        return { promptContributions: [contribution] };
+      },
+      afterTurn,
     });
     vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("launch failed"));
 
     await useChatStore.getState().send("first", []);
     expect(accepted).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(afterTurn).toHaveBeenCalledTimes(1));
+    expect(afterTurn).toHaveBeenCalledWith(expect.objectContaining({
+      turnId: beforeTurns[0],
+      engine: "claude",
+      sessionId: null,
+      workspace: expect.objectContaining({ id: REGISTERED_WORKSPACE.id, path: WS }),
+      status: "failed",
+      error: "Error: launch failed",
+    }));
 
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-retry", sessionId: null });
     await useChatStore.getState().send("retry", []);
     dispose();
     expect(accepted).toHaveBeenCalledTimes(1);
+    expect(beforeTurns[1]).not.toBe(beforeTurns[0]);
+    expect(afterTurn).toHaveBeenCalledTimes(1);
   });
 
   it("emits restored only after loading and created only after a pending tab gains a native id", async () => {

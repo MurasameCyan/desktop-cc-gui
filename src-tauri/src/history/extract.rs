@@ -18,7 +18,7 @@ pub fn parse_session_file(
     accepted_internal_frames: &HashSet<String>,
 ) -> Result<ParsedSession, String> {
     if engine == "agy" {
-        return Ok(super::agy::parse_agy_session(path));
+        return Ok(super::agy::parse_agy_session(path, accepted_internal_frames));
     }
     if engine == "opencode" {
         return Ok(parse_opencode_session(path, accepted_internal_frames));
@@ -52,7 +52,7 @@ pub fn scan_summary_file(
     accepted_internal_frames: &HashSet<String>,
 ) -> Result<ScanSummary, String> {
     if engine == "agy" {
-        return Ok(super::agy::scan_agy_summary(path));
+        return Ok(super::agy::scan_agy_summary(path, accepted_internal_frames));
     }
     if engine == "opencode" {
         return Ok(scan_opencode_summary(path, accepted_internal_frames));
@@ -526,7 +526,10 @@ pub fn recordable_internal_frame_hash(frame: &str) -> Option<String> {
     Some(internal_frame_hash(frame))
 }
 
-fn strip_recorded_internal_frames(text: &str, accepted_internal_frames: &HashSet<String>) -> String {
+pub(super) fn strip_recorded_internal_frames(
+    text: &str,
+    accepted_internal_frames: &HashSet<String>,
+) -> String {
     const OPEN: &str = "<CCGUI_INTERNAL_";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;

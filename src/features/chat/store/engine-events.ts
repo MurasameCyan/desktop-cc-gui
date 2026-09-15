@@ -95,12 +95,13 @@ function recordAcceptedFrame(
   engine: string,
   sessionId: string,
   frame: string,
+  workspacePath: string,
   attempt: number,
 ): void {
-  void ipc.recordAcceptedInternalFrame(engine, sessionId, frame).catch(() => {
+  void ipc.recordAcceptedInternalFrame(engine, sessionId, frame, workspacePath).catch(() => {
     if (attempt >= FRAME_RECORD_MAX_ATTEMPTS) return;
     setTimeout(
-      () => recordAcceptedFrame(engine, sessionId, frame, attempt + 1),
+      () => recordAcceptedFrame(engine, sessionId, frame, workspacePath, attempt + 1),
       FRAME_RECORD_RETRY_MS,
     );
   });
@@ -111,7 +112,7 @@ function persistAcceptedFrames(lifecycle: RunLifecycle): void {
   const sessionId = lifecycle.sessionId;
   if (!sessionId || !frames || frames.length === 0) return;
   for (const frame of frames.splice(0)) {
-    recordAcceptedFrame(lifecycle.engine, sessionId, frame, 1);
+    recordAcceptedFrame(lifecycle.engine, sessionId, frame, lifecycle.workspace.path, 1);
   }
 }
 
@@ -197,9 +198,16 @@ export function replayBufferedEngineEvents(runId: string, deps: EngineEventDeps)
   handleEngineEvents(events, deps);
 }
 
-export function cancelRunLifecycle(runId: string): void {
+export function finishRunLifecycle(
+  runId: string,
+  status: "completed" | "cancelled" | "failed",
+  error?: string,
+  sessionId?: string | null,
+): void {
   const lifecycle = runLifecycles.get(runId);
   if (!lifecycle) return;
+  if (sessionId) lifecycle.sessionId = sessionId;
+  unregisterRunLifecycle(runId);
   dispatchAfterTurn({
     runId,
     turnId: lifecycle.turnId,
@@ -207,9 +215,9 @@ export function cancelRunLifecycle(runId: string): void {
     sessionId: lifecycle.sessionId,
     workspace: lifecycle.workspace,
     occurredAt: new Date().toISOString(),
-    status: "cancelled",
+    status,
+    ...(error === undefined ? {} : { error }),
   });
-  unregisterRunLifecycle(runId);
 }
 export function unregisterRunLifecycle(runId: string): void {
   // A turn can settle before its send result resolved the native session id.
@@ -393,25 +401,6 @@ function dispatchNormalized(event: EngineEventPayload, terminal?: EngineTerminal
   if (normalized) dispatchRuntimeEvent(normalized);
 }
 
-function finishLifecycle(
-  event: EngineEventPayload,
-  status: "completed" | "cancelled" | "failed",
-  error?: string,
-): void {
-  const lifecycle = runLifecycles.get(event.runId);
-  if (!lifecycle) return;
-  dispatchAfterTurn({
-    runId: event.runId,
-    turnId: lifecycle.turnId,
-    engine: event.engine,
-    sessionId: event.sessionId ?? lifecycle.sessionId,
-    workspace: lifecycle.workspace,
-    occurredAt: new Date().toISOString(),
-    status,
-    ...(error === undefined ? {} : { error }),
-  });
-  unregisterRunLifecycle(event.runId);
-}
 
 /**
  * Engine-event handling: the main loop resolves each event's session key and
@@ -1029,7 +1018,7 @@ function onError(
   dropRunUsage(event.runId);
   deps.markUnseenIfBackground(key);
   dispatchNormalized(event);
-  finishLifecycle(event, "failed", typeof event.data === "string" ? event.data : undefined);
+  finishRunLifecycle(event.runId, "failed", typeof event.data === "string" ? event.data : undefined, event.sessionId);
   // An error settles the turn exactly like done does — the messages typed
   // behind it are the user's next step, and parking them here left the queue
   // stuck until it was sent or cleared by hand. A stop is still the user's
@@ -1254,7 +1243,7 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   runRouting.delete(event.runId);
   const cancelled = prev.interrupted;
   dispatchNormalized(event, { status: cancelled ? "cancelled" : "completed" });
-  finishLifecycle(event, cancelled ? "cancelled" : "completed");
+  finishRunLifecycle(event.runId, cancelled ? "cancelled" : "completed", undefined, event.sessionId);
   untrackRun(event.runId);
   // Ledger the turn's tokens now that it is settled: the same report that
   // stamps the row above, so the usage page counts real engine numbers. The

@@ -4,7 +4,7 @@ import { registerTurnHooks } from "@/features/plugins/runtime/hooks";
 import { routeRun } from "./stream";
 import {
   bindRunLifecycle,
-  cancelRunLifecycle,
+  finishRunLifecycle,
   filterInternalFrameDelta,
   flushInternalFrameDelta,
   handleEngineEvents,
@@ -187,6 +187,7 @@ describe("incremental internal frame routing", () => {
         "claude",
         "session-1",
         accepted,
+        workspace.path,
       ),
     );
     expect(ipc.recordAcceptedInternalFrame).toHaveBeenCalledTimes(1);
@@ -222,8 +223,8 @@ describe("incremental internal frame routing", () => {
       await vi.advanceTimersByTimeAsync(1000);
 
       expect(record.mock.calls).toEqual([
-        ["claude", "session-1", accepted],
-        ["claude", "session-1", accepted],
+        ["claude", "session-1", accepted, workspace.path],
+        ["claude", "session-1", accepted, workspace.path],
       ]);
     } finally {
       vi.useRealTimers();
@@ -494,8 +495,8 @@ describe("terminal turn lifecycle", () => {
     const dispose = registerTurnHooks("test.terminal", { afterTurn });
     begin("run-1");
 
-    cancelRunLifecycle("run-1");
-    cancelRunLifecycle("run-1");
+    finishRunLifecycle("run-1", "cancelled");
+    finishRunLifecycle("run-1", "cancelled");
     await Promise.resolve();
     dispose();
 

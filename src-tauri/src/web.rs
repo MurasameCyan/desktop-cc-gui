@@ -1073,6 +1073,7 @@ struct RecordAcceptedFrameArgs {
     engine: String,
     session_id: String,
     frame: String,
+    workspace_path: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1484,6 +1485,7 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
                 a.engine,
                 a.session_id,
                 a.frame,
+                a.workspace_path,
             )
             .await)
         }

@@ -772,8 +772,13 @@ pub async fn record_accepted_internal_frame(
     engine: String,
     session_id: String,
     frame: String,
+    workspace_path: String,
 ) -> Result<(), String> {
     let (engine, session_id) = recordable_frame_scope(&engine, &session_id)?;
+    // The workspace the frame was accepted in. A remote session never gets a
+    // `sessions` row, so a purge that joins through it cannot reach these
+    // identities: this is the only key `remove_workspace` can reclaim them by.
+    let workspace_path = workspace_path.trim().to_string();
     let Some(frame_hash) = super::recordable_internal_frame_hash(&frame) else {
         return Err("frame is not one complete internal frame with a JSON payload".to_string());
     };
@@ -801,8 +806,9 @@ pub async fn record_accepted_internal_frame(
         }
         let inserted = conn
             .execute(
-                "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash) VALUES(?1, ?2, ?3)",
-                rusqlite::params![engine, session_id, frame_hash],
+                "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash, workspace_path)
+                 VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![engine, session_id, frame_hash, workspace_path],
             )
             .map_err(|error| error.to_string())?
             != 0;
@@ -997,12 +1003,10 @@ pub fn reorder_workspaces(
     Ok(())
 }
 
-#[tauri::command]
-pub fn remove_workspace(
-    state: tauri::State<'_, crate::AppState>,
-    id: String,
-) -> Result<(), String> {
-    let conn = state.db.0.lock();
+/// Sync body of `remove_workspace`. Split out so the identity reclamation
+/// below is reachable from a test without a Tauri `State`.
+fn remove_workspace_blocking(db: &crate::db::Db, id: &str) -> Result<(), String> {
+    let conn = db.0.lock();
     let path: Option<String> = conn
         .query_row(
             "SELECT path FROM workspaces WHERE id=?1",
@@ -1014,10 +1018,14 @@ pub fn remove_workspace(
         .map_err(|e| e.to_string())?;
     if let Some(path) = path {
         // Same cleanup as delete_session: these identities are scoped to
-        // sessions that no longer exist.
+        // sessions that no longer exist. Remote sessions have no `sessions`
+        // row, so the workspace the frame was accepted in is matched directly
+        // — without it their identities would never be reclaimed.
         conn.execute(
-            "DELETE FROM accepted_internal_frames WHERE (engine, session_id) IN
-             (SELECT engine, session_id FROM sessions WHERE workspace_path=?1)",
+            "DELETE FROM accepted_internal_frames
+              WHERE workspace_path=?1
+                 OR (engine, session_id) IN
+                    (SELECT engine, session_id FROM sessions WHERE workspace_path=?1)",
             rusqlite::params![path],
         )
         .map_err(|e| e.to_string())?;
@@ -1027,7 +1035,15 @@ pub fn remove_workspace(
         )
         .map_err(|e| e.to_string())?;
     }
-    drop(conn);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_workspace(
+    state: tauri::State<'_, crate::AppState>,
+    id: String,
+) -> Result<(), String> {
+    remove_workspace_blocking(&state.db, &id)?;
     state.sink.emit_sessions_changed();
     Ok(())
 }
@@ -1124,6 +1140,7 @@ mod tests {
             "omp",
             "sid-1",
             &super::super::internal_frame_hash(recorded),
+            &workspace.to_string_lossy(),
         )
         .unwrap();
         let page = load_session_page_blocking(&db, "omp", "sid-1", None, None).unwrap();
@@ -1165,6 +1182,7 @@ mod tests {
             "omp",
             "sid-1",
             &super::super::internal_frame_hash(recorded),
+            &workspace.to_string_lossy(),
         )
         .unwrap();
 
@@ -1211,15 +1229,60 @@ mod tests {
             )
             .unwrap();
         }
-        db.record_accepted_internal_frame_hash("omp", "sid-1", &"a".repeat(64))
+        db.record_accepted_internal_frame_hash("omp", "sid-1", &"a".repeat(64), &workspace.to_string_lossy())
             .unwrap();
-        db.record_accepted_internal_frame_hash("omp", "kept", &"b".repeat(64))
+        db.record_accepted_internal_frame_hash("omp", "kept", &"b".repeat(64), &workspace.to_string_lossy())
             .unwrap();
 
         delete_session_blocking(&db, "omp", "sid-1").unwrap();
 
         assert!(db.accepted_internal_frames("omp", "sid-1").unwrap().0.is_empty());
         assert_eq!(db.accepted_internal_frames("omp", "kept").unwrap().0.len(), 1);
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Removing a workspace reclaims every identity accepted in it. A remote
+    /// session never gets a `sessions` row, so the stored workspace is the only
+    /// key that can reach its rows: without it they accumulate until the global
+    /// cap makes every later record fail and hidden frames reappear app-wide.
+    #[test]
+    fn removing_a_workspace_reclaims_remote_session_frame_identities() {
+        let home = scratch_dir("workspace-frames");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        let ws_path = workspace.to_string_lossy().to_string();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                rusqlite::params![ws_path],
+            )
+            .unwrap();
+        }
+        // Deliberately no `sessions` row: this is the remote shape, the one the
+        // old `sessions`-only purge could never reach.
+        db.record_accepted_internal_frame_hash("codex", "remote-1", &"a".repeat(64), &ws_path)
+            .unwrap();
+        db.record_accepted_internal_frame_hash("codex", "elsewhere", &"b".repeat(64), "C:/other")
+            .unwrap();
+
+        remove_workspace_blocking(&db, "w1").unwrap();
+
+        assert!(db
+            .accepted_internal_frames("codex", "remote-1")
+            .unwrap()
+            .0
+            .is_empty());
+        assert_eq!(
+            db.accepted_internal_frames("codex", "elsewhere")
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
 
         drop(db);
         std::fs::remove_dir_all(&home).ok();

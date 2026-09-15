@@ -1964,6 +1964,7 @@ mod tests {
                 "omp",
                 "sid-1",
                 &crate::history::internal_frame_hash(frame),
+                "",
             )
             .map_err(|e| e.to_string())?);
         assert_eq!(scan_with(&db, || {})?.reparsed, 1);

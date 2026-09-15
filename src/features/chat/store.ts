@@ -44,7 +44,7 @@ import {
 } from "./store/stream";
 import {
   bindRunLifecycle,
-  cancelRunLifecycle,
+  finishRunLifecycle,
   dropRunUsage,
   firstLineTitle,
   handleEngineEvents,
@@ -55,7 +55,6 @@ import {
   rememberModelForRun,
   rememberEffortForRun,
   settleOrphanedRuns,
-  unregisterRunLifecycle,
   upsertSessionMetaInto,
 } from "./store/engine-events";
 import { effectivePermission, readPermissionPref } from "./store/permissions";
@@ -566,7 +565,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         ]);
       }
     } catch (error) {
-      unregisterRunLifecycle(hookRunId);
+      finishRunLifecycle(hookRunId, "failed", String(error));
       set((s) => ({
         streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
       }));
@@ -1568,7 +1567,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       // The runs are dead: drop their routing and usage entries so the maps
       // cannot grow forever. (A late done event would also remove them.)
       for (const runId of deadRunIds) {
-        cancelRunLifecycle(runId);
+        finishRunLifecycle(runId, "cancelled");
         runRouting.delete(runId);
         untrackRun(runId);
         dropRunUsage(runId);

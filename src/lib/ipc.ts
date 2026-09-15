@@ -711,9 +711,21 @@ export const ipc = {
     invoke<boolean>("interrupt_session", { sessionId }),
   listEngines: () => invoke<EngineInfo[]>("list_engines"),
   /** Record a complete internal frame already accepted by its live capture
-   * validator, so history reload can hide only that exact frame. */
-  recordAcceptedInternalFrame: (engine: string, sessionId: string, frame: string) =>
-    invoke<void>("record_accepted_internal_frame", { engine, sessionId, frame }),
+   * validator, so history reload can hide only that exact frame.
+   * `workspacePath` is the only key a workspace removal can reclaim the
+   * identity by: a remote session never gets a `sessions` row to join through. */
+  recordAcceptedInternalFrame: (
+    engine: string,
+    sessionId: string,
+    frame: string,
+    workspacePath: string,
+  ) =>
+    invoke<void>("record_accepted_internal_frame", {
+      engine,
+      sessionId,
+      frame,
+      workspacePath,
+    }),
   /** Persist a clipboard image to app home; returns its absolute path so it
    * can flow through the same path-based image pipeline as picked files. */
   savePastedImage: (dataBase64: string, extension: string) =>
