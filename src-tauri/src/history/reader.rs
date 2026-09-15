@@ -388,6 +388,26 @@ fn load_session_page_blocking(
     Ok(page_from_cached(&cached, limit, before_seq))
 }
 
+/// Sync body of `load_remote_session_page`, once the remote transcript is
+/// cached on this machine. A remote page must consult the same accepted-frame
+/// table as a local one: `record_accepted_internal_frame` scopes an identity by
+/// `(engine, session_id)` alone and never consults the `sessions` table, and a
+/// turn run in a remote workspace goes through the same send path, so its
+/// accepted frames are recorded exactly like a local session's. Parsing with an
+/// empty set would re-reveal every frame the capture validator hid.
+fn remote_session_page_blocking(
+    db: &crate::db::Db,
+    engine: &str,
+    session_id: &str,
+    cache_path: &Path,
+    limit: Option<usize>,
+    before_seq: Option<i64>,
+) -> Result<SessionPage, String> {
+    let (accepted_frames, accepted_signature) = db.accepted_internal_frames(engine, session_id)?;
+    let cached = cached_session(engine, cache_path, &accepted_frames, &accepted_signature)?;
+    Ok(page_from_cached(&cached, limit, before_seq))
+}
+
 #[tauri::command]
 pub async fn load_session_page(
     state: tauri::State<'_, crate::AppState>,
@@ -478,11 +498,16 @@ pub async fn load_remote_session_page(
     }
 
     let engine_for_parse = engine.clone();
+    let db = Arc::clone(&state.db);
     tauri::async_runtime::spawn_blocking(move || {
-        // Remote transcripts have no local db row, so no capture validator ever
-        // recorded an accepted frame identity for them: nothing to hide.
-        let cached = cached_session(&engine_for_parse, &cache_path, &HashSet::new(), "")?;
-        Ok(page_from_cached(&cached, limit, before_seq))
+        remote_session_page_blocking(
+            &db,
+            &engine_for_parse,
+            &session_id,
+            &cache_path,
+            limit,
+            before_seq,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1102,6 +1127,48 @@ mod tests {
         )
         .unwrap();
         let page = load_session_page_blocking(&db, "omp", "sid-1", None, None).unwrap();
+        assert_eq!(assistant(&page), format!("answer  tail {unrecorded}"));
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A remote workspace's turn records accepted frame identities exactly like
+    /// a local one — `record_accepted_internal_frame` scopes them by
+    /// `(engine, session_id)` and never consults the `sessions` table — so the
+    /// remote page must consult the same table. Parsing a remote transcript with
+    /// an empty set re-reveals the whole handoff payload the capture validator
+    /// hid from the live transcript. Note there is deliberately no `sessions`
+    /// row here: a remote session has none, which is what made the empty-set
+    /// resolution look defensible.
+    #[test]
+    fn remote_session_page_hides_recorded_internal_frames() {
+        let home = scratch_dir("remote-frames");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cache = home.join("remote-cache.jsonl");
+        let recorded = "<CCGUI_INTERNAL_abcdefgh>{\"pluginId\":\"bridge\"}</CCGUI_INTERNAL_abcdefgh>";
+        let unrecorded = "<CCGUI_INTERNAL_zzzzzzzz>{\"pluginId\":\"other\"}</CCGUI_INTERNAL_zzzzzzzz>";
+        write_session(&cache, &workspace, &format!("answer {recorded} tail {unrecorded}"));
+
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        let assistant = |page: &SessionPage| {
+            page.messages
+                .iter()
+                .find(|m| m.role == "assistant")
+                .expect("assistant row")
+                .text
+                .clone()
+        };
+
+        db.record_accepted_internal_frame_hash(
+            "omp",
+            "sid-1",
+            &super::super::internal_frame_hash(recorded),
+        )
+        .unwrap();
+
+        let page = remote_session_page_blocking(&db, "omp", "sid-1", &cache, None, None).unwrap();
         assert_eq!(assistant(&page), format!("answer  tail {unrecorded}"));
 
         drop(db);
