@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import BookOpen from "lucide-react/dist/esm/icons/book-open";
 import Download from "lucide-react/dist/esm/icons/download";
+import Github from "lucide-react/dist/esm/icons/github";
 import Loader2 from "lucide-react/dist/esm/icons/loader-2";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import SquareArrowOutUpRight from "lucide-react/dist/esm/icons/square-arrow-out-up-right";
+import X from "lucide-react/dist/esm/icons/x";
 import {
   SettingsCard,
   SettingsSectionLabel,
 } from "@/components/application/settings/settings-rows";
 import { Input } from "@/components/base/input/input";
+import { ModalShell } from "@/components/dialogs";
 import { cx } from "@/utils/cx";
 import { isWeb, openExternal } from "@/lib/platform";
 import type { MarketPlugin } from "@/lib/ipc";
@@ -43,15 +47,30 @@ function LinkButton({ url, label }: { url: string; label: string }) {
 /** Authoring + submission tutorial (用户教育): how to build a plugin locally
  *  and how to get it into the market. Plain ordered steps — the full guide
  *  lives in the template repo README, linked through the example repo. */
-function DevelopCard() {
+function DevelopGuideDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const localSteps = t("plugins.market.localSteps", { returnObjects: true }) as string[];
   const submitSteps = t("plugins.market.submitSteps", { returnObjects: true }) as string[];
   return (
-    <SettingsCard className="flex flex-col gap-4 px-4 py-3">
-      <span className="text-body-medium font-medium text-text-primary">
-        {t("plugins.market.developTitle")}
-      </span>
+    <ModalShell
+      onClose={onClose}
+      label={t("plugins.market.developTitle")}
+      className="flex max-h-[calc(100dvh-64px)] w-[560px] max-w-[calc(100vw-32px)] flex-col"
+      dialogClassName="flex flex-col gap-4 overflow-y-auto"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-body-medium font-medium text-text-primary">
+          {t("plugins.market.developTitle")}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={t("common.close")}
+          className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-foreground-icon-secondary transition-colors hover:bg-background-secondary-hover hover:text-foreground-icon-primary"
+        >
+          <X className="size-4" aria-hidden />
+        </button>
+      </div>
       <div className="flex flex-col gap-1.5">
         <span className="text-body-medium text-text-primary">
           {t("plugins.market.localTitle")}
@@ -82,7 +101,7 @@ function DevelopCard() {
           <LinkButton url={SUBMIT_REPO_URL} label={t("plugins.market.openSubmitRepo")} />
         </div>
       </div>
-    </SettingsCard>
+    </ModalShell>
   );
 }
 
@@ -142,6 +161,17 @@ function MarketRow({ entry }: { entry: MarketPlugin }) {
             <span className="truncate text-body-medium text-text-primary">{entry.name}</span>
             <span className={BADGE}>v{entry.version}</span>
             <span className={BADGE}>{entry.tier === "declarative" ? "Tier-0" : "JS"}</span>
+            {entry.downloads != null && (
+              <span
+                className={cx(BADGE, "flex items-center gap-1")}
+                title={t("plugins.market.downloads", {
+                  count: entry.downloads,
+                })}
+              >
+                <Download className="size-3" aria-hidden />
+                {entry.downloads.toLocaleString()}
+              </span>
+            )}
             {entry.author && (
               <span className="truncate text-xs text-text-tertiary">{entry.author}</span>
             )}
@@ -162,6 +192,15 @@ function MarketRow({ entry }: { entry: MarketPlugin }) {
             </span>
           )}
         </div>
+        <button
+          type="button"
+          aria-label={t("plugins.market.viewRepo")}
+          title={t("plugins.market.viewRepo")}
+          onClick={() => openExternal(`https://github.com/${entry.repo}`)}
+          className="cursor-pointer self-center rounded-lg p-2 text-foreground-icon-secondary transition-colors hover:bg-background-primary-hover hover:text-foreground-icon-primary"
+        >
+          <Github className="size-4" aria-hidden />
+        </button>
         <MarketRowAction entry={entry} />
       </div>
     </div>
@@ -176,6 +215,7 @@ export default function MarketplaceSection() {
   const { entries, loaded, error, fetchIndex, checkUpdates } = useMarketplaceStore();
   const refreshInstalled = usePluginsStore((s) => s.refresh);
   const [query, setQuery] = useState("");
+  const [guideOpen, setGuideOpen] = useState(false);
 
   useEffect(() => {
     void fetchIndex();
@@ -244,7 +284,15 @@ export default function MarketplaceSection() {
         )}
       </SettingsCard>
       <p className="text-body-medium text-text-tertiary">{t("plugins.market.hint")}</p>
-      <DevelopCard />
+      <button
+        type="button"
+        onClick={() => setGuideOpen(true)}
+        className="flex cursor-pointer items-center gap-1.5 self-start rounded-lg px-2 py-1.5 text-body-medium text-text-brand-secondary transition-colors hover:bg-background-primary-hover"
+      >
+        <BookOpen className="size-4" aria-hidden />
+        {t("plugins.market.developGuide")}
+      </button>
+      {guideOpen && <DevelopGuideDialog onClose={() => setGuideOpen(false)} />}
     </div>
   );
 }

@@ -149,6 +149,21 @@ pub enum EngineEvent {
     /// Non-terminal engine notice (e.g. an upstream 429 the CLI is
     /// retrying): surfaced to the UI, but the turn is still running.
     Warn(String),
+    /// One model attempt ended, but the CLI may retry or compact next.
+    /// Keep its outcome for EOF; unlike Error/Done, this never ends the run.
+    AttemptEnd { error: Option<String> },
+    /// The CLI is backing off before re-issuing a request (claude
+    /// `system/api_retry`, omp `auto_retry_start`). Distinct from `Warn`
+    /// because the UI shows it as live progress ("重试中 2/5") in the run
+    /// status line rather than as an error banner; cleared by the next
+    /// content event or by the turn settling.
+    Retry {
+        attempt: u64,
+        /// The CLI's own retry budget; 0 when it does not report one.
+        max: u64,
+        /// Human-readable reason (HTTP status / provider message).
+        message: String,
+    },
     /// A tool call was denied by the CLI's permission system (headless mode
     /// cannot prompt). `path` is the denied absolute path when the denial
     /// text or tool input carries one — the UI offers a directory grant for
@@ -182,6 +197,20 @@ pub struct TodoItem {
 pub struct TodosPayload {
     pub items: Vec<TodoItem>,
     pub replace: bool,
+}
+
+/// Normalize a CLI's todo status onto the four the UI renders. Every CLI
+/// spells these differently (claude `in_progress`, omp `running`/`active`,
+/// `abandoned` for a dropped task), and a status the UI does not know reads
+/// as "pending" - showing finished or abandoned work as still to do.
+fn todo_status(raw: Option<&str>) -> &'static str {
+    match raw.unwrap_or("") {
+        "in_progress" | "running" | "active" => "active",
+        "completed" | "complete" | "done" => "complete",
+        "blocked" => "blocked",
+        "dropped" | "cancelled" | "abandoned" | "deleted" => "dropped",
+        _ => "pending",
+    }
 }
 
 /// Drop empty / null payloads so the UI does not render a blank args panel.
@@ -263,7 +292,55 @@ pub(crate) fn tool_call_patch_with_id(
     }
 }
 
-/// Patches execution result onto the matching in-flight tool row.
+/// Todo state echoed by the todo tool's own result (`details.phases`).
+///
+/// This is the authoritative snapshot: omp answers every todo call (init,
+/// start, done, block, append, view) with the complete post-op list, where
+/// each phase carries its tasks and their current status. Reading it avoids
+/// two live-path gaps at once — the start event carries no `args` for this
+/// tool, and `done`/`block` may name a PHASE instead of one task, which a
+/// task-keyed patch could never apply. `replace: true` because the payload
+/// is a full list, not a delta.
+pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
+    let phases = result
+        .get("details")
+        .and_then(|d| d.get("phases"))
+        .and_then(Value::as_array)?;
+    let mut items = Vec::new();
+    for phase in phases {
+        let Some(tasks) = phase.get("tasks").and_then(Value::as_array) else {
+            continue;
+        };
+        for task in tasks {
+            let Some(content) = task
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let status = todo_status(task.get("status").and_then(Value::as_str));
+            items.push(TodoItem {
+                id: None,
+                content: content.to_string(),
+                status: status.to_string(),
+            });
+        }
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(TodosPayload {
+        items,
+        replace: true,
+    })
+}
+
+/// Patches execution result onto the matching in-flight tool row. A todo
+/// tool's result carries the full list (`details.phases`), so it doubles as
+/// an authoritative todo snapshot — the live path's only reliable source for
+/// this tool (see [`parse_todo_result`]).
 pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>) -> EngineEvent {
     tool_result_patch_with_id(name, result, None)
 }
@@ -273,11 +350,12 @@ pub(crate) fn tool_result_patch_with_id(
     result: Option<&Value>,
     tool_call_id: Option<&str>,
 ) -> EngineEvent {
+    let todos = result.and_then(parse_todo_result);
     EngineEvent::Message {
         role: "tool".to_string(),
         text: name.into(),
         path: None,
-        todos: None,
+        todos,
         args: None,
         result: result.cloned(),
         tool_call_id: tool_call_id.map(str::to_string),
@@ -356,12 +434,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
                     .filter_map(|key| entry.get(key).and_then(Value::as_str))
                     .map(|s| s.trim())
                     .find(|s| !s.is_empty())?;
-                let status = match entry.get("status").and_then(Value::as_str).unwrap_or("") {
-                    "in_progress" | "running" | "active" => "active",
-                    "completed" | "complete" | "done" => "complete",
-                    "blocked" => "blocked",
-                    _ => "pending",
-                };
+                let status = todo_status(entry.get("status").and_then(Value::as_str));
                 let id = entry
                     .get("id")
                     .or_else(|| entry.get("taskId"))
@@ -388,12 +461,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
         .filter(|s| !s.is_empty())
     {
         if args.get("taskId").is_none() && args.get("op").is_none() {
-            let status = match args.get("status").and_then(Value::as_str).unwrap_or("") {
-                "in_progress" | "running" | "active" => "active",
-                "completed" | "complete" | "done" => "complete",
-                "blocked" => "blocked",
-                _ => "pending",
-            };
+            let status = todo_status(args.get("status").and_then(Value::as_str));
             return Some(TodosPayload {
                 items: vec![TodoItem {
                     id: None,
@@ -418,13 +486,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("");
-        let status = match args.get("status").and_then(Value::as_str).unwrap_or("") {
-            "in_progress" | "running" | "active" => "active",
-            "completed" | "complete" | "done" => "complete",
-            "blocked" => "blocked",
-            "deleted" => "dropped",
-            _ => "pending",
-        };
+        let status = todo_status(args.get("status").and_then(Value::as_str));
         return Some(TodosPayload {
             items: vec![TodoItem {
                 id: Some(task_id.to_string()),
@@ -452,6 +514,13 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
             })
         }
         "start" | "done" | "block" | "unblock" | "drop" => {
+            // `task` names ONE item. A phase-wide op names a `phase` instead
+            // (the CLI pairs it with an empty `items` array) and must NOT be
+            // emitted here: the frontend matches patches by `content`, so a
+            // phase name would find no item and get APPENDED as a phantom
+            // row. Phase-wide moves travel via the tool's own result
+            // snapshot (`parse_todo_result`), which always carries the
+            // complete post-op list.
             let task = args.get("task").and_then(Value::as_str)?;
             let status = match op {
                 "start" => "active",
@@ -1141,8 +1210,9 @@ struct TurnState {
     native_session_id: Option<String>,
     saw_done: bool,
     saw_error: bool,
+    attempt_error: Option<String>,
     // NOTE: TurnState lives for the whole process (one run_reader per
-    // spawn), so once saw_error is set every later Done in this process
+    // spawn), so once saw_error is set every later event in this process
     // is suppressed. That is correct for the current one-process-per-turn
     // engines (omp --print, codex exec); a future multi-turn-per-process
     // engine must reset this per turn instead.
@@ -1156,6 +1226,7 @@ impl TurnState {
             native_session_id: preassigned,
             saw_done: false,
             saw_error: false,
+            attempt_error: None,
             saw_any_output: false,
         }
     }
@@ -1226,6 +1297,11 @@ impl TurnCore {
     }
 
     fn dispatch_event(&self, state: &mut TurnState, event: EngineEvent) {
+        // Killing the child after an Error races with already-buffered stdout.
+        // No late retry/content event may revive that terminal run.
+        if state.saw_error {
+            return;
+        }
         match event {
             EngineEvent::Delta(text) => state.push(
                 &self.sink,
@@ -1280,6 +1356,7 @@ impl TurnCore {
                     payload,
                 )
             }
+            EngineEvent::AttemptEnd { error } => state.attempt_error = error,
             EngineEvent::SessionId(id) => self.adopt_session_id(state, &id, true),
             EngineEvent::Usage(usage) => {
                 state.push(&self.sink, &self.run_id, &self.engine_id, "usage", usage)
@@ -1320,6 +1397,23 @@ impl TurnCore {
                     Value::String(error),
                 );
             }
+            EngineEvent::Retry {
+                attempt,
+                max,
+                message,
+            } => {
+                // Not terminal: the CLI is backing off and will re-issue the
+                // request. The frontend renders it as live progress in the
+                // run status line (not as an error banner) and clears it on
+                // the next content event.
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "retry",
+                    serde_json::json!({ "attempt": attempt, "max": max, "message": message }),
+                );
+            }
             EngineEvent::PermissionDenied {
                 tool,
                 path,
@@ -1345,13 +1439,6 @@ impl TurnCore {
                 );
             }
             EngineEvent::Done { session_id, usage } => {
-                // A Done after a terminal Error must never reach the UI: it
-                // clears the error banner and flips a failed turn back to
-                // "success" in the footer. Engines can emit both in one
-                // flush (omp: turn_end error, then agent_end done).
-                if state.saw_error {
-                    return;
-                }
                 state.saw_done = true;
                 if let Some(id) = session_id {
                     self.adopt_session_id(state, &id, false);
@@ -1572,14 +1659,16 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
                 "done",
                 serde_json::json!({ "usage": null }),
             );
-        } else if failed || !state.saw_any_output {
-            let mut message = format!(
-                "{} exited with status {}",
-                ctx.core.engine_id,
-                status
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            );
+        } else if failed || !state.saw_any_output || state.attempt_error.is_some() {
+            let mut message = state.attempt_error.take().unwrap_or_else(|| {
+                format!(
+                    "{} exited with status {}",
+                    ctx.core.engine_id,
+                    status
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                )
+            });
             if !stderr_tail.is_empty() {
                 message.push_str(&format!(": {stderr_tail}"));
             }
@@ -2259,6 +2348,109 @@ mod permission_tests {
             None,
         ] {
             assert!(argv(&e, &req(mode)).contains(&"--always-approve".to_string()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_lifecycle_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct CollectingEmitter(Mutex<Vec<Value>>);
+
+    impl event_sink::Emit for CollectingEmitter {
+        fn emit_json(&self, _name: &str, raw_json: &str) {
+            self.0.lock().unwrap().extend(serde_json::from_str::<Vec<Value>>(raw_json).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_error_cannot_be_followed_by_live_retry_events() {
+        let emitter = Arc::new(CollectingEmitter::default());
+        let core = TurnCore {
+            sink: event_sink::EventSink::new(emitter.clone()),
+            registry: Arc::new(ProcessRegistry::default()),
+            engine_id: "omp".to_string(),
+            run_id: "settled-run".to_string(),
+        };
+        let mut state = TurnState::new(Some("session".to_string()));
+        for event in [
+            EngineEvent::Error("retry exhausted".to_string()),
+            EngineEvent::Retry { attempt: 1, max: 50, message: "socket closed".to_string() },
+            EngineEvent::Warn("late request error".to_string()),
+            EngineEvent::Done { session_id: None, usage: None },
+        ] {
+            core.dispatch_event(&mut state, event);
+        }
+        core.sink.flush();
+        let events = emitter.0.lock().unwrap();
+        let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["error"], "a settled run must not send live events");
+    }
+
+    async fn replay_cli_output(lines: &[Value]) -> Vec<Value> {
+        let path = std::env::temp_dir().join(format!("ccgui-retry-{}.jsonl", uuid::Uuid::new_v4()));
+        let mut text = lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        text.push('\n');
+        std::fs::write(&path, text).unwrap();
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "cat" });
+        if cfg!(windows) {
+            command.args(["/d", "/c", "type"]);
+        }
+        let mut child = command.arg(&path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let emitter = Arc::new(CollectingEmitter::default());
+        let ctx = RunContext {
+            core: TurnCore {
+                sink: event_sink::EventSink::new(emitter.clone()),
+                registry: Arc::new(ProcessRegistry::default()),
+                engine_id: "omp".to_string(),
+                run_id: "pipe-retry-run".to_string(),
+            },
+            engine_impl: Box::new(pi_family::omp()),
+            pid: child.id().unwrap(),
+            preassigned_session_id: Some("session".to_string()),
+            initial_model: None,
+            child: Arc::new(TokioMutex::new(child)),
+            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cleanup_files: vec![path],
+            stderr_buf: Arc::new(Mutex::new(String::new())),
+        };
+        run_reader(stdout, ctx).await;
+        let events = std::mem::take(&mut *emitter.0.lock().unwrap());
+        events
+    }
+
+    #[tokio::test]
+    async fn legacy_agent_end_can_retry_and_recover_before_eof() {
+        let events = replay_cli_output(&[
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"socket closed"}}),
+            serde_json::json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"socket closed"}]}),
+            serde_json::json!({"type":"auto_retry_start","attempt":1,"maxAttempts":50}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"recovered"}}),
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}),
+            serde_json::json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}]}),
+        ]).await;
+        let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["retry", "delta", "done"]);
+        assert_eq!(events[1]["data"], "recovered");
+    }
+
+    #[tokio::test]
+    async fn clean_eof_preserves_a_final_model_failure() {
+        for failure in [
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"401 Invalid token"}}),
+            serde_json::json!({"type":"auto_retry_end","success":false,"finalError":"socket closed"}),
+        ] {
+            let events = replay_cli_output(&[failure]).await;
+            let last = events.last().unwrap();
+            assert_eq!(last["kind"], "error", "clean process exit must not turn a failed request into success");
+            assert!(matches!(last["data"].as_str(), Some("401 Invalid token" | "socket closed")));
+            assert!(!events.iter().any(|event| event["kind"] == "done"));
         }
     }
 }

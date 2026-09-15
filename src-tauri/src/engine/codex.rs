@@ -161,7 +161,17 @@ impl Engine for CodexEngine {
             // settled the UI and killed the CLI on the first reconnect, so
             // the turn died at 1/5 instead of continuing.
             "error" => {
-                out.push(EngineEvent::Warn(error_message(&value)));
+                // codex announces every retry as `Reconnecting... N/M (...)`:
+                // that line is live progress for the run status strip, not an
+                // error. The bare error right before `turn.failed` (or any
+                // other line) stays a non-terminal notice — only turn.failed
+                // ends the turn.
+                match parse_reconnect_notice(&value) {
+                    Some((attempt, max, message)) => {
+                        out.push(EngineEvent::Retry { attempt, max, message })
+                    }
+                    None => out.push(EngineEvent::Warn(error_message(&value))),
+                }
             }
             _ => {}
         }
@@ -180,6 +190,24 @@ fn attach_context_window(mut usage: Value, source: &Value) -> Value {
         }
     }
     usage
+}
+
+/// codex's reconnect notice: `Reconnecting... 3/5 (stream disconnected …)`.
+/// Returns `(attempt, max, reason)` so the run status line can show
+/// "重试中 3/5"; `None` for every other error line.
+fn parse_reconnect_notice(value: &Value) -> Option<(u64, u64, String)> {
+    let text = error_message(value);
+    let rest = text.strip_prefix("Reconnecting...")?.trim_start();
+    let (counts, reason) = match rest.split_once('(') {
+        Some((counts, reason)) => (counts.trim(), reason.trim_end_matches(')').trim()),
+        None => (rest.trim(), ""),
+    };
+    let (attempt, max) = counts.split_once('/')?;
+    Some((
+        attempt.trim().parse().ok()?,
+        max.trim().parse().ok()?,
+        reason.to_string(),
+    ))
 }
 
 /// Message text of a codex error payload: `error.message` when nested,
@@ -255,11 +283,18 @@ mod tests {
     /// settled the UI — and killed the CLI — on the first reconnect, so the
     /// turn died at 1/5 instead of continuing to completion.
     #[test]
-    fn reconnect_notice_is_non_terminal() {
+    fn reconnect_notice_is_live_retry_progress() {
         let line = r#"{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)"}"#;
         match &parse(line)[..] {
-            [EngineEvent::Warn(text)] => assert!(text.starts_with("Reconnecting... 1/5")),
-            other => panic!("expected a non-terminal warn, got {other:?}"),
+            [EngineEvent::Retry {
+                attempt,
+                max,
+                message,
+            }] => {
+                assert_eq!((*attempt, *max), (1, 5));
+                assert!(message.contains("stream disconnected"));
+            }
+            other => panic!("expected live retry progress, got {other:?}"),
         }
     }
 
@@ -267,7 +302,7 @@ mod tests {
     /// final message; the terminal signal is the `turn.failed` event itself.
     #[test]
     fn turn_failed_is_the_terminal_error() {
-        // The retry notice must not settle the turn.
+        // A non-reconnect error line is a notice, not retry progress.
         match &parse(
             r#"{"type":"error","message":"unexpected status 401 Unauthorized: Incorrect API key provided: x."}"#,
         )[..] {
@@ -292,7 +327,7 @@ mod tests {
             &mut out,
         );
         CodexEngine.parse_line(r#"{"type":"turn.completed","usage":null}"#, &mut out);
-        assert!(matches!(out[0], EngineEvent::Warn(_)));
+        assert!(matches!(out[0], EngineEvent::Retry { .. }));
         assert!(matches!(out[1], EngineEvent::Done { .. }));
     }
 }

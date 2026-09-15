@@ -46,8 +46,8 @@ function ShortcutChips({ value }: { value: string }) {
   }
   return (
     <span className="flex items-center gap-0.5">
-      {keys.map((key, index) => (
-        <Kbd key={`${key}-${index}`}>{key}</Kbd>
+      {keys.map((part) => (
+        <Kbd key={part}>{part}</Kbd>
       ))}
     </span>
   );

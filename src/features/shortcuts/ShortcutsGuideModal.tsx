@@ -26,7 +26,7 @@ function GuideRow({ label, value }: { label: string; value: string }) {
       <span className="text-body-regular text-text-primary">{label}</span>
       <span className="flex shrink-0 items-center gap-0.5">
         {keys ? (
-          keys.map((key, index) => <Kbd key={`${key}-${index}`}>{key}</Kbd>)
+          keys.map((part) => <Kbd key={part}>{part}</Kbd>)
         ) : (
           <Kbd>{value}</Kbd>
         )}

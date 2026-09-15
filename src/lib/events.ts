@@ -14,6 +14,7 @@ export interface EngineEventPayload {
     | "usage"
     | "error"
     | "warn"
+    | "retry"
     | "permission_denied"
     | "done"
     | "model";

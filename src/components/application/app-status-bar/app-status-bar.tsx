@@ -12,6 +12,8 @@ import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { cx } from "@/utils/cx";
 import { compareByOrder, pluginIdFromRegistryKey, statusBarRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
+import { ChangelogDialog } from "@/features/settings/ChangelogDialog";
+import { CHANGELOG_DATA, GITHUB_REPO_URL } from "@/version/changelog";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 
 const ZOOM_KEY = "ccgui-next.zoom:v1";
@@ -49,6 +51,7 @@ export function AppStatusBar() {
   const [zoomPct, setZoomPct] = useState(readZoomPct);
   const [sync, setSync] = useState<ScanProgress | null>(null);
   const [version, setVersion] = useState<string | null>(null);
+  const [showChangelog, setShowChangelog] = useState(false);
   const pluginItems = useRegistry(statusBarRegistry);
 
   // Re-apply the persisted zoom on startup; Tauri does not restore it.
@@ -222,8 +225,23 @@ export function AppStatusBar() {
         {version && (
           <>
             <span className="text-text-disabled">·</span>
-            <span className="shrink-0">v{version}</span>
+            <button
+              type="button"
+              aria-label={t("settings.versionHistory")}
+              title={t("settings.versionHistoryDesc")}
+              className="shrink-0 cursor-pointer rounded px-1 transition-colors hover:bg-background-tertiary-hover hover:text-text-secondary"
+              onClick={() => setShowChangelog(true)}
+            >
+              v{version}
+            </button>
           </>
+        )}
+        {showChangelog && (
+          <ChangelogDialog
+            entries={CHANGELOG_DATA}
+            githubUrl={GITHUB_REPO_URL}
+            onClose={() => setShowChangelog(false)}
+          />
         )}
       </div>
     </div>

@@ -31,6 +31,7 @@ export function ModalShell({
   onClose,
   className,
   label,
+  dialogClassName,
 }: {
   children: ReactNode;
   onClose: () => void;
@@ -38,6 +39,9 @@ export function ModalShell({
   className?: string;
   /** Accessible title for the dialog (or render a Heading slot="title"). */
   label?: string;
+  /** Inner Dialog layout override; needed when className makes the Modal a
+   * bounded flex column so children can scroll instead of being clipped. */
+  dialogClassName?: string;
 }) {
   return (
     <ModalOverlay
@@ -54,7 +58,7 @@ export function ModalShell({
           className,
         )}
       >
-        <Dialog aria-label={label} className="outline-none">
+        <Dialog aria-label={label} className={cx("outline-none", dialogClassName)}>
           {children}
         </Dialog>
       </Modal>

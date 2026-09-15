@@ -8,6 +8,11 @@ import {
   type EngineId,
 } from "@/features/settings/providers";
 
+// Stable fallbacks: a fresh `{}` per render would re-run every effect and
+// memo keyed on `catalogs`/`pending` below.
+const EMPTY_CATALOGS: Record<string, EngineCatalog> = {};
+const EMPTY_PENDING: Record<string, true> = {};
+
 /** Provider configs and per-engine model catalogs feeding the CLI menu's
  * per-engine model flyouts, plus the pin effect that repairs unset or stale
  * stored model picks. */
@@ -52,8 +57,8 @@ export function useEngineModels(
     window.addEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
     return () => window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
   }, []);
-  const catalogs = catalogsByWs[wsKey] ?? {};
-  const pending = pendingByWs[wsKey] ?? {};
+  const catalogs = catalogsByWs[wsKey] ?? EMPTY_CATALOGS;
+  const pending = pendingByWs[wsKey] ?? EMPTY_PENDING;
   // Model catalogs for every engine (pi/omp probe their CLI; others return
   // empty and fall back to provider-config models below). The CLI menu's
   // per-engine model flyouts all read from this map.
@@ -85,9 +90,8 @@ export function useEngineModels(
     [wsKey, workspacePath],
   );
   useEffect(() => {
-    // pending 也要拦:catalogs 空槽位时每 render 都是新引用,没有 pending
-    // 守卫会在首个探针落地前对同一引擎反复发 IPC(同步 effect 循环下
-    // 直接失控)。
+    // pending 也要拦:首个探针落地前 catalogs 里没有槽位,没有 pending
+    // 守卫会对同一引擎反复发 IPC。
     engines
       .filter((engine) => !(engine.id in catalogs) && !pending[engine.id])
       .forEach((engine) => probeCatalog(engine.id));

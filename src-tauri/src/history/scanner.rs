@@ -231,7 +231,13 @@ fn qoder_encode_project_slug(path: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    value.replace('/', "-")
+    // Windows rejects a drive colon in a directory name (mkdir fails with
+    // `目录名称无效`, ERROR_DIRECTORY), so `C:\ws\proj` has to encode to
+    // `C--ws-proj`. The old `C:-ws-proj` could never exist on disk — and
+    // `Path::join` reads it as a *drive-relative* path, which replaced the
+    // whole base, sending both distributions to the process's working
+    // directory instead of their own home.
+    value.replace(['/', ':'], "-")
 }
 
 /// Candidate `<projects>/<slug>` dirs for one workspace — same spelling
@@ -315,9 +321,16 @@ fn opencode_data_roots(workspace: &Path) -> Vec<PathBuf> {
     if let Some(dir) = dirs::data_dir() {
         roots.push(dir.join("opencode"));
     }
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".local").join("share").join("opencode"));
-    }
+    // `dirs::home_dir()` reads the Windows Known Folder API, which ignores
+    // HOME/USERPROFILE, so a scratch home never reached this root. Same split
+    // `paths::home_dir` already applies for the v0.9 legacy homes; production
+    // resolves identically either way.
+    roots.push(
+        crate::paths::home_dir()
+            .join(".local")
+            .join("share")
+            .join("opencode"),
+    );
     roots.push(workspace.join(".opencode"));
     let mut deduped: Vec<PathBuf> = Vec::new();
     for root in roots {
@@ -1683,7 +1696,7 @@ mod tests {
     fn qoder_project_slug_matches_qodercli_encoding() {
         assert_eq!(qoder_encode_project_slug("/Users/foo/bar"), "-Users-foo-bar");
         assert_eq!(qoder_encode_project_slug("/Users/foo/bar/"), "-Users-foo-bar");
-        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C:-ws-proj");
+        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C--ws-proj");
         assert_eq!(qoder_encode_project_slug("/"), "-");
         assert_eq!(qoder_encode_project_slug(""), "");
     }

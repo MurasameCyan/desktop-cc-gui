@@ -200,21 +200,7 @@ describe("compactContext and refreshSessionUsage", () => {
       openTabs: [tab],
       active: tab,
       bySession: {
-        [key]: {
-          messages: [],
-          subagentHistory: [],
-          queue: [],
-          error: null,
-          streaming: false,
-          turnStartedAt: null,
-          usage: null,
-          turnUsage: null,
-          interrupted: false,
-          activeModel: null,
-          activeEffort: null,
-          nextBefore: null,
-          loading: false,
-        },
+        [key]: { ...EMPTY_SESSION },
       },
     });
 
@@ -291,19 +277,8 @@ describe("compactContext and refreshSessionUsage", () => {
       active: tab,
       bySession: {
         [key]: {
-          messages: [],
-          subagentHistory: [],
-          queue: [],
-          error: null,
-          streaming: false,
-          turnStartedAt: null,
+          ...EMPTY_SESSION,
           usage: { inputTokens: 50000, outputTokens: 5000 },
-          turnUsage: null,
-          interrupted: false,
-          activeModel: null,
-          activeEffort: null,
-          nextBefore: null,
-          loading: false,
         },
       },
       streamingByKey: {},

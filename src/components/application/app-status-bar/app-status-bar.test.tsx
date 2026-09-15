@@ -25,6 +25,7 @@ vi.mock("@/lib/platform", () => ({
 }));
 
 import { AppStatusBar } from "./app-status-bar";
+import { getAppVersion } from "@/lib/platform";
 import { statusBarRegistry } from "@ccgui/plugin-sdk";
 import type { Disposer } from "@ccgui/plugin-sdk";
 
@@ -115,6 +116,40 @@ describe("AppStatusBar plugin items (plan §4.2 #8)", () => {
       expect(container.firstElementChild).not.toBeNull();
     } finally {
       silence.mockRestore();
+    }
+  });
+});
+describe("AppStatusBar version chip", () => {
+  afterEach(() => {
+    // The shared platform mock defaults to no version; restore it so the
+    // plugin-items suite keeps rendering without the chip.
+    vi.mocked(getAppVersion).mockResolvedValue(null);
+  });
+
+  it("opens the changelog dialog when the version chip is clicked", async () => {
+    vi.mocked(getAppVersion).mockResolvedValue("1.0.2");
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<AppStatusBar />);
+      });
+      const chip = [...container.querySelectorAll("button")].find(
+        (b) => b.textContent === "v1.0.2",
+      );
+      expect(chip).toBeDefined();
+      await act(async () => {
+        chip!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      // ModalShell portals to document.body: title + newest version badge.
+      expect(document.body.textContent).toContain(i18n.t("changelog.title"));
+      expect(document.body.textContent).toContain("v1.0.2");
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
     }
   });
 });

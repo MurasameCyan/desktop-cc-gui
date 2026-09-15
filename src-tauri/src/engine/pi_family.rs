@@ -179,7 +179,14 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
     let event_type = envelope.kind.as_str();
     if !matches!(
         event_type,
-        "session" | "tool_execution_start" | "tool_execution_end" | "message_end" | "turn_end" | "agent_end"
+        "session"
+            | "tool_execution_start"
+            | "tool_execution_end"
+            | "message_end"
+            | "turn_end"
+            | "agent_end"
+            | "auto_retry_start"
+            | "auto_retry_end"
     ) {
         return;
     }
@@ -232,36 +239,82 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             {
                 out.push(EngineEvent::Usage(usage.clone()));
             }
-            // A message-level error is one failed model call (e.g. an
-            // upstream 429): the CLI retries and the turn continues, so this
-            // is only a notice. turn_end/agent_end errors stay terminal.
-            // omp shapes vary by version: `message.errorMessage`, top-level
-            // `errorMessage`, and nested `error.message` / `message.error`.
+            // A failed model call can still retry. Only a terminal agent_end
+            // (or process EOF) decides the run's outcome.
             if let Some(error) = nested_error_text(&value, &["message"]) {
                 out.push(EngineEvent::Warn(error));
             }
         }
-        "turn_end" | "agent_end" => {
-            // omp nests the failure in `message.errorMessage` on every one
-            // of these events (e.g. upstream 401 Invalid token): a failed
-            // model call ends the turn with stopReason=error, so this is
-            // terminal — same treatment as a top-level errorMessage.
-            if let Some(error) = nested_error_text(&value, &["message"]) {
-                out.push(EngineEvent::Error(error));
+        "auto_retry_start" => {
+            // The CLI is backing off before re-issuing the request (provider
+            // 5xx / stream-envelope failures). Live progress, not an error:
+            // the run status line renders "重试中 x/y" and the next content
+            // event clears it.
+            out.push(EngineEvent::Retry {
+                attempt: value.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                max: value
+                    .get("maxAttempts")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                message: value
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+        "auto_retry_end" => {
+            // A retry saga can hand off to compaction/continuation. Clear its
+            // indicator, but leave run settlement to terminal agent_end/EOF.
+            out.push(EngineEvent::Retry {
+                attempt: 0,
+                max: 0,
+                message: String::new(),
+            });
+            if value.get("success").and_then(Value::as_bool) == Some(false) {
+                let error = value.get("finalError")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or("Automatic retry failed")
+                    .to_string();
+                out.push(EngineEvent::AttemptEnd { error: Some(error) });
             }
-            // No terminal result event exists in this protocol; the runner
-            // emits Done on clean EOF. agent_end still settles the turn —
-            // but never after an Error: the Done event would clear the
-            // error banner in the UI and report a failed turn as success.
-            if event_type == "agent_end" && !out.iter().any(|e| matches!(e, EngineEvent::Error(_))) {
-                out.push(EngineEvent::Done {
-                    session_id: None,
-                    usage: None,
+        }
+        "turn_end" | "agent_end" => {
+            let error = attempt_error(&value);
+            // turn_end precedes the retry decision. OMP explicitly marks its
+            // final agent_end; pi/older CLIs may emit agent_end BEFORE retry
+            // and lack isTerminal, so their outcome remains provisional to EOF.
+            if event_type == "agent_end"
+                && value.get("isTerminal").and_then(Value::as_bool) == Some(true)
+                && value.get("willRetry").and_then(Value::as_bool) != Some(true)
+            {
+                out.push(match error {
+                    Some(error) => EngineEvent::Error(error),
+                    None => EngineEvent::Done { session_id: None, usage: None },
                 });
+            } else {
+                out.push(EngineEvent::AttemptEnd { error });
             }
         }
         _ => {}
     }
+}
+
+/// The final assistant result wins; earlier failed attempts may have recovered.
+fn attempt_error(value: &Value) -> Option<String> {
+    let message = value.get("message").or_else(|| {
+        value.get("messages")?.as_array()?.iter().rev()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+    });
+    nested_error_text(value, &["message"])
+        .or_else(|| message.and_then(|message| nested_error_text(message, &[])))
+        .or_else(|| {
+            (message?.get("stopReason")?.as_str()? == "error")
+                .then(|| "Model request failed".to_string())
+        })
 }
 /// Display label for a tool call: the human-readable intent when the CLI
 /// provides one, prefixed with the tool name so the frontend's type
@@ -490,6 +543,82 @@ mod tests {
         }
     }
 
+    /// The live path's only reliable todo source for this tool. Two real
+    /// gaps it covers: the start event carries no `args` for `todo` (so the
+    /// list would stay stale until the session was reloaded), and a
+    /// phase-wide `done` names a PHASE, which no task-keyed patch could
+    /// apply. `abandoned` is omp's own spelling for a dropped task and must
+    /// not read as still-to-do.
+    #[test]
+    fn tool_execution_end_carries_the_authoritative_todo_snapshot() {
+        let line = serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "tool_5",
+            "toolName": "todo",
+            "result": {
+                "content": [{"type": "text", "text": "Remaining items (1)"}],
+                "details": {
+                    "phases": [
+                        {"name": "scaffold", "tasks": [
+                            {"content": "scan files", "status": "completed"},
+                            {"content": "write code", "status": "running"}
+                        ]},
+                        {"name": "verify", "tasks": [
+                            {"content": "run tests", "status": "pending"},
+                            {"content": "update snapshots", "status": "abandoned"},
+                            {"content": "await review", "status": "blocked", "blocker": "waiting on user"}
+                        ]}
+                    ],
+                    "storage": "session"
+                }
+            }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[0] {
+            EngineEvent::Message {
+                todos: Some(todos),
+                patch,
+                ..
+            } => {
+                // A full post-op list, not a delta: it replaces what the row holds.
+                assert!(todos.replace);
+                assert!(*patch, "must land on the in-flight todo row");
+                let seen: Vec<(&str, &str)> = todos
+                    .items
+                    .iter()
+                    .map(|i| (i.content.as_str(), i.status.as_str()))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    [
+                        ("scan files", "complete"),
+                        ("write code", "active"),
+                        ("run tests", "pending"),
+                        ("update snapshots", "dropped"),
+                        ("await review", "blocked"),
+                    ]
+                );
+            }
+            other => panic!("expected a todo snapshot patch, got {other:?}"),
+        }
+
+        // A non-todo tool's result carries no list.
+        let line = serde_json::json!({
+            "type": "tool_execution_end",
+            "toolName": "bash",
+            "result": {"content": [{"type": "text", "text": "ok"}]}
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[0] {
+            EngineEvent::Message { todos, .. } => assert!(todos.is_none()),
+            other => panic!("expected tool result patch, got {other:?}"),
+        }
+    }
+
     #[test]
     fn message_end_extracts_nested_error_shapes_as_warn() {
         for line in [
@@ -508,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_end_extracts_error_from_all_shapes() {
+    fn turn_end_preserves_provisional_errors_from_all_shapes() {
         for line in [
             serde_json::json!({"type":"turn_end","errorMessage":"boom"}),
             serde_json::json!({"type":"turn_end","error":{"message":"nested boom"}}),
@@ -519,16 +648,15 @@ mod tests {
             let mut out = Vec::new();
             parse_pi_family_line(&line.to_string(), &mut out);
             match out.first() {
-                Some(EngineEvent::Error(text)) => assert!(text.contains("boom") || text.contains("401"), "{line}"),
-                other => panic!("expected Error for {line}, got {other:?}"),
+                Some(EngineEvent::AttemptEnd { error: Some(text) }) => assert!(text.contains("boom") || text.contains("401"), "{line}"),
+                other => panic!("expected provisional error for {line}, got {other:?}"),
             }
         }
     }
 
     #[test]
     fn agent_end_after_error_does_not_emit_done() {
-        // A failed turn ends turn_end(error) + agent_end: the Done must be
-        // suppressed or the UI clears the error banner and reports success.
+        // A terminal agent_end must preserve failure rather than emit Done.
         let line = serde_json::json!({
             "type":"agent_end",
             "message":{"stopReason":"error","errorMessage":"401 Invalid token"},
@@ -545,5 +673,65 @@ mod tests {
         let mut ok_out = Vec::new();
         parse_pi_family_line(&ok_line, &mut ok_out);
         assert!(matches!(ok_out[0], EngineEvent::Done { .. }), "got {ok_out:?}");
+    }
+
+    #[test]
+    fn failed_attempt_can_retry_before_the_agent_finishes() {
+        // turn_end describes one model call, before the session decides
+        // whether to retry. It must not cause the runner to kill the CLI.
+        let lines = [
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"socket closed unexpectedly"}}),
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"error","errorMessage":"socket closed unexpectedly"}}),
+            serde_json::json!({"type":"auto_retry_start","attempt":1,"maxAttempts":50,"errorMessage":"socket closed unexpectedly"}),
+            serde_json::json!({"type":"agent_end","isTerminal":false,"messages":[{"role":"assistant","stopReason":"error","errorMessage":"socket closed unexpectedly"}]}),
+            serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"recovered"}}),
+            serde_json::json!({"type":"auto_retry_end","success":true,"attempt":1}),
+        ];
+        let mut out = Vec::new();
+        for line in lines {
+            parse_pi_family_line(&line.to_string(), &mut out);
+        }
+        assert!(!out.iter().any(|event| matches!(event, EngineEvent::Error(_) | EngineEvent::Done { .. })), "retry was terminated: {out:?}");
+        assert!(out.iter().any(|event| matches!(event, EngineEvent::Delta(text) if text == "recovered")));
+    }
+
+    #[test]
+    fn terminal_agent_end_uses_the_last_assistant_result() {
+        let mut out = Vec::new();
+        parse_pi_family_line(&serde_json::json!({
+            "type":"agent_end", "isTerminal":true,
+            "messages":[
+                {"role":"assistant","stopReason":"stop","content":[]},
+                {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
+                {"role":"toolResult","content":[]}
+            ]
+        }).to_string(), &mut out);
+        assert!(matches!(out.as_slice(), [EngineEvent::Error(text)] if text == "HTTP 502"), "final error was lost: {out:?}");
+
+        out.clear();
+        parse_pi_family_line(&serde_json::json!({
+            "type":"agent_end", "isTerminal":true,
+            "messages":[
+                {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
+                {"role":"assistant","stopReason":"stop","content":[]}
+            ]
+        }).to_string(), &mut out);
+        assert!(matches!(out.as_slice(), [EngineEvent::Done { .. }]), "recovered error leaked: {out:?}");
+    }
+
+    #[test]
+    fn exhausted_retry_settles_when_the_agent_finishes() {
+        let mut out = Vec::new();
+        for line in [
+            serde_json::json!({"type":"auto_retry_end", "success":false,
+                "attempt":50, "finalError":"socket closed unexpectedly"}),
+            serde_json::json!({"type":"agent_end", "isTerminal":true,
+                "messages":[{"role":"assistant", "stopReason":"error",
+                    "errorMessage":"socket closed unexpectedly"}]}),
+        ] {
+            parse_pi_family_line(&line.to_string(), &mut out);
+        }
+        assert!(matches!(out.last(), Some(EngineEvent::Error(text)) if text == "socket closed unexpectedly"), "final failure was lost: {out:?}");
+        assert!(!out.iter().any(|event| matches!(event, EngineEvent::Done { .. })));
     }
 }

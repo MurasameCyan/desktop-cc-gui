@@ -18,6 +18,8 @@ vi.mock("@/lib/events", () => ({
 }));
 
 const KEY = sessionKey("codex", "s-1", "/tmp/ws");
+let runCounter = 0;
+let runId: string;
 
 function deps(): EngineEventDeps {
   return {
@@ -30,7 +32,7 @@ function deps(): EngineEventDeps {
 }
 
 function event(kind: "usage" | "done", seq: number, data: unknown) {
-  return { runId: "run-1", sessionId: "s-1", engine: "codex", seq, kind, data };
+  return { runId, sessionId: "s-1", engine: "codex", seq, kind, data };
 }
 
 function report(inputTokens: number, outputTokens: number) {
@@ -43,10 +45,11 @@ function session() {
 
 describe("usage accounting", () => {
   beforeEach(() => {
+    runId = `usage-run-${++runCounter}`;
     localStorage.clear();
     vi.clearAllMocks();
     runRouting.clear();
-    runRouting.set("run-1", KEY);
+    runRouting.set(runId, KEY);
     useChatStore.setState({
       openTabs: [],
       active: null,

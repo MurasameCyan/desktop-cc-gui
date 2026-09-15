@@ -47,6 +47,7 @@ function entry(over: Partial<MarketPlugin> = {}): MarketPlugin {
     minAppVersion: "1.0.0",
     sdkVersion: "^0.3",
     permissions: ["storage"],
+    downloads: null,
     ...over,
   };
 }

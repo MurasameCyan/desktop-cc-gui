@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// `engine::fallback_home` uses. The scanner's provider-home tests set a
 /// scratch HOME and expect `~/.ccgui` under it; without this the v0.9
 /// legacy scan kept looking at the real profile and found nothing.
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     #[cfg(test)]
     {
         if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {

@@ -10,13 +10,14 @@ import PanelLeftOpen from "lucide-react/dist/esm/icons/panel-left-open";
 import { TerminalDock } from "@/features/terminal/TerminalDock";
 import { useTerminalStore } from "@/features/terminal/store";
 import { useGitStore } from "@/features/git/store";
-import { ipc } from "@/lib/ipc";
 import { cx } from "@/utils/cx";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useLayoutPanels } from "./use-layout-panels";
-import { commandRegistry } from "@ccgui/plugin-sdk";
-import { keywords } from "@/features/commands/builtins";
-import { registerShortcutHandler } from "@/features/shortcuts/runtime";
+import {
+  useChatPageLifecycle,
+  useChatShortcutHandlers,
+  useLayoutCommands,
+} from "./use-chat-page-effects";
 import { useChatTabs } from "./use-chat-tabs";
 import { useChatSidebar } from "./use-chat-sidebar";
 import { ChatPageDialogs, type ChatPageDialog } from "./ChatPageDialogs";
@@ -115,27 +116,7 @@ export default function ChatPage() {
       ? Math.min(panelWidth, Math.max(0, centerRowWidth - CHAT_MIN_WIDTH))
       : panelWidth;
 
-  // Layout toggles registered as palette commands (plan §4.2 #9): the toggles
-  // live in this hook instance, so registration happens here where they're in
-  // scope. ChatPage stays mounted for the app's lifetime; the cleanup keeps
-  // the registry honest under HMR.
-  useEffect(() => {
-    const disposers = [
-      commandRegistry.register({
-        id: "builtin:toggleSidePanel",
-        title: () => t("commands.toggleSidePanel"),
-        keywords: keywords("commands.toggleSidePanelKeywords"),
-        run: handleTogglePanel,
-      }),
-      commandRegistry.register({
-        id: "builtin:toggleSidebar",
-        title: () => t("commands.toggleSidebar"),
-        keywords: keywords("commands.toggleSidebarKeywords"),
-        run: toggleSidebarCollapsed,
-      }),
-    ];
-    return () => disposers.forEach((d) => d());
-  }, [t, handleTogglePanel, toggleSidebarCollapsed]);
+  useLayoutCommands(handleTogglePanel, toggleSidebarCollapsed);
   const {
     tabItems,
     activeTabKey,
@@ -179,46 +160,11 @@ export default function ChatPage() {
     setDialog,
   });
 
-  useEffect(() => {
-    void init();
-  }, [init]);
-
-  // Refocus rescan: 5min TTL, aligned with TokenTracker tier-1.
-  useEffect(() => {
-    let lastScan = Date.now();
-    const onFocus = () => {
-      if (Date.now() - lastScan > 5 * 60_000) {
-        lastScan = Date.now();
-        void ipc.rescanSessions().catch(() => {});
-      }
-    };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, []);
-
-  // Git status follows the active workspace (30s TTL inside the store).
-  useEffect(() => {
-    if (active?.workspacePath) void gitRefresh(active.workspacePath);
-  }, [active?.workspacePath, gitRefresh]);
-  // Terminal toggle + new-session + interrupt keys live in the shortcut
-  // runtime (defaults ⌘J / ⌘N / ⌃C, configurable in Settings → Shortcuts).
-  useEffect(
-    () =>
-      registerShortcutHandler("toggleTerminal", () => {
-        if (active) toggleTerminal(active.workspacePath);
-      }),
-    [active, toggleTerminal],
-  );
-  useEffect(
-    () => registerShortcutHandler("newSession", handleNewSession),
-    [handleNewSession],
-  );
-  useEffect(
-    () =>
-      registerShortcutHandler("interrupt", () => {
-        void useChatStore.getState().interrupt();
-      }),
-    [],
+  useChatPageLifecycle(init, gitRefresh, active?.workspacePath);
+  useChatShortcutHandlers(
+    active?.workspacePath,
+    toggleTerminal,
+    handleNewSession,
   );
 
   return (

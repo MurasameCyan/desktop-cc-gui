@@ -3,7 +3,7 @@ import type { EngineEventPayload } from "@/lib/events";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
-    sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
+    sendMessage: vi.fn(async () => ({ runId, sessionId: null })),
     interruptSession: vi.fn(async () => true),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
     getAppSettings: vi.fn(async () => ({})),
@@ -42,6 +42,8 @@ const { runRouting } = await import("./store/stream");
 const WS = "/tmp/ws";
 const PENDING = sessionKey("codex", null, WS);
 const NATIVE = sessionKey("codex", "tid-1", WS);
+let runCounter = 0;
+let runId: string;
 
 function deps(): EngineEventDeps {
   return {
@@ -60,12 +62,12 @@ function ev(
   seq: number,
   data: unknown,
   sessionId: string | null = "tid-1",
-  runId = "run-1",
 ): EngineEventPayload {
   return { runId, sessionId, engine: "codex", seq, kind, data };
 }
 
 function resetStore() {
+  runId = `codex-settle-${++runCounter}`;
   localStorage.clear();
   vi.clearAllMocks();
   runRouting.clear();
@@ -118,21 +120,18 @@ describe("codex turn settling", () => {
     // events below only race the response once the invoke is actually in flight.
     await started.promise;
 
-    // The engine can start streaming before the invoke promise resolves. This
-    // turn uses its own run id: `knownRunIds` is module state, so a run id the
-    // previous test already bound can never be adopted again (ids are unique
-    // in production).
+    // The engine can start streaming before the invoke promise resolves.
     handleEngineEvents(
       [
-        ev("session", 1, "tid-1", "tid-1", "run-2"),
-        ev("message", 2, { role: "assistant", text: "hi there" }, "tid-1", "run-2"),
+        ev("session", 1, "tid-1"),
+        ev("message", 2, { role: "assistant", text: "hi there" }),
       ],
       deps(),
     );
 
-    send.resolve({ runId: "run-2", sessionId: null });
+    send.resolve({ runId, sessionId: null });
     await inflight;
-    handleEngineEvents([ev("done", 3, { usage: null }, "tid-1", "run-2")], deps());
+    handleEngineEvents([ev("done", 3, { usage: null })], deps());
 
     const s = useChatStore.getState();
     expect(s.bySession[PENDING]).toBeUndefined();

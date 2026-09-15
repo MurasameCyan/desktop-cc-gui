@@ -566,6 +566,9 @@ export interface MarketPlugin {
   minAppVersion: string | null;
   sdkVersion: string | null;
   permissions: string[];
+  /** Lifetime download count from the index stats bot; null when the
+   *  stats file is unavailable — decorative, never gates anything. */
+  downloads: number | null;
 }
 
 /** One installed marketplace plugin with a newer indexed version. */
