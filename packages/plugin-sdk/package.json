@@ -6,7 +6,9 @@
   "private": true,
   "exports": {
     ".": "./src/index.ts",
-    "./plugin": { "types": "./plugin.d.ts" }
+    "./plugin": {
+      "types": "./plugin.d.ts"
+    }
   },
   "types": "./src/index.ts",
   "scripts": {

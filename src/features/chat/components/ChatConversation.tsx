@@ -21,20 +21,20 @@ import {
 
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
+import { useComposerActions } from "./use-composer-actions";
+import { filterEngineOptions } from "./engine-options";
+import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
 import { useComposerImages } from "./use-composer-images";
 import { useEngineModels } from "./use-engine-models";
 import { useTabModelDisplay } from "./use-tab-model-display";
-import { useComposerActions } from "./use-composer-actions";
 import type { EngineInfo, Workspace } from "@/lib/ipc";
 import type { OmpServiceTier } from "@/lib/omp-service-tier";
 import { EmptyState } from "@/components/base/empty-state";
-import { parseUsage } from "../usage";
+import { ASSUMED_CONTEXT_WINDOW, parseUsage } from "../usage";
+import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
-
-/** Assumed context window when the engine does not report one. */
-const CONTEXT_WINDOW_TOKENS = 200_000;
 
 /** Message list with its own bySession subscription: stream flushes swap the
  * messages array once per animation frame, and this boundary keeps that
@@ -61,32 +61,6 @@ const SessionTimeline = memo(function SessionTimeline({
   );
 });
 
-/** Session error banner above the timeline. */
-function SessionErrorBanner({
-  error,
-  onDismiss,
-}: {
-  error: string;
-  onDismiss: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div
-      role="alert"
-      className="mx-4 mt-3 flex items-center gap-2 rounded-lg border border-border-error-default bg-background-tertiary-error px-3 py-2 text-body-regular text-text-error-primary"
-    >
-      <span className="min-w-0 flex-1 break-all">{error}</span>
-      <button
-        type="button"
-        aria-label={t("common.close")}
-        onClick={onDismiss}
-        className="shrink-0 cursor-pointer rounded p-0.5 hover:bg-background-tertiary-hover"
-      >
-        ×
-      </button>
-    </div>
-  );
-}
 
 /** Composer menu slots (add / CLI / permission) plus the all-engines-disabled
  * state, memoized so per-keystroke draft updates don't rebuild the menus. */
@@ -110,6 +84,7 @@ function useConversationMenus({
   setCodexServiceTier,
   refreshModels,
   loadingEngines,
+  allowedEngines,
 }: {
   engines: EngineInfo[];
   engineInfo: EngineInfo | undefined;
@@ -131,26 +106,17 @@ function useConversationMenus({
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   refreshModels: () => Promise<void>;
   loadingEngines: readonly string[];
+  /** 接管工作区(桥返回非 null):仅列允许表内引擎(null = 不过滤)。 */
+  allowedEngines: string[] | null;
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Disabled-in-settings CLIs leave the picker entirely; the greyed-out
-  // state stays reserved for CLIs whose binary is not installed.
+  // Disabled-in-settings CLIs leave the picker entirely. 接管工作区下:
+  // 列表只留桥给的允许表,可用态按列表内与否而不是本机 `command -v` ——
+  // 否则本机没装的 CLI 在接管工作区里永远灰点。
   const cliOptions = useMemo(
-    () =>
-      engines.flatMap((e) => {
-        if (!e.enabled) return [];
-        return [
-          {
-            id: e.id,
-            label: t(`settings.engines.${e.id}`),
-            available: e.available,
-            disabled: !e.available,
-            disabledReason: t("chat.engineNotInstalled"),
-          },
-        ];
-      }),
-    [engines, t],
+    () => filterEngineOptions(engines, allowedEngines, t),
+    [engines, allowedEngines, t],
   );
   // Every CLI is switched off in settings: swap the picker for a placeholder
   // that deep-links to the CLI config page.
@@ -295,6 +261,7 @@ export const ChatConversation = memo(function ChatConversation({
     pinModels,
     loadEarlier,
     removeQueued,
+    sendQueuedNow,
     clearQueue,
   } = useChatStore(
     useShallow((s) => ({
@@ -306,6 +273,7 @@ export const ChatConversation = memo(function ChatConversation({
       pinModels: s.pinModels,
       loadEarlier: s.loadEarlier,
       removeQueued: s.removeQueued,
+      sendQueuedNow: s.sendQueuedNow,
       clearQueue: s.clearQueue,
     })),
   );
@@ -346,20 +314,21 @@ export const ChatConversation = memo(function ChatConversation({
     modelsByEngine,
     refresh: refreshModels,
     pendingEngines,
-  } = useEngineModels(engines, models, pinModels);
+  } = useEngineModels(engines, models, pinModels, active?.workspacePath);
   const loadingEngines = useMemo(
     () => Object.keys(pendingEngines),
     [pendingEngines],
   );
 
-  // Conversation-reported window (Codex token_count) wins; catalog is only
-  // a fallback for engines that never send one.
+  // Conversation-reported window (Codex token_count, Claude's modelUsage)
+  // wins; the model catalog is the fallback for engines that never report
+  // one, and the shared constant is the last resort.
   const contextMax =
     parseUsage(sessionUsage)?.contextWindow ||
     (catalogs[activeEngine]?.models ?? []).find(
       (m) => m.id === displayModels[activeEngine],
     )?.contextWindow ||
-    CONTEXT_WINDOW_TOKENS;
+    ASSUMED_CONTEXT_WINDOW;
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;
@@ -385,11 +354,20 @@ export const ChatConversation = memo(function ChatConversation({
     supportsImages,
     composerInputRef,
   });
+  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
+  // null = 非接管工作区,按本机探针展示。
+  const uiHooks = useWorkspaceUIHooks();
+  const allowedEngines = useMemo(
+    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
+    () => workspaceAllowedEngines(active?.workspacePath),
+    [uiHooks, active?.workspacePath],
+  );
   const { addMenu, cliMenu, permissionMenu, noEnabledEngines } =
     useConversationMenus({
       engines,
       engineInfo,
       activeEngine,
+      allowedEngines,
       modelsByEngine,
       onPickFiles: handleAddAttachments,
       onPickSkills: handlePickSkills,
@@ -413,8 +391,9 @@ export const ChatConversation = memo(function ChatConversation({
       {active && hasSession ? (
         <>
           {sessionError && (
-            <SessionErrorBanner
-              error={sessionError}
+            <ErrorBanner
+              className="mx-4 mt-3"
+              message={sessionError}
               onDismiss={() => dismissSessionError(key)}
             />
           )}
@@ -435,6 +414,7 @@ export const ChatConversation = memo(function ChatConversation({
         workspaces={workspaces}
         queue={queue}
         onRemoveQueued={removeQueued}
+        onSendQueuedNow={sendQueuedNow}
         onClearQueued={clearQueue}
         imageError={imageError}
         branchError={branchError}

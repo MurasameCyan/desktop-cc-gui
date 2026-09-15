@@ -38,6 +38,8 @@ export interface UsageChartProps {
   days: string[];
   /** Scale cap in tokens; bars share it so days stay comparable. */
   formatTokens: (n: number) => string;
+  /** Name of the selected range (今日/本周/本月) — the axis tooltip's title. */
+  axisLabel: string;
 }
 
 interface Series {
@@ -63,20 +65,21 @@ function axisMax(max: number): number {
   return magnitude * 10;
 }
 
-/** Tooltip breakdown for one hovered day: one pass over the series (and one
- *  over each CLI's models), keeping non-zero entries in series order. */
+/** Tooltip breakdown: one pass over the series (and one over each CLI's
+ *  models), keeping non-zero entries in series order. `tokensFor` picks the
+ *  number to show per CLI/model — one day's slot, or the range's sum. */
 function buildTooltipRows(
   series: Series[],
-  dayIndex: number,
+  tokensFor: (byDay: number[]) => number,
   formatTokens: (n: number) => string,
 ): ReactNode[] {
   const rows: ReactNode[] = [];
   for (const cli of series) {
-    const tokens = cli.byDay[dayIndex] ?? 0;
+    const tokens = tokensFor(cli.byDay);
     if (tokens <= 0) continue;
     const modelRows: ReactNode[] = [];
     for (const model of cli.models) {
-      const modelTokens = model.byDay[dayIndex] ?? 0;
+      const modelTokens = tokensFor(model.byDay);
       if (modelTokens <= 0) continue;
       modelRows.push(
         <span
@@ -120,9 +123,12 @@ function buildTooltipRows(
   return rows;
 }
 
-export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
+export function UsageChart({ rows, days, formatTokens, axisLabel }: UsageChartProps) {
   const { t } = useTranslation();
   const [hoverDay, setHoverDay] = useState<string | null>(null);
+  /** The axis gutter answers the other question the columns cannot: how much
+   *  the whole selected range holds, not one day of it. */
+  const [hoverAxis, setHoverAxis] = useState(false);
   // The tooltip trails the pointer (clamped to the chart box) instead of
   // being pinned to the hovered column: pinning made it jump to the other
   // side near the edges and widened the settings pane into a scrollbar.
@@ -204,7 +210,12 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
 
   const hoverIndex = hoverDay ? days.indexOf(hoverDay) : -1;
   const hoverTotal = hoverIndex >= 0 ? dayTotals[hoverIndex] : 0;
-  const tooltipRows = hoverIndex >= 0 ? buildTooltipRows(series, hoverIndex, formatTokens) : [];
+  const tooltipRows = hoverIndex >= 0 ? buildTooltipRows(series, (byDay) => byDay[hoverIndex] ?? 0, formatTokens) : [];
+  /** Same breakdown, summed over every day the range covers. */
+  const rangeTotal = dayTotals.reduce((acc, n) => acc + n, 0);
+  const axisRows = hoverAxis
+    ? buildTooltipRows(series, (byDay) => byDay.reduce((acc, n) => acc + n, 0), formatTokens)
+    : [];
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -231,7 +242,7 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
       left: Math.max(left, Math.min(desiredLeft, right - size.width)),
       top: Math.max(top, Math.min(cursor.y + 14, bottom - size.height)),
     });
-  }, [cursor, hoverDay]);
+  }, [cursor, hoverDay, hoverAxis]);
 
   return (
     <div
@@ -242,7 +253,10 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
         if (!box) return;
         setCursor({ x: event.clientX - box.left, y: event.clientY - box.top });
       }}
-      onMouseLeave={() => setCursor(null)}
+      onMouseLeave={() => {
+        setCursor(null);
+        setHoverAxis(false);
+      }}
     >
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img" aria-label={t("usage.chartLabel")}>
         {ticks.map((tick) => (
@@ -266,6 +280,21 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
             </text>
           </g>
         ))}
+        {/* Axis gutter: hovering the scale totals the whole selected range —
+            the question the per-day columns cannot answer. Covers the tick
+            labels too, so the hit area is forgiving. */}
+        <rect
+          x={0}
+          y={padTop}
+          width={padLeft}
+          height={plotH}
+          fill="transparent"
+          onMouseEnter={() => {
+            setHoverAxis(true);
+            setHoverDay(null);
+          }}
+          onMouseLeave={() => setHoverAxis(false)}
+        />
         {days.map((day, dayIndex) => {
           const x = padLeft + dayIndex * step + (step - barW) / 2;
           let cursor = 0;
@@ -315,18 +344,22 @@ export function UsageChart({ rows, days, formatTokens }: UsageChartProps) {
         })}
       </svg>
 
-      {hoverIndex >= 0 && (
+      {(hoverIndex >= 0 || hoverAxis) && (
         <div
           ref={tipRef}
           className="pointer-events-none absolute z-10 flex min-w-[150px] flex-col gap-1 rounded-lg border border-separator-border bg-background-primary-default p-2 shadow-dropdown"
           style={tipPos ? { left: tipPos.left, top: tipPos.top } : { left: 0, top: 0, visibility: "hidden" }}
         >
-          <span className="text-body-2-regular text-text-tertiary">{hoverDay}</span>
-          <span className="flex items-baseline justify-between gap-3 text-body-2-medium text-text-primary">
-            <span>{t("usage.tooltipTotal")}</span>
-            <span className="tabular-nums">{formatTokens(hoverTotal)}</span>
+          <span className="text-body-2-regular text-text-tertiary">
+            {hoverAxis ? axisLabel : hoverDay}
           </span>
-          {tooltipRows}
+          <span className="flex items-baseline justify-between gap-3 text-body-2-medium text-text-primary">
+            <span>{t(hoverAxis ? "usage.rangeTooltipTotal" : "usage.tooltipTotal")}</span>
+            <span className="tabular-nums">
+              {formatTokens(hoverAxis ? rangeTotal : hoverTotal)}
+            </span>
+          </span>
+          {hoverAxis ? axisRows : tooltipRows}
         </div>
       )}
 

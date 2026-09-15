@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ipc } from "@/lib/ipc";
+import { ipc, type SessionMeta } from "@/lib/ipc";
 import { useChatStore } from "./store";
 import { OPEN_TABS_KEY } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
@@ -14,7 +14,11 @@ vi.mock("@/lib/ipc", () => ({
   ipc: {
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     interruptSession: vi.fn(async () => true),
-    loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
+    rememberSessionModel: vi.fn(async () => {}),
+    rememberSessionEffort: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
+    loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
+    loadRemoteSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
@@ -198,6 +202,7 @@ describe("compactContext and refreshSessionUsage", () => {
       bySession: {
         [key]: {
           messages: [],
+          subagentHistory: [],
           queue: [],
           error: null,
           streaming: false,
@@ -225,12 +230,56 @@ describe("compactContext and refreshSessionUsage", () => {
         },
       ] as any,
       nextBefore: null,
+      subagentHistory: [],
     });
 
     await useChatStore.getState().refreshSessionUsage(key);
 
     expect(ipc.loadSessionPage).toHaveBeenCalledWith("claude", "sess-compact", 100);
     expect(useChatStore.getState().bySession[key]?.usage).toEqual(mockUsage);
+  });
+
+  it("loadHistoryPage routes remote metas through loadRemoteSessionPage", async () => {
+    useChatStore.setState({
+      sessions: [
+        {
+          engine: "codex",
+          sessionId: "remote-1",
+          workspacePath: WS,
+          filePath: "",
+          fileSize: 0,
+          fileMtimeMs: 0,
+          title: "remote",
+          preview: "",
+          createdAt: null,
+          updatedAt: null,
+          messageCount: 0,
+          pinned: false,
+          customTitle: null,
+          remote: true,
+          remotePath: "/home/u/x.jsonl",
+        } as any,
+      ],
+    });
+    await useChatStore.getState().selectSession("codex", "remote-1", WS);
+    expect(ipc.loadRemoteSessionPage).toHaveBeenCalledWith(WS, "codex", "remote-1", "/home/u/x.jsonl", 100, undefined);
+    expect(ipc.loadSessionPage).not.toHaveBeenCalledWith("codex", "remote-1", 100);
+  });
+
+  it("pinModels(updates, false) 只更新内存 models,不触碰 persisted 默认", async () => {
+    vi.mocked(ipc.updateAppSettings).mockClear();
+    await useChatStore.getState().pinModels({ omp: "remote-only-model" }, false);
+    expect(useChatStore.getState().models.omp).toBe("remote-only-model");
+    expect(ipc.updateAppSettings).not.toHaveBeenCalled();
+  });
+
+  it("pinModels 默认 persist:写 settings.defaultModels", async () => {
+    vi.mocked(ipc.updateAppSettings).mockClear();
+    await useChatStore.getState().pinModels({ omp: "m1" });
+    expect(useChatStore.getState().models.omp).toBe("m1");
+    expect(ipc.updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultModels: expect.objectContaining({ omp: "m1" }) }),
+    );
   });
 
   it("compactContext sends /compact and invokes refreshSessionUsage after compaction finishes", async () => {
@@ -243,6 +292,7 @@ describe("compactContext and refreshSessionUsage", () => {
       bySession: {
         [key]: {
           messages: [],
+          subagentHistory: [],
           queue: [],
           error: null,
           streaming: false,
@@ -271,6 +321,7 @@ describe("compactContext and refreshSessionUsage", () => {
         },
       ] as any,
       nextBefore: null,
+      subagentHistory: [],
     });
 
     const compactPromise = useChatStore.getState().compactContext(key);
@@ -404,6 +455,119 @@ describe("model selection is per session", () => {
     expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
       expect.objectContaining({ model: "claude-opus-5" }),
     );
+  });
+  it("keeps an existing session's effort out of the engine default and sibling sessions", async () => {
+    const a = sess("s-a");
+    const b = sess("s-b");
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [a, b],
+      active: a,
+      efforts: { omp: "medium" },
+    });
+
+    await useChatStore.getState().setEffort("omp", "max");
+
+    expect(useChatStore.getState().efforts.omp).toBe("medium");
+    expect(vi.mocked(ipc.rememberSessionEffort)).toHaveBeenCalledWith(
+      "omp",
+      "s-a",
+      "max",
+    );
+    useChatStore.setState({ active: b });
+    await useChatStore.getState().send("next", []);
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenLastCalledWith(
+      expect.objectContaining({ effort: "medium" }),
+    );
+  });
+
+  it("ignores a stale persisted tab effort for a native session", async () => {
+    const stale = { ...sess("s-a"), effort: "max" as const };
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [stale],
+      active: stale,
+      efforts: { omp: "medium" },
+      bySession: {
+        "omp/s-a": { ...EMPTY_SESSION, activeEffort: "low" },
+      },
+    });
+
+    await useChatStore.getState().send("next", []);
+
+    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+      expect.objectContaining({ effort: "low" }),
+    );
+  });
+});
+
+describe("refreshSessions and the not-yet-scanned session", () => {
+  beforeEach(() => {
+    resetStore();
+    useChatStore.setState({ sessions: [], engines: [], workspaces: [] });
+    vi.mocked(ipc.listSessions).mockResolvedValue([]);
+  });
+
+  const meta = (sessionId: string, title = "新会话"): SessionMeta => ({
+    engine: "omp",
+    sessionId,
+    workspacePath: WS,
+    filePath: "",
+    fileSize: 0,
+    fileMtimeMs: 0,
+    title,
+    preview: "",
+    createdAt: 1,
+    updatedAt: 2,
+    messageCount: 1,
+    pinned: false,
+    customTitle: null,
+  });
+
+  it("keeps the new chat's row when a refresh lands before the scanner ingests its file", async () => {
+    // The reported bug: the engine announces the session id and the sidebar
+    // row is upserted optimistically, but adopting the id also files the
+    // model (remember_session_model → sessions_changed) and the refresh it
+    // triggers replaced the list with a scan that has not seen the new file
+    // yet — the row vanished until a manual sync.
+    useChatStore.setState({
+      sessions: [meta("s-new")],
+      bySession: { "omp/s-new": { ...EMPTY_SESSION, streaming: true } },
+    });
+
+    await useChatStore.getState().refreshSessions();
+
+    expect(
+      useChatStore.getState().sessions.map((s) => s.sessionId),
+    ).toContain("s-new");
+  });
+
+  it("still drops rows with no local state (external delete cleanup)", async () => {
+    useChatStore.setState({ sessions: [meta("s-gone")] });
+
+    await useChatStore.getState().refreshSessions();
+
+    expect(useChatStore.getState().sessions).toEqual([]);
+  });
+
+  it("lets the scanned row win once the scanner ingests the file", async () => {
+    useChatStore.setState({
+      sessions: [meta("s-new")],
+      bySession: { "omp/s-new": { ...EMPTY_SESSION, streaming: true } },
+    });
+    vi.mocked(ipc.listSessions).mockResolvedValue([
+      { ...meta("s-new", "VPN 一直超时"), filePath: "s.jsonl" },
+    ]);
+
+    await useChatStore.getState().refreshSessions();
+
+    const sessions = useChatStore.getState().sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      sessionId: "s-new",
+      title: "VPN 一直超时",
+      filePath: "s.jsonl",
+    });
   });
 });
 

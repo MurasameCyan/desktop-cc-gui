@@ -28,15 +28,23 @@
 //! tables in $GROK_HOME/config.toml with `[models].default` leading — the
 //! same entries the CLI's own /model menu lists. The CLI-maintained
 //! models_cache.json holds the relay's /v1/models ids, which `-m` cannot
-//! resolve, so it is deliberately not a source. Remaining
-//! engines are filled by the frontend from the configured provider channels
-//! instead.
+//! resolve, so it is deliberately not a source. agy is `agy models` TSV
+//! (`id<TAB>name`). OpenCode lists `provider/model` ids via `opencode
+//! models` (ANSI table), with a generated fallback catalog when the probe
+//! cannot run. Qoder has no list subcommand: its catalog only exists on the
+//! ACP session/new result, so a temp-dir handshake probes it on demand and
+//! caches the last success. Remaining engines are filled by the frontend
+//! from the configured provider channels instead.
 
+mod agy;
 mod claude;
 mod codex;
 mod grok;
 mod kimi;
+mod opencode;
 mod pi;
+mod qoder;
+mod wsl;
 
 /// Claude launch-time model resolution: picker alias → the custom id its
 /// ANTHROPIC_DEFAULT_<FAMILY>_MODEL override maps to (pass-through when
@@ -99,6 +107,11 @@ pub struct EngineCatalog {
     /// (config/registry/binary-derived). A stored pick outside it cannot
     /// run, so the frontend resets it to the leading entry.
     pub authoritative: bool,
+    /// True when the catalog was produced for a remote workspace (WSL
+    /// distro): the frontend must NOT merge local provider/custom models
+    /// into it — only the distro CLI's own list is runnable there.
+    #[serde(default)]
+    pub remote: bool,
 }
 
 impl EngineCatalog {
@@ -106,12 +119,52 @@ impl EngineCatalog {
         Self {
             models,
             authoritative: true,
+            remote: false,
+        }
+    }
+
+    /// Catalog sourced from inside a remote workspace; even when empty it
+    /// suppresses the frontend's local-config fallback.
+    fn authoritative_remote(models: Vec<EngineModel>) -> Self {
+        Self {
+            models,
+            authoritative: true,
+            remote: true,
         }
     }
 }
 
 #[tauri::command]
-pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String> {
+pub async fn list_engine_models(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    workspace: Option<String>,
+) -> Result<EngineCatalog, String> {
+    // WSL 工作区:模型目录必须来自发行版内的 CLI(探针 bin),不是本机。
+    if let Some(ws) = workspace.as_deref() {
+        if let Some(transport) =
+            crate::engine::wsl_transport::transport_for_workspace(&state.db, ws)
+        {
+            match engine.as_str() {
+                "pi" | "omp" => {
+                    return Ok(wsl::pi_family_catalog_remote(engine.as_str(), &transport).await);
+                }
+                "codex" => {
+                    return Ok(wsl::codex_catalog_remote(&transport).await);
+                }
+                "kimi" => {
+                    return Ok(wsl::kimi_catalog_remote(&transport).await);
+                }
+                "claude" => {
+                    return Ok(wsl::claude_catalog_remote(&transport).await);
+                }
+                // 其余引擎暂无远程 catalog 命令形态(grok/dsh/agy 等
+                // 是本机推导):空目录 + remote 旗标,前端不掺本机配置 ——
+                // 发行版里的 CLI 用自己配置里的默认模型。
+                _ => return Ok(EngineCatalog::authoritative_remote(Vec::new())),
+            }
+        }
+    }
     match engine.as_str() {
         "codex" => Ok(codex_catalog().await),
         "kimi" => Ok(kimi_catalog().await),
@@ -119,6 +172,10 @@ pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String>
         "claude" => Ok(claude_catalog()),
         "pi" | "omp" => Ok(pi_family_catalog(&engine).await),
         "dsh" => dsh_catalog().await,
+        "agy" => Ok(agy_catalog().await),
+        "opencode" => Ok(opencode_catalog().await),
+        "qoder" => qoder_catalog("qoder").await,
+        "qoder-cn" => qoder_catalog("qoder-cn").await,
         // Unknown engine: no CLI-sourced catalog — the frontend fills the
         // picker from the configured provider channels.
         _ => Ok(EngineCatalog::authoritative(Vec::new())),
@@ -130,6 +187,24 @@ pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String>
 /// provider with `default` carrying the host's current model. Never spawns
 /// the host — a down host is an error so the frontend keeps whatever catalog
 /// it already has instead of blanking the picker.
+async fn agy_catalog() -> EngineCatalog {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, "agy");
+    agy::agy_catalog(&bin).await
+}
+
+async fn opencode_catalog() -> EngineCatalog {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, "opencode");
+    opencode::opencode_catalog(&bin).await
+}
+
+async fn qoder_catalog(engine: &'static str) -> Result<EngineCatalog, String> {
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let bin = super::engine_bin(&settings, engine);
+    qoder::qoder_catalog(engine, &bin).await
+}
+
 async fn dsh_catalog() -> Result<EngineCatalog, String> {
     let settings = crate::settings::read_settings().unwrap_or_default();
     let origin = crate::dsh_host::configured_origin(&settings);
@@ -416,7 +491,7 @@ pub(super) fn promote_default(models: &mut Vec<EngineModel>, default: Option<&st
 /// The frontend auto-selects the first catalog entry when the user has no
 /// stored pick, so the CLI's effective default leads: moved to the front
 /// when already listed, prepended when the catalog doesn't name it.
-fn with_default_first(models: Vec<EngineModel>, default: Option<EngineModel>) -> Vec<EngineModel> {
+pub(super) fn with_default_first(models: Vec<EngineModel>, default: Option<EngineModel>) -> Vec<EngineModel> {
     let Some(default) = default else {
         return models;
     };

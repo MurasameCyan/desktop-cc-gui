@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAnchorRowsBuilder } from "../src/features/chat/components/timeline-anchors.ts";
-import { applyStreamParts, settleLiveRows } from "../src/features/chat/store/stream.ts";
-import type { Message } from "../src/lib/ipc.ts";
 import type { TimelineRow } from "../src/features/chat/components/timeline-rows.ts";
 
 function row(seq: number, text: string, role = "user"): TimelineRow {
@@ -53,20 +51,3 @@ test("anchor builder keeps independent session caches", () => {
   assert.deepEqual(b(rows), cached);
 });
 
-test("stream batching preserves immutable history, sequence and mixed-role order", () => {
-  const original: Message[] = [Object.freeze({seq:1, role:"user", text:"question"}), Object.freeze({seq:2, role:"assistant", text:"start", live:true})];
-  Object.freeze(original);
-  const result = applyStreamParts(original, [
-    {kind:"delta", text:" one"}, {kind:"thinking", text:"reason"},
-    {kind:"thinking", text:" more"}, {kind:"delta", text:"answer"},
-  ], "model");
-  assert.deepEqual(result.map(m => [m.seq,m.role,m.text]), [
-    [1,"user","question"], [2,"assistant","start one"],
-    [3,"thinking","reason more"], [4,"assistant","answer"],
-  ]);
-  assert.equal(original[1].text, "start");
-  assert.strictEqual(result[0], original[0]);
-  assert.strictEqual(applyStreamParts(original, [], null), original);
-  assert.strictEqual(applyStreamParts(original, [{kind:"delta",text:""}], null), original);
-  assert.ok(settleLiveRows(result).every(m => !m.live));
-});

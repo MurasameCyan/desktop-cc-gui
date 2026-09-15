@@ -18,6 +18,7 @@
 
 mod fs;
 mod manifest;
+pub mod market;
 mod state;
 pub(crate) mod storage;
 
@@ -48,6 +49,7 @@ pub async fn plugin_install_from_path(
             &state::plugins_dir(),
             &state::state_path(),
             Path::new(path.trim()),
+            "local",
             |p| sink.emit_install_progress(p),
         )
     })
@@ -317,7 +319,7 @@ mod tests {
 
         let source = scratch.path("src-life");
         write_plugin(&source, &valid_manifest("life-plugin"));
-        fs::install_from(&plugins_dir, &state_path, &source, |_| {}).unwrap();
+        fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
         // Freshly installed plugins start disabled; enable first.
         set_enabled_at(&plugins_dir, &state_path, "life-plugin", true).unwrap();
 
@@ -400,7 +402,7 @@ mod tests {
             &source,
             r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
         );
-        fs::install_from(&plugins_dir, &state_path, &source, |_| {}).unwrap();
+        fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
         set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
         let roots = StorageRoots {
             data: scratch.path("data"),
@@ -450,7 +452,7 @@ mod tests {
                 &source,
                 r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
             );
-            fs::install_from(&plugins_dir, &state_path, &source, |_| {}).unwrap();
+            fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
             set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
             let roots = StorageRoots {
                 data: scratch.path("data"),

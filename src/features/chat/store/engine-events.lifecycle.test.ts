@@ -28,7 +28,7 @@ const workspace = { id: "workspace-1", path: "/tmp/workspace" };
 function fakeDeps() {
   return {
     set: vi.fn(),
-    get: () => ({ bySession: {} }) as never,
+    get: () => ({ bySession: {}, streamingByKey: {} }) as never,
     drainQueue: vi.fn(),
     markUnseenIfBackground: vi.fn(),
     upsertSessionMeta: vi.fn(),
@@ -248,6 +248,7 @@ describe("assistant message snapshots", () => {
       openTabs: [],
       models: { claude: "claude-test" },
       efforts: {},
+      streamingByKey: {},
     };
     return {
       key,

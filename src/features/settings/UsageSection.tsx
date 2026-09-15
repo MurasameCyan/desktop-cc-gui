@@ -13,6 +13,7 @@ import {
 import { UsageChart } from "./UsageChart";
 import { modelDisplayName } from "./usage-model";
 import { tokensOf } from "./usage-totals";
+import { formatTokens } from "@/utils/format-tokens";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { ModelBadge } from "@/components/foundations/icons/model-badge";
@@ -46,13 +47,6 @@ function rangeStart(range: Range, now: Date): string {
   const back = (monday.getDay() + 6) % 7;
   monday.setDate(monday.getDate() - back);
   return dayKey(monday);
-}
-
-/** "1.2M" / "84k" / "512" — compact enough for a row of numbers. */
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(n);
 }
 
 interface Totals {
@@ -112,7 +106,19 @@ function ShareBar({ pct }: { pct: number }) {
   );
 }
 
-const ENGINE_ICON_IDS: readonly EngineIconId[] = ["claude", "codex", "grok", "kimi", "pi", "omp", "dsh"];
+const ENGINE_ICON_IDS: readonly EngineIconId[] = [
+  "claude",
+  "codex",
+  "grok",
+  "kimi",
+  "pi",
+  "omp",
+  "dsh",
+  "agy",
+  "opencode",
+  "qoder",
+  "qoder-cn",
+];
 const isEngineIcon = (engine: string): engine is EngineIconId =>
   ENGINE_ICON_IDS.includes(engine as EngineIconId);
 
@@ -300,7 +306,12 @@ export function UsageSection() {
               {t("usage.chartTotal", { tokens: formatTokens(tokensOf(totals)) })}
             </span>
           </div>
-          <UsageChart rows={scoped} days={perDay.map((point) => point.day)} formatTokens={formatTokens} />
+          <UsageChart
+            rows={scoped}
+            days={perDay.map((point) => point.day)}
+            formatTokens={formatTokens}
+            axisLabel={t(RANGES.find((item) => item.id === range)?.labelKey ?? "usage.rangeToday")}
+          />
         </div>
       </SettingsCard>
 

@@ -26,6 +26,15 @@ type MessageAnchorRailProps = {
 const MAX_VISIBLE_ANCHOR_DASHES = 32;
 /** Edge rows flip the preview card so it never clips outside the rail. */
 const PREVIEW_EDGE_ROW_COUNT = 6;
+/**
+ * Horizontal band the rail occupies, as the timeline's left padding class.
+ * The rail is absolutely positioned (`left-3` = 12px offset + `w-[52px]` dash
+ * width = 64px) so it claims no layout space of its own; the timeline pads its
+ * scroll container by that footprint plus an 8px gutter. Without it a narrow
+ * window slides the centered message column under the dashes and message text
+ * renders over the quick-jump targets. Keep in sync with the `nav` classes below.
+ */
+export const MESSAGE_ANCHOR_RAIL_BAND_CLASS = "pl-[72px]";
 
 function getVisibleAnchorDashes(
   anchors: MessageAnchor[],

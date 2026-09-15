@@ -1,3 +1,4 @@
+pub mod agy;
 pub mod claude;
 pub mod codex;
 mod codex_provider_env;
@@ -8,8 +9,12 @@ pub mod grok;
 pub mod images;
 pub mod kimi;
 pub mod models;
+pub mod opencode;
 pub mod pi_family;
+pub mod wsl_transport;
 pub mod pi_family_auth;
+pub mod qoder;
+mod qoder_session;
 pub mod resolve;
 
 pub(crate) use resolve::command_for_binary;
@@ -512,6 +517,14 @@ pub fn engine_by_id(id: &str) -> Option<Box<dyn Engine>> {
         "pi" => Some(Box::new(pi_family::pi())),
         "omp" => Some(Box::new(pi_family::omp())),
         "dsh" => Some(Box::new(dsh::DshEngine)),
+        "agy" => Some(Box::new(agy::AgyEngine)),
+        "opencode" => Some(Box::new(opencode::OpenCodeEngine)),
+        "qoder" => Some(Box::new(qoder::QoderEngine::new(
+            qoder::QoderDistribution::Global,
+        ))),
+        "qoder-cn" => Some(Box::new(qoder::QoderEngine::new(
+            qoder::QoderDistribution::Cn,
+        ))),
         _ => None,
     }
 }
@@ -529,6 +542,28 @@ pub(crate) fn engine_home(env_key: Option<&str>, default_dir: &str) -> PathBuf {
         }
     }
     fallback_home().join(default_dir)
+}
+
+/// Codex config/session home. Settings override wins in production so CLI
+/// 管理's directory is what history, official config, and `codex exec` all
+/// read — not a leftover `~/.codex` default. Tests keep using `CODEX_HOME`
+/// / `HOME/.codex` so HomeGuard scratch dirs stay isolated.
+pub(crate) fn codex_home() -> PathBuf {
+    #[cfg(not(test))]
+    if let Some(path) = settings_codex_home() {
+        return path;
+    }
+    engine_home(Some("CODEX_HOME"), ".codex")
+}
+
+#[cfg(not(test))]
+fn settings_codex_home() -> Option<PathBuf> {
+    let custom = crate::settings::read_settings().ok()?.codex_home?;
+    let trimmed = custom.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    crate::open_app::expand_user_path(trimmed).ok()
 }
 
 /// Home dir for the default engine path. Production uses `dirs` (Known
@@ -888,7 +923,31 @@ pub struct EngineInfo {
     pub permissions: Vec<String>,
 }
 
+fn codex_bin_from_home(settings: &crate::settings::AppSettings) -> Option<String> {
+    let home = settings.codex_home.as_deref()?.trim();
+    if home.is_empty() {
+        return None;
+    }
+    let expanded = crate::open_app::expand_user_path(home).ok()?;
+    let candidate = expanded.join("bin").join("codex");
+    candidate.exists().then(|| resolve::resolve_launchable_cli_binary(&candidate.to_string_lossy()))
+}
+
+/// CLI binary name behind an engine id, when they differ: qoder's engine ids
+/// name the product/distribution, but only the `qodercli*` binaries speak
+/// ACP (the `qoder` binary is the IDE launcher and is rejected at spawn).
+pub(crate) fn cli_binary_name(engine_id: &str) -> &str {
+    match engine_id {
+        "qoder" => qoder::QoderDistribution::Global.cli_name(),
+        "qoder-cn" => qoder::QoderDistribution::Cn.cli_name(),
+        _ => engine_id,
+    }
+}
+
 pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &str) -> String {
+    // An explicit bin override always wins: it predates the codex-home row
+    // (hidden for codex in the UI), and a stale codexBin in an upgraded
+    // settings.json must not be silently overridden by $home/bin/codex.
     if let Some(custom) = settings.bin_override(engine_id) {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
@@ -902,7 +961,12 @@ pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &st
             }
         }
     }
-    resolve::resolve_launchable_cli_binary(engine_id)
+    if engine_id == "codex" {
+        if let Some(from_home) = codex_bin_from_home(settings) {
+            return from_home;
+        }
+    }
+    resolve::resolve_launchable_cli_binary(cli_binary_name(engine_id))
 }
 
 #[tauri::command]
@@ -917,7 +981,8 @@ pub fn list_engines() -> Vec<EngineInfo> {
                 Some(custom) if !custom.trim().is_empty() => {
                     crate::settings::validate_bin_override(custom).is_ok()
                 }
-                _ => resolve::find_cli_binary(id, None).is_some(),
+                _ if *id == "codex" && codex_bin_from_home(&settings).is_some() => true,
+                _ => resolve::find_cli_binary(cli_binary_name(id), None).is_some(),
             };
             EngineInfo {
                 id: id.to_string(),
@@ -1324,11 +1389,16 @@ enum LineRead {
 /// only await is `fill_buf`, so a `tokio::select!` tick landing mid-line
 /// consumes and drops nothing — the property the old code relied on
 /// `next_line` for (a cancelled `read_line` would lose the partial bytes).
+/// Resuming the buffer is the whole point: a `line.clear()` here wiped the
+/// bytes a cancelled call had already consumed from the reader, so a tick
+/// landing mid-line truncated that line (a long `item.completed` parsed as
+/// broken JSON and was dropped). The caller hands back the same buffer every
+/// call, and `mem::take` empties it on a complete line while Eof/TooLong end
+/// the run, so this only ever appends.
 async fn read_line_capped(
     reader: &mut BufReader<ChildStdout>,
     line: &mut Vec<u8>,
 ) -> std::io::Result<LineRead> {
-    line.clear();
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -1547,6 +1617,37 @@ pub async fn send_message(
     effort: Option<String>,
     permission: Option<String>,
 ) -> Result<SendResult, String> {
+    send_message_inner(
+        &state,
+        engine,
+        workspace_path,
+        session_id,
+        prompt,
+        prompt_contributions,
+        image_paths,
+        model,
+        effort,
+        permission,
+    )
+    .await
+}
+
+/// Body of the `send_message` command, taking the state directly: integration
+/// tests drive the real spawn/read pipeline without a Tauri app (the mock
+/// runtime links the GUI crates into the test exe, which then cannot load
+/// without a comctl32 v6 manifest).
+pub async fn send_message_inner(
+    state: &crate::AppState,
+    engine: String,
+    workspace_path: String,
+    session_id: Option<String>,
+    prompt: String,
+    prompt_contributions: Vec<PromptContribution>,
+    image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
+    permission: Option<String>,
+) -> Result<SendResult, String> {
     if state.processes.len() >= MAX_CONCURRENT_RUNS {
         return Err(format!(
             "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
@@ -1568,14 +1669,48 @@ pub async fn send_message(
         state.db.granted_roots().unwrap_or_default(),
     )?;
 
+    // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
+    let wsl_tp = wsl_transport::transport_for_workspace(&state.db, &workspace_path);
     // Host-stream engines drive their own transport: no child process — the
-    // registry entry only routes interrupts to the transport task.
+    // registry entry only routes interrupts to the transport task. 远程
+    // 工作区下没有可包装的子进程,本机 host 又对远端路径无意义,显式拒绝。
     if launch.engine_impl.drives_own_transport() {
+        if wsl_tp.is_some() {
+            return Err(format!("引擎 {engine} 不支持远程工作区(WSL)"));
+        }
         return send_host_stream(state, launch, engine).await;
     }
-
-    let mut command = launch.built.command;
-    if engine == "codex" {
+    let (mut command, extra_cleanup, skip_local_cwd) = match &wsl_tp {
+        Some(tp) => {
+            // 依赖本机 staging 文件的引擎(grok 等 cleanup_files 非空):
+            // 远端 CLI 读不到本机文件,直接拒绝而非跑出莫名其妙的失败;
+            // 已写盘的 staging 文件顺手清掉,不 strand。
+            if !launch.built.cleanup_files.is_empty() {
+                for path in &launch.built.cleanup_files {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(format!(
+                    "引擎 {engine} 不支持远程工作区(WSL):依赖本机临时文件"
+                ));
+            }
+            match wsl_transport::wrap(launch.built.command, tp).await {
+                Ok(wrapped) => (wrapped.command, wrapped.cleanup_files, wrapped.skip_local_cwd),
+                Err(error) => {
+                    // wrap 失败(ssh 上传失败等)同样不许 strand staging 文件。
+                    for path in &launch.built.cleanup_files {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        None => (launch.built.command, Vec::new(), false),
+    };
+    let mut cleanup_files = launch.built.cleanup_files;
+    cleanup_files.extend(extra_cleanup);
+    // 本地 env 不跨 ssh:WSL 分支的 command 是本地 ssh 进程,apply 无意义
+    // (还白跑一次登录 shell 解析);远端 codex 用发行版自己的配置。
+    if engine == "codex" && wsl_tp.is_none() {
         codex_provider_env::apply(&mut command).await;
     }
     command
@@ -1585,8 +1720,13 @@ pub async fn send_message(
             std::process::Stdio::null()
         })
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .current_dir(&launch.req.workspace);
+        .stderr(std::process::Stdio::piped());
+    // 远程工作区路径在本机不存在 → cwd 落本地当前目录(wsl.exe/ssh 不关心)。
+    if skip_local_cwd {
+        command.current_dir(wsl_transport::fallback_cwd());
+    } else {
+        command.current_dir(&launch.req.workspace);
+    }
     // Own process group so interrupt can kill the whole tree (grandchildren
     // inherit the stdout pipe and would otherwise block EOF forever).
     #[cfg(unix)]
@@ -1597,8 +1737,9 @@ pub async fn send_message(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            // Never strand the staging files build_command wrote (grok).
-            for path in &launch.built.cleanup_files {
+            // Never strand the staging files build_command wrote (grok) or
+            // the remote-run script marker (wsl transport).
+            for path in &cleanup_files {
                 let _ = std::fs::remove_file(path);
             }
             return Err(format!("failed to spawn {}: {error}", launch.bin));
@@ -1618,7 +1759,7 @@ pub async fn send_message(
             Some(pair) => pair,
             None => {
                 let _ = child.start_kill();
-                for path in &launch.built.cleanup_files {
+                for path in &cleanup_files {
                     let _ = std::fs::remove_file(path);
                 }
                 return Err("missing stdout/stderr pipe after spawn".to_string());
@@ -1676,7 +1817,7 @@ pub async fn send_message(
         initial_model,
         child,
         killed,
-        cleanup_files: launch.built.cleanup_files,
+        cleanup_files,
         stderr_buf,
     };
     let reader = tokio::spawn(run_reader(stdout, ctx));
@@ -1704,7 +1845,7 @@ fn next_virtual_pid() -> u32 {
 /// then detach it. The task dispatches the same event kinds as `run_reader`
 /// and settles the turn itself (done/error + registry cleanup).
 async fn send_host_stream(
-    state: tauri::State<'_, crate::AppState>,
+    state: &crate::AppState,
     launch: Launch,
     engine: String,
 ) -> Result<SendResult, String> {
@@ -1733,13 +1874,19 @@ async fn send_host_stream(
         run_id: run_id.clone(),
     };
     let resume_session_id = launch.req.session_id.clone();
-    let task = tokio::spawn(dsh_session::run_host_turn(
-        core,
-        launch.req,
-        state.dsh_host.clone(),
-        killed,
-        pid,
-    ));
+    let task = match engine.as_str() {
+        "dsh" => tokio::spawn(dsh_session::run_host_turn(
+            core,
+            launch.req,
+            state.dsh_host.clone(),
+            killed,
+            pid,
+        )),
+        "qoder" | "qoder-cn" => tokio::spawn(qoder_session::run_acp_turn(
+            core, launch.req, launch.bin, killed, pid,
+        )),
+        _ => unreachable!("send_host_stream only routes drives_own_transport engines: {engine}"),
+    };
     let _ = reader_abort.set(task.abort_handle());
     Ok(SendResult {
         run_id,
@@ -1798,6 +1945,13 @@ mod prompt_contribution_tests {
 mod permission_tests {
     use super::*;
 
+    #[test]
+    fn every_registered_engine_has_an_adapter() {
+        for id in crate::config::ENGINES {
+            assert!(engine_by_id(id).is_some(), "{id}");
+        }
+    }
+
     fn req(permission: Option<&str>) -> SendRequest {
         SendRequest {
             session_id: None,
@@ -1821,6 +1975,30 @@ mod permission_tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect()
+    }
+
+    #[test]
+    fn pi_prompt_goes_through_stdin_not_argv() {
+        // Windows resolves the pi install to a `.cmd` shim spawned via `cmd /c`;
+        // cmd.exe cuts a multiline argument at the first newline, so only line 1
+        // ever reached the model. The prompt must ride stdin verbatim, and the
+        // `@<abs path>` image refs must stay in argv.
+        let mut request = req(None);
+        request.prompt = "first line\nsecond line\n%PATH%".to_string();
+        request.images = vec!["C:/tmp/paste.png".to_string()];
+        let engines: [&dyn Engine; 2] = [&pi_family::pi(), &pi_family::omp()];
+        for engine in engines {
+            let built = engine.build_command(&request, "fake-bin").unwrap();
+            let args: Vec<String> = built
+                .command
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert!(!args.iter().any(|a| a.contains("first line")), "{args:?}");
+            assert!(args.iter().any(|a| a.contains("paste.png")), "{args:?}");
+            assert_eq!(built.stdin_payload.as_deref(), Some(request.prompt.as_str()));
+        }
     }
 
     #[test]
@@ -1993,6 +2171,57 @@ mod permission_tests {
         let manual = argv(&e, &req(Some("manual")));
         assert!(!manual.contains(&"--yolo".to_string()));
         assert!(!manual.contains(&"--plan".to_string()));
+    }
+
+    #[test]
+    fn omp_offers_plan_and_bypass_while_pi_stays_auto() {
+        // omp 18.1.x grew real approval switches plus a headless plan flow; pi
+        // 0.85 still exposes none of them. Declaring only the modes a CLI can
+        // actually honor is the whole point of supported_permissions — the
+        // picker greys out the rest instead of sending a mode that is ignored.
+        assert_eq!(pi_family::omp().supported_permissions(), ["auto", "plan", "bypass"]);
+        assert_eq!(pi_family::pi().supported_permissions(), ["auto"]);
+
+        // "manual" must stay unsupported: always-ask/write leave write/exec
+        // tools on a prompt policy, and print mode has no UI to answer with —
+        // the CLI aborts the turn ("requires approval but no interactive UI
+        // available") the moment a gated tool runs.
+        assert_eq!(pi_family::omp().resolve_permission(Some("manual")), "auto");
+        // pi falls back to its only mode for anything else.
+        assert_eq!(pi_family::pi().resolve_permission(Some("bypass")), "auto");
+
+        let auto = argv(&pi_family::omp(), &req(Some("auto")));
+        assert!(!auto.contains(&"--approval-mode".to_string()));
+        assert!(!auto.contains(&"--auto-approve".to_string()));
+        assert!(!auto.contains(&"--plan-yolo".to_string()));
+
+        let bypass = argv(&pi_family::omp(), &req(Some("bypass")));
+        assert!(bypass.contains(&"--auto-approve".to_string()));
+        assert!(!bypass.contains(&"--plan-yolo".to_string()));
+
+        // The plan flow pins the implementation phase to the picked model;
+        // otherwise --plan-yolo-into drops to the cheap "smol" role.
+        let mut plan_req = req(Some("plan"));
+        plan_req.model = Some("openai-codex/gpt-5.4".into());
+        let plan = argv(&pi_family::omp(), &plan_req);
+        assert!(plan.contains(&"--plan-yolo".to_string()));
+        let pin = plan
+            .iter()
+            .position(|a| a == "--plan-yolo-into")
+            .expect("plan pins the implementation model");
+        assert_eq!(plan[pin + 1], "openai-codex/gpt-5.4");
+
+        // No model picked yet: --plan-yolo alone must not invent one.
+        let bare = argv(&pi_family::omp(), &req(Some("plan")));
+        assert!(bare.contains(&"--plan-yolo".to_string()));
+        assert!(!bare.contains(&"--plan-yolo-into".to_string()));
+
+        // pi never receives any of these flags, even when it is asked for one.
+        for mode in [Some("plan"), Some("bypass"), Some("manual")] {
+            let args = argv(&pi_family::pi(), &req(mode));
+            assert!(!args.contains(&"--plan-yolo".to_string()), "{args:?}");
+            assert!(!args.contains(&"--auto-approve".to_string()), "{args:?}");
+        }
     }
 
     #[test]
@@ -2235,5 +2464,42 @@ mod tool_args_tests {
             EngineEvent::Message { patch, .. } => assert!(patch),
             _ => panic!("expected patch"),
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_home_bin_tests {
+    use super::*;
+
+    #[test]
+    fn engine_bin_prefers_codex_home_bin() {
+        let dir = std::env::temp_dir().join(format!(
+            "ccgui-codex-home-bin-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let candidate = dir.join("bin").join("codex");
+        std::fs::write(&candidate, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut settings = crate::settings::AppSettings::default();
+        settings.codex_home = Some(dir.to_string_lossy().into_owned());
+        let resolved = engine_bin(&settings, "codex");
+        assert_eq!(PathBuf::from(&resolved), candidate);
+
+        // An explicit codexBin override (set before the home row existed, or
+        // hand-edited) still wins over $home/bin/codex.
+        #[cfg(unix)]
+        {
+            settings.bin_overrides.insert(
+                "codexBin".to_string(),
+                serde_json::Value::String("/bin/sh".to_string()),
+            );
+            assert_eq!(engine_bin(&settings, "codex"), "/bin/sh");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,6 +9,10 @@ export const CLI_DISPLAY_NAMES: Record<string, string> = {
   pi: "PI CLI",
   omp: "OMP CLI",
   dsh: "DeepSeek Harness",
+  agy: "Antigravity CLI",
+  opencode: "OpenCode",
+  qoder: "Qoder CLI",
+  "qoder-cn": "Qoder CLI CN",
 };
 
 /**
@@ -27,7 +31,7 @@ export function inferModelEngine(name: string): EngineIconId | null {
   if (/\b(baichuan)\b/.test(lower)) return "baichuan";
   if (/\b(hunyuan)\b/.test(lower)) return "hunyuan";
   if (/\b(step-?\d|stepfun)\b/.test(lower)) return "stepfun";
-  if (/\b(gemini|gemma)\b/.test(lower)) return "gemini";
+  if (/\b(gemini|gemma|antigravity|agy)\b/.test(lower)) return "gemini";
   if (/\b(mistral|mixtral|codestral)\b/.test(lower)) return "mistral";
   if (/\b(cohere|command-r)\b/.test(lower)) return "cohere";
   if (/\b(perplexity|sonar)\b/.test(lower)) return "perplexity";

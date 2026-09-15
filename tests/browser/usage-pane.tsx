@@ -1,8 +1,9 @@
 // Open /tests/browser/usage-pane.html with the Vite dev server running.
 // Renders the real UsageSection inside the settings modal's content pane with
 // a mocked IPC surface, so one model that the ledger recorded twice (relay
-// slug + plain id) can be checked for a single merged row, live refresh, and
-// the chart tooltip. No app, no database, no saved state.
+// slug + plain id) can be checked for a single merged row, live refresh, the
+// per-day chart tooltip, and the axis tooltip that totals the selected range
+// (轴区悬停 → 今日/本周/本月 的区间合计). No app, no database, no saved state.
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
 import "../../src/lib/i18n";

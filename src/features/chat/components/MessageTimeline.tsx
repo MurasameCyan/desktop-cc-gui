@@ -4,14 +4,18 @@ import { useTranslation } from "react-i18next";
 import Copy from "lucide-react/dist/esm/icons/copy";
 import Check from "lucide-react/dist/esm/icons/check";
 import type { Message } from "@/lib/ipc";
+
 import type { SessionState } from "../store";
+import { useChatStore } from "../store";
 import { parseUsage } from "../usage";
+import { formatTokens } from "@/utils/format-tokens";
+import { cx } from "@/utils/cx";
 import { AgentThinking } from "@/components/application/agent-thinking/agent-thinking";
 import { streamParseInterval, useThrottled } from "@/hooks/use-throttled";
 import { useCopied } from "@/hooks/use-copied";
 import { MessageImages } from "./MessageImages";
 import { GrantCard } from "./GrantCard";
-import { MessageAnchorRail } from "./MessageAnchorRail";
+import { MESSAGE_ANCHOR_RAIL_BAND_CLASS, MessageAnchorRail } from "./MessageAnchorRail";
 import { createAnchorRowsBuilder } from "./timeline-anchors";
 import { buildRows, collectToolKeys, rowKey, type TimelineRow } from "./timeline-rows";
 import { formatDuration } from "./format-duration";
@@ -29,6 +33,7 @@ const TimelineRowView = memo(function TimelineRowView({
   workspacePath,
   turnLive,
   autoExpand,
+  thinkingAutoCollapse,
   seenTools,
 }: {
   row: TimelineRow;
@@ -38,6 +43,8 @@ const TimelineRowView = memo(function TimelineRowView({
   /** True on the timeline's last process row: it rides open until a newer
    * one appears, and stays open once the turn settles. */
   autoExpand: boolean;
+  /** False keeps a settled thinking row expanded (设置 → 通用 → 行为). */
+  thinkingAutoCollapse: boolean;
   seenTools: Set<string>;
 }) {
   // Plugin-defined row kinds (plan §4.2 #5) dispatch to the registered
@@ -63,6 +70,7 @@ const TimelineRowView = memo(function TimelineRowView({
         items={row.items}
         autoExpand={autoExpand}
         turnLive={turnLive}
+        thinkingAutoCollapse={thinkingAutoCollapse}
         processId={row.firstSeq}
         seenTools={seenTools}
       />
@@ -122,11 +130,9 @@ function formatUsage(usage: unknown): string | null {
   if (!u) return null;
   const input = u.input + u.cacheRead + u.cacheWrite;
   if (!input && !u.output) return null;
-  const fmt = (n: number) =>
-    n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
   const parts: string[] = [];
-  if (input) parts.push(`↑${fmt(input)}`);
-  if (u.output) parts.push(`↓${fmt(u.output)}`);
+  if (input) parts.push(`↑${formatTokens(input)}`);
+  if (u.output) parts.push(`↓${formatTokens(u.output)}`);
   return parts.join(" ");
 }
 
@@ -273,7 +279,9 @@ export const MessageTimeline = memo(function MessageTimeline({
   onLoadEarlier: () => void;
   workspacePath: string;
 }) {
+
   const { t } = useTranslation();
+  const thinkingAutoCollapse = useChatStore((s) => s.thinkingAutoCollapse);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const items = session.messages;
   const rows = useMemo(() => buildRows(items), [items]);
@@ -387,7 +395,17 @@ export const MessageTimeline = memo(function MessageTimeline({
         onScrollToAnchor={handleScrollToAnchor}
       />
       <ScrollToBottomButton scrollRef={scrollRef} contentSignal={count} onJump={resumeFollow} />
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4">
+      {/* The rail is absolutely positioned, so its band must be reserved here or
+          a narrow window slides the centered column under the dashes. Only when
+          the rail actually renders (anchors present) — otherwise the padding
+          would be lopsided for no reason. */}
+      <div
+        ref={scrollRef}
+        className={cx(
+          "min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4",
+          anchors.length > 0 && MESSAGE_ANCHOR_RAIL_BAND_CLASS,
+        )}
+      >
         <div data-sentinel className="h-px" />
         {session.nextBefore && (
           <button
@@ -436,6 +454,7 @@ export const MessageTimeline = memo(function MessageTimeline({
                     workspacePath={workspacePath}
                     turnLive={turnLive}
                     autoExpand={rowKey(rows[item.index]) === lastProcessKey}
+                    thinkingAutoCollapse={thinkingAutoCollapse}
                     seenTools={seenTools}
                   />
                 )}

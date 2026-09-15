@@ -18,6 +18,17 @@ export interface SessionMeta {
   messageCount: number;
   pinned: boolean;
   customTitle: string | null;
+  /** Model this app last sent for the session ("provider/model"), absent when
+   * it never sent one — see ipc.rememberSessionModel. */
+  model?: string | null;
+  /** Reasoning effort this app last sent for the session, absent when it never
+   *  recorded one — see ipc.rememberSessionEffort. */
+  effort?: string | null;
+  /** No local transcript (plugin session source, e.g. a WSL distro CLI):
+   *  history replay routes through load_remote_session_page instead. */
+  remote?: boolean;
+  /** Absolute path of the transcript inside the distro (remote rows only). */
+  remotePath?: string;
 }
 
 export type TodoStatus = "pending" | "active" | "complete" | "blocked" | "dropped";
@@ -70,6 +81,8 @@ export interface Message {
 export interface SessionPage {
   messages: Message[];
   nextBefore: number | null;
+  /** Delegation metadata before this page, restored from the session file. */
+  subagentHistory: Message[];
 }
 
 export interface Workspace {
@@ -80,6 +93,10 @@ export interface Workspace {
   sortOrder: number | null;
   /** Sidebar group id (工作区分组); null = ungrouped. */
   groupId: string | null;
+  /** Opaque per-workspace metadata written by host-capability callers
+   *  (e.g. { wsl: { hostId, distro } } from the wsl plugin); absent for
+   *  ordinary directories. */
+  meta?: Record<string, unknown>;
 }
 
 export interface EngineInfo {
@@ -116,6 +133,12 @@ export interface EngineCatalog {
    * lists (claude), which may be partial.
    */
   authoritative: boolean;
+  /**
+   * True for a remote workspace (WSL distro) catalog: the local provider
+   * channel and custom models are NOT runnable there, so the picker must
+   * not merge them — only `models` is selectable.
+   */
+  remote?: boolean;
 }
 
 export interface SendResult {
@@ -166,6 +189,10 @@ export interface CliConfig {
   pi: ProviderSection;
   omp: ProviderSection;
   dsh: ProviderSection;
+  agy: ProviderSection;
+  opencode: ProviderSection;
+  qoder: ProviderSection;
+  "qoder-cn": ProviderSection;
 }
 
 export interface AppSettings {
@@ -185,6 +212,10 @@ export interface AppSettings {
   piBin: string | null;
   ompBin: string | null;
   dshBin: string | null;
+  agyBin: string | null;
+  opencodeBin: string | null;
+  qoderBin: string | null;
+  qoderCnBin: string | null;
   defaultModels: Record<string, string>;
   /** Per-engine user-added custom model ids (设置 → CLI → 自定义模型). */
   customModels: Record<string, string[]>;
@@ -192,10 +223,30 @@ export interface AppSettings {
   ompOpenaiServiceTier?: "default" | "priority" | null;
   /** Codex Fast override; null preserves ~/.codex/config.toml. */
   codexServiceTier?: "default" | "priority" | null;
+  /** Codex config/session home (`CODEX_HOME`); null uses ~/.codex. */
+  codexHome?: string | null;
   /** Max sessions listed per workspace in the sidebar (default 5). */
   sidebarThreadLimit: number;
   /** Composer send gesture: "enter" (Enter sends) or "cmdEnter" (⌘/Ctrl+Enter sends). */
   composerSendShortcut: string;
+  /** Keyboard shortcuts (快捷键), format "cmd+ctrl+alt+shift+key" lowercase;
+   *  null = unbound. Defaults live in src/features/shortcuts/actions.ts;
+   *  interruptShortcut null = platform default (mac ctrl+c, win ctrl+shift+c). */
+  newSessionShortcut?: string | null;
+  interruptShortcut?: string | null;
+  commandPaletteShortcut?: string | null;
+  sidebarSearchShortcut?: string | null;
+  toggleTerminalShortcut?: string | null;
+  toggleSidebarShortcut?: string | null;
+  toggleSidePanelShortcut?: string | null;
+  saveFileShortcut?: string | null;
+  openSettingsShortcut?: string | null;
+  increaseUiScaleShortcut?: string | null;
+  decreaseUiScaleShortcut?: string | null;
+  resetUiScaleShortcut?: string | null;
+  /** Thinking-process row behavior once its thinking settles: true/absent =
+   *  auto-fold (default), false = stay expanded until the user folds it. */
+  thinkingAutoCollapse?: boolean | null;
   /** Terminal shell override; null/empty = auto-detect. */
   terminalShellPath: string | null;
   /** DSH host address (default "127.0.0.1"). */
@@ -209,6 +260,14 @@ export interface AppSettings {
   systemProxyEnabled: boolean;
   /** Proxy URL (http/https/socks5); null = unset. */
   systemProxyUrl: string | null;
+  /** Require a pairing key before the bridge serves a browser. */
+  webAuthEnabled?: boolean | null;
+  /** 8-character pairing key, minted when the switch is turned on. */
+  webAuthKey?: string | null;
+  /** Relay worker base URL (设置 → 远程访问 → 外网访问); null = unset. */
+  webRelayUrl?: string | null;
+  /** Shared relay key; also the phone URL's path segment. */
+  webRelayKey?: string | null;
 }
 
 export interface DirEntry {
@@ -223,6 +282,10 @@ export interface FileContent {
   text: string | null;
   dataUrl: string | null;
   truncated: boolean;
+  /** Served by a remote reader (e.g. WSL distro, features/files/remote-files):
+   *  content is complete but writes are unsupported, so the editor stays
+   *  read-only — distinct from `truncated`, which means partial content. */
+  readOnly?: boolean;
 }
 /** Result of `duplicate_item` / `paste_item`: the created destination. */
 export interface FileOpResult {
@@ -300,6 +363,37 @@ export interface AppMetrics {
   /** CPU usage since the previous poll, percent of one core. */
   cpuPercent: number;
 }
+/** The outbound relay: the phone reaches the app through a Worker. */
+export interface RelayInfo {
+  /** Address to open on the phone (key already in the path). */
+  url: string;
+  agentUrl: string;
+  connected: boolean;
+  error: string | null;
+}
+
+/** Outcome of a one-click relay deploy (mirrors Rust `RelayDeployResult`). */
+export interface RelayDeployResult {
+  /** `https://ccgui-relay.<subdomain>.workers.dev` — a suggestion, not a lock:
+   *  the URL field stays editable so a custom domain can replace it. */
+  url: string;
+  /** The relay key that was uploaded with the Worker. */
+  key: string;
+  accountId: string;
+  accountName: string;
+}
+
+/** A browser that reached the LAN bridge; approved devices may use it. */
+export interface WebDevice {
+  id: string;
+  userAgent: string;
+  createdAt: number;
+  lastSeenAt: number;
+  approvedAt: number | null;
+  /** Name the user gave it; empty falls back to the user-agent summary. */
+  name: string | null;
+}
+
 export interface WebAccessInfo {
   /** Full URL including the auth token — shareable as-is or as a QR code. */
   url: string;
@@ -395,6 +489,15 @@ export interface CliUpdatePlan {
 // Shared in-flight/cached app-settings promise: startup, the settings page
 // and the chat store all read the same settings, so fetch once.
 let settingsPromise: Promise<AppSettings> | null = null;
+
+function fetchAppSettings(): Promise<AppSettings> {
+  return (settingsPromise ??= invoke<AppSettings>("get_app_settings").catch((e) => {
+    // Allow retry after a failed fetch instead of caching the rejection.
+    settingsPromise = null;
+    throw e;
+  }));
+}
+
 // ---- pi-family (pi/omp) provider auth & custom providers (供应商认证) ----
 
 export type PiFamilyAuthState = "configured" | "none";
@@ -449,6 +552,27 @@ export interface PluginInfo {
   permissions: string[];
   installedAt: number;
   minAppVersion: string | null;
+}
+/** Marketplace listing row (plan §6.1): community-plugins.json merged with
+ *  plugins/<id>.json — the fields the market UI renders. */
+export interface MarketPlugin {
+  id: string;
+  repo: string;
+  name: string;
+  description: string;
+  author: string;
+  tier: "declarative" | "js";
+  version: string;
+  minAppVersion: string | null;
+  sdkVersion: string | null;
+  permissions: string[];
+}
+
+/** One installed marketplace plugin with a newer indexed version. */
+export interface PluginUpdate {
+  id: string;
+  currentVersion: string;
+  latestVersion: string;
 }
 
 export interface PluginWorkspaceMetadata {
@@ -544,16 +668,21 @@ export const ipc = {
   fetchProviderModels: (baseUrl: string, apiKey: string) =>
     invoke<ProviderModelList>("fetch_provider_models", { baseUrl, apiKey }),
   // settings
-  getAppSettings: () =>
-    (settingsPromise ??= invoke<AppSettings>("get_app_settings").catch((e) => {
-      // Allow retry after a failed fetch instead of caching the rejection.
-      settingsPromise = null;
-      throw e;
-    })),
+  getAppSettings: fetchAppSettings,
+  /** De-cached read: settings the backend changed on its own (the pairing key
+   *  rotates after a pairing and on a timer) never pass through a write here,
+   *  so the cached copy would keep showing the retired code. */
+  refreshAppSettings: () => {
+    settingsPromise = null;
+    return fetchAppSettings();
+  },
   updateAppSettings: async (settings: AppSettings) => {
     await invoke<void>("update_app_settings", { settings });
-    // Keep the cache in sync with the authoritative value just persisted.
-    settingsPromise = Promise.resolve(settings);
+    // Drop the cache instead of caching `settings`: the backend adjusts what
+    // it stores (it mints the pairing key, drops rejected bin paths), and a
+    // write must never seed the shared copy with something the backend did
+    // not answer — one bad value here blanks every settings page.
+    settingsPromise = null;
   },
   setWindowTheme: (dark: boolean) =>
     invoke<void>("set_window_theme", { dark }),
@@ -590,8 +719,10 @@ export const ipc = {
    * new paths (same order). Picked paths live outside the sandbox, so the
    * engines' path-based image pipeline cannot read them in place. */
   importAttachments: (paths: string[]) => invoke<string[]>("import_attachments", { paths }),
-  listEngineModels: (engine: string) =>
-    invoke<EngineCatalog>("list_engine_models", { engine }),
+  listEngineModels: (engine: string, workspace?: string) =>
+    withGrantRetry(() =>
+      invoke<EngineCatalog>("list_engine_models", { engine, workspace: workspace ?? null }),
+    ),
   // history
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
   loadSessionPage: (
@@ -600,15 +731,49 @@ export const ipc = {
     limit?: number,
     beforeSeq?: number | null,
   ) => invoke<SessionPage>("load_session_page", { engine, sessionId, limit, beforeSeq }),
+  /** Remote (WSL distro) transcript: host fetches the jsonl over the ssh
+   *  channel, caches it locally, and parses with the same engine reader. */
+  loadRemoteSessionPage: (
+    workspacePath: string,
+    engine: string,
+    sessionId: string,
+    remotePath: string,
+    limit?: number,
+    beforeSeq?: number | null,
+  ) =>
+    invoke<SessionPage>("load_remote_session_page", {
+      workspacePath,
+      engine,
+      sessionId,
+      remotePath,
+      limit,
+      beforeSeq,
+    }),
   deleteSession: (engine: string, sessionId: string) =>
     invoke<void>("delete_session", { engine, sessionId }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
     invoke<void>("rename_session", { engine, sessionId, title }),
+  /** Remember the model id this session ran ("provider/model", as the picker
+   * spells it) — the engine's own transcript keeps only the bare name, so
+   * this is what survives a restart or another client. */
+  rememberSessionModel: (engine: string, sessionId: string, model: string) =>
+    invoke<void>("remember_session_model", { engine, sessionId, model }),
+  /** Remember the reasoning level a session ran, so reopening it — here, in
+   *  another window, or on the phone — keeps that level. */
+  rememberSessionEffort: (engine: string, sessionId: string, effort: string) =>
+    invoke<void>("remember_session_effort", { engine, sessionId, effort }),
   rescanSessions: () => invoke<void>("rescan_sessions"),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
-  addWorkspace: (path: string) => invoke<Workspace>("add_workspace", { path }),
+  addWorkspace: (path: string, meta?: Record<string, unknown>) =>
+    invoke<Workspace>("add_workspace", { path, meta: meta ?? null }),
+  /** Plugin-scoped workspace registration: the Rust side re-checks the
+   *  plugin's manifest grants (host:workspace; meta.wsl additionally needs
+   *  host:workspace:remote) — the server-side counterpart of the JS gate in
+   *  plugins/runtime/context.ts. pluginId is injected by the host bridge. */
+  pluginAddWorkspace: (pluginId: string, path: string, meta?: Record<string, unknown>) =>
+    invoke<Workspace>("plugin_add_workspace", { pluginId, path, meta: meta ?? null }),
   reorderWorkspaces: (ids: string[]) => invoke<void>("reorder_workspaces", { ids }),
   removeWorkspace: (id: string) => invoke<void>("remove_workspace", { id }),
   setWorkspaceGroup: (id: string, groupId: string | null) =>
@@ -757,7 +922,38 @@ export const ipc = {
     }),
   pluginDocumentStorageList: (pluginId: string, prefix?: string) =>
     invoke<string[]>("plugin_document_storage_list", { pluginId, prefix: prefix ?? null }),
+  // plugin marketplace (Phase 3, plan §6) — install is desktop-only on the
+  // web bridge; fetch/checkUpdates ride the read-only whitelist.
+  pluginFetchIndex: (force = false) =>
+    invoke<MarketPlugin[]>("plugin_fetch_index", { force }),
+  pluginInstallFromMarketplace: (id: string) =>
+    invoke<PluginInfo>("plugin_install_from_marketplace", { id }),
+  pluginCheckUpdates: () => invoke<PluginUpdate[]>("plugin_check_updates"),
   // web access (start/stop are desktop-only; the bridge answers status too)
+  webDevices: () => invoke<WebDevice[]>("web_devices"),
+  webDeviceApprove: (id: string) => invoke<boolean>("web_device_approve", { id }),
+  webDeviceRevoke: (id: string) => invoke<boolean>("web_device_revoke", { id }),
+  webDeviceRename: (id: string, name: string) =>
+    invoke<boolean>("web_device_rename", { id, name }),
+  webRelayStatus: () => invoke<RelayInfo | null>("web_relay_status"),
+  webRelayStart: (url: string, key: string) => invoke<RelayInfo>("web_relay_start", { url, key }),
+  webRelayStop: () => invoke<void>("web_relay_stop"),
+  /** Is a browser driving this machine through the relay right now? */
+  remoteControlActive: () => invoke<boolean>("remote_control_active"),
+  /** Replace the pairing key now instead of waiting for the automatic
+   *  rotation. Desktop-only — a phone rotating it would lock others out. */
+  rotateWebPairKey: () => invoke<string>("rotate_web_pair_key"),
+  /** Write the deploy pack (source + wrangler project + how-to) to `path` as a
+   *  STORE-only zip; resolves with the relay key baked into it. */
+  relayDeployPack: (path: string, key: string | null) =>
+    invoke<string>("relay_deploy_pack", { path, key }),
+  /** Deploy the relay Worker into the token's account: creates the Durable
+   *  Object class, its binding and a freshly minted key in one upload.
+   *  `accountId` is only needed for account-owned tokens (`cfat_…`), which
+   *  Cloudflare does not let list their own accounts. The key is never taken
+   *  from the caller — it is the only guard on the agent endpoint. */
+  relayDeploy: (token: string, accountId: string | null) =>
+    invoke<RelayDeployResult>("relay_deploy", { token, accountId }),
   webAccessStart: () => invoke<WebAccessInfo>("web_access_start"),
   webAccessStop: () => invoke<void>("web_access_stop"),
   webAccessStatus: () => invoke<WebAccessInfo | null>("web_access_status"),

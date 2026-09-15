@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Key, KeyboardEvent } from "react";
+
 import { Select, SelectItem } from "@/components/base/select/select";
 import { Input } from "@/components/base/input/input";
+import { Switch } from "@/components/base/switch/switch";
 import {
   SettingsCard,
   SettingsRow,
@@ -107,12 +109,19 @@ export function GeneralSection() {
       (e.target as HTMLElement).blur();
     }
   };
+
   const onSendShortcutChange = (key: Key | null) => {
     if (!settings || key == null) return;
     const composerSendShortcut = String(key);
     setSettings({ ...settings, composerSendShortcut });
     useChatStore.getState().setSendShortcut(composerSendShortcut);
     void save({ composerSendShortcut });
+  };
+  const onThinkingAutoCollapseChange = (autoCollapse: boolean) => {
+    if (!settings) return;
+    setSettings({ ...settings, thinkingAutoCollapse: autoCollapse });
+    useChatStore.getState().setThinkingAutoCollapse(autoCollapse);
+    void save({ thinkingAutoCollapse: autoCollapse });
   };
   return (
     <div className="flex w-full flex-col gap-6">
@@ -190,6 +199,18 @@ export function GeneralSection() {
                     : "settings.sendShortcutCmdEnterCtrl")}
                 </SelectItem>
               </Select>
+            </SettingsRow>
+
+            <SettingsRow
+              label={t("settings.thinkingAutoCollapse")}
+              description={t("settings.thinkingAutoCollapseDesc")}
+            >
+              <Switch
+                size="sm"
+                aria-label={t("settings.thinkingAutoCollapse")}
+                isSelected={settings.thinkingAutoCollapse ?? true}
+                onChange={onThinkingAutoCollapseChange}
+              />
             </SettingsRow>
             <PromptHistoryToggleRow />
           </SettingsCard>

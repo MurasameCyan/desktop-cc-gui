@@ -27,6 +27,7 @@ Thumbs.db
 .agents/
 .omp/
 .omx/
+.omo/
 .playwright-mcp/
 .vscode/
 skills-lock.json

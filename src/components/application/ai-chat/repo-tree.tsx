@@ -29,14 +29,20 @@ function ThreadItem({
   tabIndex,
   onSelect,
   onAction,
+  onContextMenu,
 }: AiChatThread & {
   tabIndex?: number;
   onSelect?: (id: string) => void;
   onAction?: (id: string, action: ThreadAction) => void;
+  /** Right-click anywhere on the row: opens the thread context menu. */
+  onContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
 }) {
   const { t } = useTranslation();
   return (
     <div
+      onContextMenu={
+        id && onContextMenu ? (event) => onContextMenu(event, id) : undefined
+      }
       className={cx(
         "group flex w-full cursor-pointer items-center gap-2.5 rounded-2lg py-[5px] pr-2 pl-9 transition-colors duration-150 ease",
         isSelected ? "bg-background-secondary-hover" : "hover:bg-background-secondary-hover",
@@ -288,6 +294,11 @@ function RepoHeaderRow({
         >
           {repo.label}
         </span>
+        {repo.labelSuffix && (
+          <span className="ws-label-badge ml-1.5 shrink-0">
+            {repo.labelSuffix}
+          </span>
+        )}
       </button>
       {hasHoverActions && (
         <span className="ml-auto hidden shrink-0 items-center gap-1.5 group-hover:inline-flex">
@@ -343,6 +354,7 @@ function RepoThreadList({
   activeThreadId,
   onThreadSelect,
   onThreadAction,
+  onThreadContextMenu,
   onShowMore,
   onShowFewer,
 }: {
@@ -353,6 +365,7 @@ function RepoThreadList({
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
+  onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
   onShowMore: () => void;
   onShowFewer: () => void;
 }) {
@@ -377,6 +390,7 @@ function RepoThreadList({
               isSelected={thread.id ? thread.id === activeThreadId : thread.isSelected}
               onSelect={onThreadSelect}
               onAction={onThreadAction}
+              onContextMenu={onThreadContextMenu}
               tabIndex={expanded ? undefined : -1}
             />
           ))}
@@ -417,6 +431,7 @@ export function RepoItem({
   activeThreadId,
   onThreadSelect,
   onThreadAction,
+  onThreadContextMenu,
   onRemove,
   onNewSession,
   onContextMenu,
@@ -432,6 +447,8 @@ export function RepoItem({
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
+  /** Right-click on a thread row: opens the thread context menu. */
+  onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
   onRemove?: (id: string) => void;
   /** Per-row + button: start a new chat in this workspace. */
   onNewSession?: (id: string) => void;
@@ -480,6 +497,7 @@ export function RepoItem({
         activeThreadId={activeThreadId}
         onThreadSelect={onThreadSelect}
         onThreadAction={onThreadAction}
+        onThreadContextMenu={onThreadContextMenu}
         onShowMore={() => setPage((value) => value + 1)}
         onShowFewer={() => setPage(0)}
       />

@@ -12,6 +12,7 @@ import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { cx } from "@/utils/cx";
 import { compareByOrder, pluginIdFromRegistryKey, statusBarRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
+import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 
 const ZOOM_KEY = "ccgui-next.zoom:v1";
 const ZOOM_MIN = 50;
@@ -58,6 +59,20 @@ export function AppStatusBar() {
     setZoomPct(clamped);
     applyZoom(clamped);
   }, []);
+  // Zoom keys live in the shortcut runtime (defaults ⌘= / ⌘- / ⌘0,
+  // configurable in Settings → Shortcuts). Web mode skips registration:
+  // browsers own ⌘± natively. readZoomPct() keeps handlers stale-free.
+  useEffect(() => {
+    if (isWeb) return;
+    const unIn = registerShortcutHandler("zoomIn", () => changeZoom(readZoomPct() + ZOOM_STEP));
+    const unOut = registerShortcutHandler("zoomOut", () => changeZoom(readZoomPct() - ZOOM_STEP));
+    const unReset = registerShortcutHandler("zoomReset", () => changeZoom(100));
+    return () => {
+      unIn();
+      unOut();
+      unReset();
+    };
+  }, [changeZoom]);
 
   useEffect(() => {
     void getAppVersion().then((v) => {

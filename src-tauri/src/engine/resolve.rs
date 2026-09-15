@@ -6,8 +6,9 @@
 //!
 //! - A GUI process inherits the registry PATH snapshot, which often predates
 //!   the user's Node/npm install (or misses nvm/fnm/scoop shims entirely), so
-//!   `which` alone can't find npm-global CLIs. We probe a list of well-known
-//!   install dirs plus `npm config get prefix`.
+//!   `which` alone can't find npm-global CLIs. We probe the registry's live
+//!   User/Machine PATH, a list of well-known install dirs, plus
+//!   `npm config get prefix`.
 //! - npm global bins ship three files: an extensionless POSIX shim, a `.cmd`
 //!   wrapper, and a `.ps1` wrapper. CreateProcess matches the exact filename
 //!   before PATHEXT and cannot run batch files, so `Command::new("claude")`
@@ -137,6 +138,7 @@ fn build_windows_extra_search_paths(
         // Fallback: npm global install path via USERPROFILE.
         paths.push(user_profile.join("AppData\\Roaming\\npm"));
         paths.push(user_profile.join(".local\\bin"));
+        paths.push(user_profile.join(".codex-cli\\bin"));
         paths.push(user_profile.join(".local\\share\\mise\\shims"));
         // Hermes ships dsh as a Node-global bin, same layout as ~/.hermes/node/bin.
         paths.push(user_profile.join(".hermes\\node"));
@@ -144,6 +146,24 @@ fn build_windows_extra_search_paths(
         paths.push(user_profile.join(".omp\\bin"));
         paths.push(user_profile.join(".cargo\\bin"));
         paths.push(user_profile.join(".bun\\bin"));
+        // Legacy codemoss builds bundled the Claude Agent SDK under the app
+        // home; users whose only claude is that copy have nothing on PATH.
+        // Scan for the arch-specific package dir instead of hardcoding x64.
+        let codemoss_sdk_root = user_profile
+            .join(".codemoss\\dependencies\\claude-sdk\\node_modules\\@anthropic-ai");
+        if let Ok(entries) = std::fs::read_dir(&codemoss_sdk_root) {
+            for entry in entries.flatten() {
+                let candidate = entry.path();
+                if candidate.is_dir()
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("claude-agent-sdk-win32-")
+                {
+                    paths.push(candidate);
+                }
+            }
+        }
         // Scoop shims + the active Node prefix (npm -g often lands here).
         paths.push(user_profile.join("scoop\\shims"));
         paths.push(user_profile.join("scoop\\apps\\nodejs\\current"));
@@ -176,6 +196,12 @@ fn build_windows_extra_search_paths(
         }
     }
     if let Some(local_app_data) = local_app_data {
+        // Official OMP CLI Windows installer layout: %LOCALAPPDATA%\omp\omp.exe.
+        paths.push(local_app_data.join("omp"));
+        // Hermes prefixes also live under %LOCALAPPDATA% (per-shell layout);
+        // dsh ships as a Node-global bin there.
+        paths.push(local_app_data.join("hermes\\node"));
+        paths.push(local_app_data.join("hermes\\node\\bin"));
         paths.push(local_app_data.join("Volta\\bin"));
         paths.push(local_app_data.join("pnpm"));
         paths.push(local_app_data.join("mise\\shims"));
@@ -192,6 +218,10 @@ fn build_windows_extra_search_paths(
         let programs_root = local_app_data.join("Programs");
         if programs_root.is_dir() {
             paths.push(programs_root.join("nodejs"));
+            // Official OpenAI Codex Windows installer layout:
+            // %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe. The installer
+            // only appends to User PATH, which a stale-PATH GUI process misses.
+            paths.push(programs_root.join("OpenAI\\Codex\\bin"));
             if let Ok(entries) = std::fs::read_dir(&programs_root) {
                 for entry in entries.flatten() {
                     let candidate = entry.path();
@@ -232,11 +262,94 @@ fn build_unix_extra_search_paths() -> Vec<PathBuf> {
     ];
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".local/bin"));
+        paths.push(home.join(".codex-cli/bin"));
         paths.push(home.join(".local/share/mise/shims"));
         paths.push(home.join(".cargo/bin"));
         paths.push(home.join(".bun/bin"));
         paths.push(home.join(".volta/bin"));
         paths.push(home.join(".omp/bin"));
+        // nvm: globally installed CLIs land in the active version's bin.
+        let nvm_root = home.join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(nvm_root) {
+            for entry in entries.flatten() {
+                let bin_path = entry.path().join("bin");
+                if bin_path.is_dir() {
+                    paths.push(bin_path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Expand `%VAR%` references from the process environment (registry PATH
+/// values are REG_EXPAND_SZ and winreg returns them raw). Unknown vars stay
+/// literal so a partially resolvable value still yields usable entries.
+#[cfg(any(windows, test))]
+fn expand_windows_env_vars(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) if end > 0 => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(resolved) => out.push_str(&resolved),
+                    Err(_) => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Split a registry PATH value into individual dirs (empty segments out).
+#[cfg(any(windows, test))]
+fn parse_registry_path_value(value: &str) -> Vec<PathBuf> {
+    expand_windows_env_vars(value)
+        .split(';')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Live PATH from the registry: `HKCU\Environment` (User) and the system
+/// Environment key (Machine). A GUI process inherits the PATH snapshot of
+/// its launcher, which predates any CLI installed while the app is running;
+/// the registry always holds what a freshly opened terminal would see.
+#[cfg(windows)]
+fn registry_environment_paths() -> Vec<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for (root, subkey) in [
+        (HKEY_CURRENT_USER, "Environment"),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ] {
+        if let Ok(key) = RegKey::predef(root).open_subkey(subkey) {
+            if let Ok(value) = key.get_value::<String, _>("Path") {
+                for path in parse_registry_path_value(&value) {
+                    push_unique_path(&mut paths, path);
+                }
+            }
+        }
     }
     paths
 }
@@ -246,6 +359,9 @@ fn get_extra_search_paths() -> Vec<PathBuf> {
 
     #[cfg(windows)]
     {
+        // Live User/Machine PATH first: it reflects installs made while the
+        // app was running, which the inherited process PATH snapshot misses.
+        paths.extend(registry_environment_paths());
         let appdata = std::env::var("APPDATA").ok();
         let user_profile = std::env::var("USERPROFILE").ok();
         let local_app_data = std::env::var("LOCALAPPDATA").ok();
@@ -262,6 +378,12 @@ fn get_extra_search_paths() -> Vec<PathBuf> {
     #[cfg(not(windows))]
     {
         paths.extend(build_unix_extra_search_paths());
+    }
+
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        if !codex_home.trim().is_empty() {
+            push_unique_path(&mut paths, PathBuf::from(codex_home.trim()).join("bin"));
+        }
     }
 
     for prefix_key in ["NPM_CONFIG_PREFIX", "npm_config_prefix"] {
@@ -582,6 +704,78 @@ mod tests {
         assert_eq!(strip_verbatim(unc.clone()), unc);
         let plain = PathBuf::from(r"C:\npm\claude.cmd");
         assert_eq!(strip_verbatim(plain.clone()), plain);
+    }
+
+    #[test]
+    fn windows_extra_search_paths_cover_openai_codex_installer() {
+        // The Programs dir must exist for the installer path to be pushed;
+        // emulate %LOCALAPPDATA% with a temp dir.
+        let temp = std::env::temp_dir().join(format!("ccgui-openai-codex-{}", std::process::id()));
+        let programs = temp.join("Programs");
+        std::fs::create_dir_all(&programs).expect("create Programs dir");
+
+        let paths = build_windows_extra_search_paths(None, None, Some(&temp), None, None);
+        let expected = programs.join("OpenAI\\Codex\\bin");
+        assert!(
+            paths.iter().any(|p| p == &expected),
+            "missing {} in {paths:?}",
+            expected.display()
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn windows_extra_search_paths_cover_codemoss_bundled_claude() {
+        let temp = std::env::temp_dir().join(format!("ccgui-codemoss-sdk-{}", std::process::id()));
+        // Build the expectation the same way the resolver does: the
+        // read_dir entry joins with a platform separator, so the final
+        // segment is its own component even though the parents carry
+        // Windows-style literals.
+        let scope_dir =
+            temp.join(".codemoss\\dependencies\\claude-sdk\\node_modules\\@anthropic-ai");
+        let sdk_dir = scope_dir.join("claude-agent-sdk-win32-x64");
+        std::fs::create_dir_all(&sdk_dir).expect("create sdk dir");
+        // An unrelated package under the same scope must not be picked up.
+        std::fs::create_dir_all(scope_dir.join("sdk")).expect("create unrelated dir");
+
+        let paths = build_windows_extra_search_paths(None, Some(&temp), None, None, None);
+        assert!(
+            paths.iter().any(|p| p == &sdk_dir),
+            "missing {} in {paths:?}",
+            sdk_dir.display()
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn expand_windows_env_vars_resolves_known_and_keeps_unknown() {
+        std::env::set_var("CCGUI_TEST_EXPAND_ROOT", r"C:\Users\demo");
+        let expanded = expand_windows_env_vars(
+            r"%CCGUI_TEST_EXPAND_ROOT%\bin;C:\tools;%CCGUI_NO_SUCH_VAR%\x;100%",
+        );
+        assert_eq!(
+            expanded,
+            r"C:\Users\demo\bin;C:\tools;%CCGUI_NO_SUCH_VAR%\x;100%"
+        );
+        std::env::remove_var("CCGUI_TEST_EXPAND_ROOT");
+    }
+
+    #[test]
+    fn parse_registry_path_value_splits_and_expands() {
+        std::env::set_var("CCGUI_TEST_PATH_ROOT", r"C:\Users\demo");
+        let paths = parse_registry_path_value(
+            r"C:\Windows;;%CCGUI_TEST_PATH_ROOT%\AppData\Local\Programs\OpenAI\Codex\bin; ",
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Windows"),
+                PathBuf::from(r"C:\Users\demo\AppData\Local\Programs\OpenAI\Codex\bin"),
+            ]
+        );
+        std::env::remove_var("CCGUI_TEST_PATH_ROOT");
     }
 
     #[test]

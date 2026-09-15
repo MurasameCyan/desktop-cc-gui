@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { cx } from "@/utils/cx";
 import { useGitStore } from "@/features/git/store";
@@ -10,6 +10,7 @@ import {
   deriveTodoList,
   type AgentTaskStep,
 } from "./agent-task-steps";
+import { deriveEditLineStats, type EditLineStat } from "./edit-line-stats";
 
 const EMPTY_MESSAGES: Message[] = [];
 
@@ -26,8 +27,9 @@ const EMPTY_MESSAGES: Message[] = [];
  * - Pills never auto-hide after a turn completes — counts freeze until a
  *   newer turn contributes fresh data. A panel auto-collapses when its
  *   section's data disappears.
- * - The 已编辑 pill carries git line stats (+/−) aggregated over the files
- *   this session edited, sourced from the workspace git status.
+ * - The 已编辑 pill carries line stats (+/−) aggregated over the files this
+ *   session edited, counted from the session's own edit tool payloads with
+ *   workspace git status as a fallback.
  */
 
 const CHROME_OPEN_KEY = "ccgui.chat.runStatusChromeOpen";
@@ -56,10 +58,9 @@ function baseName(path: string): string {
   return idx < 0 ? trimmed : trimmed.slice(idx + 1);
 }
 
-interface FileStat {
-  additions: number;
-  deletions: number;
-}
+/** Same shape as the session-derived stat; the two sources are interchangeable
+ * at the render layer. */
+type FileStat = EditLineStat;
 
 function normalizeSlashes(path: string): string {
   return path.replace(/\\/g, "/");
@@ -74,19 +75,25 @@ function toWorkspaceRel(path: string, workspacePath: string): string {
   return norm;
 }
 
-/** Match session-edited files against workspace git status and sum line
- * stats. One file may appear in several status lists (staged + unstaged) —
- * take the per-side max instead of double-counting. `total` is null when
- * nothing matched (non-repo / status not loaded yet) so stats stay hidden. */
+/** Line stats for the session-edited files. The session's own edit payloads
+ * are authoritative: git status misses gitignored targets (`.omp/**`),
+ * non-repo workspaces and files already committed mid-session, which is why
+ * the pill used to show no numbers at all. Git status is the fallback for
+ * files the transcript recorded without usable args. One file may appear in
+ * several git status lists (staged + unstaged) — take the per-side max
+ * instead of double-counting. `total` is null only when no file resolved a
+ * stat from either source, so stats stay hidden rather than showing zeros. */
 function collectFileStats(
   files: string[],
+  sessionStats: Map<string, FileStat>,
   status: GitStatus | undefined,
   workspacePath: string,
 ): { perFile: Map<string, FileStat>; total: FileStat | null } {
   const perFile = new Map<string, FileStat>();
-  if (!status) return { perFile, total: null };
   const byRel = new Map<string, FileStat>();
-  for (const entry of [...status.staged, ...status.unstaged, ...status.untracked]) {
+  for (const entry of status
+    ? [...status.staged, ...status.unstaged, ...status.untracked]
+    : []) {
     const rel = normalizeSlashes(entry.path);
     const prev = byRel.get(rel);
     byRel.set(rel, {
@@ -97,7 +104,7 @@ function collectFileStats(
   const total: FileStat = { additions: 0, deletions: 0 };
   let matched = false;
   for (const file of files) {
-    const stat = byRel.get(toWorkspaceRel(file, workspacePath));
+    const stat = sessionStats.get(file) ?? byRel.get(toWorkspaceRel(file, workspacePath));
     if (!stat) continue;
     matched = true;
     perFile.set(file, stat);
@@ -292,50 +299,137 @@ function TodoRows({ items }: { items: TodoItem[] }) {
   );
 }
 
+function BackIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.5 4 6 8l3.5 4" />
+    </svg>
+  );
+}
+
+/** One agent's full assignment, overlaid on the list inside the same panel:
+ *  task briefs run long, and leaving the strip to read one loses the panel. */
+function SubagentDetail({ step, onBack }: { step: AgentTaskStep; onBack: () => void }) {
+  const { t } = useTranslation();
+  const complete = step.state === "complete";
+  // The row that opened this overlay unmounted with the list; move focus
+  // into the overlay instead of dropping it on document.body.
+  const backRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => backRef.current?.focus(), []);
+  return (
+    <div data-testid="subagent-detail-overlay" className="flex flex-col gap-1 p-1">
+      <div className="flex items-center gap-1.5 px-1">
+        <button
+          ref={backRef}
+          type="button"
+          onClick={onBack}
+          aria-label={t("chat.agentDetailBack")}
+          title={t("chat.agentDetailBack")}
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-foreground-icon-tertiary hover:bg-background-tertiary-hover hover:text-foreground-icon-primary"
+        >
+          <BackIcon />
+        </button>
+        <div className="flex min-w-0 items-center gap-1.5">
+          {step.subagentType && (
+            <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
+              {step.subagentType}
+            </span>
+          )}
+          <span className="truncate text-caption-1-medium text-text-primary">{step.label}</span>
+        </div>
+        <span
+          className={cx(
+            "ml-auto shrink-0 text-caption-2-medium",
+            complete ? "text-[var(--color-status-unseen)]" : "font-medium text-blue-500",
+          )}
+        >
+          {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
+        </span>
+      </div>
+      <pre className="max-h-52 overflow-y-auto rounded bg-background-secondary-default px-2 py-1.5 text-caption-1-medium break-words whitespace-pre-wrap text-text-secondary">
+        {step.detail ?? step.label}
+      </pre>
+    </div>
+  );
+}
+
 function SubagentRows({ steps }: { steps: AgentTaskStep[] }) {
   const { t } = useTranslation();
+  // Open detail lives here, not in the strip: closing the panel unmounts this
+  // component, so reopening always starts on the list.
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  // Hand focus back to the row that opened the detail once the list returns.
+  const restoreKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (openKey !== null) {
+      restoreKey.current = openKey;
+      return;
+    }
+    const key = restoreKey.current;
+    if (key === null) return;
+    restoreKey.current = null;
+    // No CSS.escape in every webview/jsdom: match by dataset instead.
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-agent-step-key]")) {
+      if (button.dataset.agentStepKey === key) {
+        button.focus();
+        break;
+      }
+    }
+  }, [openKey]);
+  const open = openKey ? steps.find((step) => step.key === openKey) : undefined;
+  if (open) return (
+    <div data-testid="run-status-subagents">
+      <SubagentDetail step={open} onBack={() => setOpenKey(null)} />
+    </div>
+  );
   return (
-    <ul className="flex flex-col gap-0.5 p-1" data-testid="run-status-subagents">
-      {steps.map((step) => {
-        const complete = step.state === "complete";
-        return (
-          <li
-            key={step.key}
-            className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-background-tertiary-default/50"
-          >
-            <div className="flex items-center justify-center">
-              <BreathingDot active={!complete} />
-            </div>
-            <div className="flex min-w-0 items-center gap-1.5">
-              {step.subagentType && (
-                <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
-                  {step.subagentType}
-                </span>
-              )}
-              <span
-                className={cx(
-                  "truncate text-caption-1-medium",
-                  complete ? "text-text-secondary" : "text-text-primary",
-                )}
-                title={step.detail ? `${step.label}\n${step.detail}` : step.label}
+    <div data-testid="run-status-subagents">
+      <ul className="flex flex-col gap-0.5 p-1">
+        {steps.map((step) => {
+          const complete = step.state === "complete";
+          return (
+            <li key={step.key}>
+              <button
+                type="button"
+                data-agent-step-key={step.key}
+                onClick={() => setOpenKey(step.key)}
+                title={step.label}
+                className="grid w-full cursor-pointer grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-background-tertiary-default/50"
               >
-                {step.label}
-              </span>
-            </div>
-            <span
-              className={cx(
-                "text-caption-2-medium shrink-0 flex items-center gap-1",
-                complete
-                  ? "text-[var(--color-status-unseen)]"
-                  : "text-blue-500 font-medium",
-              )}
-            >
-              {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
+                <div className="flex items-center justify-center">
+                  <BreathingDot active={!complete} />
+                </div>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  {step.subagentType && (
+                    <span className="shrink-0 rounded border border-border-button-default bg-background-tertiary-default px-1.5 py-0.5 text-[11px] font-medium text-text-secondary">
+                      {step.subagentType}
+                    </span>
+                  )}
+                  <span
+                    className={cx(
+                      "truncate text-caption-1-medium",
+                      complete ? "text-text-secondary" : "text-text-primary",
+                    )}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+                <span
+                  className={cx(
+                    "text-caption-2-medium flex shrink-0 items-center gap-1",
+                    complete
+                      ? "text-[var(--color-status-unseen)]"
+                      : "font-medium text-blue-500",
+                  )}
+                >
+                  {complete ? t("chat.agentStatusDone") : t("chat.agentStatusRunning")}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -509,17 +603,26 @@ export const RunStatusStrip = memo(function RunStatusStrip({
   const messages = useChatStore((s) =>
     sessionKey ? (s.bySession[sessionKey]?.messages ?? EMPTY_MESSAGES) : EMPTY_MESSAGES,
   );
+  const subagentHistory = useChatStore((s) =>
+    sessionKey ? (s.bySession[sessionKey]?.subagentHistory ?? EMPTY_MESSAGES) : EMPTY_MESSAGES,
+  );
   const streaming = useChatStore((s) =>
     sessionKey ? (s.bySession[sessionKey]?.streaming ?? false) : false,
   );
   const steps = useMemo(
-    () => deriveAgentTaskSteps(messages, streaming, engine),
-    [messages, streaming, engine],
+    () => deriveAgentTaskSteps(
+      subagentHistory.length ? [...subagentHistory, ...messages] : messages,
+      streaming,
+      engine,
+    ),
+    [subagentHistory, messages, streaming, engine],
   );
   const files = useMemo(() => deriveEditedFiles(messages), [messages]);
   const todos = useMemo(() => deriveTodoList(messages), [messages]);
+  const sessionStats = useMemo(() => deriveEditLineStats(messages), [messages]);
 
-  // git line stats for the 已编辑 pill; force-refresh when the turn settles.
+  // git line stats are the fallback for files the session recorded without an
+  // edit payload; force-refresh when the turn settles.
   const gitStatus = useGitStore((s) =>
     workspacePath ? s.statusByWorkspace[workspacePath] : undefined,
   );
@@ -529,8 +632,8 @@ export const RunStatusStrip = memo(function RunStatusStrip({
     void refreshGit(workspacePath, !streaming).catch(() => undefined);
   }, [workspacePath, streaming, files.length, refreshGit]);
   const { perFile, total } = useMemo(
-    () => collectFileStats(files, gitStatus, workspacePath),
-    [files, gitStatus, workspacePath],
+    () => collectFileStats(files, sessionStats, gitStatus, workspacePath),
+    [files, sessionStats, gitStatus, workspacePath],
   );
 
   const [chromeOpen, setChromeOpen] = useState(readChromeOpen);

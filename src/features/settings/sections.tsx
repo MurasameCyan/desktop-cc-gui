@@ -1,4 +1,5 @@
 import Settings from "lucide-react/dist/esm/icons/settings";
+import Keyboard from "lucide-react/dist/esm/icons/keyboard";
 import Globe from "lucide-react/dist/esm/icons/globe";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
 import Info from "lucide-react/dist/esm/icons/info";
@@ -17,6 +18,7 @@ import { CliConfigSection } from "./CliConfigSection";
 import { AboutSection } from "./AboutSection";
 import { WebAccessSection } from "./WebAccessSection";
 import { UsageSection } from "./UsageSection";
+import { ShortcutsSection } from "@/features/shortcuts/ShortcutsSection";
 import { ENGINE_IDS, type EngineId } from "./providers";
 
 /**
@@ -66,6 +68,15 @@ settingsRegistry.register({
   group: "settings",
   order: 2,
   component: WorkspacesSection,
+});
+settingsRegistry.register({
+  id: "shortcuts",
+  key: "shortcuts",
+  label: () => i18n.t("shortcuts.sectionTitle"),
+  icon: Keyboard,
+  group: "settings",
+  order: 3,
+  component: ShortcutsSection,
 });
 settingsRegistry.register({
   id: "webAccess",

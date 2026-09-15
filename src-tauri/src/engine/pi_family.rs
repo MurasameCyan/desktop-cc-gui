@@ -1,6 +1,5 @@
 use super::{
-    command_for_binary, images, push_session_id, safe_prompt_arg, BuiltCommand, Engine,
-    EngineEvent, SendRequest,
+    command_for_binary, images, push_session_id, BuiltCommand, Engine, EngineEvent, SendRequest,
 };
 use serde_json::Value;
 
@@ -36,8 +35,22 @@ impl Engine for PiFamilyEngine {
         // content is provider-dependent, but the transport is supported.
         true
     }
-    // Print mode runs tools without prompting and exposes no permission
-    // flags: only "auto" is honest (the trait default).
+    /// omp exposes real approval switches (`--approval-mode`,
+    /// `--auto-approve`) plus a headless plan flow (`--plan-yolo`); pi 0.85
+    /// has none of them, so it keeps the trait default.
+    ///
+    /// `always-ask`/`write` are deliberately absent: they leave write/exec
+    /// tools on a `prompt` policy, and print mode has no UI to answer with —
+    /// the CLI aborts the turn with "requires approval but no interactive UI
+    /// available" the moment a gated tool runs. Only the non-prompting modes
+    /// can be honored headlessly.
+    fn supported_permissions(&self) -> &'static [&'static str] {
+        if self.id == "omp" {
+            &["auto", "plan", "bypass"]
+        } else {
+            &["auto"]
+        }
+    }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = command_for_binary(bin);
@@ -68,6 +81,28 @@ impl Engine for PiFamilyEngine {
             cmd.arg("--thinking");
             cmd.arg(effort);
         }
+        match self.resolve_permission(req.permission.as_deref()) {
+            // Skips every approval tier for this run, and also sets the
+            // session's explicit auto-approve flag (not just the setting), so
+            // the ACP permission gate stands down too.
+            "bypass" => {
+                cmd.arg("--auto-approve");
+            }
+            // omp's own documented headless plan flow: start read-only,
+            // auto-approve the plan on the model's first resolve call, then
+            // implement. `--plan-yolo-into` otherwise drops to the cheap
+            // "smol" role — pin it to the picked model so the implementation
+            // phase runs on the CLI the user actually selected.
+            "plan" => {
+                cmd.arg("--plan-yolo");
+                if let Some(model) = req.model.as_deref() {
+                    cmd.arg("--plan-yolo-into");
+                    cmd.arg(model);
+                }
+            }
+            // "auto": leave the CLI's own tools.approvalMode alone.
+            _ => {}
+        }
         if let Some(session_id) = req.session_id.as_deref() {
             if !session_id.starts_with('-') {
                 // pi supports `--session-id <id>`; omp dropped it, resume goes
@@ -89,10 +124,15 @@ impl Engine for PiFamilyEngine {
                 cmd.arg(format!("@{}", absolute.display()));
             }
         }
-        cmd.arg(safe_prompt_arg(&req.prompt));
+        // Prompt travels through stdin, never argv: on Windows the pi shim is a
+        // `.cmd` batch file spawned via `cmd /c`, and cmd.exe cuts a multiline
+        // argument at the first newline - every line after the first was
+        // dropped. pi joins piped stdin into the initial message
+        // (`readPipedStdin` -> `buildInitialMessage`), so the prompt rides
+        // stdin verbatim, matching codex; `@<abs path>` image refs stay in argv.
         Ok(BuiltCommand {
             command: cmd,
-            stdin_payload: None,
+            stdin_payload: Some(req.prompt.clone()),
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })

@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import ImageIcon from "lucide-react/dist/esm/icons/image";
 import ListOrdered from "lucide-react/dist/esm/icons/list-ordered";
+import SendHorizontal from "lucide-react/dist/esm/icons/send-horizontal";
 import X from "lucide-react/dist/esm/icons/x";
 import type { QueuedMessage } from "@/features/chat/store";
 import { cx } from "@/utils/cx";
@@ -25,12 +26,16 @@ function preview(text: string): string {
 export interface MessageQueueProps {
   queue: QueuedMessage[];
   onRemove: (id: string) => void;
+  /** Send one row now instead of waiting the turn out; a running turn is
+   *  stopped first, since an engine takes one prompt at a time. Row button
+   *  only renders when provided. */
+  onSendNow?: (id: string) => void;
   /** Clear every queued message; header button only renders when provided. */
   onClear?: () => void;
   className?: string;
 }
 
-export function MessageQueue({ queue, onRemove, onClear, className }: MessageQueueProps) {
+export function MessageQueue({ queue, onRemove, onSendNow, onClear, className }: MessageQueueProps) {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
 
@@ -86,15 +91,27 @@ export function MessageQueue({ queue, onRemove, onClear, className }: MessageQue
                 )}
                 {preview(item.text)}
               </span>
-              <button
-                type="button"
-                aria-label={t("chat.queueRemove")}
-                title={t("chat.queueRemove")}
-                onClick={() => onRemove(item.id)}
-                className="flex size-5 cursor-pointer items-center justify-center rounded-full text-foreground-icon-tertiary transition-colors hover:bg-background-secondary-hover hover:text-text-error-primary"
-              >
-                <X className="size-3.5" aria-hidden />
-              </button>
+              <span className="flex shrink-0 items-center gap-0.5">
+                {onSendNow && (
+                  <button
+                    type="button"
+                    aria-label={t("chat.queueSendNow")}
+                    onClick={() => onSendNow(item.id)}
+                    className="flex size-5 cursor-pointer items-center justify-center rounded-full text-foreground-icon-tertiary transition-colors hover:bg-background-secondary-hover hover:text-foreground-icon-primary"
+                  >
+                    <SendHorizontal className="size-3.5" aria-hidden />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label={t("chat.queueRemove")}
+                  title={t("chat.queueRemove")}
+                  onClick={() => onRemove(item.id)}
+                  className="flex size-5 cursor-pointer items-center justify-center rounded-full text-foreground-icon-tertiary transition-colors hover:bg-background-secondary-hover hover:text-text-error-primary"
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </span>
             </div>
           );
         })}

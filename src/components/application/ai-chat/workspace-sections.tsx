@@ -124,6 +124,7 @@ export function WorkspaceSection({
   activeThreadId,
   onThreadSelect,
   onThreadAction,
+  onThreadContextMenu,
   onAddWorkspace,
   onRemoveWorkspace,
   onNewSessionInWorkspace,
@@ -142,6 +143,8 @@ export function WorkspaceSection({
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
+  /** Right-click on a thread row (thread context menu). */
+  onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, threadId: string) => void;
   onAddWorkspace?: () => void;
   onRemoveWorkspace?: (id: string) => void;
   onNewSessionInWorkspace?: (id: string) => void;
@@ -183,6 +186,7 @@ export function WorkspaceSection({
             activeThreadId={activeThreadId}
             onThreadSelect={onThreadSelect}
             onThreadAction={onThreadAction}
+            onThreadContextMenu={onThreadContextMenu}
             onRemove={onRemoveWorkspace}
             onNewSession={onNewSessionInWorkspace}
             onContextMenu={

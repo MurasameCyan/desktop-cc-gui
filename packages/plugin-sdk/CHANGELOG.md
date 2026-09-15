@@ -26,6 +26,33 @@
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
 
+## 0.3.4 — 2026-09-14
+- **新增能力**:`ctx.sessions.registerSource({ id, list })`(权限 `host:session`)——登记
+  外部会话源(远程机/容器内 CLI 的会话摘要),宿主在会话目录刷新时调用 `list()` 并把行合并进
+  侧栏列表;本机扫描结果优先,行 `workspacePath` 须为已登记工作区 path。配套类型
+  `ExternalSessionRow`;返回 Disposer,卸载自动注销。
+- **新增权限**:`host:workspace:remote`——`ctx.workspaces.add` 的 meta 携带 `wsl` 键
+  (远程工作区,宿主引擎经 ssh 把会话流量导到插件指定主机)时必需;仅 `host:workspace`
+  的插件不能再设置远程 meta。等效于出网 + 远程执行导向,故独立于工作区登记授权。
+- **修复**:`events` 权限条目在权限 spec 中被误删导致存量插件无法加载的问题,已恢复
+  (契约本身无变化)。
+- **加固**(宿主侧,契约不变):registerSource 入口校验 def 形状;同步抛错的会话源被
+  隔离(不再连累其他源与整轮刷新);外部行字段类型校验 + 单源 500 行上限;
+  `selectSession` 的错误统一走 Promise rejection。
+
+## 0.3.3 — 2026-09-13
+- **新增能力**:`ctx.workspaces.add(path, meta?)`(权限 `host:workspace`)——把任意路径
+  登记为侧栏工作区,不要求本机存在该目录(远程机/WSL 发行版内路径);meta 透传存储,
+  如 `{ wsl: { hostId, distro } }`(0.3.4 起携带 `wsl` 键需 `host:workspace:remote`)。
+- **新增能力**:`ctx.sessions.selectSession(engine, sessionId, workspacePath)`(权限
+  `host:session`)——按引擎 + 会话 id 打开/恢复既有会话;未知组合抛错,不静默。
+- 注:0.3.3 未单独发布,上述能力随 0.3.4 首次落地;版本戳保留以标注能力引入序。
+
+## 0.3.2 — 2026-09-12
+- **新增能力**：`ctx.composer.setDraft(text)`（权限 `composer:draft`）——写入当前活动会话的
+  聊天输入框草稿；替换语义，不触发发送。配合既有 `composer://draft` 事件（host→plugin）构成
+  草稿的双向通道；react-doctor 的「一键修复」填入修复提示词即首个消费者。
+
 ## 0.3.1 — 2026-09-09
 
 - `plugin_exec_spawn` 新增可选 `lifecycle: "detached" | "plugin"`（缺省 detached，行为不变）；

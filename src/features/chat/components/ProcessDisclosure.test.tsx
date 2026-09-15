@@ -34,17 +34,27 @@ const ITEMS: ProcessItem[] = [
   { type: "tool", text: "Grep", path: null },
 ];
 
-async function render(items: ProcessItem[] = ITEMS) {
+
+async function render(
+  items: ProcessItem[] = ITEMS,
+  props: { autoExpand?: boolean; turnLive?: boolean; thinkingAutoCollapse?: boolean } = {},
+) {
   await act(async () => {
     root.render(
       <ProcessDisclosure
         items={items}
-        autoExpand
+        autoExpand={props.autoExpand ?? true}
+        turnLive={props.turnLive}
+        thinkingAutoCollapse={props.thinkingAutoCollapse}
         processId={1}
         seenTools={new Set()}
       />,
     );
   });
+}
+
+function headerExpanded(): boolean {
+  return container.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded") === "true";
 }
 
 describe("ProcessDisclosure tool args", () => {
@@ -129,6 +139,52 @@ describe("ProcessDisclosure tool args", () => {
     expect(container.textContent).toContain("Check working tree");
     expect(container.textContent).toContain("git status");
     expect(container.textContent).toContain("执行结果");
+
     expect(container.textContent).toContain("On branch main");
+  });
+});
+
+describe("ProcessDisclosure thinking expansion", () => {
+  it("folds thinking when the stream settles by default", async () => {
+    await render([{ type: "thinking", text: "先分析需求", live: true }], { turnLive: true });
+    expect(headerExpanded()).toBe(true);
+    expect(container.textContent).toContain("先分析需求");
+
+    await render([{ type: "thinking", text: "先分析需求" }], { turnLive: true });
+    expect(headerExpanded()).toBe(false);
+  });
+
+  it("keeps thinking expanded after the stream settles when auto-collapse is off", async () => {
+    await render([{ type: "thinking", text: "先分析需求", live: true }], {
+      turnLive: true,
+      thinkingAutoCollapse: false,
+    });
+    expect(headerExpanded()).toBe(true);
+    expect(container.textContent).toContain("先分析需求");
+
+    await render([{ type: "thinking", text: "先分析需求" }], {
+      turnLive: true,
+      thinkingAutoCollapse: false,
+    });
+    expect(headerExpanded()).toBe(true);
+    expect(container.textContent).toContain("先分析需求");
+  });
+
+  it("still lets the user collapse thinking after it settles", async () => {
+    await render([{ type: "thinking", text: "先分析需求", live: true }], {
+      turnLive: true,
+      thinkingAutoCollapse: false,
+    });
+    await render([{ type: "thinking", text: "先分析需求" }], {
+      turnLive: true,
+      thinkingAutoCollapse: false,
+    });
+
+    const header = container.querySelector("button[aria-expanded]");
+    expect(header).toBeTruthy();
+    await act(async () => {
+      header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(headerExpanded()).toBe(false);
   });
 });

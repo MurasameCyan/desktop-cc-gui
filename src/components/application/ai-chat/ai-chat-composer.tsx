@@ -55,6 +55,7 @@ import { ipc, type SlashCommandEntry } from "@/lib/ipc";
 import { listenSettingsChanged } from "@/lib/events";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { joinPath } from "@/features/files/store";
+import { ASSUMED_CONTEXT_WINDOW } from "@/features/chat/usage";
 import {
   usePromptCompletion,
   usePromptHistoryNav,
@@ -584,7 +585,7 @@ export function StatusBar({
   ]);
   const allowContextOpenChange = useTriggerToggle(contextOpen, contextTriggerRef);
   const limitsContext = useMemo(
-    () => ({ max: contextMax ?? 200_000, segments: contextSegments ?? [] }),
+    () => ({ max: contextMax ?? ASSUMED_CONTEXT_WINDOW, segments: contextSegments ?? [] }),
     [contextMax, contextSegments],
   );
   const limitsText = useMemo(

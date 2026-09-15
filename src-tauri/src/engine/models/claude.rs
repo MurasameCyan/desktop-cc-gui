@@ -194,6 +194,19 @@ fn resolve_launch_model_from(config: &CliModelConfig, selector: &str) -> String 
 }
 
 fn read_cli_config_from(dir: &std::path::Path) -> CliModelConfig {
+    let mut config = CliModelConfig::default();
+    // User settings first so the local file overrides per field.
+    for name in ["settings.json", "settings.local.json"] {
+        if let Ok(content) = std::fs::read_to_string(dir.join(name)) {
+            merge_settings_json(&mut config, &content);
+        }
+    }
+    config
+}
+
+/// Per-field settings merge (settings.local.json wins), shared by the local
+/// read and the remote (WSL distro) variant.
+fn merge_settings_json(config: &mut CliModelConfig, content: &str) {
     let pick = |value: Option<&serde_json::Value>| {
         value
             .and_then(|m| m.as_str())
@@ -201,29 +214,32 @@ fn read_cli_config_from(dir: &std::path::Path) -> CliModelConfig {
             .filter(|m| !m.is_empty())
             .map(str::to_string)
     };
-    let mut config = CliModelConfig::default();
-    // User settings first so the local file overrides per field.
-    for name in ["settings.json", "settings.local.json"] {
-        let Ok(content) = std::fs::read_to_string(dir.join(name)) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        let env = v.get("env");
-        if let Some(m) = pick(env.and_then(|e| e.get("ANTHROPIC_MODEL"))) {
-            config.env_model = Some(m);
-        }
-        if let Some(m) = pick(v.get("model")) {
-            config.model_key = Some(m);
-        }
-        for (family, key, _) in FAMILY_ENV_KEYS {
-            if let Some(m) = pick(env.and_then(|e| e.get(key))) {
-                config.overrides.insert(family.to_string(), m);
-            }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(content) else {
+        return;
+    };
+    let env = v.get("env");
+    if let Some(m) = pick(env.and_then(|e| e.get("ANTHROPIC_MODEL"))) {
+        config.env_model = Some(m);
+    }
+    if let Some(m) = pick(v.get("model")) {
+        config.model_key = Some(m);
+    }
+    for (family, key, _) in FAMILY_ENV_KEYS {
+        if let Some(m) = pick(env.and_then(|e| e.get(key))) {
+            config.overrides.insert(family.to_string(), m);
         }
     }
-    config
+}
+
+/// Remote (WSL distro) catalog from the distro's `$CLAUDE_CONFIG_DIR`
+/// settings contents (fetched via ssh by the caller). Aliases are CLI
+/// built-ins; only the per-field overrides come from config, so the distro
+/// settings reproduce its own /model menu.
+pub(super) fn claude_models_remote(user_json: &str, local_json: &str) -> Vec<EngineModel> {
+    let mut config = CliModelConfig::default();
+    merge_settings_json(&mut config, user_json);
+    merge_settings_json(&mut config, local_json);
+    claude_models_from(config, None)
 }
 
 /// Claude's picker catalog: the CLI's built-in aliases, default row first.

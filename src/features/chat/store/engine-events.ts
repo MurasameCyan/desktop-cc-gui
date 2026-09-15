@@ -11,6 +11,7 @@ import {
   migratePendingStream,
   moveStreamingFlag,
   patchSession,
+  resolveSessionEffort,
   resolveSessionModel,
   routeRun,
   runRouting,
@@ -498,20 +499,18 @@ function stampedModel(
   );
 }
 
-/** Effective reasoning effort for event-stamped rows: the session's activeEffort wins,
- * followed by the owning tab's per-tab override, then engine default. */
+/** Effective reasoning effort for event-stamped rows. Native-session state
+ * wins; a tab override is only valid before that session receives its id. */
 function stampedEffort(
   deps: EngineEventDeps,
   engine: string,
   key: string,
 ): string | null {
   const s = deps.get();
-  const sessionActive = s.bySession[key]?.activeEffort;
-  if (sessionActive) return sessionActive;
   const tab = s.openTabs.find(
     (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
   );
-  return (tab?.effort ?? s.efforts[engine]) || null;
+  return resolveSessionEffort(tab, s.bySession[key], s.efforts[engine]) || null;
 }
 
 function onModel(
@@ -519,8 +518,14 @@ function onModel(
   key: string,
   deps: EngineEventDeps,
 ) {
-  const model = typeof event.data === "string" ? event.data.trim() : "";
-  if (!model) return;
+  const reported = typeof event.data === "string" ? event.data.trim() : "";
+  if (!reported) return;
+  // The engine reports the bare model name; our own record spells it
+  // "provider/model" (see ipc.rememberSessionModel). Same model, more
+  // context — keep the qualified one instead of dropping the provider.
+  const current = deps.get().bySession[key]?.activeModel ?? "";
+  const model =
+    current === reported || current.endsWith(`/${reported}`) ? current : reported;
   updatePendingStreamModel(key, model);
   deps.set((s) => {
     const cur = s.bySession[key];
@@ -652,6 +657,31 @@ function onMessage(
   });
 }
 
+/** Model a local send resolved for a session key, held until the run reports
+ *  the native session id (`session` event) so the two can be remembered
+ *  together — the engine transcript only carries the bare model name, and the
+ *  new session's id is not known before that event. Only local sends fill
+ *  this: an observer must never write its own (bare) reading of a run. */
+const pendingSessionModels = new Map<string, string>();
+/** Same hand-off for the reasoning level: it is chosen before the first send
+ *  of a new session and can only be filed under the id the `session` event
+ *  carries. */
+const pendingSessionEfforts = new Map<string, string>();
+
+export function rememberModelForRun(
+  key: string,
+  model: string | null | undefined,
+) {
+  if (model) pendingSessionModels.set(key, model);
+}
+
+export function rememberEffortForRun(
+  key: string,
+  effort: string | null | undefined,
+) {
+  if (effort) pendingSessionEfforts.set(key, effort);
+}
+
 function onSession(
   event: EngineEventPayload,
   key: string,
@@ -662,6 +692,20 @@ function onSession(
   if (lifecycle) {
     lifecycle.sessionId = nativeId;
     persistAcceptedFrames(lifecycle);
+  }
+  const sentModel = pendingSessionModels.get(key);
+  if (sentModel) {
+    pendingSessionModels.delete(key);
+    void ipc
+      .rememberSessionModel(event.engine, nativeId, sentModel)
+      .catch(() => {});
+  }
+  const sentEffort = pendingSessionEfforts.get(key);
+  if (sentEffort) {
+    pendingSessionEfforts.delete(key);
+    void ipc
+      .rememberSessionEffort(event.engine, nativeId, sentEffort)
+      .catch(() => {});
   }
   // Resolve the workspace from the tab that owns this key — not from the
   // active tab. A first message sent on a background tab must not adopt the
@@ -674,9 +718,19 @@ function onSession(
   const workspacePath =
     lifecycle?.workspace.path ?? tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
+  // The event can resolve straight to the native key when it beat the send
+  // response (the run had no routing entry yet). The turn rows and streaming
+  // flag still sit under the pending key then; migrate from there instead of
+  // orphaning them on a key nothing renders.
+  const pendingKey = sessionKey(event.engine, null, workspacePath);
+  const fromKey = deps.get().bySession[key]
+    ? key
+    : pendingKey !== key && deps.get().bySession[pendingKey]
+      ? pendingKey
+      : key;
   settleOrphanedRuns(deps.set, routeRun(event.runId, newKey));
   // Unflushed stream chunks sit under the pre-migration key; move them too.
-  migratePendingStream(key, newKey);
+  migratePendingStream(fromKey, newKey);
   // A delta-only engine reports no native id from the send, so a remembered
   // session contribution still sits under the pending scope. Rekey it onto the
   // native id exactly like the session state (the workspace resolved above is
@@ -692,22 +746,22 @@ function onSession(
   });
   // Migrate pending key -> native key.
   deps.set((s) => {
-    const prev = s.bySession[key];
+    const prev = s.bySession[fromKey];
     if (!prev) return {};
     const bySession = { ...s.bySession, [newKey]: prev };
-    if (key !== newKey) delete bySession[key];
+    if (fromKey !== newKey) delete bySession[fromKey];
     const drafts = { ...s.drafts };
-    if (key in drafts) {
-      drafts[newKey] = drafts[key];
-      delete drafts[key];
+    if (fromKey in drafts) {
+      drafts[newKey] = drafts[fromKey];
+      delete drafts[fromKey];
     }
-    const streamingByKey = moveStreamingFlag(s.streamingByKey, key, newKey);
+    const streamingByKey = moveStreamingFlag(s.streamingByKey, fromKey, newKey);
     const activeNext =
       s.active &&
       s.active.engine === event.engine &&
       s.active.sessionId === null &&
       s.active.workspacePath === workspacePath
-        ? { ...s.active, sessionId: nativeId }
+        ? { ...s.active, sessionId: nativeId, effort: undefined }
         : s.active;
     return { bySession, drafts, streamingByKey, active: activeNext };
   });
@@ -729,7 +783,7 @@ function onSession(
           return t;
         }
         stamped = true;
-        return { ...t, sessionId: nativeId };
+        return { ...t, sessionId: nativeId, effort: undefined };
       }),
     );
     persistTabs(openTabs, s.active);
@@ -908,6 +962,7 @@ function onError(
   }
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
+  const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const pending = drainPending(key);
   deps.set((s) => {
     const cur = s.bySession[key] ?? EMPTY_SESSION;
@@ -959,6 +1014,11 @@ function onError(
   deps.markUnseenIfBackground(key);
   dispatchNormalized(event);
   finishLifecycle(event, "failed", typeof event.data === "string" ? event.data : undefined);
+  // An error settles the turn exactly like done does — the messages typed
+  // behind it are the user's next step, and parking them here left the queue
+  // stuck until it was sent or cleared by hand. A stop is still the user's
+  // own call: that queue stays parked.
+  if (!prev.interrupted) deps.drainQueue(key);
 }
 
 /** Patch the grant state of one card row, located by its message seq. */
@@ -1179,6 +1239,32 @@ function recordTurnUsage(
   writeUsageRow(deps, event, key, parsed, 1);
 }
 
+/** Mark a session running off an event of a turn this client never sent: the
+ *  phone watching the desktop's run, or the desktop watching the phone's.
+ *  Routes the run first so Stop and the orphan sweep reach it, then lifts the
+ *  two flags the composer / sidebar / tab dots read. */
+function adoptObservedRun(
+  event: EngineEventPayload,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  if (!runRouting.has(event.runId)) {
+    settleOrphanedRuns(deps.set, routeRun(event.runId, key));
+  }
+  const cur = deps.get().bySession[key];
+  if (!cur?.streaming) {
+    patchSession(deps.set, key, {
+      streaming: true,
+      turnStartedAt: cur?.turnStartedAt ?? Date.now(),
+    });
+  }
+  if (!deps.get().streamingByKey[key]) {
+    deps.set((s) => ({
+      streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
+    }));
+  }
+}
+
 /** Resolve an event's session key (run routing, then session-id match) and
  * dispatch to the per-kind handler. */
 export function handleEngineEvents(
@@ -1233,6 +1319,16 @@ export function handleEngineEvents(
     if (event.kind !== "done" && event.kind !== "error") {
       dispatchNormalized(event);
     }
+    // Engine events reach every attached client, but the running flag is set
+    // by the sender's own send path — so an observer (a phone watching the
+    // desktop's turn) would never see one. The events are the shared truth:
+    // adopt any run still talking, let done/error settle it below. A denial
+    // is excluded on purpose: the CLI has stopped to ask, and the grant
+    // card's resend has to stay available while it waits.
+    if (event.kind !== "done" && event.kind !== "error" && event.kind !== "permission_denied") {
+      adoptObservedRun(event, key, deps);
+    }
+
     switch (event.kind) {
       case "delta":
         onDelta(event, key, deps);

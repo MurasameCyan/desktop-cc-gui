@@ -8,7 +8,9 @@ pub const LOCAL_PROVIDER_ID: &str = "__local_settings_json__";
 /// config" semantics, different spelling.
 pub(crate) const LEGACY_LOCAL_CONFIG_TOML_ID: &str = "__local_config_toml__";
 pub const DISABLED_PROVIDER_ID: &str = "__disabled__";
-pub const ENGINES: [&str; 7] = ["claude", "kimi", "grok", "codex", "pi", "omp", "dsh"];
+pub const ENGINES: [&str; 11] = [
+    "claude", "kimi", "grok", "codex", "pi", "omp", "dsh", "agy", "opencode", "qoder", "qoder-cn",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderSection {
@@ -22,14 +24,15 @@ pub struct ProviderSection {
     pub disabled_from: Option<String>,
 }
 
-/// Per-engine config sections: engine ids double as field names, so the
-/// serialized shape stays flat (`{"claude": …, "kimi": …}`) while
-/// section()/section_mut() dispatch is generated, not hand-written.
+/// Per-engine config sections: the engine id doubles as the serialized key,
+/// so the shape stays flat (`{"claude": …, "qoder-cn": …}`) while
+/// section()/section_mut() dispatch is generated, not hand-written. The
+/// field name is separate from the id because ids may contain '-'.
 macro_rules! engine_sections {
-    ($($engine:ident),* $(,)?) => {
+    ($(($field:ident, $id:literal)),* $(,)?) => {
         #[derive(Debug, Clone, Serialize, Deserialize, Default)]
         pub struct CliConfig {
-            $(#[serde(default)] pub $engine: ProviderSection,)*
+            $(#[serde(default, rename = $id)] pub $field: ProviderSection,)*
             /// Preserve unknown top-level fields from legacy config on import.
             #[serde(flatten)]
             pub extra: HashMap<String, Value>,
@@ -38,14 +41,14 @@ macro_rules! engine_sections {
         impl CliConfig {
             pub fn section(&self, engine: &str) -> Option<&ProviderSection> {
                 match engine {
-                    $(stringify!($engine) => Some(&self.$engine),)*
+                    $($id => Some(&self.$field),)*
                     _ => None,
                 }
             }
 
             pub fn section_mut(&mut self, engine: &str) -> Option<&mut ProviderSection> {
                 match engine {
-                    $(stringify!($engine) => Some(&mut self.$engine),)*
+                    $($id => Some(&mut self.$field),)*
                     _ => None,
                 }
             }
@@ -53,7 +56,19 @@ macro_rules! engine_sections {
     };
 }
 
-engine_sections!(claude, kimi, grok, codex, pi, omp, dsh);
+engine_sections!(
+    (claude, "claude"),
+    (kimi, "kimi"),
+    (grok, "grok"),
+    (codex, "codex"),
+    (pi, "pi"),
+    (omp, "omp"),
+    (dsh, "dsh"),
+    (agy, "agy"),
+    (opencode, "opencode"),
+    (qoder, "qoder"),
+    (qoder_cn, "qoder-cn"),
+);
 
 #[derive(Default)]
 pub struct ConfigStore(pub Mutex<()>);

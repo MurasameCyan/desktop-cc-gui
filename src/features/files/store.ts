@@ -8,6 +8,7 @@ import {
 } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { writeStored } from "@/lib/storage";
+import { installFilesBridge, readRemoteAware } from "./remote-files";
 
 export const FILES_ROOT_KEY = "ccgui-next.filesRoot";
 
@@ -69,6 +70,8 @@ interface FilesStore {
   dirtyPaths: Record<string, true>;
   /** Tree item staged by the context menu's Copy; consumed by Paste. */
   clipboard: TreeClipboard | null;
+  /** Folder the workspace file search is scoped to (absolute); null = closed. */
+  searchRoot: string | null;
 
   setRoot: (path: string) => void;
   ensureDir: (path: string) => Promise<void>;
@@ -106,6 +109,10 @@ interface FilesStore {
   /** Close every tab at or under a removed path. */
   closeFilesUnder: (path: string) => void;
   setFileDirty: (path: string, dirty: boolean) => void;
+  /** Open the workspace file search scoped to `searchRoot` (absolute dir). */
+  openSearch: (searchRoot: string) => void;
+  /** Close the workspace file search overlay. */
+  closeSearch: () => void;
 }
 
 export const useFilesStore = create<FilesStore>((set, get) => ({
@@ -124,6 +131,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   activeFilePath: null,
   dirtyPaths: {},
   clipboard: null,
+  searchRoot: null,
 
   setRoot: (path) => {
     const root = path.trim();
@@ -145,6 +153,9 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       fileColors: {},
       selectedPath: null,
       selectedIsDir: false,
+      // A workspace switch invalidates the search scope (it belonged to the
+      // previous tree).
+      searchRoot: null,
     });
     if (root) void get().ensureDir(root);
   },
@@ -294,7 +305,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       };
     });
     try {
-      const content = await ipc.readFile(path);
+      const content = await readRemoteAware(path, (p) => ipc.readFile(p));
       set((s) => {
         const st = s.fileStates[path];
         if (!st) return s; // tab closed mid-load
@@ -427,4 +438,12 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       else delete dirtyPaths[path];
       return { dirtyPaths };
     }),
+
+  openSearch: (searchRoot) => set({ searchRoot }),
+
+  closeSearch: () => set({ searchRoot: null }),
 }));
+
+// WSL 插件(独立 bundle)经 window.__ccguiFiles 拿到中央编辑器的打开入口,
+// 并注册远程读取器 —— 见 remote-files.ts。
+installFilesBridge((path) => useFilesStore.getState().openFile(path));

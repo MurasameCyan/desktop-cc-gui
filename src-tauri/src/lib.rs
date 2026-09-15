@@ -21,6 +21,7 @@ pub mod settings;
 pub mod usage;
 pub mod slash_commands;
 pub mod terminal;
+pub mod relay;
 pub mod web;
 
 use std::sync::Arc;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub terminals: terminal::TerminalRegistry,
     pub processes: Arc<engine::ProcessRegistry>,
     pub web: web::WebAccessState,
+    pub relay: relay::RelayState,
     pub dsh_host: std::sync::Arc<dsh_host::DshHostState>,
 }
 
@@ -55,6 +57,7 @@ pub fn run() {
         if let Err(error) = proxy::apply_app_proxy_settings(&settings) {
             eprintln!("[proxy] failed to apply persisted proxy settings: {error}");
         }
+        settings::apply_codex_home(&settings);
     }
 
     tauri::Builder::default()
@@ -90,6 +93,7 @@ pub fn run() {
                 terminals: terminal::TerminalRegistry::default(),
                 processes: Arc::new(engine::ProcessRegistry::default()),
                 web: web::WebAccessState::default(),
+                relay: relay::RelayState::default(),
                 dsh_host: std::sync::Arc::new(dsh_host::DshHostState::default()),
             };
             // Clone what the initial scan needs before state moves into manage.
@@ -103,6 +107,19 @@ pub fn run() {
             app.manage(config::ConfigStore::default());
             app.manage(metrics::MetricsState::new());
             app.manage(baidu_tongji::BaiduTongjiState::load());
+            // Keep the pairing key from lingering: while the switch is on, a
+            // fresh code is minted every ten minutes and broadcast.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(600));
+                    loop {
+                        interval.tick().await;
+                        let _ = crate::settings::rotate_web_auth_key(&handle);
+                    }
+                });
+            }
             // Initial history scan, non-blocking.
             history::scanner::spawn_scan(scan_db, scan_sink);
             // DSH host autostart: adopt-or-spawn in the background when
@@ -117,6 +134,22 @@ pub fn run() {
                     let state = handle.state::<AppState>();
                     if let Err(error) = dsh_host::ensure_host(&state.dsh_host, &settings).await {
                         eprintln!("[dsh] autostart failed: {error}");
+                    }
+                });
+            }
+            // Relay autostart: the outbound tunnel is what keeps the machine
+            // reachable with nobody at the desk, so it comes back on launch
+            // when the switch was left on. Failures are logged, never fatal;
+            // the running task retries the dial by itself from there.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let settings = settings::read_settings().unwrap_or_default();
+                    let Some((url, key)) = relay::autostart_target(&settings) else {
+                        return;
+                    };
+                    if let Err(error) = relay::web_relay_start(handle, url, key).await {
+                        eprintln!("[relay] autostart failed: {error}");
                     }
                 });
             }
@@ -183,6 +216,10 @@ pub fn run() {
             plugins::storage::plugin_document_storage_remove,
             plugins::storage::plugin_document_storage_list,
             db::workspace_metadata,
+            // plugin marketplace (Phase 3, plan §6)
+            plugins::market::plugin_fetch_index,
+            plugins::market::plugin_install_from_marketplace,
+            plugins::market::plugin_check_updates,
             // engine
             engine::send_message,
             engine::interrupt_session,
@@ -201,9 +238,12 @@ pub fn run() {
             usage::usage_summary,
             usage::usage_clear,
             history::reader::load_session_page,
+            history::reader::load_remote_session_page,
             history::reader::delete_session,
             history::reader::pin_session,
             history::reader::rename_session,
+            history::reader::remember_session_model,
+            history::reader::remember_session_effort,
             history::reader::rescan_sessions,
             history::reader::record_accepted_internal_frame,
             history::reader::list_workspaces,
@@ -257,6 +297,7 @@ pub fn run() {
             metrics::app_metrics,
             // plugin capability egress (network:/exec: manifest grants)
             plugin_caps::plugin_http_request,
+            plugin_caps::plugin_add_workspace,
             plugin_caps::plugin_exec_run,
             plugin_caps::plugin_exec_spawn,
             plugin_caps::plugin_exec_kill,
@@ -264,6 +305,22 @@ pub fn run() {
             web::web_access_start,
             web::web_access_stop,
             web::web_access_status,
+            // Device rows: the bridge already dispatched these for phones,
+            // but the desktop page invokes them over IPC too — without this
+            // registration its list silently stayed empty.
+            web::web_devices,
+            web::web_device_approve,
+            web::web_device_rename,
+            web::web_device_revoke,
+            // Key rotation stays desktop-only: a phone rotating it would lock
+            // every other device out.
+            web::rotate_web_pair_key,
+            web::remote_control_active,
+            relay::web_relay_start,
+            relay::web_relay_stop,
+            relay::web_relay_status,
+            relay::relay_deploy_pack,
+            relay::relay_deploy,
             // dsh host + managed-CLI lifecycle
             dsh_host::dsh_host_status,
             dsh_host::dsh_host_start,

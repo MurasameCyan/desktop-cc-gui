@@ -37,3 +37,15 @@ Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles
 expand/collapse, and a short message is never clamped. No model or session.
+
+Open `/tests/browser/file-search-overlay.html` to check the file panel's
+workspace search (tree right-click → 搜索文件) inside the panel's own 280px
+column: the scope buttons stand in for the right-clicked folder, and the store
+readout below the panel shows what the overlay asked the store to do. Typing
+`store` under scope **src** must list `src/features/files/store.ts`; typing
+`sibling` under scope **src** must show 无匹配文件 while the same query under
+**工作区根** finds `src-extra/sibling.ts` — a folder scope may not sweep in a
+sibling whose name shares its prefix. Arrow keys move the highlighted row,
+Enter opens the file (the readout then shows it under `openFiles` and
+`read_file` in `invoked`), Escape closes the overlay. The index and the file
+read come from a stubbed `list_file_index` / `read_file`; no app, no database.

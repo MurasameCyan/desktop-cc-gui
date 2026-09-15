@@ -160,7 +160,7 @@ function SortableNavItems({
     <WorkspaceSortableList
       items={sortableItems}
       onReorder={(orderedKeys) => group.onReorderItems?.(orderedKeys)}
-      className="flex w-full flex-row gap-1 md:flex-col"
+      className="flex w-auto flex-row gap-1 md:w-full md:flex-col"
       renderItem={({ item }, drag: RepoDragChrome | null) => {
         const selected = item.key === page;
         if (!drag?.dragHandleProps) {
@@ -302,7 +302,7 @@ export function SettingsModal({
             {groups.map((group, groupIndex) => (
               <div
                 key={group.label ?? groupIndex}
-                className="flex w-full flex-row md:flex-col gap-1.5 pt-1"
+                className="flex w-auto shrink-0 flex-row gap-1.5 pt-1 md:w-full md:flex-col"
               >
                 {(() => {
                   const groupKey = group.label ?? String(groupIndex);
@@ -359,7 +359,7 @@ export function SettingsModal({
                             }}
                           />
                         ) : (
-                          <div className="flex w-full flex-row gap-1 md:flex-col">
+                          <div className="flex w-auto flex-row gap-1 md:w-full md:flex-col">
                             {group.items.map((item) => (
                               <NavButton
                                 key={item.key}

@@ -1,5 +1,6 @@
 import i18n from "@/lib/i18n";
 import { commandRegistry } from "@ccgui/plugin-sdk";
+import { useShortcutsStore } from "@/features/shortcuts/store";
 
 /**
  * Builtin palette commands, registered through the same commandRegistry the
@@ -37,5 +38,21 @@ commandRegistry.register({
   // 插件管理 section registered by startPluginSystem.
   run: () => {
     window.location.hash = "#/settings?page=plugins";
+  },
+});
+commandRegistry.register({
+  id: "builtin:openMarketplace",
+  title: () => i18n.t("commands.openMarketplace"),
+  keywords: keywords("commands.openMarketplaceKeywords"),
+  run: () => {
+    window.location.hash = "#/settings?page=marketplace";
+  },
+});
+commandRegistry.register({
+  id: "builtin:openShortcutsGuide",
+  title: () => i18n.t("commands.openShortcutsGuide"),
+  keywords: keywords("commands.openShortcutsGuideKeywords"),
+  run: () => {
+    useShortcutsStore.getState().setGuideOpen(true);
   },
 });

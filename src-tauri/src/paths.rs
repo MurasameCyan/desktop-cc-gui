@@ -2,7 +2,24 @@ use std::path::PathBuf;
 
 /// Home dir without panicking: a headless/odd environment falls back to the
 /// current directory so startup degrades instead of crashing.
+///
+/// Production resolves through `dirs` (Known Folder API on Windows). Tests
+/// steer it through HOME / USERPROFILE instead, because `dirs` ignores the
+/// environment on Windows and would read the real profile — the same split
+/// `engine::fallback_home` uses. The scanner's provider-home tests set a
+/// scratch HOME and expect `~/.ccgui` under it; without this the v0.9
+/// legacy scan kept looking at the real profile and found nothing.
 fn home_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(home);
+        }
+        #[cfg(windows)]
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            return PathBuf::from(profile);
+        }
+    }
     dirs::home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }

@@ -52,6 +52,28 @@ pub struct AppSettings {
     /// Per-app Codex Fast override (`service_tier`); None preserves ~/.codex.
     #[serde(default)]
     pub codex_service_tier: Option<String>,
+    /// Codex config/session home (`CODEX_HOME`). None keeps ~/.codex, or a
+    /// CODEX_HOME already present in the process environment at launch.
+    #[serde(default)]
+    pub codex_home: Option<String>,
+    /// Require a pairing key before the bridge serves a browser (设置 → 远程
+    /// 访问 → 启用授权). Off by default: on the LAN the token URL is enough.
+    #[serde(default)]
+    pub web_auth_enabled: bool,
+    /// 8-character pairing key, generated when the switch is turned on.
+    #[serde(default)]
+    pub web_auth_key: Option<String>,
+    /// Worker base URL for the outbound relay (设置 → 远程访问 → 外网访问),
+    /// e.g. https://ccgui-relay.<account>.workers.dev.
+    #[serde(default)]
+    pub web_relay_url: Option<String>,
+    /// Shared key the relay worker checks.
+    #[serde(default)]
+    pub web_relay_key: Option<String>,
+    /// Relay switch position, remembered across launches: the tunnel is what
+    /// keeps the machine reachable unattended, so an app relaunch restores it.
+    #[serde(default)]
+    pub web_relay_on: Option<bool>,
     /// Max sessions shown per workspace in the sidebar before collapsing
     /// behind a "show more" row.
     #[serde(default = "default_sidebar_thread_limit")]
@@ -60,6 +82,39 @@ pub struct AppSettings {
     /// "cmdEnter" (Cmd/Ctrl+Enter sends, Enter newline).
     #[serde(default = "default_composer_send_shortcut")]
     pub composer_send_shortcut: String,
+    /// Keyboard shortcuts (快捷键), format "cmd+ctrl+alt+shift+key" lowercase;
+    /// None = unbound. Defaults mirror src/features/shortcuts/actions.ts.
+    #[serde(default = "default_new_session_shortcut")]
+    pub new_session_shortcut: Option<String>,
+    /// None = platform default (mac ctrl+c, win ctrl+shift+c), resolved
+    /// frontend-side via getDefaultInterruptShortcut().
+    #[serde(default)]
+    pub interrupt_shortcut: Option<String>,
+    #[serde(default = "default_command_palette_shortcut")]
+    pub command_palette_shortcut: Option<String>,
+    #[serde(default = "default_sidebar_search_shortcut")]
+    pub sidebar_search_shortcut: Option<String>,
+    #[serde(default = "default_toggle_terminal_shortcut")]
+    pub toggle_terminal_shortcut: Option<String>,
+    #[serde(default = "default_toggle_sidebar_shortcut")]
+    pub toggle_sidebar_shortcut: Option<String>,
+    #[serde(default = "default_toggle_side_panel_shortcut")]
+    pub toggle_side_panel_shortcut: Option<String>,
+    #[serde(default = "default_save_file_shortcut")]
+    pub save_file_shortcut: Option<String>,
+    #[serde(default = "default_open_settings_shortcut")]
+    pub open_settings_shortcut: Option<String>,
+    #[serde(default = "default_increase_ui_scale_shortcut")]
+    pub increase_ui_scale_shortcut: Option<String>,
+    #[serde(default = "default_decrease_ui_scale_shortcut")]
+    pub decrease_ui_scale_shortcut: Option<String>,
+    #[serde(default = "default_reset_ui_scale_shortcut")]
+    pub reset_ui_scale_shortcut: Option<String>,
+    /// Thinking-process row behavior once its thinking stream settles:
+    /// None/Some(true) = auto-fold (default), Some(false) = stay expanded
+    /// until the user folds it (设置 → 通用 → 行为 → 思考过程).
+    #[serde(default)]
+    pub thinking_auto_collapse: Option<bool>,
     /// Terminal shell override; None/empty = auto-detect from $SHELL/COMSPEC.
     /// Validated with the same spawn-target rules as bin overrides.
     #[serde(default)]
@@ -98,8 +153,53 @@ fn default_composer_send_shortcut() -> String {
     "enter".to_string()
 }
 
+fn default_new_session_shortcut() -> Option<String> {
+    Some("cmd+n".to_string())
+}
+fn default_command_palette_shortcut() -> Option<String> {
+    Some("cmd+k".to_string())
+}
+fn default_sidebar_search_shortcut() -> Option<String> {
+    Some("cmd+l".to_string())
+}
+fn default_toggle_terminal_shortcut() -> Option<String> {
+    Some("cmd+j".to_string())
+}
+fn default_toggle_sidebar_shortcut() -> Option<String> {
+    Some("cmd+b".to_string())
+}
+fn default_toggle_side_panel_shortcut() -> Option<String> {
+    Some("cmd+shift+e".to_string())
+}
+fn default_save_file_shortcut() -> Option<String> {
+    Some("cmd+s".to_string())
+}
+fn default_open_settings_shortcut() -> Option<String> {
+    Some("cmd+,".to_string())
+}
+fn default_increase_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+=".to_string())
+}
+fn default_decrease_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+-".to_string())
+}
+fn default_reset_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+0".to_string())
+}
+
 fn default_language() -> String {
     "zh".to_string()
+}
+
+/// Random 8-character pairing key: no vowels and no look-alikes, so it can
+/// be read out loud and typed on a phone without ambiguity.
+pub fn generate_pair_key() -> String {
+    const ALPHABET: &[u8] = b"23456789BCDFGHJKLMNPQRSTVWXZ";
+    let mut out = String::with_capacity(8);
+    for _ in 0..8 {
+        out.push(ALPHABET[uuid::Uuid::new_v4().as_bytes()[0] as usize % ALPHABET.len()] as char);
+    }
+    out
 }
 
 impl Default for AppSettings {
@@ -109,14 +209,33 @@ impl Default for AppSettings {
             workspace_groups: Vec::new(),
             workspace_aliases: HashMap::new(),
             archived_workspaces: Vec::new(),
+            web_auth_enabled: false,
+            web_auth_key: None,
+            web_relay_url: None,
+            web_relay_key: None,
+            web_relay_on: None,
             language: default_language(),
             default_models: HashMap::new(),
             custom_models: HashMap::new(),
             default_efforts: HashMap::new(),
             omp_openai_service_tier: None,
             codex_service_tier: None,
+            codex_home: None,
             sidebar_thread_limit: default_sidebar_thread_limit(),
             composer_send_shortcut: default_composer_send_shortcut(),
+            new_session_shortcut: default_new_session_shortcut(),
+            interrupt_shortcut: None,
+            command_palette_shortcut: default_command_palette_shortcut(),
+            sidebar_search_shortcut: default_sidebar_search_shortcut(),
+            toggle_terminal_shortcut: default_toggle_terminal_shortcut(),
+            toggle_sidebar_shortcut: default_toggle_sidebar_shortcut(),
+            toggle_side_panel_shortcut: default_toggle_side_panel_shortcut(),
+            save_file_shortcut: default_save_file_shortcut(),
+            open_settings_shortcut: default_open_settings_shortcut(),
+            increase_ui_scale_shortcut: default_increase_ui_scale_shortcut(),
+            decrease_ui_scale_shortcut: default_decrease_ui_scale_shortcut(),
+            reset_ui_scale_shortcut: default_reset_ui_scale_shortcut(),
+            thinking_auto_collapse: None,
             terminal_shell_path: None,
             dsh_host: None,
             dsh_port: None,
@@ -131,9 +250,28 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn bin_override(&self, engine: &str) -> Option<&str> {
         self.bin_overrides
-            .get(&format!("{engine}Bin"))
+            .get(&bin_override_key(engine))
             .and_then(Value::as_str)
     }
+}
+
+/// Settings key for an engine's bin override: `{engine}Bin` in camelCase,
+/// so hyphenated engine ids read the key the frontend actually writes
+/// ("qoder-cn" → `qoderCnBin`, not `qoder-cnBin`).
+fn bin_override_key(engine: &str) -> String {
+    let mut key = String::with_capacity(engine.len() + 3);
+    let mut uppercase_next = false;
+    for ch in engine.chars() {
+        if ch == '-' {
+            uppercase_next = true;
+        } else if std::mem::take(&mut uppercase_next) {
+            key.extend(ch.to_uppercase());
+        } else {
+            key.push(ch);
+        }
+    }
+    key.push_str("Bin");
+    key
 }
 
 /// A bin override is a spawn target, so it must be a stable absolute path —
@@ -150,21 +288,70 @@ pub(crate) fn validate_bin_override(value: &str) -> Result<std::path::PathBuf, S
     }
     let canonical = std::fs::canonicalize(&path)
         .map_err(|e| format!("{}: cannot resolve ({e})", path.display()))?;
-    const TEMP_ROOTS: &[&str] = &[
-        "/tmp",
-        "/var/folders",
-        "/private/tmp",
-        "/private/var/folders",
-    ];
+    reject_temp_root(&canonical, "binaries")?;
+    Ok(canonical)
+}
+
+const TEMP_ROOTS: &[&str] = &[
+    "/tmp",
+    "/var/folders",
+    "/private/tmp",
+    "/private/var/folders",
+];
+
+fn reject_temp_root(path: &std::path::Path, kind: &str) -> Result<(), String> {
     for root in TEMP_ROOTS {
-        if canonical.starts_with(root) {
+        if path.starts_with(root) {
             return Err(format!(
-                "{}: binaries under {root} are not allowed",
-                canonical.display()
+                "{}: {kind} under {root} are not allowed",
+                path.display()
             ));
         }
     }
-    Ok(canonical)
+    Ok(())
+}
+
+/// Codex home override: absolute directory (may not exist yet). `~` is
+/// expanded. Same temp-dir refusal as bin overrides.
+fn validate_home_override(value: &str) -> Result<std::path::PathBuf, String> {
+    let expanded = crate::open_app::expand_user_path(value.trim())?;
+    if !expanded.is_absolute() {
+        return Err(format!("{}: not an absolute path", expanded.display()));
+    }
+    if expanded.exists() && !expanded.is_dir() {
+        return Err(format!("{}: not a directory", expanded.display()));
+    }
+    let check = if expanded.exists() {
+        std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone())
+    } else {
+        expanded.clone()
+    };
+    reject_temp_root(&check, "homes")?;
+    Ok(expanded)
+}
+
+/// Push `settings.codex_home` into this process's `CODEX_HOME` so every
+/// existing `engine_home(Some("CODEX_HOME"), ".codex")` call site — official
+/// config, history, skills, catalog probes, and spawned `codex` — sees the
+/// same directory. Clearing the setting only unsets an env we previously
+/// applied, so a launch-time `CODEX_HOME` survives.
+pub(crate) fn apply_codex_home(settings: &AppSettings) {
+    static APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if let Some(home) = settings
+        .codex_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(expanded) = validate_home_override(home) {
+            std::env::set_var("CODEX_HOME", expanded);
+            APPLIED.store(true, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    if APPLIED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        std::env::remove_var("CODEX_HOME");
+    }
 }
 
 pub fn read_settings() -> Result<AppSettings, String> {
@@ -210,12 +397,17 @@ pub fn import_legacy_groups_once(db: &crate::db::Db) -> Result<(), String> {
             return Ok(());
         }
     }
-    import_legacy_groups_from(
-        db,
-        &crate::paths::settings_path(),
-        &crate::paths::legacy_settings_path(),
-        &crate::paths::legacy_workspaces_path(),
-    )?;
+    {
+        // Raw read-modify-write of settings.json: same write lock as every
+        // other writer, so a concurrent persist cannot be overwritten.
+        let _guard = settings_write_lock();
+        import_legacy_groups_from(
+            db,
+            &crate::paths::settings_path(),
+            &crate::paths::legacy_settings_path(),
+            &crate::paths::legacy_workspaces_path(),
+        )?;
+    }
     let conn = db.0.lock();
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES('legacy_groups_import_v1', '1')",
@@ -389,6 +581,51 @@ pub fn update_app_settings<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     mut settings: AppSettings,
 ) -> Result<(), String> {
+    let prev_home = read_settings().ok().and_then(|s| s.codex_home);
+    let result = persist_settings(&mut settings);
+    // Other surfaces (the composer's proxy toggle) follow along without
+    // re-reading settings.json.
+    let _ = app.emit("settings://changed", ());
+    // persist_settings reports committed-with-warnings as Err; the home change
+    // is already on disk by then, so gate on the value, not on result.
+    if prev_home != settings.codex_home {
+        use tauri::Manager;
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            crate::history::scanner::spawn_scan(
+                std::sync::Arc::clone(&state.db),
+                std::sync::Arc::clone(&state.sink),
+            );
+        }
+    }
+    result
+}
+
+/// Validate + persist + apply. The public command keeps reporting rejected
+/// fields as an error, even though the sanitized snapshot was committed.
+pub fn persist_settings(settings: &mut AppSettings) -> Result<(), String> {
+    let _guard = settings_write_lock();
+    match persist_settings_committed(settings)? {
+        Some(warning) => Err(warning),
+        None => Ok(()),
+    }
+}
+
+/// Persist a settings snapshot while distinguishing failures before the
+/// atomic write from warnings produced after the sanitized snapshot commits.
+///
+/// Callers doing a read→modify→write must hold [`settings_write_lock`]
+/// across the whole cycle; this function only performs the write half.
+pub(crate) fn persist_settings_committed(
+    settings: &mut AppSettings,
+) -> Result<Option<String>, String> {
+    let path = crate::paths::settings_path();
+    persist_settings_to(settings, &path)
+}
+
+fn persist_settings_to(
+    settings: &mut AppSettings,
+    path: &std::path::Path,
+) -> Result<Option<String>, String> {
     if settings
         .omp_openai_service_tier
         .as_deref()
@@ -403,8 +640,13 @@ pub fn update_app_settings<R: tauri::Runtime>(
     {
         return Err("Invalid Codex service tier".to_string());
     }
+    if settings.web_auth_enabled && settings.web_auth_key.is_none() {
+        settings.web_auth_key = Some(generate_pair_key());
+    } else if !settings.web_auth_enabled {
+        settings.web_auth_key = None;
+    }
     // Reject only the offending bin-override fields: the rest of the settings
-    // still persist, and the error names what was dropped.
+    // still persist, and the warning names what was dropped.
     let mut rejected = Vec::new();
     settings.bin_overrides.retain(|key, value| {
         let Some(text) = value.as_str() else {
@@ -432,27 +674,130 @@ pub fn update_app_settings<R: tauri::Runtime>(
             }
         }
     }
-    let path = crate::paths::settings_path();
+    if let Some(home) = settings.codex_home.take() {
+        let trimmed = home.trim().to_string();
+        if !trimmed.is_empty() {
+            match validate_home_override(&trimmed) {
+                Ok(path) => settings.codex_home = Some(path.to_string_lossy().into_owned()),
+                Err(reason) => rejected.push(format!("codexHome: {reason}")),
+            }
+        }
+    }
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     // Reject before persisting: an invalid proxy URL must not be saved (the
     // frontend rolls its drafts back on this error).
     crate::proxy::validate_proxy_settings(&settings)?;
-    atomic_write(&path, &content)?;
-    // Apply to this process's env so the next spawned child inherits it.
-    crate::proxy::apply_app_proxy_settings(&settings)?;
-    // Other surfaces (the composer's proxy toggle) follow along without
-    // re-reading settings.json.
-    let _ = app.emit("settings://changed", ());
-    if rejected.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("rejected settings: {}", rejected.join("; ")))
+    atomic_write(path, &content)?;
+
+    let mut warnings = Vec::new();
+    if !rejected.is_empty() {
+        warnings.push(format!("rejected settings: {}", rejected.join("; ")));
     }
+    // The snapshot is already durable here. Keep any future apply failure in
+    // the committed-warning channel rather than misreporting it as a rollback.
+    if let Err(error) = crate::proxy::apply_app_proxy_settings(&settings) {
+        warnings.push(error);
+    }
+    // Infallible: an invalid home was already rejected above, and a stale
+    // value simply leaves CODEX_HOME untouched.
+    apply_codex_home(settings);
+    Ok((!warnings.is_empty()).then(|| warnings.join("; ")))
+}
+
+/// A submitted pairing key is accepted only when one is configured and the two
+/// match, case-insensitively (the caller normalises the form field). The cases
+/// that must never pass — no key configured, an empty submission, the
+/// `--------` the UI shows while authorization is off — are pinned by a test.
+pub(crate) fn pairing_key_matches(expected: &str, submitted: &str) -> bool {
+    !expected.is_empty() && !submitted.is_empty() && submitted.eq_ignore_ascii_case(expected)
+}
+
+/// Serialises every read-modify-write of settings.json. Without it two
+/// writers — a timed key rotation and a relay-switch persist, say — can each
+/// read the other's pre-write snapshot and the later write silently drops the
+/// earlier one's field. It also keeps the pairing key's compare-and-rotate
+/// atomic: two devices posting the same code must not both be admitted.
+static SETTINGS_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Hold across a full read→modify→persist of settings.json.
+pub(crate) fn settings_write_lock() -> parking_lot::MutexGuard<'static, ()> {
+    SETTINGS_WRITE_LOCK.lock()
+}
+
+/// Spend the pairing key on one device: rotates `settings` in place and
+/// answers whether the browser may be admitted. Pure, so the property that
+/// matters — a code opens exactly one pairing — is pinned by a test without a
+/// running app; `consume_web_auth_key` adds the lock and the disk round-trip.
+fn spend_pair_key(settings: &mut AppSettings, submitted: &str) -> bool {
+    if !settings.web_auth_enabled {
+        return false;
+    }
+    if !pairing_key_matches(
+        settings.web_auth_key.as_deref().unwrap_or_default(),
+        submitted,
+    ) {
+        return false;
+    }
+    settings.web_auth_key = Some(generate_pair_key());
+    true
+}
+
+/// Spend the pairing key on one device: compare and rotate under a single
+/// lock, so a code is good for exactly one pairing. `false` means the browser
+/// must not be admitted — wrong key, or the switch is off and there is nothing
+/// to pair with.
+pub fn consume_web_auth_key(app: &tauri::AppHandle, submitted: &str) -> Result<bool, String> {
+    let _guard = settings_write_lock();
+    let mut settings = read_settings()?;
+    if !spend_pair_key(&mut settings, submitted) {
+        return Ok(false);
+    }
+    let warning = persist_settings_committed(&mut settings)?;
+    announce_settings(app);
+    if let Some(warning) = warning {
+        eprintln!("[settings] pairing key committed with warning: {warning}");
+    }
+    Ok(true)
+}
+
+/// Rotate the pairing key (only when the switch is on) and tell every surface
+/// that settings moved. Used on a timer and by the 换一个 button, so a code
+/// never lingers even when nobody pairs with it.
+pub fn rotate_web_auth_key(app: &tauri::AppHandle) -> Result<(), String> {
+    let _guard = settings_write_lock();
+    let mut settings = read_settings()?;
+    if !settings.web_auth_enabled {
+        return Ok(());
+    }
+    settings.web_auth_key = Some(generate_pair_key());
+    let warning = persist_settings_committed(&mut settings)?;
+    announce_settings(app);
+    if let Some(warning) = warning {
+        eprintln!("[settings] pairing key rotation committed with warning: {warning}");
+    }
+    Ok(())
+}
+
+/// Through the sink: the webview *and* every browser attached over the bridge
+/// must see the new code, or a phone would keep showing one that is spent.
+fn announce_settings(app: &tauri::AppHandle) {
+    use crate::event_sink::Emit;
+    use tauri::Manager;
+    app.state::<crate::AppState>()
+        .emitters
+        .emit_json("settings://changed", "null");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bin_override_key_camel_cases_hyphenated_engine_ids() {
+        assert_eq!(bin_override_key("claude"), "claudeBin");
+        assert_eq!(bin_override_key("qoder"), "qoderBin");
+        assert_eq!(bin_override_key("qoder-cn"), "qoderCnBin");
+    }
 
     struct Scratch(std::path::PathBuf);
 
@@ -632,12 +977,129 @@ mod tests {
         .unwrap();
         assert!(!scratch.path("settings.json").exists());
     }
+
+    #[test]
+    fn committed_settings_warning_is_distinct_from_precommit_failure() {
+        let scratch = Scratch::new();
+        let path = scratch.path("settings.json");
+        let missing_bin = scratch.path("missing-claude");
+        let mut settings = AppSettings {
+            web_relay_on: Some(true),
+            web_relay_url: Some("https://relay.example".to_string()),
+            web_relay_key: Some("SAVED_KEY".to_string()),
+            ..AppSettings::default()
+        };
+        settings.bin_overrides.insert(
+            "claudeBin".to_string(),
+            Value::String(missing_bin.to_string_lossy().into_owned()),
+        );
+
+        let warning = persist_settings_to(&mut settings, &path)
+            .expect("a rejected binary is a committed warning")
+            .expect("the rejected field is reported");
+        assert!(warning.contains("claudeBin"));
+        let saved: AppSettings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!saved.bin_overrides.contains_key("claudeBin"));
+        assert_eq!(
+            crate::relay::autostart_target(&saved),
+            Some(("https://relay.example".to_string(), "SAVED_KEY".to_string())),
+            "the committed target and enabled switch survive the warning"
+        );
+    }
+
+    #[test]
+    fn invalid_proxy_is_reported_before_settings_are_committed() {
+        let scratch = Scratch::new();
+        let path = scratch.path("settings.json");
+        let mut settings = AppSettings {
+            system_proxy_enabled: true,
+            system_proxy_url: Some("file:///not-a-network-proxy".to_string()),
+            ..AppSettings::default()
+        };
+
+        let error = persist_settings_to(&mut settings, &path).unwrap_err();
+        assert!(error.contains("unsupported scheme"));
+        assert!(
+            !path.exists(),
+            "pre-commit validation must not write settings"
+        );
+    }
+
+    /// The key box shows `--------` while authorization is off; a placeholder
+    /// (or an empty field, or no configured key at all) must never pair.
+    #[test]
+    fn pairing_key_rejects_placeholders() {
+        assert!(pairing_key_matches("BCDF2345", "bcdf2345"));
+        assert!(!pairing_key_matches("BCDF2345", "--------"));
+        assert!(!pairing_key_matches("BCDF2345", ""));
+        assert!(!pairing_key_matches("", "--------"));
+        assert!(!pairing_key_matches("", ""));
+        assert!(!pairing_key_matches("BCDF2345", "BCDF2346"));
+    }
+
+    #[test]
+    fn home_override_expands_tilde_and_rejects_temp() {
+        // Tilde expansion is race-safe to assert directly: parallel scanner
+        // tests mutate HOME, so validating `~/...` here can spuriously hit
+        // the temp-root rejection.
+        let expanded = crate::open_app::expand_user_path("~/.codex-cli").unwrap();
+        assert!(expanded.is_absolute());
+        assert!(expanded.ends_with(".codex-cli"));
+
+        // A fixed absolute path outside any temp root validates as-is.
+        let ok = if cfg!(windows) {
+            r"C:\ccgui-codex-home-probe"
+        } else {
+            "/opt/ccgui-codex-home-probe"
+        };
+        assert_eq!(validate_home_override(ok).unwrap(), std::path::PathBuf::from(ok));
+        assert!(validate_home_override("/tmp/codex-home").is_err());
+        assert!(validate_home_override("relative/codex").is_err());
+    }
+
+    /// The property the relay's whole gate rests on: a code opens exactly one
+    /// pairing. The second device replaying the same string must be turned
+    /// away, and the switch being off must admit nobody at all.
+    #[test]
+    fn a_pairing_key_is_spent_by_the_first_device() {
+        let mut settings = AppSettings {
+            web_auth_enabled: true,
+            web_auth_key: Some("BCDF2345".to_string()),
+            ..AppSettings::default()
+        };
+
+        assert!(
+            spend_pair_key(&mut settings, "bcdf2345"),
+            "the first device pairs"
+        );
+        let fresh = settings.web_auth_key.clone().unwrap();
+        assert_ne!(fresh, "BCDF2345", "pairing mints a new code");
+        assert!(
+            !spend_pair_key(&mut settings, "BCDF2345"),
+            "the spent code never pairs a second device"
+        );
+        assert_eq!(
+            settings.web_auth_key.as_deref(),
+            Some(fresh.as_str()),
+            "a rejected attempt leaves the live code alone"
+        );
+
+        settings.web_auth_enabled = false;
+        assert!(
+            !spend_pair_key(&mut settings, &fresh),
+            "with the switch off there is nothing to pair with"
+        );
+    }
 }
 #[tauri::command]
 pub fn set_window_theme(
     app: tauri::AppHandle,
     dark: bool,
 ) -> Result<(), String> {
+    // Only Windows consumes these; reference unconditionally so macOS/Linux
+    // builds don't warn.
+    let _ = (&app, dark);
     #[cfg(target_os = "windows")]
     {
         use tauri::{Manager, Theme};

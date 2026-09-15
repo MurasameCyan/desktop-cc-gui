@@ -1,3 +1,4 @@
+mod agy;
 mod codex_titles;
 mod extract;
 pub mod reader;
@@ -65,6 +66,16 @@ pub struct SessionMeta {
     pub message_count: i64,
     pub pinned: bool,
     pub custom_title: Option<String>,
+    /// Model id this app sent for the session last ("provider/model", as the
+    /// picker spells it). Kept in our own table because the engine's own
+    /// transcript records only the bare model name — a session reopened in
+    /// another window, on the phone, or after a restart would otherwise have
+    /// nothing to recover its provider and model from.
+    pub model: Option<String>,
+    /// Reasoning effort the session last ran. Kept beside the model for the
+    /// same reason: a reopened session has to keep its level, wherever it is
+    /// opened from.
+    pub effort: Option<String>,
 }
 
 /// A native session file discovered on disk, matched to a workspace.

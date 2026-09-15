@@ -2,8 +2,11 @@
 
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ThreadMenuState } from "@/components/application/ai-chat/thread-context-menu";
 import type { WorkspaceMenuState } from "@/components/application/ai-chat/workspace-context-menu";
 import type { AiChatRepo, AiChatRepoSection } from "./ai-chat-sidebar";
+import type { ThreadAction } from "./sidebar-types";
+import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 
 /**
  * AiChatSidebar state hooks: quick search (⌘L), persisted workspace
@@ -137,6 +140,24 @@ export function useWorkspaceMenu(
   const closeWorkspaceMenu = useCallback(() => setWorkspaceMenu(null), []);
   return { workspaceMenu, closeWorkspaceMenu, openWorkspaceMenu, openArchivedMenu };
 }
+/** Thread right-click menu: pointer-anchored, one open at a time. Opens only
+ *  when at least one entry has a handler. */
+export function useThreadMenu(
+  onThreadAction?: (id: string, action: ThreadAction) => void,
+  onCopyThreadId?: (id: string) => void,
+) {
+  const [threadMenu, setThreadMenu] = useState<ThreadMenuState | null>(null);
+  const openThreadMenu = useCallback(
+    (event: ReactMouseEvent<HTMLElement>, threadId: string) => {
+      if (!onThreadAction && !onCopyThreadId) return;
+      event.preventDefault();
+      setThreadMenu({ x: event.clientX, y: event.clientY, threadId });
+    },
+    [onThreadAction, onCopyThreadId],
+  );
+  const closeThreadMenu = useCallback(() => setThreadMenu(null), []);
+  return { threadMenu, openThreadMenu, closeThreadMenu };
+}
 
 /** Quick search: the nav row swaps for a field that filters workspaces and
  *  sessions by label; ⌘L focuses it from anywhere. */
@@ -158,16 +179,12 @@ export function useSidebarSearch() {
     return () => window.cancelAnimationFrame(frame);
   }, [searchActive]);
 
-  useEffect(() => {
-    const onShortcut = (event: KeyboardEvent) => {
-      if (event.key.toLocaleLowerCase() === "l" && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        activateSearch();
-      }
-    };
-    window.addEventListener("keydown", onShortcut);
-    return () => window.removeEventListener("keydown", onShortcut);
-  }, [activateSearch]);
+  // Activation key lives in the shortcut runtime (default ⌘L, configurable
+  // in Settings → Shortcuts).
+  useEffect(
+    () => registerShortcutHandler("sidebarSearch", activateSearch),
+    [activateSearch],
+  );
 
   return {
     searchActive,

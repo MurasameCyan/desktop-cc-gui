@@ -12,6 +12,7 @@ import { fileName, useFilesStore } from "./store";
 import { BinaryFileView, ImageFileView } from "./EditorFallbackViews";
 import { FileEditorHeader } from "./FileEditorHeader";
 import { MarkdownPreview } from "./MarkdownPreview";
+import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 
 const MARKDOWN_RE = /\.(md|markdown)$/i;
 const CM_BASIC_SETUP = { foldGutter: false, highlightActiveLine: true };
@@ -78,8 +79,9 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
 
   const name = fileName(path);
   const isMarkdown = MARKDOWN_RE.test(name);
-  // Truncated files are partial: editing + saving would clobber the tail.
-  const readOnly = content.truncated;
+  // Truncated files are partial (editing + saving would clobber the tail);
+  // remote-readOnly files are complete but unwritable — both stay read-only.
+  const readOnly = content.truncated || content.readOnly === true;
   const dirty = !readOnly && draft !== savedText;
 
   // Publish dirty state so the tab strip can dot the tab and confirm closes.
@@ -129,17 +131,15 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
     savingRef.current = saving;
     activeRef.current = isActiveTab;
   });
+  // Save key lives in the shortcut runtime (default ⌘S, configurable in
+  // Settings → Shortcuts). Refs keep the handler reading the latest
+  // save/dirty/saving so it isn't re-registered on every keystroke.
   useEffect(() => {
     if (readOnly) return;
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        if (!activeRef.current) return;
-        if (dirtyRef.current && !savingRef.current) void saveRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return registerShortcutHandler("saveFile", () => {
+      if (!activeRef.current) return;
+      if (dirtyRef.current && !savingRef.current) void saveRef.current();
+    });
   }, [readOnly]);
 
   if (content.kind === "image") {

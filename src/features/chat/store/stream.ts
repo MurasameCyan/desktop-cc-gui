@@ -15,6 +15,8 @@ export interface QueuedMessage {
 
 export interface SessionState {
   messages: Message[];
+  /** Older delegation metadata kept outside the paginated message window. */
+  subagentHistory: Message[];
   nextBefore: number | null;
   loading: boolean;
   streaming: boolean;
@@ -39,6 +41,7 @@ export interface SessionState {
 
 export const EMPTY_SESSION: SessionState = {
   messages: [],
+  subagentHistory: [],
   nextBefore: null,
   loading: false,
   streaming: false,
@@ -76,6 +79,28 @@ export function resolveSessionModel(
     for (let i = messages.length - 1; i >= 0; i--) {
       const model = messages[i].model;
       if (model) return model;
+    }
+  }
+  return engineDefault;
+}
+
+/** The reasoning level one session runs with. A native session owns its level
+ * in SessionState/database; only a not-yet-created tab may carry a starting
+ * override. This prevents stale persisted tab fields from shadowing a newer
+ * level recorded by another client. */
+export function resolveSessionEffort(
+  tab: { engine: string; sessionId?: string | null; effort?: string | null } | null | undefined,
+  session: Pick<SessionState, "activeEffort" | "messages"> | undefined,
+  engineDefault?: string,
+): string | undefined {
+  if (!tab) return engineDefault;
+  if (tab.sessionId === null && tab.effort) return tab.effort;
+  if (session?.activeEffort) return session.activeEffort;
+  const messages = session?.messages;
+  if (messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const effort = messages[i].effort;
+      if (effort) return effort;
     }
   }
   return engineDefault;

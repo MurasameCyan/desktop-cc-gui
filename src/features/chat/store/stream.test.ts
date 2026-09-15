@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { appendToolMessage, applyStreamParts, EMPTY_SESSION, type BySessionSlice } from "./stream";
+import type { Message } from "@/lib/ipc";
+import { appendToolMessage, applyStreamParts, settleLiveRows, EMPTY_SESSION, type BySessionSlice } from "./stream";
 
 function harness() {
   let state: BySessionSlice = { bySession: { k: { ...EMPTY_SESSION, messages: [] } } };
@@ -53,5 +54,42 @@ describe("appendToolMessage", () => {
       model: "gemini-3.8-flash",
       effort: "high",
     });
+  });
+});
+
+describe("applyStreamParts / settleLiveRows contract", () => {
+  it("preserves immutable history, sequence and mixed-role order", () => {
+    const original: Message[] = [
+      Object.freeze({ seq: 1, role: "user", text: "question", ts: null }),
+      Object.freeze({ seq: 2, role: "assistant", text: "start", live: true, ts: null }),
+    ];
+    Object.freeze(original);
+    const result = applyStreamParts(original, [
+      { kind: "delta", text: " one" },
+      { kind: "thinking", text: "reason" },
+      { kind: "thinking", text: " more" },
+      { kind: "delta", text: "answer" },
+    ], "model");
+    // omp interleaves the channels within ONE assistant message, so the
+    // trailing delta folds back into the earlier live assistant row,
+    // skipping the live thinking row — text stays one continuous document.
+    expect(result.map((m) => [m.seq, m.role, m.text])).toEqual([
+      [1, "user", "question"],
+      [2, "assistant", "start oneanswer"],
+      [3, "thinking", "reason more"],
+    ]);
+    expect(original[1].text).toBe("start");
+    expect(result[0]).toBe(original[0]);
+  });
+
+  it("returns the original array for empty or textless parts", () => {
+    const original: Message[] = [Object.freeze({ seq: 1, role: "user", text: "question", ts: null })];
+    expect(applyStreamParts(original, [], null)).toBe(original);
+    expect(applyStreamParts(original, [{ kind: "delta", text: "" }], null)).toBe(original);
+  });
+
+  it("settleLiveRows clears every live flag", () => {
+    const result = applyStreamParts([], [{ kind: "delta", text: "hello" }], null);
+    expect(settleLiveRows(result).every((m) => !m.live)).toBe(true);
   });
 });

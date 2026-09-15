@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
   ipc,
   type SessionMeta,
+  type SessionPage,
   type Workspace,
   type WorkspaceGroup,
   type EngineInfo,
@@ -34,6 +35,7 @@ import {
   moveStreamingFlag,
   patchSession,
   resolveSessionModel,
+  resolveSessionEffort,
   routeRun,
   runRouting,
   setStreamingFlag,
@@ -50,6 +52,8 @@ import {
   patchGrantBySeq,
   registerPendingRunLifecycle,
   replayBufferedEngineEvents,
+  rememberModelForRun,
+  rememberEffortForRun,
   settleOrphanedRuns,
   unregisterRunLifecycle,
   upsertSessionMetaInto,
@@ -63,7 +67,11 @@ import {
   sessionContributionScope,
 } from "./store/session-contributions";
 import { persistSettings } from "./store/settings-persist";
-import { appendCommittedRows, visibleSessions } from "./store/session-utils";
+import {
+  listExternalSessionMetas,
+  setSessionSourcesChangedCallback,
+} from "@/features/plugins/runtime/session-source";
+import { appendCommittedRows, mergeExternalSessions, preserveUnscannedSessions, visibleSessions } from "./store/session-utils";
 import type { ChatStore } from "./store/types";
 import {
   collectBeforeTurnContributions,
@@ -112,6 +120,43 @@ function workspaceMetadata(workspaces: Workspace[], workspacePath: string): Work
   return workspace
     ? { id: workspace.id, path: workspace.path }
     : { id: derivedWorkspaceId(workspacePath), path: workspacePath };
+}
+
+/** Load a page of session history, routing remote (plugin-fed, e.g. WSL
+ *  distro CLI) transcripts through the host's remote fetch instead of the
+ *  local db lookup. `meta` is looked up from the current session catalog
+ *  when not supplied (usage refresh can't key by workspace). */
+function loadHistoryPage(
+  engine: string,
+  sessionId: string,
+  workspacePath: string,
+  limit?: number,
+  beforeSeq?: number | null,
+  meta?: SessionMeta,
+): Promise<SessionPage> {
+  const m =
+    meta ??
+    useChatStore
+      .getState()
+      .sessions.find(
+        (s) =>
+          s.engine === engine &&
+          s.sessionId === sessionId &&
+          s.workspacePath === workspacePath,
+      );
+  if (m?.remote && m.remotePath) {
+    return ipc.loadRemoteSessionPage(
+      workspacePath,
+      engine,
+      sessionId,
+      m.remotePath,
+      limit,
+      beforeSeq,
+    );
+  }
+  return beforeSeq === undefined
+    ? ipc.loadSessionPage(engine, sessionId, limit)
+    : ipc.loadSessionPage(engine, sessionId, limit, beforeSeq);
 }
 
 export const useChatStore = create<ChatStore>((set, get) => {
@@ -274,7 +319,36 @@ export const useChatStore = create<ChatStore>((set, get) => {
     const model =
       resolveSessionModel(tab, get().bySession[key], get().models[engine]) ||
       null;
-    const effort = tab.effort ?? get().efforts[engine] ?? null;
+    // Remember what this session runs, spelled as the picker spells it: the
+    // engine's own transcript keeps only the bare model name, so this record
+    // is what a restart or another client reads back (see
+    // ipc.rememberSessionModel). A brand-new session has no id yet — its
+    // `session` event carries the model instead.
+    if (model) {
+      if (tab.sessionId) {
+        void ipc
+          .rememberSessionModel(engine, tab.sessionId, model)
+          .catch(() => {});
+      } else {
+        rememberModelForRun(key, model);
+      }
+    }
+    const effort =
+      resolveSessionEffort(tab, get().bySession[key], get().efforts[engine]) ??
+      null;
+    // Remember the level the way the model is remembered: the picker follows
+    // the session, so a reopened session — here, in another window, or on the
+    // phone — keeps running the level it ran instead of the engine default.
+    if (effort) {
+      if (tab.sessionId) {
+        void ipc
+          .rememberSessionEffort(engine, tab.sessionId, effort)
+          .catch(() => {});
+      } else {
+        rememberEffortForRun(key, effort);
+      }
+    }
+    // Optimistic user message.
     const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
     const hookRunId = newId();
     // Optimistic user message, right away: the hooks below can take up to
@@ -385,6 +459,16 @@ export const useChatStore = create<ChatStore>((set, get) => {
           tab.workspacePath,
         );
         adoptNativeContributions(engine, tab.workspacePath, result.sessionId);
+        if (model) {
+          void ipc
+            .rememberSessionModel(engine, result.sessionId, model)
+            .catch(() => {});
+        }
+        if (effort) {
+          void ipc
+            .rememberSessionEffort(engine, result.sessionId, effort)
+            .catch(() => {});
+        }
         settleOrphanedRuns(set, routeRun(result.runId, newKey));
         set((s) => {
           const bySession = { ...s.bySession };
@@ -406,7 +490,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
                 return t;
               }
               stamped = true;
-              return { ...t, sessionId: result.sessionId };
+              return { ...t, sessionId: result.sessionId, effort: undefined };
             }),
           );
           // Only the active tab adopts the native id on `active`; a
@@ -416,7 +500,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
             s.active.engine === engine &&
             s.active.sessionId === null &&
             s.active.workspacePath === tab.workspacePath
-              ? { ...s.active, sessionId: result.sessionId }
+              ? { ...s.active, sessionId: result.sessionId, effort: undefined }
               : s.active;
           return {
             bySession,
@@ -445,7 +529,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
           }));
           dispatchSessionCreated(sessionLifecycleBase(createdTab));
         }
-      } else {
+      } else if (!runRouting.has(result.runId)) {
+        // The engine can announce its session id while the invoke is in
+        // flight; onSession rekeys the run to the native key then, and
+        // routing it back to the pre-send key would strand the live turn
+        // there while the tab renders the native key.
         settleOrphanedRuns(set, routeRun(result.runId, key));
       }
       replayBufferedEngineEvents(result.runId, {
@@ -487,6 +575,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
         streaming: false,
         turnStartedAt: null,
       });
+      // The send never became a turn, so no engine event will report one:
+      // without this the rest of the queue waits for a settle that is not
+      // coming. Each drain consumes one item, so a run of failures empties
+      // the queue instead of looping.
+      if (!get().bySession[key]?.interrupted) drainQueue(key);
     }
   }
 
@@ -547,6 +640,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     workspaceAliases: {},
     archivedWorkspaces: [],
     sendShortcut: "enter",
+    thinkingAutoCollapse: true,
     bySession: {},
     streamingByKey: {},
     unseen: {},
@@ -584,19 +678,26 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const onCliConfigChanged = () => void get().refreshEngines();
       window.addEventListener(CLI_CONFIG_CHANGED_EVENT, onCliConfigChanged);
       eventTeardowns.push(() =>
-        window.removeEventListener(
-          CLI_CONFIG_CHANGED_EVENT,
-          onCliConfigChanged,
-        ),
+        window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, onCliConfigChanged),
       );
       const [workspaces, sessions, engines] = await Promise.all([
         ipc.listWorkspaces().catch(() => [] as Workspace[]),
         ipc.listSessions().catch(() => [] as SessionMeta[]),
         ipc.listEngines().catch(() => [] as EngineInfo[]),
       ]);
+      // Plugin session sources (remote/容器内 CLI) merge under the local
+      // scan so WSL 等远端会话进侧栏,且重启时已开标签不至于因“会话表无
+      // 此会话”被清掉。
+      setSessionSourcesChangedCallback(() => void get().refreshSessions());
+      const external = await listExternalSessionMetas();
+      const allSessions = mergeExternalSessions(
+        sessions,
+        external,
+        workspaces.map((w) => w.path),
+      );
       set({
         workspaces,
-        sessions: visibleSessions(sessions, engines),
+        sessions: visibleSessions(allSessions, engines),
         engines,
       });
       ensureUsableEngine(engines);
@@ -605,7 +706,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         (t) =>
           workspaces.some((w) => w.path === t.workspacePath) &&
           (t.sessionId === null ||
-            sessions.some(
+            allSessions.some(
               (s) => s.engine === t.engine && s.sessionId === t.sessionId,
             )),
       );
@@ -644,26 +745,69 @@ export const useChatStore = create<ChatStore>((set, get) => {
             workspaceAliases: settings.workspaceAliases ?? {},
             archivedWorkspaces: settings.archivedWorkspaces ?? [],
             sendShortcut: settings.composerSendShortcut ?? "enter",
+            thinkingAutoCollapse: settings.thinkingAutoCollapse ?? true,
           }),
         )
         .catch(() => {});
     },
 
     refreshSessions: async () => {
-      const sessions = await ipc.listSessions().catch(() => null);
-      if (sessions) set({ sessions: visibleSessions(sessions, get().engines) });
+      const [sessions, external] = await Promise.all([
+        ipc.listSessions().catch(() => null),
+        listExternalSessionMetas(),
+      ]);
+      if (!sessions) return;
+      const merged = mergeExternalSessions(
+        sessions,
+        external,
+        get().workspaces.map((w) => w.path),
+      );
+      set((s) => {
+        const visible = visibleSessions(
+          preserveUnscannedSessions(merged, s.sessions, s.bySession),
+          s.engines,
+        );
+        const bySession = { ...s.bySession };
+        for (const meta of merged) {
+          const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
+          const current = bySession[key];
+          if (!current) continue;
+          bySession[key] = {
+            ...current,
+            activeModel: meta.model ?? current.activeModel,
+            activeEffort: meta.effort ?? current.activeEffort,
+          };
+        }
+        return { sessions: visible, bySession };
+      });
     },
 
     refreshEngines: async () => {
-      const [engines, sessions] = await Promise.all([
+      const [engines, sessions, external] = await Promise.all([
         ipc.listEngines().catch(() => null),
         ipc.listSessions().catch(() => null),
+        listExternalSessionMetas(),
       ]);
       if (!engines) return;
-      set({
+      set((s) => ({
         engines,
-        ...(sessions ? { sessions: visibleSessions(sessions, engines) } : {}),
-      });
+        ...(sessions
+          ? {
+              sessions: visibleSessions(
+                preserveUnscannedSessions(
+                  mergeExternalSessions(
+                    sessions,
+                    external,
+                    s.workspaces.map((w) => w.path),
+                  ),
+                  s.sessions,
+                  s.bySession,
+                ),
+                engines,
+              ),
+            }
+          : {}),
+      }));
       ensureUsableEngine(engines);
     },
 
@@ -672,9 +816,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (workspaces) set({ workspaces });
     },
 
-    addWorkspace: async (path) => {
+    addWorkspace: async (path, meta) => {
       try {
-        await ipc.addWorkspace(path);
+        await ipc.addWorkspace(path, meta);
         await get().refreshWorkspaces();
         set({ actionError: null });
       } catch (error) {
@@ -762,25 +906,41 @@ export const useChatStore = create<ChatStore>((set, get) => {
 
     selectSession: async (engine, sessionId, workspacePath) => {
       const key = sessionKey(engine, sessionId, workspacePath);
+      // The session remembers the model it ran, and our own record is the
+      // only place that carries the provider ("agentrouter qunyou/x", while
+      // the engine transcript keeps the bare "x"). Without it a session
+      // reopened here — after a restart, or in another window — showed the
+      // engine default and sent that instead.
+      const remembered = get().sessions.find(
+        (x) => x.engine === engine && x.sessionId === sessionId,
+      )?.model;
+      if (remembered && !get().bySession[key]?.activeModel) {
+        patchSession(set, key, { activeModel: remembered });
+      }
+      // Same for the reasoning level: the picker and the next send follow the
+      // session, so an unset level adopts the one this session last ran.
+      const rememberedEffort = get().sessions.find(
+        (x) => x.engine === engine && x.sessionId === sessionId,
+      )?.effort;
+      if (rememberedEffort && !get().bySession[key]?.activeEffort) {
+        patchSession(set, key, { activeEffort: rememberedEffort });
+      }
       const syncEngine = engine !== get().activeEngine;
       if (syncEngine) writeStored(ENGINE_PREF_KEY, engine);
       set((s) => {
-        // Reuse the stored tab so its per-tab model/effort overrides survive;
-        // a fresh object would drop them on every session switch.
+        // Native sessions read effort from SessionState/database. Strip the
+        // legacy per-tab field so an old localStorage value cannot shadow it.
         const stored = s.openTabs.find((t) =>
           sameTab(t, engine, sessionId, workspacePath),
         );
-        const tab: ActiveSession = stored ?? {
-          engine,
-          sessionId,
-          workspacePath,
-        };
-        const openTabs = stored ? s.openTabs : [...s.openTabs, tab];
+        const tab: ActiveSession = stored
+          ? { ...stored, effort: undefined }
+          : { engine, sessionId, workspacePath };
+        const openTabs = stored
+          ? s.openTabs.map((t) => (t === stored ? tab : t))
+          : [...s.openTabs, tab];
         persistTabs(openTabs, tab);
-        // Opening a session clears its unseen flag.
         const unseen = key in s.unseen ? omitKey(s.unseen, key) : s.unseen;
-        // The picker must follow the session's engine — otherwise the chip
-        // shows one CLI while sends go to another (same rule as pending tabs).
         return { openTabs, active: tab, unseen, activeEngine: engine };
       });
       // A selection restores the session whether or not its messages are
@@ -794,9 +954,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (existing && existing.messages.length > 0) return;
       patchSession(set, key, { loading: true });
       try {
-        const page = await ipc.loadSessionPage(engine, sessionId, 100);
+        const page = await loadHistoryPage(engine, sessionId, workspacePath, 100);
         patchSession(set, key, {
           messages: page.messages,
+          subagentHistory: page.subagentHistory,
           nextBefore: page.nextBefore,
           loading: false,
           // Live "usage" events only cover fresh turns; a resumed session
@@ -971,8 +1132,16 @@ export const useChatStore = create<ChatStore>((set, get) => {
       set({ codexServiceTier: tier });
     },
     setEffort: async (engine, effort) => {
+      const active = get().active;
+      if (active?.engine === engine && active.sessionId) {
+        const key = sessionKey(engine, active.sessionId, active.workspacePath);
+        patchSession(set, key, { activeEffort: effort });
+        void ipc.rememberSessionEffort(engine, active.sessionId, effort).catch(() => {});
+        stampActiveTab({ effort: undefined });
+        return;
+      }
       set({ efforts: { ...get().efforts, [engine]: effort } });
-      if (get().active?.engine === engine) stampActiveTab({ effort });
+      if (active?.engine === engine) stampActiveTab({ effort });
       await persistSettings((settings) => ({
         defaultEfforts: { ...settings.defaultEfforts, [engine]: effort },
       }));
@@ -1002,7 +1171,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         stampActiveTab({ model: model || undefined });
       }
     },
-    pinModels: async (updates) => {
+    pinModels: async (updates, persist = true) => {
       const entries = Object.entries(updates).filter(([, model]) =>
         model.trim(),
       );
@@ -1010,6 +1179,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const models = { ...get().models };
       for (const [engine, model] of entries) models[engine] = model;
       set({ models });
+      if (!persist) return;
       await persistSettings((settings) => ({
         defaultModels: {
           ...settings.defaultModels,
@@ -1149,6 +1319,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
     setSendShortcut: (shortcut) => {
       set({ sendShortcut: shortcut });
     },
+    setThinkingAutoCollapse: (autoCollapse) => {
+      set({ thinkingAutoCollapse: autoCollapse });
+    },
 
     setDraft: (key, text) => {
       set((s) => ({ drafts: { ...s.drafts, [key]: text } }));
@@ -1182,9 +1355,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (!state?.nextBefore || state.loading) return;
       patchSession(set, key, { loading: true });
       try {
-        const page = await ipc.loadSessionPage(
+        const page = await loadHistoryPage(
           active.engine,
           active.sessionId,
+          active.workspacePath,
           100,
           state.nextBefore,
         );
@@ -1194,6 +1368,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
             ...(get().bySession[key] ?? EMPTY_SESSION).messages,
           ],
           nextBefore: page.nextBefore,
+          subagentHistory: page.subagentHistory,
           loading: false,
         });
       } catch {
@@ -1306,6 +1481,40 @@ export const useChatStore = create<ChatStore>((set, get) => {
           },
         };
       });
+    },
+
+    /** Jump the queue with one message. An engine takes one prompt at a time,
+     *  so "now" means stopping the turn in flight; the row moves to the head
+     *  and the stop's own park is lifted, so the exit drain sends this message
+     *  instead of waiting the turn out. The rows behind it follow on the next
+     *  settle. */
+    sendQueuedNow: async (id) => {
+      const { active } = get();
+      if (!active) return;
+      const key = sessionKey(
+        active.engine,
+        active.sessionId,
+        active.workspacePath,
+      );
+      const session = get().bySession[key];
+      const item = session?.queue.find((entry) => entry.id === id);
+      if (!item || !session) return;
+      const running = session.streaming;
+      set((s) => {
+        const prev = s.bySession[key] ?? EMPTY_SESSION;
+        return {
+          bySession: {
+            ...s.bySession,
+            [key]: {
+              ...prev,
+              queue: [item, ...prev.queue.filter((entry) => entry.id !== id)],
+              interrupted: false,
+            },
+          },
+        };
+      });
+      if (running) await get().interrupt();
+      drainQueue(key);
     },
 
     interrupt: async () => {
@@ -1539,9 +1748,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (!engine || !sessionId) return;
 
       try {
-        const page = await ipc.loadSessionPage(
+        const page = await loadHistoryPage(
           engine,
           sessionId,
+          targetTab?.workspacePath ?? "",
           100,
         );
         const latestUsage =

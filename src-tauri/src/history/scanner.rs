@@ -137,8 +137,41 @@ fn claude_project_dirs(base: &Path, workspace: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// v0.9 managed provider homes (`~/.ccgui/<engine>-provider-homes/<id>/`):
+/// sessions launched under a managed provider profile wrote into these
+/// CLI-home-shaped dirs. Scanned so users upgrading from v0.9 keep that
+/// history instead of watching it vanish from the sidebar.
+fn legacy_provider_homes(dir_name: &str) -> Vec<PathBuf> {
+    let root = crate::paths::legacy_home().join(dir_name);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
 fn discover_kimi(workspace: &Path) -> Vec<SessionFile> {
-    let base = crate::engine::engine_home(None, ".kimi-code");
+    // Current CLI home, the v0.9-era CLI home (`~/.kimi`, KIMI_HOME
+    // override), and every v0.9 managed provider home.
+    let mut homes = vec![crate::engine::engine_home(None, ".kimi-code")];
+    homes.push(crate::engine::engine_home(Some("KIMI_HOME"), ".kimi"));
+    homes.extend(legacy_provider_homes("kimi-provider-homes"));
+    let mut out = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    for base in homes {
+        for file in discover_kimi_in(&base, workspace) {
+            if seen_paths.insert(file.file_path.clone()) {
+                out.push(file);
+            }
+        }
+    }
+    out
+}
+
+fn discover_kimi_in(base: &Path, workspace: &Path) -> Vec<SessionFile> {
     let Ok(raw) = std::fs::read_to_string(base.join("session_index.jsonl")) else {
         return Vec::new();
     };
@@ -188,6 +221,194 @@ fn discover_kimi(workspace: &Path) -> Vec<SessionFile> {
     out
 }
 
+/// `/Users/foo/bar` → `-Users-foo-bar` (qodercli project dir names; reference
+/// engine/qoder_history.rs::encode_qoder_project_slug).
+fn qoder_encode_project_slug(path: &str) -> String {
+    let mut value = path.trim().replace('\\', "/");
+    while value.ends_with('/') && value.len() > 1 {
+        value.pop();
+    }
+    if value.is_empty() {
+        return String::new();
+    }
+    value.replace('/', "-")
+}
+
+/// Candidate `<projects>/<slug>` dirs for one workspace — same spelling
+/// spread as [`claude_project_dirs`] (raw / trailing-trimmed / canonical).
+fn qoder_project_dirs(base: &Path, workspace: &Path) -> Vec<PathBuf> {
+    fn push(
+        out: &mut Vec<PathBuf>,
+        seen: &mut std::collections::HashSet<String>,
+        base: &Path,
+        spelling: &str,
+    ) {
+        let slug = qoder_encode_project_slug(spelling);
+        if !slug.is_empty() && seen.insert(slug.clone()) {
+            out.push(base.join(slug));
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let raw = workspace.to_string_lossy().to_string();
+    let trimmed = raw.trim_end_matches(['/', '\\']).to_string();
+    push(&mut out, &mut seen, base, &raw);
+    push(&mut out, &mut seen, base, &trimmed);
+    for spelling in [&raw, &trimmed] {
+        if let Ok(canonical) = std::fs::canonicalize(spelling) {
+            let canonical = strip_verbatim_prefix(&canonical.to_string_lossy()).to_string();
+            push(&mut out, &mut seen, base, &canonical);
+        }
+    }
+    out
+}
+
+/// Qoder sessions: `<config-home>/projects/<cwd-slug>/<sessionId>.jsonl`, one
+/// claude-shaped NDJSON file per session (reference qoder_history.rs). Each
+/// distribution (Global `~/.qoder` / CN `~/.qoder-cn`) owns an independent
+/// home. Slug-keyed per workspace, so discovery is a handful of readdirs.
+fn discover_qoder(
+    workspace: &Path,
+    distribution: crate::engine::qoder::QoderDistribution,
+) -> Vec<SessionFile> {
+    let base =
+        crate::engine::engine_home(None, distribution.default_config_dir_name()).join("projects");
+    let mut out = Vec::new();
+    let mut seen_sessions = std::collections::HashSet::new();
+    for dir in qoder_project_dirs(&base, workspace) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !seen_sessions.insert(stem.to_string()) {
+                continue;
+            }
+            out.push(SessionFile {
+                engine: distribution.engine_id(),
+                session_id: stem.to_string(),
+                workspace_path: workspace.to_string_lossy().to_string(),
+                file_path: path,
+            });
+        }
+    }
+    out
+}
+
+/// OpenCode data roots holding `storage/{session,message,part}/…` and
+/// `opencode.db` (reference commands_opencode_catalog.rs
+/// ::opencode_data_candidate_roots).
+fn opencode_data_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("OPENCODE_HOME") {
+        roots.push(PathBuf::from(home));
+    }
+    if let Some(dir) = dirs::data_local_dir() {
+        roots.push(dir.join("opencode"));
+    }
+    if let Some(dir) = dirs::data_dir() {
+        roots.push(dir.join("opencode"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".local").join("share").join("opencode"));
+    }
+    roots.push(workspace.join(".opencode"));
+    let mut deduped: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        if !deduped.contains(&root) {
+            deduped.push(root);
+        }
+    }
+    deduped
+}
+
+// OpenCode scan budgets. Session metadata files are ~400 bytes of pretty
+// JSON; the caps exist so a bloated storage tree costs a bounded readdir
+// count plus a few KB per file, never an unbounded walk (the repo has a
+// 287MB-scan incident in its history).
+const MAX_OPENCODE_PROJECT_DIRS: usize = 64;
+const MAX_OPENCODE_SESSION_FILES: usize = 512;
+const MAX_OPENCODE_META_BYTES: u64 = 64 * 1024;
+
+/// Parse a small JSON file (opencode pretty-prints, so line readers do not
+/// apply), reading at most `max_bytes`. Truncated or invalid JSON → None.
+fn read_small_json(path: &Path, max_bytes: u64) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = String::new();
+    file.take(max_bytes).read_to_string(&mut buf).ok()?;
+    serde_json::from_str(&buf).ok()
+}
+
+/// OpenCode sessions: `<root>/storage/session/<projectId>/<sessionId>.json`
+/// (shape verified against opencode 1.1.16 on disk: `{id, projectID,
+/// directory, title, time:{created,updated}}`). Attribution comes from the
+/// metadata's `directory` field — the projectId dir is a content hash, not
+/// a path encoding, so the tiny metadata file must be read (bounded above).
+fn discover_opencode(workspace: &Path) -> Vec<SessionFile> {
+    let mut out = Vec::new();
+    let mut seen_sessions = std::collections::HashSet::new();
+    for root in opencode_data_roots(workspace) {
+        let session_root = root.join("storage").join("session");
+        let Ok(projects) = std::fs::read_dir(&session_root) else {
+            continue;
+        };
+        for (index, project) in projects.flatten().enumerate() {
+            if index >= MAX_OPENCODE_PROJECT_DIRS {
+                break;
+            }
+            let project_dir = project.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&project_dir) else {
+                continue;
+            };
+            for (index, file) in files.flatten().enumerate() {
+                if index >= MAX_OPENCODE_SESSION_FILES {
+                    break;
+                }
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(meta) = read_small_json(&path, MAX_OPENCODE_META_BYTES) else {
+                    continue;
+                };
+                let directory = meta
+                    .get("directory")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if directory.is_empty() || !same_or_child(Path::new(directory), workspace) {
+                    continue;
+                }
+                let session_id = meta
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                    .unwrap_or_default();
+                if session_id.is_empty() || !seen_sessions.insert(session_id.clone()) {
+                    continue;
+                }
+                out.push(SessionFile {
+                    engine: "opencode",
+                    session_id,
+                    workspace_path: workspace.to_string_lossy().to_string(),
+                    file_path: path,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn grok_url_decode(encoded: &str) -> String {
     let bytes = encoded.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -208,8 +429,21 @@ fn grok_url_decode(encoded: &str) -> String {
 }
 
 fn discover_grok(workspace: &Path) -> Vec<SessionFile> {
-    let sessions_root = crate::engine::engine_home(None, ".grok").join("sessions");
-    let Ok(cwd_dirs) = std::fs::read_dir(&sessions_root) else {
+    let mut roots = vec![crate::engine::engine_home(None, ".grok").join("sessions")];
+    roots.extend(
+        legacy_provider_homes("grok-provider-homes")
+            .into_iter()
+            .map(|home| home.join("sessions")),
+    );
+    let mut out = Vec::new();
+    for root in roots {
+        out.extend(discover_grok_in(&root, workspace));
+    }
+    out
+}
+
+fn discover_grok_in(sessions_root: &Path, workspace: &Path) -> Vec<SessionFile> {
+    let Ok(cwd_dirs) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -247,6 +481,105 @@ fn discover_grok(workspace: &Path) -> Vec<SessionFile> {
         }
     }
     out
+}
+
+/// Antigravity conversations live under `~/.gemini/antigravity-cli/` as
+/// sqlite files, indexed by `conversation_summaries.db` (`workspace_uris`).
+fn discover_agy(workspace: &Path) -> Vec<SessionFile> {
+    let home = crate::engine::agy::agy_home();
+    let conv_dir = home.join("conversations");
+    let mut by_id: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+
+    if let Ok(conn) = rusqlite::Connection::open_with_flags(
+        home.join("conversation_summaries.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT conversation_id, workspace_uris FROM conversation_summaries",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    let (id, uris) = row;
+                    if id.trim().is_empty() {
+                        continue;
+                    }
+                    if agy_uris_match_workspace(&uris, workspace) {
+                        let path = conv_dir.join(format!("{id}.db"));
+                        by_id.entry(id).or_insert(path);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(text) = std::fs::read_to_string(home.join("cache").join("last_conversations.json")) {
+        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text) {
+            for (cwd, id) in map {
+                let Some(id) = id.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                if same_or_child(Path::new(&cwd), workspace) {
+                    by_id
+                        .entry(id.to_string())
+                        .or_insert_with(|| conv_dir.join(format!("{id}.db")));
+                }
+            }
+        }
+    }
+
+    by_id
+        .into_iter()
+        .filter(|(_, path)| path.is_file())
+        .map(|(session_id, file_path)| SessionFile {
+            engine: "agy",
+            session_id,
+            workspace_path: workspace.to_string_lossy().to_string(),
+            file_path,
+        })
+        .collect()
+}
+
+fn agy_uris_match_workspace(uris_json: &str, workspace: &Path) -> bool {
+    let Ok(uris) = serde_json::from_str::<Vec<String>>(uris_json) else {
+        return false;
+    };
+    uris.iter().any(|uri| {
+        file_uri_path(uri).is_some_and(|path| same_or_child(&path, workspace))
+    })
+}
+
+fn file_uri_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    Some(PathBuf::from(percent_decode_path(rest)))
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ==================== Scan ====================
@@ -294,6 +627,30 @@ fn is_codex_subagent_file(path: &Path) -> bool {
         .any(is_codex_subagent_head)
 }
 
+/// DSH writes one session file per spawned child. The header stamps
+/// `origin: "subagent"` (and a positive `delegationDepth`); listing those
+/// next to the parent looks like leftover review chats. The live turn
+/// already surfaces them in the subagent strip.
+fn is_dsh_subagent_source(source: &serde_json::Value) -> bool {
+    if source.get("origin").and_then(|v| v.as_str()) == Some("subagent") {
+        return true;
+    }
+    source
+        .get("delegationDepth")
+        .and_then(|v| v.as_i64())
+        .is_some_and(|depth| depth > 0)
+}
+
+fn is_dsh_subagent_head(head: &serde_json::Value) -> bool {
+    head.get("type").and_then(|v| v.as_str()) == Some("session") && is_dsh_subagent_source(head)
+}
+
+fn is_dsh_subagent_file(path: &Path) -> bool {
+    peek_head_json_lines(path, true, 8)
+        .iter()
+        .any(is_dsh_subagent_head)
+}
+
 /// Engine file identity from the first JSON line (codex session_meta /
 /// pi-family & dsh session line). Returns (session_id, cwd).
 fn identify_head(engine: &str, path: &Path) -> Option<(String, String)> {
@@ -316,6 +673,9 @@ fn identify_head(engine: &str, path: &Path) -> Option<(String, String)> {
         if engine == "codex" && source.get("source").is_some_and(is_codex_subagent_source) {
             return None;
         }
+        if engine == "dsh" && is_dsh_subagent_source(source) {
+            return None;
+        }
         let id = source.get("id").and_then(|v| v.as_str())?.trim();
         let cwd = source.get("cwd").and_then(|v| v.as_str())?.trim();
         if id.is_empty() || cwd.is_empty() {
@@ -328,25 +688,30 @@ fn identify_head(engine: &str, path: &Path) -> Option<(String, String)> {
 
 /// Codex rollout files (readdir only, no content reads).
 fn codex_candidates() -> Vec<PathBuf> {
-    let home = crate::engine::engine_home(Some("CODEX_HOME"), ".codex");
+    // Beyond the active home, every v0.9 managed provider home keeps its
+    // own sessions tree.
+    let mut homes = vec![crate::engine::codex_home()];
+    homes.extend(legacy_provider_homes("codex-provider-homes"));
     let mut out = Vec::new();
-    for root in [home.join("sessions"), home.join("archived_sessions")] {
-        let mut stack = vec![root];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
-                    .unwrap_or(false)
-                {
-                    out.push(path);
+    for home in homes {
+        for root in [home.join("sessions"), home.join("archived_sessions")] {
+            let mut stack = vec![root];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+                        .unwrap_or(false)
+                    {
+                        out.push(path);
+                    }
                 }
             }
         }
@@ -376,6 +741,44 @@ fn pi_family_candidates(home_dir_name: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Canonical compressed DSH log generation. v0 is `session.jsonl.zstd`;
+/// later formats are `session.vN.jsonl.zstd` (no leading zeros).
+fn dsh_log_generation(name: &str) -> Option<u32> {
+    const SUFFIX: &str = ".jsonl.zstd";
+    let stem = name.strip_suffix(SUFFIX)?;
+    if stem == "session" {
+        return Some(0);
+    }
+    let digits = stem.strip_prefix("session.v")?;
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn dsh_session_log(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    let mut best: Option<(u32, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(generation) = dsh_log_generation(name) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(current, _)| generation > *current) {
+            best = Some((generation, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 fn dsh_candidates() -> Vec<PathBuf> {
     let root = crate::engine::engine_home(Some("DSH_HOME"), ".dsh").join("sessions");
     let mut out = Vec::new();
@@ -387,8 +790,7 @@ fn dsh_candidates() -> Vec<PathBuf> {
             continue;
         };
         for session_entry in session_dirs.flatten() {
-            let file = session_entry.path().join("session.jsonl.zstd");
-            if file.is_file() {
+            if let Some(file) = dsh_session_log(&session_entry.path()) {
                 out.push(file);
             }
         }
@@ -429,6 +831,10 @@ fn gather_candidates(workspaces: &[String]) -> Vec<Candidate> {
             .into_iter()
             .chain(discover_kimi(&workspace))
             .chain(discover_grok(&workspace))
+            .chain(discover_agy(&workspace))
+            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global))
+            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Cn))
+            .chain(discover_opencode(&workspace))
         {
             if seen_paths.insert(file.file_path.clone()) {
                 candidates.push(Candidate {
@@ -473,6 +879,8 @@ fn stat_all(
     let mut signature_hasher = Sha256::new();
     signature_hasher.update(format!("v{}|", crate::db::CACHE_VERSION).as_bytes());
     signature_hasher.update(accepted_signature.as_bytes());
+    signature_hasher.update(b"codex_home=");
+    signature_hasher.update(crate::engine::codex_home().to_string_lossy().as_bytes());
     signature_hasher.update(b"|");
     for w in workspaces {
         signature_hasher.update(w.as_bytes());
@@ -662,9 +1070,87 @@ fn prepare_candidate(
     })
 }
 
-/// Drop Codex subagent rollouts that were indexed as top-level chats.
+/// Drop Codex / DSH subagent sessions that were indexed as top-level chats.
 /// Returns true when any row was removed.
-fn prune_codex_subagent_sessions(db: &crate::db::Db) -> Result<bool, String> {
+fn prune_hidden_subagent_sessions(db: &crate::db::Db) -> Result<bool, String> {
+    let a = prune_engine_subagent_sessions(db, "codex", is_codex_subagent_file)?;
+    let b = prune_engine_subagent_sessions(db, "dsh", is_dsh_subagent_file)?;
+    Ok(a || b)
+}
+
+fn prune_engine_subagent_sessions(
+    db: &crate::db::Db,
+    engine: &str,
+    is_subagent: fn(&Path) -> bool,
+) -> Result<bool, String> {
+    let paths: Vec<(String, String)> = {
+        let conn = db.0.lock();
+        let mut stmt = conn
+            .prepare("SELECT session_id, file_path FROM sessions WHERE engine=?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([engine], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok(pair) => out.push(pair),
+                Err(e) => eprintln!("[scanner] skipping undecodable {engine} session row: {e}"),
+            }
+        }
+        out
+    };
+    let dead: Vec<String> = paths
+        .into_iter()
+        .filter(|(_, path)| is_subagent(Path::new(path)))
+        .map(|(id, _)| id)
+        .collect();
+    if dead.is_empty() {
+        return Ok(false);
+    }
+    let conn = db.0.lock();
+    for id in &dead {
+        conn.execute(
+            "DELETE FROM sessions WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+fn path_is_under(path: &str, home: &Path) -> bool {
+    let path = Path::new(path);
+    if path.starts_with(home) {
+        return true;
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(home)) {
+        (Ok(path), Ok(home)) => path.starts_with(home),
+        _ => false,
+    }
+}
+
+/// Drop Codex rows indexed from a previous CODEX_HOME after the user points
+/// CLI 管理 at another directory. Returns true when any row was removed.
+///
+/// No custom home → no-op. Default `~/.codex` users must not lose history
+/// because of a path-prefix mismatch (symlink, case, missing file).
+fn prune_codex_sessions_outside_home(db: &crate::db::Db) -> Result<bool, String> {
+    #[cfg(not(test))]
+    {
+        let custom = crate::settings::read_settings()
+            .ok()
+            .and_then(|s| s.codex_home)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if custom.is_none() {
+            return Ok(false);
+        }
+    }
+    let home = crate::engine::codex_home();
+    // v0.9 provider-home sessions live outside any codex home but stay
+    // valid history; pruning them would re-hide upgraded users' sessions.
+    let legacy_root = crate::paths::legacy_home().join("codex-provider-homes");
     let paths: Vec<(String, String)> = {
         let conn = db.0.lock();
         let mut stmt = conn
@@ -684,21 +1170,29 @@ fn prune_codex_subagent_sessions(db: &crate::db::Db) -> Result<bool, String> {
     };
     let dead: Vec<String> = paths
         .into_iter()
-        .filter(|(_, path)| is_codex_subagent_file(Path::new(path)))
+        .filter(|(_, path)| !path_is_under(path, &home) && !path_is_under(path, &legacy_root))
         .map(|(id, _)| id)
         .collect();
     if dead.is_empty() {
         return Ok(false);
     }
-    let conn = db.0.lock();
+    let mut conn = db.0.lock();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     for id in &dead {
-        conn.execute(
+        tx.execute(
             "DELETE FROM sessions WHERE engine='codex' AND session_id=?1",
             rusqlite::params![id],
         )
         .map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+fn prune_stale_sessions(db: &crate::db::Db) -> Result<bool, String> {
+    let outside = prune_codex_sessions_outside_home(db)?;
+    let subagent = prune_hidden_subagent_sessions(db)?;
+    Ok(outside || subagent)
 }
 
 /// Phase B (one lock, one transaction): upsert every prepared row, then
@@ -777,7 +1271,7 @@ fn scan_inner(
     let (accepted, accepted_signature) = db.accepted_internal_frame_index()?;
     let (stats, signature) = stat_all(&workspaces, &candidates, &accepted_signature);
     let Some(tier1) = tier1_gate(db, signature)? else {
-        let pruned = prune_codex_subagent_sessions(db)?;
+        let pruned = prune_stale_sessions(db)?;
         if super::codex_titles::sync(db)? || pruned {
             on_changed();
         }
@@ -843,7 +1337,7 @@ fn scan_inner(
         &tier1,
         !tier1.retitle_pending || retitle_complete,
     )?;
-    prune_codex_subagent_sessions(db)?;
+    prune_stale_sessions(db)?;
     super::codex_titles::sync(db)?;
     on_changed();
     if total > 0 {
@@ -977,6 +1471,74 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn write_zstd_jsonl(path: &Path, lines: &[&str]) {
+        use std::io::Write;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(file, 0).unwrap();
+        for line in lines {
+            encoder.write_all(line.as_bytes()).unwrap();
+            encoder.write_all(b"\n").unwrap();
+        }
+        encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn dsh_log_generation_reads_v0_and_later() {
+        assert_eq!(dsh_log_generation("session.jsonl.zstd"), Some(0));
+        assert_eq!(dsh_log_generation("session.v3.jsonl.zstd"), Some(3));
+        assert_eq!(dsh_log_generation("session.v12.jsonl.zstd"), Some(12));
+        assert_eq!(dsh_log_generation("session.v03.jsonl.zstd"), None);
+        assert_eq!(dsh_log_generation("session.v0.jsonl.zstd"), None);
+        assert_eq!(dsh_log_generation("session.jsonl"), None);
+        assert_eq!(dsh_log_generation("session.lock"), None);
+    }
+
+    #[test]
+    fn dsh_session_log_picks_highest_generation() {
+        let dir = scratch_dir("dsh-gen");
+        write_zstd_jsonl(&dir.join("session.jsonl.zstd"), &[r#"{"type":"session","id":"old"}"#]);
+        write_zstd_jsonl(&dir.join("session.v3.jsonl.zstd"), &[r#"{"type":"session","id":"new"}"#]);
+        std::fs::write(dir.join("session.lock"), "").unwrap();
+        let picked = dsh_session_log(&dir).unwrap();
+        assert_eq!(picked.file_name().unwrap(), "session.v3.jsonl.zstd");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn identify_head_skips_dsh_subagent_session() {
+        let dir = scratch_dir("identify-dsh-subagent");
+        let path = dir.join("session.v3.jsonl.zstd");
+        write_zstd_jsonl(
+            &path,
+            &[
+                r#"{"type":"session","version":3,"id":"child","cwd":"/ws","createdAt":1,"isSeeded":false,"origin":"subagent","parentSession":"parent","delegationDepth":1}"#,
+                r#"{"type":"user/message","time":1,"data":{"content":[{"type":"text","text":"你是一名只读代码评审员"}]}}"#,
+            ],
+        );
+        assert_eq!(identify_head("dsh", &path), None);
+        assert!(is_dsh_subagent_file(&path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn identify_head_keeps_top_level_dsh_session() {
+        let dir = scratch_dir("identify-dsh-parent");
+        let path = dir.join("session.v3.jsonl.zstd");
+        write_zstd_jsonl(
+            &path,
+            &[r#"{"type":"session","version":3,"id":"parent","cwd":"/ws","createdAt":1,"isSeeded":false,"delegationDepth":0}"#],
+        );
+        assert_eq!(
+            identify_head("dsh", &path),
+            Some(("parent".to_string(), "/ws".to_string()))
+        );
+        assert!(!is_dsh_subagent_file(&path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn identify_head_first_line_session_still_works() {
         let dir = scratch_dir("identify-old");
@@ -1044,6 +1606,247 @@ mod tests {
         assert_eq!(found[0].session_id, "s1");
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    fn write_kimi_wire_session(index_dir: &Path, session_dir: &Path, workspace: &Path, session_id: &str) {
+        let wire = session_dir.join("agents").join("main");
+        std::fs::create_dir_all(index_dir).unwrap();
+        std::fs::create_dir_all(&wire).unwrap();
+        std::fs::write(wire.join("wire.jsonl"), "{}\n").unwrap();
+        let line = format!(
+            "{{\"workDir\":\"{}\",\"sessionId\":\"{session_id}\",\"sessionDir\":\"{}\"}}",
+            workspace.to_string_lossy().replace('\\', "\\\\"),
+            session_dir.to_string_lossy().replace('\\', "\\\\"),
+        );
+        std::fs::write(index_dir.join("session_index.jsonl"), format!("{line}\n")).unwrap();
+    }
+
+    /// v0.9 upgrade path: sessions under the old CLI home (~/.kimi) and under
+    /// managed provider homes (~/.ccgui/kimi-provider-homes/<id>/) must both
+    /// stay discoverable next to the current ~/.kimi-code home.
+    #[test]
+    fn discover_kimi_reads_legacy_and_provider_homes() {
+        let home = scratch_dir("discover-kimi-legacy");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_kimi_wire_session(&home.join(".kimi"), &home.join("old-cli-session"), &workspace, "old-cli");
+        let provider_home = home.join(".ccgui").join("kimi-provider-homes").join("p1");
+        write_kimi_wire_session(&provider_home, &home.join("managed-session"), &workspace, "managed");
+
+        let _guard = HomeGuard::set(&home);
+        // A stray KIMI_HOME on the host would redirect the legacy home.
+        let prev_kimi_home = std::env::var_os("KIMI_HOME");
+        std::env::remove_var("KIMI_HOME");
+        let found = discover_kimi(&workspace);
+        match &prev_kimi_home {
+            Some(value) => std::env::set_var("KIMI_HOME", value),
+            None => std::env::remove_var("KIMI_HOME"),
+        }
+        let mut ids: Vec<&str> = found.iter().map(|f| f.session_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["managed", "old-cli"]);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// v0.9 upgrade path: grok sessions written under a managed provider home
+    /// keep their <encoded-cwd>/<session>/chat_history.jsonl shape.
+    #[test]
+    fn discover_grok_reads_provider_homes() {
+        let home = scratch_dir("discover-grok-legacy");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let encoded: String = workspace
+            .to_string_lossy()
+            .bytes()
+            .map(|b| format!("%{b:02X}"))
+            .collect();
+        let session_dir = home
+            .join(".ccgui")
+            .join("grok-provider-homes")
+            .join("p1")
+            .join("sessions")
+            .join(encoded)
+            .join("g1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("chat_history.jsonl"), "{}\n").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_grok(&workspace);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].session_id, "g1");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn qoder_project_slug_matches_qodercli_encoding() {
+        assert_eq!(qoder_encode_project_slug("/Users/foo/bar"), "-Users-foo-bar");
+        assert_eq!(qoder_encode_project_slug("/Users/foo/bar/"), "-Users-foo-bar");
+        assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C:-ws-proj");
+        assert_eq!(qoder_encode_project_slug("/"), "-");
+        assert_eq!(qoder_encode_project_slug(""), "");
+    }
+
+    #[test]
+    fn discover_qoder_finds_workspace_sessions_by_slug() {
+        let home = scratch_dir("discover-qoder");
+        let workspace = home.join("ws").join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let slug = qoder_encode_project_slug(&workspace.to_string_lossy());
+        let dir = home.join(".qoder").join("projects").join(&slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sess-1.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "qoder");
+        assert_eq!(found[0].session_id, "sess-1");
+        assert_eq!(found[0].workspace_path, workspace.to_string_lossy());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn discover_qoder_cn_reads_the_cn_home() {
+        let home = scratch_dir("discover-qoder-cn");
+        let workspace = home.join("ws").join("proj");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let slug = qoder_encode_project_slug(&workspace.to_string_lossy());
+        let dir = home.join(".qoder-cn").join("projects").join(&slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sess-cn.jsonl"), "{}\n").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Cn);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "qoder-cn");
+        assert_eq!(found[0].session_id, "sess-cn");
+        // The CN distribution never reads the Global home.
+        assert!(
+            discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global).is_empty()
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// OpenCode session metadata jsons are matched to the workspace by their
+    /// `directory` field; the project dir name is a content hash.
+    #[test]
+    fn discover_opencode_matches_directory_field() {
+        let home = scratch_dir("discover-opencode");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let project = home.join(".local/share/opencode/storage/session/b8119e41");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = |id: &str, directory: &str| {
+            serde_json::json!({
+                "id": id, "projectID": "b8119e41", "directory": directory,
+                "title": "t", "time": {"created": 1, "updated": 2}
+            })
+            .to_string()
+        };
+        std::fs::write(
+            project.join("ses_a.json"),
+            session("ses_a", &workspace.to_string_lossy()),
+        )
+        .unwrap();
+        std::fs::write(project.join("ses_b.json"), session("ses_b", "/elsewhere")).unwrap();
+        std::fs::write(project.join("broken.json"), "{ not json").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let found = discover_opencode(&workspace);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].engine, "opencode");
+        assert_eq!(found[0].session_id, "ses_a");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// v0.9 upgrade path: codex rollouts under managed provider homes are
+    /// enumerated alongside the active home's sessions.
+    #[test]
+    fn codex_candidates_include_provider_homes() {
+        let home = scratch_dir("codex-candidates-legacy");
+        let active = home.join(".codex").join("sessions").join("2026").join("09").join("01");
+        let managed = home
+            .join(".ccgui")
+            .join("codex-provider-homes")
+            .join("p1")
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("19");
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(active.join("rollout-2026-09-01T00-00-00-new.jsonl"), "").unwrap();
+        std::fs::write(managed.join("rollout-2026-08-19T00-00-00-old.jsonl"), "").unwrap();
+
+        let _guard = HomeGuard::set(&home);
+        let prev_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::remove_var("CODEX_HOME");
+        let found = codex_candidates();
+        match &prev_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        let names: Vec<String> = found
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(names.iter().any(|n| n.contains("new")));
+        assert!(names.iter().any(|n| n.contains("old")));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A custom codex home must not prune sessions indexed from a v0.9
+    /// managed provider home — they live outside every codex home by design.
+    #[test] 
+    fn prune_codex_outside_home_keeps_provider_home_sessions() -> Result<(), String> {
+        let home = scratch_dir("prune-codex-legacy");
+        let _guard = HomeGuard::set(&home);
+        let legacy_dir = home.join(".ccgui").join("codex-provider-homes").join("p1").join("sessions");
+        let other_dir = home.join("elsewhere");
+        std::fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&other_dir).map_err(|e| e.to_string())?;
+        let legacy_file = legacy_dir.join("rollout-old.jsonl");
+        let other_file = other_dir.join("rollout-stray.jsonl");
+        std::fs::write(&legacy_file, "").map_err(|e| e.to_string())?;
+        std::fs::write(&other_file, "").map_err(|e| e.to_string())?;
+
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            for (id, path) in [("keep", &legacy_file), ("drop", &other_file)] {
+                conn.execute(
+                    "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title) VALUES('codex', ?1, '/ws', ?2, 0, 0, 't')",
+                    rusqlite::params![id, path.to_string_lossy().to_string()],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        let removed = prune_codex_sessions_outside_home(&db)?;
+        assert!(removed);
+        let remaining: Vec<String> = {
+            let conn = db.0.lock();
+            let mut stmt = conn
+                .prepare("SELECT session_id FROM sessions ORDER BY session_id")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .map_err(|e| e.to_string())?;
+            rows
+        };
+        assert_eq!(remaining, ["keep"]);
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
     }
 
     /// End-to-end: an omp file with a prepended title line is attributed to
@@ -1479,6 +2282,155 @@ mod tests {
                 .map_err(|e| e.to_string())?
         };
         assert_eq!(ids, vec!["parent".to_string()]);
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    /// DSH writes one compressed log per spawned child. Those files must not
+    /// become extra sidebar rows, and a previously indexed child must be
+    /// pruned on the next scan.
+    #[test]
+    fn scan_skips_and_prunes_dsh_subagent_sessions() -> Result<(), String> {
+        let home = scratch_dir("scan-dsh-subagent");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let cwd = workspace.display().to_string();
+        let escaped = cwd.replace('\\', "\\\\");
+        let project = home
+            .join(".dsh")
+            .join("sessions")
+            .join("--ws--");
+        let parent_dir = project.join("parent");
+        let child_dir = project.join("child");
+        write_zstd_jsonl(
+            &parent_dir.join("session.v3.jsonl.zstd"),
+            &[
+                &format!(
+                    r#"{{"type":"session","version":3,"id":"parent","cwd":"{escaped}","createdAt":1,"isSeeded":false,"delegationDepth":0}}"#
+                ),
+                r#"{"type":"user/message","time":1,"data":{"content":[{"type":"text","text":"review"}]}}"#,
+            ],
+        );
+        let child_path = child_dir.join("session.v3.jsonl.zstd");
+        write_zstd_jsonl(
+            &child_path,
+            &[
+                &format!(
+                    r#"{{"type":"session","version":3,"id":"child","cwd":"{escaped}","createdAt":1,"isSeeded":false,"origin":"subagent","parentSession":"parent","delegationDepth":1}}"#
+                ),
+                r#"{"type":"user/message","time":1,"data":{"content":[{"type":"text","text":"你是一名只读代码评审员"}]}}"#,
+            ],
+        );
+        let _guard = HomeGuard::set(&home);
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title) VALUES('dsh', 'child', ?1, ?2, 1, 1, '你是一名只读代码评审员')",
+                rusqlite::params![workspace.to_string_lossy().to_string(), child_path.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let report = scan_with(&db, || {})?;
+        assert_eq!(report.reparsed, 1);
+        let ids: Vec<String> = {
+            let conn = db.0.lock();
+            let mut stmt = conn
+                .prepare("SELECT session_id FROM sessions WHERE engine='dsh' ORDER BY session_id")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+        assert_eq!(ids, vec!["parent".to_string()]);
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn default_codex_home_keeps_indexed_sessions() -> Result<(), String> {
+        let home = scratch_dir("scan-codex-default-keep");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let rollout = home
+            .join(".codex")
+            .join("sessions")
+            .join("rollout-keep.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).map_err(|e| e.to_string())?;
+        let _guard = HomeGuard::set(&home);
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title) VALUES('codex', 'keep', ?1, ?2, 1, 1, '默认目录')",
+                rusqlite::params![
+                    workspace.to_string_lossy().to_string(),
+                    rollout.to_string_lossy().to_string()
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        scan_with(&db, || {})?;
+        let count: i64 = {
+            let conn = db.0.lock();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE engine='codex' AND session_id='keep'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
+        assert_eq!(count, 1);
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn scan_prunes_codex_rows_from_another_home() -> Result<(), String> {
+        let home = scratch_dir("scan-codex-wrong-home");
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let _guard = HomeGuard::set(&home);
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name) VALUES('w1', ?1, 'ws')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title) VALUES('codex', 'old', ?1, '/Users/demo/.codex/sessions/old.jsonl', 1, 1, '旧目录')",
+                [workspace.to_string_lossy().to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        scan_with(&db, || {})?;
+        let count: i64 = {
+            let conn = db.0.lock();
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE engine='codex'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?
+        };
+        assert_eq!(count, 0);
         drop(db);
         std::fs::remove_dir_all(&home).ok();
         Ok(())

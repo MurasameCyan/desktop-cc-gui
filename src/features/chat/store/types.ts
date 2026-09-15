@@ -43,6 +43,10 @@ export interface ChatStore {
   archivedWorkspaces: string[];
   /** Composer send gesture ("enter" | "cmdEnter"), persisted in app settings. */
   sendShortcut: string;
+  /** Thinking-process row behavior once its thinking settles: true = auto-fold
+   *  (default), false = stay expanded until the user folds it. Persisted in
+   *  app settings. */
+  thinkingAutoCollapse: boolean;
   bySession: Record<string, SessionState>;
   /** Flat sessionKey -> streaming map, written only when a flag flips. The
    * tab strip and sidebar select this instead of scanning bySession on every
@@ -83,7 +87,7 @@ export interface ChatStore {
    * history list, migrating the engine pref off a disabled CLI. */
   refreshEngines: () => Promise<void>;
   refreshWorkspaces: () => Promise<void>;
-  addWorkspace: (path: string) => Promise<void>;
+  addWorkspace: (path: string, meta?: Record<string, unknown>) => Promise<void>;
   reorderWorkspaces: (ids: string[]) => Promise<void>;
   removeWorkspace: (id: string) => Promise<void>;
   selectSession: (
@@ -118,7 +122,9 @@ export interface ChatStore {
   setModel: (engine: string, model: string) => Promise<void>;
   /** Pin several engines' models at once (startup defaulting); one settings
    * write instead of one per engine. */
-  pinModels: (updates: Record<string, string>) => Promise<void>;
+  /** persist=false keeps the update session-scoped (remote-catalog resets
+   *  must not rewrite the persisted default for local workspaces). */
+  pinModels: (updates: Record<string, string>, persist?: boolean) => Promise<void>;
   setThreadLimit: (limit: number) => void;
   /** Create a named sidebar group; throws on empty/duplicate names. */
   createWorkspaceGroup: (name: string) => Promise<WorkspaceGroup | null>;
@@ -144,6 +150,7 @@ export interface ChatStore {
     archived: boolean,
   ) => Promise<void>;
   setSendShortcut: (shortcut: string) => void;
+  setThinkingAutoCollapse: (autoCollapse: boolean) => void;
   setDraft: (key: string, text: string) => void;
   /** Ask the active composer to insert an @path mention at the caret. */
   requestMention: (path: string) => void;
@@ -163,6 +170,9 @@ export interface ChatStore {
   queueMessage: (text: string, images: string[]) => void;
   /** Drop a queued message from the active session. */
   removeQueued: (id: string) => void;
+  /** Send one queued message now: it takes the head of the queue, and a
+   *  running turn is stopped so the send is not left behind it. */
+  sendQueuedNow: (id: string) => Promise<void>;
   /** Drop every queued message from the active session. */
   clearQueue: () => void;
   interrupt: () => Promise<void>;
