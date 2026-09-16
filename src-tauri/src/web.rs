@@ -1121,6 +1121,15 @@ struct PathArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FileIndexArgs {
+    path: String,
+    /// Optional: include gitignored entries (chat file-link fallback).
+    #[serde(default)]
+    include_ignored: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PluginAddWorkspaceArgs {
     plugin_id: String,
     path: String,
@@ -1566,8 +1575,10 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
             ser(crate::files::search_text(app.state(), a.path, a.query).await)
         }
         "list_file_index" => {
-            let a: PathArgs = parse_args(&raw)?;
-            ser(crate::files::list_file_index(app.state(), a.path).await)
+            let a: FileIndexArgs = parse_args(&raw)?;
+            ser(
+                crate::files::list_file_index(app.state(), a.path, a.include_ignored).await,
+            )
         }
         "list_slash_commands" => {
             let a: PathArgs = parse_args(&raw)?;

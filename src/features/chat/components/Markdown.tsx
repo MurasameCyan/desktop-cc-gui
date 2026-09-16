@@ -22,6 +22,7 @@ import { useFilesStore } from "@/features/files/store";
 import { markdownRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import { useCopied } from "@/hooks/use-copied";
 import { FileLinkContextMenu } from "./FileLinkContextMenu";
+import { resolveChatFileLink } from "@/features/chat/file-link-resolution";
 import {
   decodeFileLink,
   isFileLinkUrl,
@@ -38,10 +39,14 @@ type PluginListProp = NonNullable<
 >;
 
 function openFileFromChat(rawPath: string, workspacePath: string) {
-  const path = resolveFilePath(rawPath, workspacePath);
-  if (!path) return;
-  // Opens as a center-area tab; visible at every window width.
-  void useFilesStore.getState().openFile(path);
+  // Async on purpose: a path that only exists nested below the workspace
+  // root (outer folder opened as workspace) is found through the index
+  // fallback instead of dead-ending in a not-found tab.
+  void resolveChatFileLink(rawPath, workspacePath).then((path) => {
+    if (!path) return;
+    // Opens as a center-area tab; visible at every window width.
+    void useFilesStore.getState().openFile(path);
+  });
 }
 
 function openExternalUrl(url: string) {
@@ -83,7 +88,7 @@ function FileLink({
       </a>
       {menu && (
         <FileLinkContextMenu
-          menu={{ ...menu, path, resolvedPath: resolved }}
+          menu={{ ...menu, path, resolvedPath: resolved, workspacePath }}
           onClose={() => setMenu(null)}
         />
       )}

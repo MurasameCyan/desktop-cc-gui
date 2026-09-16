@@ -547,19 +547,34 @@ pub async fn search_text(
 /// walker): .gitignore/.git/info/exclude/global excludes are honored even
 /// outside a git repo (require_git(false)); hidden files are skipped and
 /// node_modules/target are dropped even when a repo forgot to ignore them.
-fn list_file_index_blocking(db: &crate::db::Db, path: &str) -> Result<Vec<FileIndexEntry>, String> {
+///
+/// `include_ignored` serves the chat file-link fallback: build outputs
+/// (`release/`, `dist/`) are gitignored in most repos, so the normal index
+/// can never see them. The flag turns the ignore filters off — the same
+/// node_modules/target prunes (plus __pycache__) and the entry cap apply.
+fn list_file_index_blocking(
+    db: &crate::db::Db,
+    path: &str,
+    include_ignored: bool,
+) -> Result<Vec<FileIndexEntry>, String> {
     let root = ensure_allowed(path, db)?;
     let mut out: Vec<FileIndexEntry> = Vec::new();
     let walker = ignore::WalkBuilder::new(&root)
         .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        .ignore(!include_ignored)
+        .git_ignore(!include_ignored)
+        .git_global(!include_ignored)
+        .git_exclude(!include_ignored)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|e| {
-            !(e.file_type().is_some_and(|t| t.is_dir())
-                && (e.file_name() == "node_modules" || e.file_name() == "target"))
+        .filter_entry(move |e| {
+            if !e.file_type().is_some_and(|t| t.is_dir()) {
+                return true;
+            }
+            if e.file_name() == "node_modules" || e.file_name() == "target" {
+                return false;
+            }
+            !(include_ignored && e.file_name() == "__pycache__")
         })
         .build();
     for entry in walker {
@@ -588,11 +603,14 @@ fn list_file_index_blocking(db: &crate::db::Db, path: &str) -> Result<Vec<FileIn
 pub async fn list_file_index(
     db: tauri::State<'_, Arc<crate::db::Db>>,
     path: String,
+    include_ignored: Option<bool>,
 ) -> Result<Vec<FileIndexEntry>, String> {
     let db = Arc::clone(db.inner());
-    tauri::async_runtime::spawn_blocking(move || list_file_index_blocking(&db, &path))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        list_file_index_blocking(&db, &path, include_ignored.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -648,5 +666,21 @@ mod tests {
         let dir = grant_dir_for(&outside.0.to_string_lossy()).unwrap();
         let want = strip_verbatim_prefix(std::fs::canonicalize(&outside.0).unwrap());
         assert_eq!(dir, want);
+    }
+
+    #[test]
+    fn index_sees_gitignored_build_output_only_when_asked() {
+        let scratch = Scratch::new();
+        let db = crate::db::Db::open_at(&scratch.0.join("test.db")).unwrap();
+        std::fs::write(scratch.0.join(".gitignore"), b"release/\n").unwrap();
+        std::fs::create_dir_all(scratch.0.join("release")).unwrap();
+        std::fs::write(scratch.0.join("release").join("app.exe"), b"x").unwrap();
+        let root = scratch.0.to_string_lossy().to_string();
+        db.add_granted_root(&root).unwrap();
+
+        let filtered = list_file_index_blocking(&db, &root, false).unwrap();
+        assert!(!filtered.iter().any(|e| e.rel == "release/app.exe"));
+        let all = list_file_index_blocking(&db, &root, true).unwrap();
+        assert!(all.iter().any(|e| e.rel == "release/app.exe"));
     }
 }

@@ -833,8 +833,10 @@ export const ipc = {
     withGrantRetry(() => invoke<SearchHit[]>("search_text", { path, query })),
   /** Whole-tree file index for the composer @-mention picker (relative
    * paths; backend caps at 20k entries). */
-  listFileIndex: (path: string) =>
-    withGrantRetry(() => invoke<FileIndexEntry[]>("list_file_index", { path })),
+  listFileIndex: (path: string, includeIgnored = false) =>
+    withGrantRetry(() =>
+      invoke<FileIndexEntry[]>("list_file_index", { path, includeIgnored }),
+    ),
   /** Catalog for the composer `/` picker (workspace `.claude/commands` +
    *  `.claude/skills`, plus the global skill roots of the CLIs the app
    *  drives — Claude home, `$CODEX_HOME/skills` incl. `.system`,
