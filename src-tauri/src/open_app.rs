@@ -505,6 +505,16 @@ fn program_icon_sync(_path: &str) -> Option<String> {
     None
 }
 
+/// `/select,` argument for `explorer.exe`. Explorer parses the raw command
+/// line itself, so the path is quoted *inside* the switch: Rust's default
+/// argument escaping wraps the whole switch instead, which ends the path at
+/// the first space and makes Explorer fall back to the default folder
+/// (`…\Sublime Text 4\patch.zip` opened 文档).
+#[cfg(target_os = "windows")]
+fn explorer_select_arg(path: &str) -> String {
+    format!("/select,\"{path}\"")
+}
+
 /// Reveal a local path in the OS file manager (Finder / Explorer / …).
 ///
 /// Windows uses `explorer /select,…` rather than the opener plugin: the
@@ -537,10 +547,12 @@ pub(crate) async fn reveal_in_file_manager(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // `raw_arg` hands Explorer the command line verbatim so the quoted
+        // switch survives (see explorer_select_arg).
         // `spawn` (not `status`): explorer often exits non-zero on success.
-        let path_str = canonical.to_string_lossy();
         std::process::Command::new("explorer")
-            .arg(format!("/select,{path_str}"))
+            .raw_arg(explorer_select_arg(&canonical.to_string_lossy()))
             .spawn()
             .map_err(|error| format!("Failed to open Explorer: {error}"))?;
         return Ok(());
@@ -550,5 +562,23 @@ pub(crate) async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     {
         tauri_plugin_opener::reveal_item_in_dir(&canonical)
             .map_err(|error| format!("Failed to reveal in file manager: {error}"))
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_select_argument_quotes_the_path_for_explorer() {
+        assert_eq!(
+            explorer_select_arg("S:\\AIWorker\\Sublime Text 4\\patch.zip"),
+            "/select,\"S:\\AIWorker\\Sublime Text 4\\patch.zip\""
+        );
+        // Space-free paths keep the same quoted shape (Explorer accepts it).
+        assert_eq!(
+            explorer_select_arg("C:\\tmp\\a.zip"),
+            "/select,\"C:\\tmp\\a.zip\""
+        );
     }
 }
