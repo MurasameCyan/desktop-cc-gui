@@ -4,6 +4,7 @@ import FolderInput from "lucide-react/dist/esm/icons/folder-input";
 import Loader2 from "lucide-react/dist/esm/icons/loader-2";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
 import { Switch } from "@/components/base/switch/switch";
+import { DisplayName } from "@/components/base/display-name";
 import { isWeb } from "@/lib/platform";
 import {
   SettingsCard,
@@ -103,7 +104,9 @@ function PluginRow({ plugin }: { plugin: PluginInfo }) {
       <div className="flex items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2">
-            <span className="truncate text-body-medium text-text-primary">{plugin.name}</span>
+            <span className="truncate text-body-medium text-text-primary">
+              <DisplayName name={plugin.name} />
+            </span>
             <span className={BADGE}>v{plugin.version}</span>
             <span className={BADGE}>{plugin.tier === "declarative" ? "Tier-0" : "JS"}</span>
             <span className={BADGE}>
