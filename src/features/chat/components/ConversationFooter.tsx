@@ -186,6 +186,7 @@ function FooterStatusBar({
   contextMax,
   branch,
   branches,
+  branchRepoName,
   onBranchSelect,
   startNewChat,
 }: {
@@ -196,6 +197,7 @@ function FooterStatusBar({
   contextMax: number;
   branch: string | undefined;
   branches: BranchInfo[] | undefined;
+  branchRepoName: string | undefined;
   onBranchSelect: (name: string) => void;
   startNewChat: (workspacePath: string) => void;
 }) {
@@ -261,6 +263,7 @@ function FooterStatusBar({
       <StatusBar
         branch={branch}
         branches={branches}
+        branchRepoName={branchRepoName}
         onBranchSelect={onBranchSelect}
         folders={statusFolders}
         selectedFolder={active ? baseName(active.workspacePath) : undefined}
@@ -323,6 +326,7 @@ export function ConversationFooter({
   contextMax,
   branch,
   branches,
+  branchRepoName,
   onBranchSelect,
   startNewChat,
 }: {
@@ -357,6 +361,7 @@ export function ConversationFooter({
   branch: string | undefined;
   branches: BranchInfo[] | undefined;
   onBranchSelect: (name: string) => void;
+  branchRepoName: string | undefined;
   startNewChat: (workspacePath: string) => void;
 }) {
   /** Composer attachment chip lightbox: preview URL + display name. */
@@ -409,6 +414,7 @@ export function ConversationFooter({
           contextMax={contextMax}
           branch={branch}
           branches={branches}
+          branchRepoName={branchRepoName}
           onBranchSelect={onBranchSelect}
           startNewChat={startNewChat}
         />

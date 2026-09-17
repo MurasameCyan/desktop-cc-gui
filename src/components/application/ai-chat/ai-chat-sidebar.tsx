@@ -191,7 +191,7 @@ export function AiChatSidebar({
     () => (sections ? sections.flatMap((section) => section.repos) : repos),
     [sections, repos],
   );
-  const { isRepoExpanded, toggleRepoExpanded } = useExpandedWorkspaces(allRepos);
+  const { isRepoExpanded, toggleRepoExpanded } = useExpandedWorkspaces(allRepos, activeThreadId);
   const { workspaceMenu, closeWorkspaceMenu, openWorkspaceMenu, openArchivedMenu } =
     useWorkspaceMenu(onWorkspaceAlias, onSetWorkspaceArchived);
   const { threadMenu, openThreadMenu, closeThreadMenu } = useThreadMenu(
@@ -337,7 +337,10 @@ export function AiChatSidebar({
         </div>
       </div>
 
-      {workspaceMenu && (onWorkspaceAlias || onSetWorkspaceArchived) && (
+      {/* useWorkspaceMenu only opens when something will render (a builtin
+          handler or a visible registered entry), so state presence is the
+          whole gate here. */}
+      {workspaceMenu && (
         <WorkspaceContextMenu
           menu={workspaceMenu}
           onClose={closeWorkspaceMenu}

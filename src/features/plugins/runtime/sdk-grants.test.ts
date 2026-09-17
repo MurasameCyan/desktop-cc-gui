@@ -3,16 +3,26 @@ import {
   KNOWN_PERMISSIONS,
   execGrantAllows,
   isKnownPermission,
+  isValidPluginId,
   networkGrantAllows,
 } from "@ccgui/plugin-sdk";
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
 
 describe("isKnownPermission", () => {
-  it("accepts every base permission (19 项)", () => {
+  it("accepts every declared base permission", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
-    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(19);
+  });
+  it("accepts the six lifecycle, prompt, workspace, and document-storage grants", () => {
+    expect([
+      "session.lifecycle.read",
+      "runtime.events.read",
+      "runtime.switch.observe",
+      "prompt.contribute.internal",
+      "workspace.metadata.read",
+      "plugin.storage",
+    ].every(isKnownPermission)).toBe(true);
   });
 
   it("accepts well-shaped network: grants (bare host / port / port range)", () => {
@@ -53,6 +63,43 @@ describe("isKnownPermission", () => {
     expect(isKnownPermission("network:grpc:443:extra")).toBe(false);
     expect(isKnownPermission("storag")).toBe(false);
     expect(isKnownPermission("")).toBe(false);
+  });
+});
+
+describe("isValidPluginId", () => {
+  it("accepts safe point-separated ids up to 64 characters", () => {
+    expect(isValidPluginId("ccgui.client-context-bridge")).toBe(true);
+    expect(isValidPluginId("vendor.plugin2.feature-x")).toBe(true);
+    expect(isValidPluginId("a".repeat(64))).toBe(true);
+  });
+
+  it("rejects empty segments, path syntax, unsafe casing, and overlong ids", () => {
+    for (const id of ["", ".", "..", ".plugin", "plugin.", "a..b", "../plugin", "a/b", "a\\b", "Plugin", "-a", "a+b", "a".repeat(65)]) {
+      expect(isValidPluginId(id), id).toBe(false);
+    }
+  });
+
+  // Rust（src-tauri/src/plugins/manifest.rs::is_valid_id）是 id 语法的另一处实现：
+  // 总长（字节）2..=64，每段 `[a-z0-9][a-z0-9-]*`。以下用例锚定两处曾经不一致的分歧点。
+  it("aligns with the Rust grammar on the mismatch cases", () => {
+    // Rust: bytes.len() < 2 rejects — a lone one-character id is out.
+    expect(isValidPluginId("a")).toBe(false);
+    // Rust: a segment is [a-z0-9][a-z0-9-]*, so a trailing hyphen is legal.
+    expect(isValidPluginId("a-")).toBe(true);
+    expect(isValidPluginId("a-.b")).toBe(true);
+    expect(isValidPluginId("ab-")).toBe(true);
+    // 64 bytes is still in; 65 is out (checked by byte length in Rust).
+    expect(isValidPluginId("a".repeat(64))).toBe(true);
+    expect(isValidPluginId("a".repeat(65))).toBe(false);
+  });
+
+  it("drives spec.pluginIdShapes through isValidPluginId", () => {
+    for (const id of spec.pluginIdShapes.valid) {
+      expect(isValidPluginId(id), id).toBe(true);
+    }
+    for (const id of spec.pluginIdShapes.invalid) {
+      expect(isValidPluginId(id), id).toBe(false);
+    }
   });
 });
 

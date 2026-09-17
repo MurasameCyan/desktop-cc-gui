@@ -12,6 +12,22 @@ function fakeBackend(): PluginContextBackend {
     set: async (id, key, value) => void data.set(`${id}:${key}`, value),
     delete: async (id, key) => void data.delete(`${id}:${key}`),
     bridgeInvoke: async () => null,
+    workspaceMetadata: async () => ({ id: "workspace-id", path: "/work" }),
+    pickDirectory: async () => null,
+    documentStorageGetLocation: async () => ({
+      kind: "data",
+      displayPath: "/data/plugin",
+      writable: true,
+    }),
+    documentStorageSelectLocation: async (_id, kind, customPath) => ({
+      kind,
+      displayPath: customPath ?? "/data/plugin",
+      writable: true,
+    }),
+    documentStorageReadText: async () => null,
+    documentStorageWriteTextAtomic: async () => ({ status: "written", version: "v1" }),
+    documentStorageRemove: async () => ({ status: "removed" }),
+    documentStorageList: async () => [],
   };
 }
 

@@ -230,6 +230,36 @@ fn open_repo(path: &str) -> Result<Repository, String> {
     Repository::discover(path).map_err(|_| "NOT_A_REPO".to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceVcsMetadata {
+    pub git_branch: Option<String>,
+    pub git_head: Option<String>,
+    pub dirty: bool,
+}
+
+/// Read-only repository facts for the workspace metadata plugin API. Plugins
+/// receive these values but never gain access to Git operations themselves.
+pub(crate) fn workspace_vcs_metadata(path: &str) -> Option<WorkspaceVcsMetadata> {
+    let repo = Repository::discover(path).ok()?;
+    let head = repo.head().ok();
+    let git_branch = head
+        .as_ref()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.shorthand().map(str::to_string));
+    let git_head = head.as_ref().and_then(|head| head.target()).map(|oid| oid.to_string());
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    let dirty = repo
+        .statuses(Some(&mut options))
+        .ok()
+        .is_some_and(|statuses| !statuses.is_empty());
+    Some(WorkspaceVcsMetadata {
+        git_branch,
+        git_head,
+        dirty,
+    })
+}
+
 fn status_label(status: git2::Status) -> &'static str {
     if status.contains(git2::Status::WT_DELETED) || status.contains(git2::Status::INDEX_DELETED) {
         "deleted"

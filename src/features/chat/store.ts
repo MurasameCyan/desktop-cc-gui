@@ -44,17 +44,27 @@ import {
 } from "./store/stream";
 import { mergeUsage } from "./usage";
 import {
+  bindRunLifecycle,
+  finishRunLifecycle,
   dropRunUsage,
   firstLineTitle,
   handleEngineEvents,
   optimisticMeta,
   patchGrantBySeq,
+  registerPendingRunLifecycle,
+  replayBufferedEngineEvents,
   rememberModelForRun,
   rememberEffortForRun,
   settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./store/engine-events";
 import { effectivePermission, readPermissionPref } from "./store/permissions";
+import {
+  forgetSessionContributions,
+  migrateSessionContributions,
+  prepareSessionContributions,
+  sessionContributionScope,
+} from "./store/session-contributions";
 import { persistSettings } from "./store/settings-persist";
 import {
   listExternalSessionMetas,
@@ -62,9 +72,20 @@ import {
 } from "@/features/plugins/runtime/session-source";
 import { appendCommittedRows, mergeExternalSessions, preserveUnscannedSessions, visibleSessions } from "./store/session-utils";
 import type { ChatStore } from "./store/types";
+import {
+  collectBeforeTurnContributions,
+  confirmPromptContributions,
+  dispatchAfterSwitch,
+  dispatchSessionClosed,
+  dispatchSessionCreated,
+  dispatchSessionRestored,
+  isInternalMessageCaptureActive,
+  runBeforeSwitch,
+} from "@/features/plugins/runtime/hooks";
+import type { RuntimeSwitchEvent, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 
 // Facade re-exports: callers keep importing everything from "../store".
-export { sessionKey } from "./store/persistence";
+export { parseDraftSessionKey, sessionKey } from "./store/persistence";
 export type { ActiveSession } from "./store/persistence";
 export type { QueuedMessage, SessionState } from "./store/stream";
 export type { ChatStore } from "./store/types";
@@ -77,6 +98,27 @@ function omitKey(rec: Record<string, boolean>, key: string) {
   const next = { ...rec };
   delete next[key];
   return next;
+}
+
+/** Stable id for a workspace the host has not registered yet: normalize the
+ * absolute path and hash it, so hooks still run and the same directory yields
+ * the same identity across restarts. A registered workspace's own id always
+ * wins (design §7 priority 1). */
+function derivedWorkspaceId(workspacePath: string): string {
+  const normalized = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `path-${hash.toString(16).padStart(8, "0")}`;
+}
+
+function workspaceMetadata(workspaces: Workspace[], workspacePath: string): WorkspaceMetadata {
+  const workspace = workspaces.find((candidate) => candidate.path === workspacePath);
+  return workspace
+    ? { id: workspace.id, path: workspace.path }
+    : { id: derivedWorkspaceId(workspacePath), path: workspacePath };
 }
 
 /** Load a page of session history, routing remote (plugin-fed, e.g. WSL
@@ -220,6 +262,33 @@ export const useChatStore = create<ChatStore>((set, get) => {
     }
   }
 
+  function sessionLifecycleBase(tab: ActiveSession) {
+    return {
+      engine: tab.engine,
+      sessionId: tab.sessionId,
+      workspace: workspaceMetadata(get().workspaces, tab.workspacePath),
+      occurredAt: new Date().toISOString(),
+    };
+  }
+
+
+  /** A pending tab just adopted its native id: carry the remembered session
+   * contributions from the placeholder scope onto the real one. */
+  function adoptNativeContributions(engine: string, workspacePath: string, sessionId: string) {
+    set((s) => {
+      const next = migrateSessionContributions(s.sessionContributions, engine, workspacePath, sessionId);
+      return next ? { sessionContributions: next } : {};
+    });
+  }
+
+  /** Drop a session's remembered contributions (tab closed, session deleted). */
+  function clearScopedContributions(engine: string, sessionId: string | null, workspacePath: string) {
+    set((s) => {
+      const next = forgetSessionContributions(s.sessionContributions, engine, sessionId, workspacePath);
+      return next ? { sessionContributions: next } : {};
+    });
+  }
+
   /**
    * Send a prompt to a specific tab. Unlike the public `send` action this is
    * not bound to the active session, so the queue can drain on a background
@@ -271,6 +340,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       }
     }
     // Optimistic user message.
+    const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
+    const hookRunId = newId();
+    // Optimistic user message, right away: the hooks below can take up to
+    // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
       streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
     }));
@@ -296,12 +369,62 @@ export const useChatStore = create<ChatStore>((set, get) => {
         turnUsage: null,
       },
     );
+    // A pending switch prepares its handoff in beforeSwitch, which must run
+    // before the turn's contributions are collected so the first target turn
+    // carries the handoff (and not the second one).
+    const pendingSwitch = get().pendingRuntimeSwitch;
+    let switchEvent: RuntimeSwitchEvent | null = null;
+    if (
+      pendingSwitch &&
+      pendingSwitch.targetEngine === engine &&
+      pendingSwitch.workspacePath === tab.workspacePath
+    ) {
+      switchEvent = {
+        switchId: hookRunId,
+        sourceEngine: pendingSwitch.sourceEngine,
+        targetEngine: pendingSwitch.targetEngine,
+        sourceSessionId: pendingSwitch.sourceSessionId,
+        targetSessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      };
+      await runBeforeSwitch(switchEvent);
+    }
+    const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
+    const beforeTurn = await collectBeforeTurnContributions({
+      runId: hookRunId,
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      occurredAt: new Date().toISOString(),
+    });
+    // Retire old owners and withdraw their native-history instructions once.
+    const prepared = prepareSessionContributions(
+      get().sessionContributions,
+      scope,
+      beforeTurn.promptContributions,
+      tab.sessionId !== null,
+    );
+    if (prepared.next) set({ sessionContributions: prepared.next });
+    const promptContributions = prepared.promptContributions;
+    // Register the run lifecycle BEFORE the send: a fast engine's
+    // session/delta/done events may outrun the send result, and unregistered
+    // events would lose their runtime and afterTurn delivery.
+    const settleLaunch = registerPendingRunLifecycle(hookRunId, {
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
+    });
     try {
       const result = await ipc.sendMessage({
         engine,
         workspacePath: tab.workspacePath,
         sessionId: tab.sessionId,
         prompt,
+        promptContributions,
         imagePaths: images.length ? images : null,
         model,
         effort,
@@ -311,6 +434,18 @@ export const useChatStore = create<ChatStore>((set, get) => {
           get().permission,
         ),
       });
+      confirmPromptContributions(promptContributions);
+      if (switchEvent) {
+        set((s) => ({
+          pendingRuntimeSwitch:
+            s.pendingRuntimeSwitch === pendingSwitch ? null : s.pendingRuntimeSwitch,
+        }));
+        dispatchAfterSwitch({ ...switchEvent, occurredAt: new Date().toISOString() });
+      }
+      // Rekey the pre-registered lifecycle to the real run id (a no-op when an
+      // early event already bound it) and adopt the native session id.
+      bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
+      settleLaunch(result.sessionId ?? tab.sessionId);
       if (result.sessionId && !tab.sessionId) {
         // Preassigned native id (grok): adopt immediately.
         const newKey = sessionKey(
@@ -318,6 +453,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
           result.sessionId,
           tab.workspacePath,
         );
+        adoptNativeContributions(engine, tab.workspacePath, result.sessionId);
         if (model) {
           void ipc
             .rememberSessionModel(engine, result.sessionId, model)
@@ -380,6 +516,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
             firstLineTitle(prompt),
           ),
         );
+        const createdTab = { ...tab, sessionId: result.sessionId };
+        const createdKey = sessionKey(engine, result.sessionId, tab.workspacePath);
+        if (!get().createdSessionKeys[createdKey]) {
+          set((s) => ({
+            createdSessionKeys: { ...s.createdSessionKeys, [createdKey]: true },
+          }));
+          dispatchSessionCreated(sessionLifecycleBase(createdTab));
+        }
       } else if (!runRouting.has(result.runId)) {
         // The engine can announce its session id while the invoke is in
         // flight; onSession rekeys the run to the native key then, and
@@ -387,6 +531,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
         // there while the tab renders the native key.
         settleOrphanedRuns(set, routeRun(result.runId, key));
       }
+      replayBufferedEngineEvents(result.runId, {
+        set,
+        get,
+        drainQueue,
+        markUnseenIfBackground,
+        upsertSessionMeta: (meta) => upsertSessionMetaInto(set, meta),
+        refreshSessionUsage: (sessionKey) => get().refreshSessionUsage(sessionKey),
+      });
       // Stop pressed while this send was still in flight: interrupt() ran
       // before runRouting had this run (it is written above, after the
       // await), so it settled the UI and killed nothing — the CLI kept
@@ -409,6 +561,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
         ]);
       }
     } catch (error) {
+      finishRunLifecycle(hookRunId, "failed", String(error));
+      settleLaunch();
       set((s) => ({
         streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
       }));
@@ -490,6 +644,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
     pendingMention: null,
     actionError: null,
     initialized: false,
+    restoredSessionKeys: {},
+    createdSessionKeys: {},
+    sessionContributions: {},
+    pendingRuntimeSwitch: null,
 
     init: async () => {
       if (get().initialized) return;
@@ -781,6 +939,13 @@ export const useChatStore = create<ChatStore>((set, get) => {
         const unseen = key in s.unseen ? omitKey(s.unseen, key) : s.unseen;
         return { openTabs, active: tab, unseen, activeEngine: engine };
       });
+      // A selection restores the session whether or not its messages are
+      // already cached (e.g. reopened after a tab close): the hook fires once
+      // per frontend lifetime, before any load.
+      if (!get().restoredSessionKeys[key]) {
+        set((s) => ({ restoredSessionKeys: { ...s.restoredSessionKeys, [key]: true } }));
+        dispatchSessionRestored({ ...sessionLifecycleBase({ engine, sessionId, workspacePath }), sessionId });
+      }
       const existing = get().bySession[key];
       if (existing && existing.messages.length > 0) return;
       patchSession(set, key, { loading: true });
@@ -817,12 +982,28 @@ export const useChatStore = create<ChatStore>((set, get) => {
           workspacePath,
         };
         const openTabs = existing ? s.openTabs : [...s.openTabs, tab];
+        const source = s.active;
+        const pendingRuntimeSwitch =
+          source &&
+          source.sessionId !== null &&
+          source.workspacePath === workspacePath &&
+          source.engine !== tab.engine
+            ? {
+                sourceEngine: source.engine,
+                targetEngine: tab.engine,
+                sourceSessionId: source.sessionId,
+                targetSessionId: null,
+                workspacePath,
+              }
+            : s.pendingRuntimeSwitch;
         persistTabs(openTabs, tab);
-        return { openTabs, active: tab };
+        return { openTabs, active: tab, pendingRuntimeSwitch };
       });
     },
 
     closeTab: (engine, sessionId, workspacePath) => {
+      dispatchSessionClosed(sessionLifecycleBase({ engine, sessionId, workspacePath }));
+      clearScopedContributions(engine, sessionId, workspacePath);
       removeTab(engine, sessionId, workspacePath);
     },
     focusTab: (engine, sessionId, workspacePath) => {
@@ -921,6 +1102,13 @@ export const useChatStore = create<ChatStore>((set, get) => {
           bySession,
           drafts,
           streamingByKey: moveStreamingFlag(s.streamingByKey, oldKey, newKey),
+          pendingRuntimeSwitch: {
+            sourceEngine: active.engine,
+            targetEngine: engine,
+            sourceSessionId: active.sessionId,
+            targetSessionId: null,
+            workspacePath: active.workspacePath,
+          },
         };
       });
     },
@@ -1376,6 +1564,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       // The runs are dead: drop their routing and usage entries so the maps
       // cannot grow forever. (A late done event would also remove them.)
       for (const runId of deadRunIds) {
+        finishRunLifecycle(runId, "cancelled");
         runRouting.delete(runId);
         untrackRun(runId);
         dropRunUsage(runId);
@@ -1390,7 +1579,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       );
       try {
         if (meta?.remote && meta.remotePath) {
-          await ipc.deleteRemoteSession(meta.workspacePath, engine, meta.remotePath);
+          await ipc.deleteRemoteSession(meta.workspacePath, engine, sessionId, meta.remotePath);
         } else {
           await ipc.deleteSession(engine, sessionId);
         }
@@ -1403,6 +1592,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const tab = get().openTabs.find(
         (t) => t.engine === engine && t.sessionId === sessionId,
       );
+      // The session is gone: its remembered contributions go with it.
+      clearScopedContributions(engine, sessionId, "");
       set((s) => {
         // Permanent delete: the cached session state is dead weight.
         const bySession = { ...s.bySession };

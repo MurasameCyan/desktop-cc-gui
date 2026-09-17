@@ -5,6 +5,7 @@ import Link2 from "lucide-react/dist/esm/icons/link-2";
 import { ContextMenu, type ContextMenuEntry } from "@/components/context-menu";
 import { ipc } from "@/lib/ipc";
 import { useFilesStore } from "@/features/files/store";
+import { resolveChatFileLink } from "@/features/chat/file-link-resolution";
 import {
   OPEN_APP_ICONS,
   OPEN_APP_TARGETS,
@@ -19,6 +20,9 @@ export interface FileLinkMenuState {
   path: string;
   /** Absolute path, or null when unresolvable (`~/`, `../`, empty). */
   resolvedPath: string | null;
+  /** Session workspace root — anchors the async existence/index fallback
+   *  (see resolveChatFileLink). */
+  workspacePath: string;
 }
 
 /**
@@ -59,14 +63,24 @@ export function FileLinkContextMenu({
       : t("files.revealInFileManager");
 
   const resolved = menu.resolvedPath;
+  // The sync `resolved` gates an entry (instant feedback); the async resolver
+  // upgrades it to the path actually on disk before the action runs — a link
+  // whose file sits nested below the workspace root would otherwise open
+  // nothing. Resolving can reject only by returning null, so `act` is total.
+  const act = (run: (path: string) => void) => {
+    void resolveChatFileLink(menu.path, menu.workspacePath).then((path) => {
+      if (path) run(path);
+    });
+  };
   const revealEntry: ContextMenuEntry = {
     id: "reveal",
     label: revealLabel,
     icon: <FolderOpen className="size-4" aria-hidden />,
     disabled: !resolved,
-    onSelect: () => {
-      if (resolved) void ipc.revealInFileManager(resolved).catch(() => {});
-    },
+    onSelect: () =>
+      act((path) => {
+        void ipc.revealInFileManager(path).catch(() => {});
+      }),
   };
 
   const entries: ContextMenuEntry[] = [
@@ -75,9 +89,10 @@ export function FileLinkContextMenu({
       label: t("files.openFile"),
       icon: <FileText className="size-4" aria-hidden />,
       disabled: !resolved,
-      onSelect: () => {
-        if (resolved) void useFilesStore.getState().openFile(resolved);
-      },
+      onSelect: () =>
+        act((path) => {
+          void useFilesStore.getState().openFile(path);
+        }),
     },
     target.kind === "finder"
       ? revealEntry
@@ -86,19 +101,22 @@ export function FileLinkContextMenu({
           label: t("files.openInApp", { app: target.label }),
           icon: <img src={OPEN_APP_ICONS[target.id]} alt="" className="size-4 rounded-[3px]" />,
           disabled: !resolved,
-          onSelect: () => {
-            if (resolved) void openPathInTarget(resolved, target).catch(() => {});
-          },
+          onSelect: () =>
+            act((path) => {
+              void openPathInTarget(path, target).catch(() => {});
+            }),
         },
     ...(target.kind === "finder" ? [] : [revealEntry]),
     {
       id: "copy-link",
       label: t("files.copyLink"),
       icon: <Link2 className="size-4" aria-hidden />,
-      onSelect: () => {
-        const link = resolved?.startsWith("/") ? `file://${resolved}` : (resolved ?? menu.path);
-        void navigator.clipboard.writeText(link).catch(() => {});
-      },
+      onSelect: () =>
+        void resolveChatFileLink(menu.path, menu.workspacePath).then((resolvedPath) => {
+          const path = resolvedPath ?? menu.path;
+          const link = path.startsWith("/") ? `file://${path}` : path;
+          void navigator.clipboard.writeText(link).catch(() => {});
+        }),
     },
   ];
 

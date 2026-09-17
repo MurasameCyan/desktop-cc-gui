@@ -7,6 +7,7 @@ import type { WorkspaceMenuState } from "@/components/application/ai-chat/worksp
 import type { AiChatRepo, AiChatRepoSection } from "./ai-chat-sidebar";
 import type { ThreadAction } from "./sidebar-types";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
+import { useRegistry, workspaceMenuRegistry } from "@ccgui/plugin-sdk";
 
 /**
  * AiChatSidebar state hooks: quick search (⌘L), persisted workspace
@@ -84,7 +85,7 @@ function writeExpandedWorkspaces(expanded: Set<string>) {
 
 /** Workspace expansion: likewise persisted. null = the user never toggled a
  *  workspace, so the built-in default (the first one open) still applies. */
-export function useExpandedWorkspaces(allRepos: AiChatRepo[]) {
+export function useExpandedWorkspaces(allRepos: AiChatRepo[], activeThreadId?: string) {
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string> | null>(
     readExpandedWorkspaces,
   );
@@ -114,6 +115,20 @@ export function useExpandedWorkspaces(allRepos: AiChatRepo[]) {
     },
     [allRepos, expandedWorkspaces],
   );
+  // Reveal a pending "新对话" once so it is not born inside a collapsed
+  // folder. Do not keep forcing it open — that would fight the user
+  // collapsing the workspace afterwards.
+  const revealedDraftId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeThreadId) return;
+    const repo = allRepos.find((item) =>
+      item.threads.some((thread) => thread.id === activeThreadId && thread.isDraft),
+    );
+    if (!repo?.id) return;
+    if (revealedDraftId.current === activeThreadId) return;
+    revealedDraftId.current = activeThreadId;
+    if (!isRepoExpanded(repo)) toggleRepoExpanded(repo);
+  }, [activeThreadId, allRepos, isRepoExpanded, toggleRepoExpanded]);
   return { isRepoExpanded, toggleRepoExpanded };
 }
 
@@ -124,13 +139,29 @@ export function useWorkspaceMenu(
   onSetWorkspaceArchived?: (id: string, archived: boolean) => void,
 ) {
   const [workspaceMenu, setWorkspaceMenu] = useState<WorkspaceMenuState | null>(null);
+  // Registered extension entries can make the menu worth opening even when the
+  // host passed no builtin handlers. Read in render (not from a snapshot
+  // inside the callback) so a (de)registration re-binds the opener.
+  const extensionDefs = useRegistry(workspaceMenuRegistry);
   const openWorkspaceMenu = useCallback(
     (event: ReactMouseEvent<HTMLElement>, workspaceId: string, archived = false) => {
-      if (!onWorkspaceAlias && !onSetWorkspaceArchived) return;
+      const target = { workspaceId, archived };
+      // Foreign `visible` predicates can throw; a throwing entry counts as
+      // hidden, matching what WorkspaceContextMenu ends up rendering.
+      const hasEntries =
+        Boolean(onWorkspaceAlias || onSetWorkspaceArchived) ||
+        extensionDefs.some((def) => {
+          try {
+            return def.visible?.(target) !== false;
+          } catch {
+            return false;
+          }
+        });
+      if (!hasEntries) return;
       event.preventDefault();
-      setWorkspaceMenu({ x: event.clientX, y: event.clientY, workspaceId, archived });
+      setWorkspaceMenu({ x: event.clientX, y: event.clientY, ...target });
     },
-    [onWorkspaceAlias, onSetWorkspaceArchived],
+    [extensionDefs, onWorkspaceAlias, onSetWorkspaceArchived],
   );
   const openArchivedMenu = useCallback(
     (event: ReactMouseEvent<HTMLElement>, workspaceId: string) =>

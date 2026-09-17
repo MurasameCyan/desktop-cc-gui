@@ -7,7 +7,7 @@ import {
   type ThreadAction,
 } from "@/components/application/ai-chat/ai-chat-sidebar";
 import { cx } from "@/utils/cx";
-import type { ActiveSession } from "./store";
+import { sessionKey, type ActiveSession } from "./store";
 
 /** Left edge: the session sidebar, its full-height resize strip, and the
  * mobile drawer backdrop. Below the md breakpoint the sidebar floats over
@@ -81,7 +81,9 @@ export function ChatSidebarFrame({
         )}
         repos={repos}
         sections={sections}
-        activeThreadId={active?.sessionId ? `${active.engine}/${active.sessionId}` : undefined}
+        activeThreadId={
+          active ? sessionKey(active.engine, active.sessionId, active.workspacePath) : undefined
+        }
         onThreadSelect={onThreadSelect}
         onThreadAction={onThreadAction}
         onCopyThreadId={onCopyThreadId}

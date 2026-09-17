@@ -150,6 +150,7 @@ async fn send_codex_and_wait(state: &AppState, events: &Arc<Capture>, deadline_m
         workspace.to_string_lossy().to_string(),
         None,
         "hi".to_string(),
+        Vec::new(),
         None,
         None,
         None,

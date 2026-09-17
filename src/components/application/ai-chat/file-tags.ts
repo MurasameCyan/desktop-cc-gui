@@ -47,9 +47,21 @@ export const FILE_TAG_CLASS = "composer-file-tag";
 /** Absolute-path mention: `@/plain/path` or `@"quoted/path with spaces"`. */
 const MENTION_RE = /@(?:"(\/[^"]+)"|(\/[^\s@]+))/g;
 
-/** Mention token for a path: quoted when it contains whitespace. */
+/**
+ * Mention token for a path: quoted when it contains whitespace.
+ *
+ * The mention grammar (MENTION_RE) and `resolveFilePath` speak one canonical
+ * form: a `/`-rooted, forward-slash absolute path — Windows `C:\Users\x`
+ * becomes `/C:/Users/x` (the MSYS-style prefix `resolveFilePath` strips on
+ * the way back to the filesystem). Without the leading `/` the token is not
+ * a mention at all: it never renders as a chip and never round-trips through
+ * extractText — which is exactly what happened to tree-inserted
+ * `@S:\…\path` tokens on Windows.
+ */
 export function mentionToken(path: string): string {
-  return /\s/.test(path) ? `@"${path}"` : `@${path}`;
+  const slashed = path.trim().replace(/\\/g, "/");
+  const mentionPath = slashed.startsWith("/") ? slashed : `/${slashed}`;
+  return /\s/.test(mentionPath) ? `@"${mentionPath}"` : `@${mentionPath}`;
 }
 
 function escapeHtmlText(str: string): string {
