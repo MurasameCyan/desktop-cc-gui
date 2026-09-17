@@ -475,6 +475,15 @@ export function createPluginContext(
           openPluginSession(id, engine, sessionId, workspacePath),
         );
       },
+      refresh() {
+        requirePermission("host:session");
+        // 插件直写会话数据后的可见性补偿：走与宿主自身重命名/置顶一致的
+        // refreshSessions，侧栏与标签页立即反映。动态引入避免与 chat store
+        // 的模块环（store → plugins/runtime/session-source）。
+        return import("@/features/chat/store").then((m) =>
+          m.useChatStore.getState().refreshSessions(),
+        );
+      },
       registerSource(def) {
         requirePermission("host:session");
         // 入口校验:不合规 def 同步抛回插件(登记期 bug 应当即暴露),

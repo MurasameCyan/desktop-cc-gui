@@ -35,6 +35,12 @@
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
 
+## 0.3.7 — 2026-09-16
+- **新增能力**：`ctx.sessions.refresh()`（复用权限 `host:session`）——请求宿主立即
+  刷新会话目录（侧栏/标签页）。插件绕过宿主直写会话数据（sqlite custom_title、
+  转录 title 行）后调用，变更即刻可见，不再依赖手动同步或重启。首个消费者：
+  auto-title 命名/自愈补写后即时刷新侧栏。
+
 ## 0.3.6 — 2026-09-16
 - **新增能力**：`ctx.ui.openSettings(key?)`（复用权限 `ui:settings-section`）——跳转到
   本插件的设置页（hash 路由 `#/settings?page=plugin:<id>[:<key>]`），供状态栏 chip、
