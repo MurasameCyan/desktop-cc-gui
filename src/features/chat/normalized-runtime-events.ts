@@ -12,6 +12,7 @@ export type EngineTerminalFact =
   | { status: "exited"; exitCode: number | null };
 
 export interface RuntimeEventNormalizationContext {
+  turnId: string;
   workspaceId: string;
   workspacePath: string;
   occurredAt: string;
@@ -210,6 +211,7 @@ function normalizedBase(
     !Number.isSafeInteger(event.seq) ||
     event.seq < 1 ||
     (event.sessionId !== null && typeof event.sessionId !== "string") ||
+    !context.turnId ||
     !context.workspaceId ||
     !context.workspacePath ||
     !context.occurredAt ||
@@ -221,7 +223,7 @@ function normalizedBase(
   return {
     eventId: `${event.runId}:${event.seq}`,
     runId: event.runId,
-    turnId: event.runId,
+    turnId: context.turnId,
     engine: event.engine,
     sessionId: event.sessionId,
     workspaceId: context.workspaceId,

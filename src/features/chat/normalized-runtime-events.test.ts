@@ -3,6 +3,7 @@ import type { EngineEventPayload } from "@/lib/events";
 import { normalizeEngineEvent, toolNameFromLabel } from "./normalized-runtime-events";
 
 const context = {
+  turnId: "run-7",
   workspaceId: "workspace-1",
   workspacePath: "S:/work/project",
   occurredAt: "2026-09-12T08:30:00.000Z",
@@ -35,24 +36,6 @@ describe("toolNameFromLabel", () => {
 });
 
 describe("normalizeEngineEvent", () => {
-  it("derives stable event and turn identities from the source event", () => {
-    expect(
-      normalizeEngineEvent(event("done", {}), {
-        ...context,
-        terminal: { status: "completed" },
-      }),
-    ).toEqual({
-      eventId: "run-7:12",
-      runId: "run-7",
-      turnId: "run-7",
-      engine: "claude",
-      sessionId: "session-3",
-      workspaceId: "workspace-1",
-      workspacePath: "S:/work/project",
-      occurredAt: "2026-09-12T08:30:00.000Z",
-      kind: "assistant-completed",
-    });
-  });
 
   it("does not turn assistant deltas or snapshots into facts", () => {
     expect(

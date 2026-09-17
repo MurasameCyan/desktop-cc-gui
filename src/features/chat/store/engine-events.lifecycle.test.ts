@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ipc } from "@/lib/ipc";
-import { registerTurnHooks } from "@/features/plugins/runtime/hooks";
+import { collectBeforeTurnContributions, registerTurnHooks } from "@/features/plugins/runtime/hooks";
 import { routeRun } from "./stream";
 import {
   bindRunLifecycle,
@@ -22,6 +22,7 @@ vi.mock("@/lib/ipc", () => ({
 }));
 
 const workspace = { id: "workspace-1", path: "/tmp/workspace" };
+const fixtureDisposers: Array<() => void> = [];
 
 /** Deps for events that resolve no session key: the loop must not touch the
  * store for a run it cannot route. */
@@ -37,35 +38,116 @@ function fakeDeps() {
 
 /** Register a live run: pre-register under a placeholder, then bind the real
  * run id (the path the store now takes for every send). */
-function startRun(
+async function startRun(
   runId: string,
   pluginId: string,
   capture: { channel: string; nonce?: string; maxBytes: number; validate?: (payload: unknown) => boolean },
 ) {
   const placeholder = `pending:${runId}`;
-  registerPendingRunLifecycle(placeholder, {
+  fixtureDisposers.push(registerTurnHooks(pluginId, { beforeTurn: () => ({ internalMessageCapture: capture }) }));
+  const collected = await collectBeforeTurnContributions({ runId: placeholder, turnId: "turn-1", engine: "claude", sessionId: null, workspace, occurredAt: "2026-09-17T00:00:00Z" });
+  const settleLaunch = registerPendingRunLifecycle(placeholder, {
     turnId: "turn-1",
     engine: "claude",
     sessionId: null,
     workspace,
-    captures: [{ pluginId, capture }],
+    captures: collected.internalMessageCaptures,
   });
   bindRunLifecycle(placeholder, runId);
+  settleLaunch();
 }
 
-function begin(runId: string, nonce = "abc123") {
-  startRun(runId, "test.capture", { channel: "facts", nonce, maxBytes: 1024 });
+async function begin(runId: string, nonce = "abc123") {
+  return await startRun(runId, "test.capture", { channel: "facts", nonce, maxBytes: 1024 });
 }
 
-afterEach(() => unregisterRunLifecycle("run-1"));
+beforeEach(() => vi.mocked(ipc.recordAcceptedInternalFrame).mockClear());
+afterEach(() => {
+  unregisterRunLifecycle("run-1");
+  while (fixtureDisposers.length) fixtureDisposers.pop()?.();
+});
 
 describe("incremental internal frame routing", () => {
+  it("releases a buffered frame when its originating result retires", async () => {
+    let current = true;
+    const validate = vi.fn(() => true);
+    const delivered = vi.fn();
+    const dispose = registerTurnHooks("test.retired-capture", {
+      beforeTurn: () => ({
+        internalMessageCapture: { channel: "facts", nonce: "retired", maxBytes: 1024, validate },
+        isCurrent: () => current,
+      }),
+      onInternalMessage: delivered,
+    });
+    try {
+      const collected = await collectBeforeTurnContributions({ runId: "run-1", turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, occurredAt: "2026-09-17T00:00:00Z" });
+      registerPendingRunLifecycle("run-1", { turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, captures: collected.internalMessageCaptures });
+      expect(filterInternalFrameDelta("run-1", 'visible<CCGUI_INTERNAL_retired>{"ok":')).toBe("visible");
+      current = false;
+      expect(filterInternalFrameDelta("run-1", "true}</CCGUI_INTERNAL_retired>tail"))
+        .toBe('<CCGUI_INTERNAL_retired>{"ok":true}</CCGUI_INTERNAL_retired>tail');
+      await Promise.resolve();
+      expect(validate).not.toHaveBeenCalled();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(ipc.recordAcceptedInternalFrame).not.toHaveBeenCalled();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("does not route an old capture to replacement hooks with the same plugin id", async () => {
+    const previous = vi.fn();
+    const replacement = vi.fn();
+    const disposeOld = registerTurnHooks("test.replaced-capture", {
+      beforeTurn: () => ({ internalMessageCapture: { channel: "facts", nonce: "replaced", maxBytes: 1024 } }),
+      onInternalMessage: previous,
+    });
+    let disposeNew = () => {};
+    try {
+      const collected = await collectBeforeTurnContributions({ runId: "run-1", turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, occurredAt: "2026-09-17T00:00:00Z" });
+      registerPendingRunLifecycle("run-1", { turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, captures: collected.internalMessageCaptures });
+      disposeOld();
+      disposeNew = registerTurnHooks("test.replaced-capture", { onInternalMessage: replacement });
+      const frame = '<CCGUI_INTERNAL_replaced>{"ok":true}</CCGUI_INTERNAL_replaced>';
+      expect(filterInternalFrameDelta("run-1", frame)).toBe(frame);
+      await Promise.resolve();
+      expect(previous).not.toHaveBeenCalled();
+      expect(replacement).not.toHaveBeenCalled();
+      expect(ipc.recordAcceptedInternalFrame).not.toHaveBeenCalled();
+    } finally {
+      disposeOld();
+      disposeNew();
+    }
+  });
+
+  it("rechecks the result lifetime before queued internal delivery", async () => {
+    let current = true;
+    const delivered = vi.fn();
+    const dispose = registerTurnHooks("test.queued-capture", {
+      beforeTurn: () => ({
+        internalMessageCapture: { channel: "facts", nonce: "queued", maxBytes: 1024 },
+        isCurrent: () => current,
+      }),
+      onInternalMessage: delivered,
+    });
+    try {
+      const collected = await collectBeforeTurnContributions({ runId: "run-1", turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, occurredAt: "2026-09-17T00:00:00Z" });
+      registerPendingRunLifecycle("run-1", { turnId: "turn-1", engine: "claude", sessionId: "session-1", workspace, captures: collected.internalMessageCaptures });
+      expect(filterInternalFrameDelta("run-1", '<CCGUI_INTERNAL_queued>{"ok":true}</CCGUI_INTERNAL_queued>')).toBe("");
+      current = false;
+      await Promise.resolve();
+      expect(delivered).not.toHaveBeenCalled();
+    } finally {
+      dispose();
+    }
+  });
+
   it("removes a valid frame split across chunk boundaries and routes it only to its owner", async () => {
     const owned = vi.fn();
     const other = vi.fn();
     const disposeOwned = registerTurnHooks("test.capture", { onInternalMessage: owned });
     const disposeOther = registerTurnHooks("test.other", { onInternalMessage: other });
-    begin("run-1");
+    await begin("run-1");
 
     const visible = [
       filterInternalFrameDelta("run-1", "answer<CCGUI_INTER"),
@@ -89,7 +171,7 @@ describe("incremental internal frame routing", () => {
   it("retains an opening tag split inside its nonce", async () => {
     const owned = vi.fn();
     const dispose = registerTurnHooks("test.capture", { onInternalMessage: owned });
-    begin("run-1");
+    await begin("run-1");
 
     const visible = [
       filterInternalFrameDelta("run-1", "answer<CCGUI_INTERNAL_ab"),
@@ -129,8 +211,8 @@ describe("incremental internal frame routing", () => {
     expect(flushInternalFrameDelta("run-1")).toBe("");
   });
 
-  it("keeps invalid and incomplete frames visible", () => {
-    begin("run-1");
+  it("keeps invalid and incomplete frames visible", async () => {
+    await begin("run-1");
     const invalid = "<CCGUI_INTERNAL_abc123>{bad}</CCGUI_INTERNAL_abc123>";
     expect(filterInternalFrameDelta("run-1", invalid)).toBe(invalid);
     expect(filterInternalFrameDelta("run-1", "start<CCGUI_INTERNAL_abc123>{\"ok\":"))
@@ -143,7 +225,7 @@ describe("incremental internal frame routing", () => {
   it("keeps a JSON-valid frame visible when the capture's validator rejects it", async () => {
     const owned = vi.fn();
     const dispose = registerTurnHooks("test.validated", { onInternalMessage: owned });
-    startRun("run-1", "test.validated", {
+    await startRun("run-1", "test.validated", {
       channel: "facts",
       nonce: "abc123",
       maxBytes: 1024,
@@ -167,7 +249,7 @@ describe("incremental internal frame routing", () => {
   it("persists only a validator-accepted frame after the native session is known", async () => {
     const accepted = '<CCGUI_INTERNAL_abc123>{"ok":true}</CCGUI_INTERNAL_abc123>';
     const rejected = '<CCGUI_INTERNAL_abc123>{"ok":false}</CCGUI_INTERNAL_abc123>';
-    startRun("run-1", "test.capture", {
+    await startRun("run-1", "test.capture", {
       channel: "facts",
       nonce: "abc123",
       maxBytes: 1024,
@@ -193,8 +275,8 @@ describe("incremental internal frame routing", () => {
     expect(ipc.recordAcceptedInternalFrame).toHaveBeenCalledTimes(1);
   });
 
-  it("releases an opening tag whose payload outgrew the capture budget", () => {
-    startRun("run-1", "test.capture", { channel: "facts", nonce: "abc123", maxBytes: 8 });
+  it("releases an opening tag whose payload outgrew the capture budget", async () => {
+    await startRun("run-1", "test.capture", { channel: "facts", nonce: "abc123", maxBytes: 8 });
     const open = "<CCGUI_INTERNAL_abc123>";
 
     // The tag alone is retained: this frame could still complete within budget.
@@ -213,7 +295,7 @@ describe("incremental internal frame routing", () => {
     record.mockRejectedValueOnce(new Error("db busy")).mockResolvedValue(undefined);
     vi.useFakeTimers();
     try {
-      startRun("run-1", "test.capture", { channel: "facts", nonce: "abc123", maxBytes: 1024 });
+      await startRun("run-1", "test.capture", { channel: "facts", nonce: "abc123", maxBytes: 1024 });
       bindRunLifecycle("pending:run-1", "run-1", "session-1");
 
       expect(filterInternalFrameDelta("run-1", accepted)).toBe("");
@@ -280,7 +362,7 @@ describe("assistant message snapshots", () => {
   it("accepts a short nonce, dispatches its complete frame, and hides it while settling live rows", async () => {
     const owned = vi.fn();
     const dispose = registerTurnHooks("test.capture", { onInternalMessage: owned });
-    begin("run-1", "n-1");
+    await begin("run-1", "n-1");
     const { state, deps } = snapshotDeps();
 
     handleEngineEvents(
@@ -299,8 +381,8 @@ describe("assistant message snapshots", () => {
     );
   });
 
-  it("keeps rejected and incomplete snapshot frames visible", () => {
-    begin("run-1", "n-1");
+  it("keeps rejected and incomplete snapshot frames visible", async () => {
+    await begin("run-1", "n-1");
     const { state, deps } = snapshotDeps();
     const rejected = "<CCGUI_INTERNAL_n-1>{bad}</CCGUI_INTERNAL_n-1>";
     const incomplete = '<CCGUI_INTERNAL_n-1>{"ok":';
@@ -313,18 +395,20 @@ describe("assistant message snapshots", () => {
 });
 
 describe("binding a run that outran the send result", () => {
-  function pending(placeholder: string, engine = "claude") {
-    registerPendingRunLifecycle(placeholder, {
+  beforeEach(() => {
+    fixtureDisposers.push(registerTurnHooks("test.capture", {
+      beforeTurn: () => ({ internalMessageCapture: { channel: "facts", nonce: "abc123", maxBytes: 1024 } }),
+    }));
+  });
+
+  async function pending(placeholder: string, engine = "claude") {
+    const collected = await collectBeforeTurnContributions({ runId: placeholder, turnId: "turn-1", engine, sessionId: null, workspace, occurredAt: "2026-09-17T00:00:00Z" });
+    return registerPendingRunLifecycle(placeholder, {
       turnId: "turn-1",
       engine,
       sessionId: null,
       workspace,
-      captures: [
-        {
-          pluginId: "test.capture",
-          capture: { channel: "facts", nonce: "abc123", maxBytes: 1024 },
-        },
-      ],
+      captures: collected.internalMessageCaptures,
     });
   }
 
@@ -339,8 +423,8 @@ describe("binding a run that outran the send result", () => {
     unregisterRunLifecycle("placeholder-b");
   });
 
-  it("rekeys a pre-registered lifecycle onto the send result's run id", () => {
-    pending("placeholder-1");
+  it("rekeys a pre-registered lifecycle onto the send result's run id", async () => {
+    await pending("placeholder-1");
     bindRunLifecycle("placeholder-1", "run-early", "sess-1");
     // The capture buffer moved with the lifecycle.
     expect(filterInternalFrameDelta("run-early", '<CCGUI_INTERNAL_abc123>{"ok":true}</CCGUI_INTERNAL_abc123>')).toBe("");
@@ -349,8 +433,8 @@ describe("binding a run that outran the send result", () => {
     expect(filterInternalFrameDelta("run-early", "")).toBe("");
   });
 
-  it("binds an event that arrives before the send result to the unique pending run", () => {
-    pending("placeholder-2");
+  it("binds an event that arrives before the send result to the unique pending run", async () => {
+    await pending("placeholder-2");
     handleEngineEvents(
       [{ runId: "run-late", sessionId: null, engine: "claude", seq: 1, kind: "delta", data: "" }],
       fakeDeps(),
@@ -360,9 +444,9 @@ describe("binding a run that outran the send result", () => {
     expect(filterInternalFrameDelta("run-late", '<CCGUI_INTERNAL_abc123>{"ok":true}</CCGUI_INTERNAL_abc123>')).toBe("");
   });
 
-  it("leaves an event unbound when two runs of the same engine are pending", () => {
-    pending("placeholder-a");
-    pending("placeholder-b");
+  it("leaves an event unbound when two runs of the same engine are pending", async () => {
+    await pending("placeholder-a");
+    await pending("placeholder-b");
     const frame = '<CCGUI_INTERNAL_abc123>{"ok":true}</CCGUI_INTERNAL_abc123>';
     handleEngineEvents(
       [{ runId: "run-x", sessionId: null, engine: "claude", seq: 1, kind: "delta", data: "" }],
@@ -376,8 +460,8 @@ describe("binding a run that outran the send result", () => {
   it("replays an ambiguous early event after its send result identifies the owner", async () => {
     const afterTurn = vi.fn();
     const dispose = registerTurnHooks("test.ambiguous-early", { afterTurn });
-    pending("placeholder-a");
-    pending("placeholder-b");
+    const settleLaunch = await pending("placeholder-a");
+    await pending("placeholder-b");
     const key = "new:claude:/tmp/workspace";
     const state = {
       bySession: {
@@ -416,6 +500,7 @@ describe("binding a run that outran the send result", () => {
     expect(afterTurn).not.toHaveBeenCalled();
 
     bindRunLifecycle("placeholder-a", "run-x");
+    settleLaunch();
     routeRun("run-x", key);
     replayBufferedEngineEvents("run-x", deps as never);
     await Promise.resolve();
@@ -426,8 +511,8 @@ describe("binding a run that outran the send result", () => {
   });
 
   it("drains the buffered prefix when ownership resolves before the send result", async () => {
-    pending("placeholder-a");
-    pending("placeholder-b");
+    await pending("placeholder-a");
+    await pending("placeholder-b");
     const key = "new:claude:/tmp/workspace";
     const state = {
       bySession: {
@@ -493,7 +578,7 @@ describe("terminal turn lifecycle", () => {
   it("dispatches cancellation exactly once", async () => {
     const afterTurn = vi.fn();
     const dispose = registerTurnHooks("test.terminal", { afterTurn });
-    begin("run-1");
+    await begin("run-1");
 
     finishRunLifecycle("run-1", "cancelled");
     finishRunLifecycle("run-1", "cancelled");

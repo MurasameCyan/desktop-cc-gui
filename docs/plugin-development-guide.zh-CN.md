@@ -230,9 +230,11 @@ interface PluginContext {
 
 生命周期 hook 按插件注册顺序调用且逐插件隔离错误；`beforeTurn` 与 `beforeSwitch` 最多等待 2 秒，超时或异常均不阻断聊天或客户端切换。`beforeTurn` 可返回 `PromptContribution[]` 及内部消息捕获声明。内部提示不会进入 CCGUI 聊天画布、乐观用户消息或标题；当 CLI 无真正 system channel 时，`system-tail` 会降级为带清晰标记的 request tail，因此仍可能进入 CLI 自身原生历史。
 
-`turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用；失败的发送不能据此登记为已消费。
+`turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用，并保证先于该回合的 `afterTurn`，即使终态事件先于启动响应到达；失败的发送不能据此登记为已消费。
 
-`BeforeTurnResult.isCurrent` 是可选的纯同步生命周期守卫，用于某个工作区关闭功能、但插件仍在其他工作区运行的情形。宿主在收集结果、再次注入及启动接纳时检查；返回 `false` 或抛错会撤销该结果，已失效的生命周期不得再返回 `true`。已返回的结果必须捕获其原始生命周期，不能只读取可能再次开启的全局布尔值。这不是回滚或取消已发出任务的接口：已发出的工作允许自然完成。
+SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动的 `beforeSwitch` 与 `afterSwitch` 共享此身份。插件应同时核对切换身份与原生命周期，不能让停用前的迟到完成覆盖重新启用后的切换状态。
+
+`BeforeTurnResult.isCurrent` 是可选的纯同步生命周期守卫，用于某个工作区关闭功能、但插件仍在其他工作区运行的情形。宿主在收集结果、再次注入、启动接纳及内部帧解析和投递时检查；返回 `false` 或抛错会撤销该结果，已失效的生命周期不得再返回 `true`。已返回的结果必须捕获其原始生命周期，不能只读取可能再次开启的全局布尔值。失效后不再隐藏新候选帧，也不再投递已排队的内部消息。这不是回滚或取消已发出任务的接口：已发出的工作允许自然完成。
 
 宿主不会重新注入已注销注册者的缓存提示。原生 CLI 历史无法抹去，因而停用后的下一次发送会携带一次性旧指令撤销；启动失败则保留重试，接纳后不重复发送。撤销不删除历史任务事实，也不启动插件读写。旧指令撤销是发送给模型的提示，不保证任意模型遵从，不能作为技术安全边界。
 

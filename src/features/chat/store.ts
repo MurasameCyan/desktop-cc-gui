@@ -380,6 +380,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       pendingSwitch.workspacePath === tab.workspacePath
     ) {
       switchEvent = {
+        switchId: hookRunId,
         sourceEngine: pendingSwitch.sourceEngine,
         targetEngine: pendingSwitch.targetEngine,
         sourceSessionId: pendingSwitch.sourceSessionId,
@@ -410,7 +411,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     // Register the run lifecycle BEFORE the send: a fast engine's
     // session/delta/done events may outrun the send result, and unregistered
     // events would lose their runtime and afterTurn delivery.
-    registerPendingRunLifecycle(hookRunId, {
+    const settleLaunch = registerPendingRunLifecycle(hookRunId, {
       turnId: hookRunId,
       engine,
       sessionId: tab.sessionId,
@@ -444,6 +445,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       // Rekey the pre-registered lifecycle to the real run id (a no-op when an
       // early event already bound it) and adopt the native session id.
       bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
+      settleLaunch(result.sessionId ?? tab.sessionId);
       if (result.sessionId && !tab.sessionId) {
         // Preassigned native id (grok): adopt immediately.
         const newKey = sessionKey(
@@ -560,6 +562,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       }
     } catch (error) {
       finishRunLifecycle(hookRunId, "failed", String(error));
+      settleLaunch();
       set((s) => ({
         streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
       }));
@@ -1576,7 +1579,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       );
       try {
         if (meta?.remote && meta.remotePath) {
-          await ipc.deleteRemoteSession(meta.workspacePath, engine, meta.remotePath);
+          await ipc.deleteRemoteSession(meta.workspacePath, engine, sessionId, meta.remotePath);
         } else {
           await ipc.deleteSession(engine, sessionId);
         }

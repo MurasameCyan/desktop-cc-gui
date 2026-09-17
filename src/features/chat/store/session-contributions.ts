@@ -4,7 +4,7 @@ import { isPromptContributionActive, isPromptContributionConfirmed, promptContri
 interface ContributionScope {
   remembered: Record<string, PromptContribution>;
   resets: Record<string, PromptContribution>;
-  /** Evicted owners require a generic reset on the following launch. */
+  /** Evicted active owners require a generic reset on the following launch. */
   overflowed: boolean;
 }
 
@@ -105,10 +105,17 @@ export function prepareSessionContributions(
     changed = true;
   }
   const resetIds = Object.keys(resets).filter((owner) => owner !== "");
-  const overflowed = resetIds.length > PER_SCOPE_LIMIT;
-  if (overflowed) {
+  let overflowed = false;
+  if (resetIds.length > PER_SCOPE_LIMIT) {
     if (resets === previous?.resets) resets = Object.assign(Object.create(null), resets);
-    for (const id of resetIds.slice(0, resetIds.length - PER_SCOPE_LIMIT)) delete resets[id];
+    for (let index = 0; index < resetIds.length - PER_SCOPE_LIMIT; index++) {
+      const owner = resetIds[index];
+      if (owners.has(owner)) overflowed = true;
+      else if (!isPromptContributionConfirmed(resets[owner]) && (!resets[""] || isPromptContributionConfirmed(resets[""]))) {
+        resets[""] = withdrawalContribution("");
+      }
+      delete resets[owner];
+    }
     changed = true;
   }
   if (overflowed !== previous?.overflowed) changed = true;

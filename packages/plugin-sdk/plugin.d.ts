@@ -6,7 +6,7 @@
  * 插件仓用法（包未发布 npm 前的过渡方案）：复制本文件为插件仓的
  * `src/ccgui-plugin.d.ts`，首行版本戳必须与所用宿主 SDK 一致。
  *
- * @ccgui/plugin-sdk v0.4.1
+ * @ccgui/plugin-sdk v0.4.2
  */
 
 /** 宿主实现的 SDK 契约版本。 */
@@ -104,7 +104,8 @@ export interface PromptContribution {
   /** Called synchronously by the host exactly once after the engine accepts a
    * launch carrying this contribution. It is not called when launch fails or
    * when the byte budget rejects the contribution. Callback failures are
-   * isolated and do not fail the accepted launch. */
+   * isolated and do not fail the accepted launch. Admitted contributions are
+   * confirmed before afterTurn, even if the terminal event arrives first. */
   onAccepted?: () => void;
 }
 
@@ -125,9 +126,9 @@ export interface InternalMessageCapture {
 export interface BeforeTurnResult {
   promptContributions?: PromptContribution[];
   internalMessageCapture?: InternalMessageCapture;
-  /** Pure synchronous lifetime guard, checked during collection, replay and
-   * launch acceptance. False or throwing retires this result's prompts and
-   * capture; a retired lifetime must never become current again. */
+  /** Pure synchronous lifetime guard, checked during collection, replay,
+   * launch acceptance, and capture parsing/delivery. False or throwing retires
+   * this result's prompts and capture; a retired lifetime must not revive. */
   isCurrent?: () => boolean;
 }
 
@@ -163,6 +164,8 @@ export interface InternalMessageEvent extends TurnEventBase {
 }
 
 export interface RuntimeSwitchEvent {
+  /** Stable identity shared by beforeSwitch and afterSwitch for one launch. */
+  switchId: string;
   sourceEngine: string;
   targetEngine: string;
   sourceSessionId: string | null;

@@ -1,5 +1,12 @@
 # @ccgui/plugin-sdk changelog
 
+## 0.4.2 — 2026-09-17
+
+- `RuntimeSwitchEvent` 新增必填 `switchId`：同一次启动的 `beforeSwitch` 与 `afterSwitch` 共享身份，插件可拒绝停用前或已被后续切换替代的迟到完成。
+- `PromptContribution.onAccepted` 保证先于该回合的 `afterTurn`；终态事件早于启动响应时延后结算，失败启动仍不确认接纳。
+- `BeforeTurnResult.isCurrent` 同时约束内部帧解析与异步投递；原所有者失效后不再隐藏或交付新帧，撤销队列超限也覆盖本次发送前刚停用的所有者。
+- 修正运行时事件的 `turnId`，使其与 `beforeTurn`、`afterTurn` 一致；启动后的 `runId` 重绑定不再改变回合身份。
+
 ## 0.4.1 — 2026-09-17
 
 - 新增 `ctx.ui.registerWorkspaceMenuItem` 与 `ui:workspace-menu` 权限：按右键目标工作区提供菜单项，支持动态标签、可见性和卸载撤销；不改变活动工作区。

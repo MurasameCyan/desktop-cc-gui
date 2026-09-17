@@ -104,13 +104,14 @@ function dispatchNonBlocking<T>(
   hookName: string,
   getHook: (hooks: T) => ((event: never) => void | Promise<void>) | undefined,
   event: unknown,
+  isCurrent?: () => boolean,
 ): void {
   for (const entry of [...registrations]) {
     const { pluginId, hooks } = entry;
     const hook = getHook(hooks);
     if (!hook) continue;
     queueMicrotask(() => {
-      if (!entry.active) return;
+      if (!entry.active || (isCurrent && !isCurrent())) return;
       try {
         void Promise.resolve(hook(event as never)).catch((error: unknown) =>
           reportHookError(pluginId, hookName, error),
@@ -142,14 +143,15 @@ export function dispatchAfterTurn(event: AfterTurnEvent): void {
   dispatchNonBlocking(turnRegistrations, "afterTurn", ({ afterTurn }) => afterTurn, event);
 }
 
-export function dispatchInternalMessage(pluginId: string, event: InternalMessageEvent): void {
-  const registrations = turnRegistrations.filter((entry) => entry.pluginId === pluginId);
-  if (registrations.length === 0) return;
+export function dispatchInternalMessage(capture: RegisteredInternalMessageCapture, event: InternalMessageEvent): void {
+  const origin = captureOwners.get(capture);
+  if (!origin || !isResultCurrent(origin)) return;
   dispatchNonBlocking(
-    registrations,
+    turnRegistrations.filter((entry) => entry.pluginId === origin.registration.pluginId),
     "onInternalMessage",
     ({ onInternalMessage }) => onInternalMessage,
     event,
+    () => isResultCurrent(origin),
   );
 }
 
@@ -286,7 +288,7 @@ function isResultCurrent(origin: ResultOrigin): boolean {
   }
 }
 
-/** Recheck captures after the collector yields and before registering a run. */
+/** Recheck capture ownership during registration, parsing, and delivery. */
 export function isInternalMessageCaptureActive(capture: RegisteredInternalMessageCapture): boolean {
   const origin = captureOwners.get(capture);
   return origin !== undefined && isResultCurrent(origin);

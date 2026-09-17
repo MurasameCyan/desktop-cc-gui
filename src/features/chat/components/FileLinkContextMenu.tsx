@@ -112,7 +112,8 @@ export function FileLinkContextMenu({
       label: t("files.copyLink"),
       icon: <Link2 className="size-4" aria-hidden />,
       onSelect: () =>
-        act((path) => {
+        void resolveChatFileLink(menu.path, menu.workspacePath).then((resolvedPath) => {
+          const path = resolvedPath ?? menu.path;
           const link = path.startsWith("/") ? `file://${path}` : path;
           void navigator.clipboard.writeText(link).catch(() => {});
         }),

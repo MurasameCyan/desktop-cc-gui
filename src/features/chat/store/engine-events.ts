@@ -33,9 +33,10 @@ import {
   dispatchInternalMessage,
   dispatchRuntimeEvent,
   dispatchSessionCreated,
+  isInternalMessageCaptureActive,
 } from "@/features/plugins/runtime/hooks";
 import { normalizeEngineEvent, type EngineTerminalFact } from "../normalized-runtime-events";
-import type { InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
+import type { AfterTurnEvent, InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 interface RunLifecycle {
   turnId: string;
   engine: string;
@@ -43,6 +44,8 @@ interface RunLifecycle {
   workspace: WorkspaceMetadata;
   captures: RegisteredInternalMessageCapture[];
   acceptedFrames?: string[];
+  launchSettled?: boolean;
+  deferredAfterTurn?: AfterTurnEvent;
 }
 
 interface CaptureBuffer {
@@ -116,15 +119,28 @@ function persistAcceptedFrames(lifecycle: RunLifecycle): void {
   }
 }
 
-/** Register a run's lifecycle before its real run id exists. */
+/** Register before sending. Release the returned gate after launch success or
+ * rejection, so early terminal hooks cannot outrun contribution acceptance. */
 export function registerPendingRunLifecycle(
   placeholderId: string,
   lifecycle: RunLifecycle,
-): void {
+): (sessionId?: string | null) => void {
   lifecycle.acceptedFrames = [];
+  lifecycle.launchSettled = false;
   runLifecycles.set(placeholderId, lifecycle);
   captureBuffers.set(placeholderId, { lifecycle, text: "" });
   pendingRuns.set(placeholderId, lifecycle);
+  return (sessionId) => {
+    if (lifecycle.launchSettled) return;
+    lifecycle.launchSettled = true;
+    if (sessionId && !lifecycle.sessionId) lifecycle.sessionId = sessionId;
+    persistAcceptedFrames(lifecycle);
+    const terminal = lifecycle.deferredAfterTurn;
+    if (terminal) {
+      lifecycle.deferredAfterTurn = undefined;
+      dispatchAfterTurn({ ...terminal, sessionId: lifecycle.sessionId });
+    }
+  };
 }
 
 /** Move a pre-registered lifecycle onto the run id the send returned and adopt
@@ -208,7 +224,7 @@ export function finishRunLifecycle(
   if (!lifecycle) return;
   if (sessionId) lifecycle.sessionId = sessionId;
   unregisterRunLifecycle(runId);
-  dispatchAfterTurn({
+  const terminal: AfterTurnEvent = {
     runId,
     turnId: lifecycle.turnId,
     engine: lifecycle.engine,
@@ -217,7 +233,9 @@ export function finishRunLifecycle(
     occurredAt: new Date().toISOString(),
     status,
     ...(error === undefined ? {} : { error }),
-  });
+  };
+  if (lifecycle.launchSettled === false) lifecycle.deferredAfterTurn = terminal;
+  else dispatchAfterTurn(terminal);
 }
 export function unregisterRunLifecycle(runId: string): void {
   // A turn can settle before its send result resolved the native session id.
@@ -289,6 +307,7 @@ function processCaptureBuffer(runId: string, flush: boolean): string {
       | { capture: RegisteredInternalMessageCapture; index: number; open: string; close: string }
       | undefined;
     for (const capture of state.lifecycle.captures) {
+      if (!isInternalMessageCaptureActive(capture)) continue;
       const nonce = capture.capture.nonce;
       if (!validInternalNonce(nonce)) continue;
       const open = frameOpen(nonce);
@@ -308,6 +327,7 @@ function processCaptureBuffer(runId: string, flush: boolean): string {
         // the next chunk can complete it.
         let split = rest.length;
         for (const registered of state.lifecycle.captures) {
+          if (!isInternalMessageCaptureActive(registered)) continue;
           const nonce = registered.capture.nonce;
           if (!validInternalNonce(nonce)) continue;
           const open = frameOpen(nonce);
@@ -354,13 +374,13 @@ function processCaptureBuffer(runId: string, flush: boolean): string {
     }
     const frameEnd = closeIndex + selected.close.length;
     const frame = rest.slice(selected.index, frameEnd);
-    if (!acceptsCapture(selected.capture.capture, payload, bytes)) {
+    if (!acceptsCapture(selected.capture.capture, payload, bytes) || !isInternalMessageCaptureActive(selected.capture)) {
       visible += frame;
     } else {
       const lifecycle = state.lifecycle;
       (lifecycle.acceptedFrames ??= []).push(frame);
       persistAcceptedFrames(lifecycle);
-      dispatchInternalMessage(selected.capture.pluginId, {
+      dispatchInternalMessage(selected.capture, {
         runId,
         turnId: lifecycle.turnId,
         engine: lifecycle.engine,
@@ -393,6 +413,7 @@ function dispatchNormalized(event: EngineEventPayload, terminal?: EngineTerminal
   const lifecycle = runLifecycles.get(event.runId);
   if (!lifecycle) return;
   const normalized = normalizeEngineEvent(event, {
+    turnId: lifecycle.turnId,
     workspaceId: lifecycle.workspace.id,
     workspacePath: lifecycle.workspace.path,
     occurredAt: new Date().toISOString(),

@@ -279,6 +279,7 @@ describe("compactContext and refreshSessionUsage", () => {
     expect(ipc.deleteRemoteSession).toHaveBeenCalledWith(
       WS,
       "dsh",
+      "remote-1",
       "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
     );
     expect(ipc.deleteSession).not.toHaveBeenCalled();
@@ -815,6 +816,45 @@ describe("switch ordering and turn lifecycle", () => {
     expect(order).toEqual(["beforeSwitch", "beforeTurn", "send", "afterSwitch"]);
   });
 
+  it("delivers early terminal hooks only after the launch acknowledgement", async () => {
+    const launch = Promise.withResolvers<{ runId: string; sessionId: string }>();
+    const observations: string[] = [];
+    let turnId = "";
+    const runtimeTurnIds: string[] = [];
+    const settledTurnIds: string[] = [];
+    const dispose = registerTurnHooks("test.early-ack", {
+      beforeTurn: (event) => {
+        turnId = event.turnId;
+        return { promptContributions: [{ id: "receipt", content: "private instructions", placement: "request-tail", visibility: "internal", persistence: "turn", onAccepted: () => { observations.push("accepted"); } }] };
+      },
+      onRuntimeEvent: (event) => { runtimeTurnIds.push(event.turnId); },
+      afterTurn: (event) => { observations.push("settled"); settledTurnIds.push(event.turnId); },
+    });
+    useChatStore.setState({ workspaces: [REGISTERED_WORKSPACE], activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    vi.mocked(ipc.sendMessage).mockReturnValueOnce(launch.promise);
+    const sending = useChatStore.getState().send("hi", []);
+    try {
+      await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
+      handleEngineEvents([
+        { runId: "run-early-ack", sessionId: null, engine: "claude", seq: 1, kind: "delta", data: "visible reply" },
+        { runId: "run-early-ack", sessionId: null, engine: "claude", seq: 2, kind: "done", data: { usage: null } },
+      ], engineDeps());
+      await Promise.resolve();
+      expect(useChatStore.getState().bySession[`new:claude:${WS}`].streaming).toBe(false);
+      expect(observations).toEqual([]);
+      launch.resolve({ runId: "run-early-ack", sessionId: "native-early-ack" });
+      await sending;
+      expect(observations).toEqual(["accepted", "settled"]);
+      expect(runtimeTurnIds).toEqual([turnId]);
+      expect(settledTurnIds).toEqual([turnId]);
+    } finally {
+      launch.resolve({ runId: "run-early-ack", sessionId: "native-early-ack" });
+      await sending;
+      dispose();
+    }
+  });
+
   it("binds a fast engine's done event that arrives before sendMessage resolves", async () => {
     const afterTurn = vi.fn();
     const dispose = registerTurnHooks("test.early", { afterTurn });
@@ -942,6 +982,37 @@ describe("session-scoped internal contributions", () => {
         .toEqual([expect.objectContaining({ id: "host:internal-instructions-reset:constructor" })]);
     } finally {
       dispose();
+    }
+  });
+
+  it("withdraws retiring owners on the launch that first overflows the journal", async () => {
+    useChatStore.setState({ activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    const previous = Array.from({ length: 32 }, (_, index) => registerTurnHooks(`test.retiring-${index}`, {
+      beforeTurn: () => ({ promptContributions: [{ ...contribution("old"), id: `old-${index}`, persistence: "turn" }] }),
+    }));
+    const next: Array<() => void> = [];
+    try {
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-first", sessionId: "journal-session" });
+      await useChatStore.getState().send("one", []);
+      previous.forEach((dispose) => dispose());
+      next.push(...Array.from({ length: 32 }, (_, index) => registerTurnHooks(`test.new-${index}`, {
+        beforeTurn: () => ({ promptContributions: [{ ...contribution("new"), id: `new-${index}`, persistence: "turn" }] }),
+      })));
+      vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("launch rejected"));
+      await useChatStore.getState().send("two", []);
+      const outgoing = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions!;
+      expect(outgoing[0]).toMatchObject({ id: "host:internal-instructions-reset:" });
+      expect(outgoing.slice(1).map((entry) => entry.id)).toEqual(Array.from({ length: 32 }, (_, index) => `new-${index}`));
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-retry", sessionId: null });
+      await useChatStore.getState().send("retry", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions![0]).toBe(outgoing[0]);
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-next", sessionId: null });
+      await useChatStore.getState().send("next", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions?.map((entry) => entry.id))
+        .toEqual(Array.from({ length: 32 }, (_, index) => `new-${index}`));
+    } finally {
+      [...previous, ...next].forEach((dispose) => dispose());
     }
   });
 

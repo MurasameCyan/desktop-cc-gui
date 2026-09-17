@@ -2,6 +2,7 @@ use super::{parse_session_file, Message, ParsedSession, SessionMeta};
 use base64::Engine as _;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -710,34 +711,69 @@ pub async fn delete_session(
     Ok(())
 }
 
+fn remote_session_delete_script(engine: &str, remote_path: &str) -> Result<String, String> {
+    if !is_plausible_remote_session_path(engine, remote_path) {
+        return Err(format!("远程会话路径不合法: {remote_path}"));
+    }
+    let quoted = crate::engine::wsl_transport::sh_quote(remote_path);
+    // run_script_output checks the final status, without enabling set -e.
+    // Only empty-directory cleanup may mask a failure, never transcript rm.
+    let mut script = format!("rm -f -- {quoted} || exit $?");
+    if engine == "dsh" {
+        // 世代日志同目录共存(session.jsonl.zstd / session.vN.jsonl.zstd),
+        // 只删当前代会留下旧代被插件源重新列出;目录删空才移除。
+        script.push_str(&format!(
+            "\ndir=$(dirname -- {quoted}) || exit $?\nrm -f -- \"$dir\"/session.jsonl.zstd \"$dir\"/session.v*.jsonl.zstd || exit $?\nrmdir -- \"$dir\" 2>/dev/null || true"
+        ));
+    }
+    Ok(script)
+}
+
+/// Reclaim session-scoped identities only after the remote disk operation
+/// succeeds. Remote sessions need not have a local `sessions` row.
+async fn delete_remote_session_and_frames(
+    db: Arc<crate::db::Db>,
+    engine: String,
+    session_id: String,
+    delete_disk: impl Future<Output = Result<String, String>>,
+) -> Result<(), String> {
+    delete_disk.await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.0.lock();
+        conn.execute(
+            "DELETE FROM accepted_internal_frames WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, session_id],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 远程(WSL 发行版内)会话删除:插件会话源上报的 remotePath 经与
 /// load_remote_session_page 相同的形状白名单校验后,走同一套远程通道
 /// rm。dsh 的同目录旧世代日志一并清掉,目录仅在删空时移除(有其它文件
-/// 则保留)。远程会话没有本地 db 行,无需 emit_sessions_changed——前端
-/// 删除后自行刷新,插件源重新 list 时文件已不存在。
+/// 则保留)。成功后回收本地 accepted_internal_frames;远程会话没有本地
+/// sessions 行,无需 emit_sessions_changed——前端删除后自行刷新。
 #[tauri::command]
 pub async fn delete_remote_session(
     state: tauri::State<'_, crate::AppState>,
     workspace_path: String,
     engine: String,
+    session_id: String,
     remote_path: String,
 ) -> Result<(), String> {
-    if !is_plausible_remote_session_path(&engine, &remote_path) {
-        return Err(format!("远程会话路径不合法: {remote_path}"));
-    }
+    let script = remote_session_delete_script(&engine, &remote_path)?;
     let transport = crate::engine::wsl_transport::transport_for_workspace(&state.db, &workspace_path)
         .ok_or_else(|| format!("工作区 {workspace_path} 未登记远程传输"))?;
-    let quoted = crate::engine::wsl_transport::sh_quote(&remote_path);
-    let mut script = format!("rm -f -- {quoted}");
-    if engine == "dsh" {
-        // 世代日志同目录共存(session.jsonl.zstd / session.vN.jsonl.zstd),
-        // 只删当前代会留下旧代被插件源重新列出;目录删空才移除。
-        script.push_str(&format!(
-            "\ndir=$(dirname -- {quoted})\nrm -f -- \"$dir\"/session.jsonl.zstd \"$dir\"/session.v*.jsonl.zstd\nrmdir -- \"$dir\" 2>/dev/null || true"
-        ));
-    }
-    crate::engine::wsl_transport::run_script_output(&transport, &script).await?;
-    Ok(())
+    delete_remote_session_and_frames(
+        Arc::clone(&state.db),
+        engine,
+        session_id,
+        crate::engine::wsl_transport::run_script_output(&transport, &script),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1297,6 +1333,79 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    #[tokio::test]
+    async fn remote_delete_failure_preserves_all_frame_identities() {
+        let scratch = Scratch::new();
+        let db = Arc::new(crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap());
+        for (engine, session_id, hash) in [
+            ("dsh", "remote-1", "a"),
+            ("dsh", "kept", "b"),
+            ("omp", "remote-1", "c"),
+        ] {
+            db.record_accepted_internal_frame_hash(engine, session_id, &hash.repeat(64), "/remote/ws")
+                .unwrap();
+        }
+        let before = (
+            db.accepted_internal_frames("dsh", "remote-1").unwrap(),
+            db.accepted_internal_frames("dsh", "kept").unwrap(),
+            db.accepted_internal_frames("omp", "remote-1").unwrap(),
+        );
+
+        let result = delete_remote_session_and_frames(
+            Arc::clone(&db),
+            "dsh".to_string(),
+            "remote-1".to_string(),
+            async { Err("remote transcript removal failed".to_string()) },
+        )
+        .await;
+
+        assert_eq!(result, Err("remote transcript removal failed".to_string()));
+        assert_eq!(
+            (
+                db.accepted_internal_frames("dsh", "remote-1").unwrap(),
+                db.accepted_internal_frames("dsh", "kept").unwrap(),
+                db.accepted_internal_frames("omp", "remote-1").unwrap(),
+            ),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_delete_success_reclaims_only_its_session_frame_identities() {
+        let scratch = Scratch::new();
+        let db = Arc::new(crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap());
+        // Remote identities have no local sessions row to join against.
+        for (engine, session_id, hash) in [
+            ("dsh", "remote-1", "a"),
+            ("dsh", "remote-1", "b"),
+            ("dsh", "kept", "c"),
+            ("omp", "remote-1", "d"),
+        ] {
+            db.record_accepted_internal_frame_hash(engine, session_id, &hash.repeat(64), "/remote/ws")
+                .unwrap();
+        }
+        let before = db.accepted_internal_frames("dsh", "remote-1").unwrap();
+        let same_engine = db.accepted_internal_frames("dsh", "kept").unwrap();
+        let same_session_id = db.accepted_internal_frames("omp", "remote-1").unwrap();
+
+        delete_remote_session_and_frames(
+            Arc::clone(&db),
+            "dsh".to_string(),
+            "remote-1".to_string(),
+            async {
+                // Nothing can be reclaimed before the remote operation succeeds.
+                assert_eq!(db.accepted_internal_frames("dsh", "remote-1").unwrap(), before);
+                Ok(String::new())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(db.accepted_internal_frames("dsh", "remote-1").unwrap().0.is_empty());
+        assert_eq!(db.accepted_internal_frames("dsh", "kept").unwrap(), same_engine);
+        assert_eq!(db.accepted_internal_frames("omp", "remote-1").unwrap(), same_session_id);
+    }
+
     /// Removing a workspace reclaims every identity accepted in it. A remote
     /// session never gets a `sessions` row, so the stored workspace is the only
     /// key that can reach its rows: without it they accumulate until the global
@@ -1614,6 +1723,80 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         assert!(delete_session_disk("future-engine", &path).is_err());
         assert!(path.exists());
+    }
+
+    // Unix runs the actual production script. Windows CI still exercises the
+    // async deletion/identity gate above without depending on an installed sh.
+    #[cfg(unix)]
+    fn run_remote_delete_script(engine: &str, path: &Path) -> std::process::Output {
+        let script = remote_session_delete_script(engine, path.to_str().unwrap()).unwrap();
+        std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_dsh_delete_propagates_primary_transcript_failure() {
+        let scratch = Scratch::new();
+        let dir = scratch.0.join("sessions").join("session-1");
+        let transcript = dir.join("session.v2.jsonl.zstd");
+        // rm -f cannot remove a directory, even when tests run as root.
+        std::fs::create_dir_all(&transcript).unwrap();
+        let old = dir.join("session.v1.jsonl.zstd");
+        std::fs::write(&old, "old transcript").unwrap();
+
+        let output = run_remote_delete_script("dsh", &transcript);
+
+        assert!(!output.status.success());
+        assert!(transcript.is_dir());
+        assert_eq!(std::fs::read_to_string(old).unwrap(), "old transcript");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_dsh_delete_propagates_old_generation_failure() {
+        let scratch = Scratch::new();
+        let dir = scratch.0.join("sessions").join("session-1");
+        let old = dir.join("session.v1.jsonl.zstd");
+        std::fs::create_dir_all(&old).unwrap();
+        let transcript = dir.join("session.v2.jsonl.zstd");
+        std::fs::write(&transcript, "current transcript").unwrap();
+
+        let output = run_remote_delete_script("dsh", &transcript);
+
+        assert!(!output.status.success());
+        assert!(!transcript.exists());
+        assert!(old.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_dsh_delete_removes_generations_but_preserves_unrelated_files() {
+        let scratch = Scratch::new();
+        let dir = scratch.0.join("sessions").join("session 'one");
+        std::fs::create_dir_all(&dir).unwrap();
+        let generations = ["session.jsonl.zstd", "session.v1.jsonl.zstd", "session.v2.jsonl.zstd"];
+        for name in generations {
+            std::fs::write(dir.join(name), "transcript").unwrap();
+        }
+        let unrelated = dir.join("notes.txt");
+        std::fs::write(&unrelated, "keep").unwrap();
+        let sibling = scratch.0.join("sessions").join("session-two");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let sibling_transcript = sibling.join("session.jsonl.zstd");
+        std::fs::write(&sibling_transcript, "other session").unwrap();
+
+        let output = run_remote_delete_script("dsh", &dir.join("session.v2.jsonl.zstd"));
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        for name in generations {
+            assert!(!dir.join(name).exists(), "generation remains: {name}");
+        }
+        // Nonempty-directory cleanup is best effort, not a transcript failure.
+        assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(sibling_transcript).unwrap(), "other session");
     }
 
     /// dsh 远程转录本是 zstd 压缩:同 /sessions/ 形态下放行 .jsonl.zstd。

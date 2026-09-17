@@ -36,6 +36,7 @@ function contribution(id: string, content = id): PromptContribution {
 
 const beforeTurnEvent = { turnId: "turn-1" } as BeforeTurnEvent;
 const switchEvent = {
+  switchId: "switch-1",
   sourceEngine: "claude",
   targetEngine: "codex",
   sourceSessionId: null,
