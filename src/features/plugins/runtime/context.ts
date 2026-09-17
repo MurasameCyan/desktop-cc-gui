@@ -12,6 +12,7 @@ import {
   pageRegistry,
   panelTabRegistry,
   scopedPluginId,
+  sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
   timelineRowRegistry,
@@ -24,6 +25,8 @@ import type {
 } from "@ccgui/plugin-sdk";
 import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
+import { addPluginWorkspace, openPluginSession } from "./workspace-bridge";
+import { registerSessionSource } from "./session-source";
 import { runAsPlugin } from "./hardening";
 
 /** Storage transport the context talks to; the loader binds the IPC-backed
@@ -202,6 +205,23 @@ export function createPluginContext(
           }),
         );
       },
+      registerSessionMenuItem(def) {
+        requirePermission("ui:session-menu");
+        return track(
+          sessionMenuRegistry.register({
+            id: scopedPluginId(id, def.key),
+            label: def.label,
+            icon: def.icon,
+            danger: def.danger,
+            run: (target) => runAsPlugin(() => def.run(target)),
+          }),
+        );
+      },
+      openSettings(key) {
+        requirePermission("ui:settings-section");
+        // 宿主是 hash 路由（见 features/commands/builtins.ts 的设置命令）。
+        window.location.hash = `#/settings?page=${scopedPluginId(id, key)}`;
+      },
       registerMarkdownRenderer(def) {
         requirePermission("ui:markdown");
         return track(
@@ -285,6 +305,43 @@ export function createPluginContext(
       setDraft(text) {
         requirePermission("composer:draft");
         setActiveComposerDraft(id, text);
+      },
+    },
+    workspaces: {
+      add(path, meta) {
+        requirePermission("host:workspace");
+        // meta 带 wsl 键 = 远程工作区(会话流量经 ssh 导向插件指定主机),
+        // 需要独立的 host:workspace:remote 授权;判定在 workspace-bridge。
+        return addPluginWorkspace(id, path, meta, () =>
+          requirePermission("host:workspace:remote"),
+        );
+      },
+    },
+    sessions: {
+      selectSession(engine, sessionId, workspacePath) {
+        requirePermission("host:session");
+        // 契约返回 Promise:校验失败走 rejection 而不是同步抛,与
+        // workspaces.add 一致(插件可用 .catch 链式处理)。
+        return Promise.resolve().then(() =>
+          openPluginSession(id, engine, sessionId, workspacePath),
+        );
+      },
+      registerSource(def) {
+        requirePermission("host:session");
+        // 入口校验:不合规 def 同步抛回插件(登记期 bug 应当即暴露),
+        // 否则非函数 list 会在每次会话刷新时才炸,且连累其他源。
+        if (
+          typeof def?.id !== "string" ||
+          !def.id ||
+          typeof def.list !== "function"
+        ) {
+          throw new Error(
+            `[plugins] "${id}" sessions.registerSource: def must be { id: non-empty string, list: () => Promise<ExternalSessionRow[]> }`,
+          );
+        }
+        return track(
+          registerSessionSource(id, def.id, () => runAsPlugin(def.list)),
+        );
       },
     },
     bridge: {

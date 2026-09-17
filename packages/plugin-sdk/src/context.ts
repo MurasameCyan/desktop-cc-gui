@@ -1,13 +1,26 @@
 import type { ComponentType } from "react";
 import type * as React from "react";
 import type { Disposer } from "./manifest";
-import type { ComposerSlotId } from "./registry";
+import type { ComposerSlotId, SessionMenuTarget } from "./registry";
 
 /**
  * PluginContext（plan §5.2）：插件唯一能力门面。宿主 runtime/context.ts
  * 实现本接口；插件侧的类型镜像见包根 plugin.d.ts（双向漂移由
  * contract-check.ts 在类型层面把守）。
  */
+
+/** 外部会话源行(ctx.sessions.registerSource,0.3.4 起):插件上报的
+ *  远端/容器内会话摘要。workspacePath 必须是已登记工作区的 path,否则
+ *  宿主合并时丢弃(侧栏按 workspacePath 分组)。 */
+export interface ExternalSessionRow {
+  engine: string;
+  sessionId: string;
+  workspacePath: string;
+  title?: string;
+  updatedAt?: number | null;
+  /** 远端 jsonl 绝对路径(可选;宿主历史回放经远程通道拉取)。 */
+  remotePath?: string;
+}
 
 export interface PluginContext {
   pluginId: string;
@@ -63,6 +76,19 @@ export interface PluginContext {
       keywords?: () => string[];
       run: () => void;
     }): Disposer;
+    /** Sidebar session right-click menu row (permission `ui:session-menu`,
+     *  0.3.5 起)。`run` 收到打开菜单的会话 `{ engine, sessionId }`。 */
+    registerSessionMenuItem(def: {
+      key?: string;
+      label: () => string;
+      icon?: ComponentType<{ className?: string }>;
+      danger?: boolean;
+      run: (target: SessionMenuTarget) => void;
+    }): Disposer;
+    /** 跳转到本插件的设置页（权限 `ui:settings-section`，0.3.6 起）。
+     *  `key` 对应 registerSettingsSection 的子 key，省略时打开主 section；
+     *  供状态栏 chip、面板按钮等做深链入口。 */
+    openSettings(key?: string): void;
     /** Markdown pipeline additions, merged over host defaults (plan §4.2 #5). */
     registerMarkdownRenderer(def: {
       key?: string;
@@ -110,6 +136,32 @@ export interface PluginContext {
    *  写入即替换当前活动会话的草稿；不触发发送——发送永远是用户动作。 */
   composer: {
     setDraft(text: string): void;
+  };
+  /** 工作区登记（权限 `host:workspace`，0.3.3 起）。把任意路径登记为侧栏
+   *  工作区——不要求本机存在该目录（如经 ssh 管理的远程机/WSL 发行版内
+   *  路径）。`meta` 透传存储在宿主工作区行上，形状由写入方与消费方约定。
+   *
+   *  `meta` 携带 `wsl` 键（远程工作区，宿主引擎经 ssh 把会话流量导到
+   *  meta.wsl 指定的主机与发行版）需要额外权限 `host:workspace:remote`
+   *  （0.3.4 起）——这等效于出网 + 远程执行导向，远超登记一行侧栏数据。
+   *  信任权衡：远程通道首连采用 StrictHostKeyChecking=accept-new
+   *  （首连自动记录 host key，之后变更才拒绝），插件作者应知晓这是
+   *  TOFU 而非严格 pinning。 */
+  workspaces: {
+    add(path: string, meta?: Record<string, unknown>): Promise<void>;
+  };
+  /** 会话打开 + 外部会话源(权限 `host:session`;selectSession 0.3.3 起,
+   *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话
+   *  目录刷新(init/refreshSessions/rescan)时调用 `list()` 并把行合并进
+   *  侧栏列表——本机扫描结果优先,同 engine/sessionId/workspacePath 的外部
+   *  行被丢弃。返回 Disposer,插件卸载时自动注销。 */
+  sessions: {
+    selectSession(engine: string, sessionId: string, workspacePath: string): Promise<void>;
+    registerSource(def: {
+      /** 源 id,插件内唯一;同 id 重复登记覆盖(热重载语义)。 */
+      id: string;
+      list: () => Promise<ExternalSessionRow[]>;
+    }): Disposer;
   };
   /** 通用能力出口（0.3.0 起；旧的 `cmd:<command>` 逐命令授权机制已删除）。
    *  仅四条命令，`pluginId` 由宿主自动注入（插件无需也不能传）：

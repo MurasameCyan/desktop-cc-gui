@@ -25,6 +25,11 @@ pub struct WorkspaceGroup {
 pub struct AppSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Windows 标题栏样式："native"（系统原生）| "mac"（仿 mac 自绘标题栏 +
+    /// 三色按钮）。仅 Windows 生效；macOS 固定系统原生红绿灯（Overlay）。
+    /// 窗口在启动时按此值创建，改动需重启应用。
+    #[serde(default = "default_titlebar")]
+    pub titlebar: String,
     /// Sidebar workspace groups, ordered by `sortOrder` (fallback: name).
     #[serde(default)]
     pub workspace_groups: Vec<WorkspaceGroup>,
@@ -82,6 +87,34 @@ pub struct AppSettings {
     /// "cmdEnter" (Cmd/Ctrl+Enter sends, Enter newline).
     #[serde(default = "default_composer_send_shortcut")]
     pub composer_send_shortcut: String,
+    /// Keyboard shortcuts (快捷键), format "cmd+ctrl+alt+shift+key" lowercase;
+    /// None = unbound. Defaults mirror src/features/shortcuts/actions.ts.
+    #[serde(default = "default_new_session_shortcut")]
+    pub new_session_shortcut: Option<String>,
+    /// None = platform default (mac ctrl+c, win ctrl+shift+c), resolved
+    /// frontend-side via getDefaultInterruptShortcut().
+    #[serde(default)]
+    pub interrupt_shortcut: Option<String>,
+    #[serde(default = "default_command_palette_shortcut")]
+    pub command_palette_shortcut: Option<String>,
+    #[serde(default = "default_sidebar_search_shortcut")]
+    pub sidebar_search_shortcut: Option<String>,
+    #[serde(default = "default_toggle_terminal_shortcut")]
+    pub toggle_terminal_shortcut: Option<String>,
+    #[serde(default = "default_toggle_sidebar_shortcut")]
+    pub toggle_sidebar_shortcut: Option<String>,
+    #[serde(default = "default_toggle_side_panel_shortcut")]
+    pub toggle_side_panel_shortcut: Option<String>,
+    #[serde(default = "default_save_file_shortcut")]
+    pub save_file_shortcut: Option<String>,
+    #[serde(default = "default_open_settings_shortcut")]
+    pub open_settings_shortcut: Option<String>,
+    #[serde(default = "default_increase_ui_scale_shortcut")]
+    pub increase_ui_scale_shortcut: Option<String>,
+    #[serde(default = "default_decrease_ui_scale_shortcut")]
+    pub decrease_ui_scale_shortcut: Option<String>,
+    #[serde(default = "default_reset_ui_scale_shortcut")]
+    pub reset_ui_scale_shortcut: Option<String>,
     /// Thinking-process row behavior once its thinking stream settles:
     /// None/Some(true) = auto-fold (default), Some(false) = stay expanded
     /// until the user folds it (设置 → 通用 → 行为 → 思考过程).
@@ -117,12 +150,49 @@ pub struct AppSettings {
 fn default_theme() -> String {
     "system".to_string()
 }
+fn default_titlebar() -> String {
+    "native".to_string()
+}
 fn default_sidebar_thread_limit() -> u32 {
     5
 }
 
 fn default_composer_send_shortcut() -> String {
     "enter".to_string()
+}
+
+fn default_new_session_shortcut() -> Option<String> {
+    Some("cmd+n".to_string())
+}
+fn default_command_palette_shortcut() -> Option<String> {
+    Some("cmd+k".to_string())
+}
+fn default_sidebar_search_shortcut() -> Option<String> {
+    Some("cmd+l".to_string())
+}
+fn default_toggle_terminal_shortcut() -> Option<String> {
+    Some("cmd+j".to_string())
+}
+fn default_toggle_sidebar_shortcut() -> Option<String> {
+    Some("cmd+b".to_string())
+}
+fn default_toggle_side_panel_shortcut() -> Option<String> {
+    Some("cmd+shift+e".to_string())
+}
+fn default_save_file_shortcut() -> Option<String> {
+    Some("cmd+s".to_string())
+}
+fn default_open_settings_shortcut() -> Option<String> {
+    Some("cmd+,".to_string())
+}
+fn default_increase_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+=".to_string())
+}
+fn default_decrease_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+-".to_string())
+}
+fn default_reset_ui_scale_shortcut() -> Option<String> {
+    Some("cmd+0".to_string())
 }
 
 fn default_language() -> String {
@@ -144,6 +214,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            titlebar: default_titlebar(),
             workspace_groups: Vec::new(),
             workspace_aliases: HashMap::new(),
             archived_workspaces: Vec::new(),
@@ -161,6 +232,18 @@ impl Default for AppSettings {
             codex_home: None,
             sidebar_thread_limit: default_sidebar_thread_limit(),
             composer_send_shortcut: default_composer_send_shortcut(),
+            new_session_shortcut: default_new_session_shortcut(),
+            interrupt_shortcut: None,
+            command_palette_shortcut: default_command_palette_shortcut(),
+            sidebar_search_shortcut: default_sidebar_search_shortcut(),
+            toggle_terminal_shortcut: default_toggle_terminal_shortcut(),
+            toggle_sidebar_shortcut: default_toggle_sidebar_shortcut(),
+            toggle_side_panel_shortcut: default_toggle_side_panel_shortcut(),
+            save_file_shortcut: default_save_file_shortcut(),
+            open_settings_shortcut: default_open_settings_shortcut(),
+            increase_ui_scale_shortcut: default_increase_ui_scale_shortcut(),
+            decrease_ui_scale_shortcut: default_decrease_ui_scale_shortcut(),
+            reset_ui_scale_shortcut: default_reset_ui_scale_shortcut(),
             thinking_auto_collapse: None,
             terminal_shell_path: None,
             dsh_host: None,
@@ -935,6 +1018,19 @@ mod tests {
     }
 
     #[test]
+    fn titlebar_defaults_to_native_and_round_trips() {
+        assert_eq!(AppSettings::default().titlebar, "native");
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            parsed.titlebar, "native",
+            "旧设置文件没有 titlebar 字段 → 视为 native，不能崩"
+        );
+        let mac: AppSettings = serde_json::from_str(r#"{"titlebar":"mac"}"#).unwrap();
+        assert_eq!(mac.titlebar, "mac");
+        assert!(serde_json::to_string(&mac).unwrap().contains("\"titlebar\":\"mac\""));
+    }
+
+    #[test]
     fn invalid_proxy_is_reported_before_settings_are_committed() {
         let scratch = Scratch::new();
         let path = scratch.path("settings.json");
@@ -1038,4 +1134,10 @@ pub fn set_window_theme(
         }
     }
     Ok(())
+}
+
+/// 立即重启应用。用于「标题栏样式」这类在启动时按设置建窗、只能重启生效的选项。
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) {
+    app.restart();
 }

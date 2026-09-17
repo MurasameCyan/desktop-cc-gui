@@ -11,12 +11,11 @@ import {
 } from "@/components/application/settings/settings-rows";
 import { getAppVersion, openExternal } from "@/lib/platform";
 import { useUpdateStore } from "@/features/update/store";
-import { CHANGELOG_DATA } from "@/version/changelog";
+import { CHANGELOG_DATA, GITHUB_REPO_URL } from "@/version/changelog";
 import { ChangelogDialog } from "./ChangelogDialog";
 import wxqImage from "@/assets/images/wxq.png";
 import douyinImage from "@/assets/images/douyin.png";
 
-const GITHUB_URL = "https://github.com/zhukunpenglinyutong/desktop-cc-gui";
 const X_URL = "https://x.com/ZPeng31310";
 const ZHIHU_URL = "https://www.zhihu.com/people/vscodeai";
 const XIAOHONGSHU_URL = "https://www.xiaohongshu.com/user/profile/64bd7444000000001403e31e";
@@ -208,7 +207,7 @@ export function AboutSection() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 px-3 py-1">
-          <SocialLink url={GITHUB_URL} label={t("settings.socialGithub")} path={GITHUB_PATH} />
+          <SocialLink url={GITHUB_REPO_URL} label={t("settings.socialGithub")} path={GITHUB_PATH} />
           <SocialLink url={X_URL} label={t("settings.socialX")} path={X_PATH} />
           <SocialLink url={ZHIHU_URL} label={t("settings.socialZhihu")} path={ZHIHU_PATH} />
           <SocialLink
@@ -224,7 +223,7 @@ export function AboutSection() {
       {showChangelog && (
         <ChangelogDialog
           entries={CHANGELOG_DATA}
-          githubUrl={GITHUB_URL}
+          githubUrl={GITHUB_REPO_URL}
           onClose={() => setShowChangelog(false)}
         />
       )}

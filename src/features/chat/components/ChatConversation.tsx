@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
@@ -21,16 +21,19 @@ import {
 
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
+import { useComposerActions } from "./use-composer-actions";
+import { filterEngineOptions } from "./engine-options";
 import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
 import { useComposerImages } from "./use-composer-images";
 import { useEngineModels } from "./use-engine-models";
 import { useTabModelDisplay } from "./use-tab-model-display";
-import { useComposerActions } from "./use-composer-actions";
 import type { EngineInfo, Workspace } from "@/lib/ipc";
 import type { OmpServiceTier } from "@/lib/omp-service-tier";
 import { EmptyState } from "@/components/base/empty-state";
-import { ASSUMED_CONTEXT_WINDOW, parseUsage } from "../usage";
+import { parseUsage } from "../usage";
+import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
+import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
@@ -82,6 +85,7 @@ function useConversationMenus({
   setCodexServiceTier,
   refreshModels,
   loadingEngines,
+  allowedEngines,
 }: {
   engines: EngineInfo[];
   engineInfo: EngineInfo | undefined;
@@ -103,26 +107,17 @@ function useConversationMenus({
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   refreshModels: () => Promise<void>;
   loadingEngines: readonly string[];
+  /** 接管工作区(桥返回非 null):仅列允许表内引擎(null = 不过滤)。 */
+  allowedEngines: string[] | null;
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Disabled-in-settings CLIs leave the picker entirely; the greyed-out
-  // state stays reserved for CLIs whose binary is not installed.
+  // Disabled-in-settings CLIs leave the picker entirely. 接管工作区下:
+  // 列表只留桥给的允许表,可用态按列表内与否而不是本机 `command -v` ——
+  // 否则本机没装的 CLI 在接管工作区里永远灰点。
   const cliOptions = useMemo(
-    () =>
-      engines.flatMap((e) => {
-        if (!e.enabled) return [];
-        return [
-          {
-            id: e.id,
-            label: t(`settings.engines.${e.id}`),
-            available: e.available,
-            disabled: !e.available,
-            disabledReason: t("chat.engineNotInstalled"),
-          },
-        ];
-      }),
-    [engines, t],
+    () => filterEngineOptions(engines, allowedEngines, t),
+    [engines, allowedEngines, t],
   );
   // Every CLI is switched off in settings: swap the picker for a placeholder
   // that deep-links to the CLI config page.
@@ -320,21 +315,31 @@ export const ChatConversation = memo(function ChatConversation({
     modelsByEngine,
     refresh: refreshModels,
     pendingEngines,
-  } = useEngineModels(engines, models, pinModels);
+  } = useEngineModels(engines, models, pinModels, active?.workspacePath);
   const loadingEngines = useMemo(
     () => Object.keys(pendingEngines),
     [pendingEngines],
   );
 
+  const displayModel = displayModels[activeEngine];
   // Conversation-reported window (Codex token_count, Claude's modelUsage)
-  // wins; the model catalog is the fallback for engines that never report
-  // one, and the shared constant is the last resort.
-  const contextMax =
-    parseUsage(sessionUsage)?.contextWindow ||
-    (catalogs[activeEngine]?.models ?? []).find(
-      (m) => m.id === displayModels[activeEngine],
-    )?.contextWindow ||
-    ASSUMED_CONTEXT_WINDOW;
+  // wins; a fresh session starts from the last window this engine+model was
+  // seen reporting; the model catalog is the fallback for engines that never
+  // report one, and the shared constant is the last resort.
+  const contextMax = resolveContextMax({
+    usage: sessionUsage,
+    engine: activeEngine,
+    model: displayModel,
+    catalogWindow: (catalogs[activeEngine]?.models ?? []).find(
+      (m) => m.id === displayModel,
+    )?.contextWindow,
+  });
+  const observedWindow = parseUsage(sessionUsage)?.contextWindow;
+  useEffect(() => {
+    if (observedWindow) {
+      rememberContextWindow(activeEngine, displayModel, observedWindow);
+    }
+  }, [observedWindow, activeEngine, displayModel]);
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;
@@ -360,11 +365,20 @@ export const ChatConversation = memo(function ChatConversation({
     supportsImages,
     composerInputRef,
   });
+  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
+  // null = 非接管工作区,按本机探针展示。
+  const uiHooks = useWorkspaceUIHooks();
+  const allowedEngines = useMemo(
+    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
+    () => workspaceAllowedEngines(active?.workspacePath),
+    [uiHooks, active?.workspacePath],
+  );
   const { addMenu, cliMenu, permissionMenu, noEnabledEngines } =
     useConversationMenus({
       engines,
       engineInfo,
       activeEngine,
+      allowedEngines,
       modelsByEngine,
       onPickFiles: handleAddAttachments,
       onPickSkills: handlePickSkills,

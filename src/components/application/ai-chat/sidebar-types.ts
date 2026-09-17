@@ -25,6 +25,9 @@ export interface AiChatRepo {
   threads: AiChatThread[];
   /** Max threads listed before collapsing behind a "show more" row. */
   threadLimit?: number;
+  /** Plugin-provided badge text (e.g. "WSL") rendered as a chip after the
+   *  label; styling comes from the plugin's injected CSS. */
+  labelSuffix?: string;
   /** Expanded on first render (folder-open icon + visible threads). */
   defaultOpen?: boolean;
 }

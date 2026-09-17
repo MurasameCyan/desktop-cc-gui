@@ -551,6 +551,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_group_id {
         conn.execute("ALTER TABLE workspaces ADD COLUMN group_id TEXT", [])?;
     }
+
+    // Additive migration: opaque per-workspace metadata from host-capability
+    // callers (plugin `workspaces.add`, e.g. { wsl: { hostId, distro } } for
+    // remote distro paths that do not exist on this machine).
+    let has_meta = conn
+        .prepare("PRAGMA table_info(workspaces)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .flatten()
+        .any(|name| name == "meta");
+    if !has_meta {
+        conn.execute("ALTER TABLE workspaces ADD COLUMN meta TEXT", [])?;
+    }
     Ok(())
 }
 

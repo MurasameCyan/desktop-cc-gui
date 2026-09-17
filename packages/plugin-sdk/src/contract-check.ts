@@ -7,6 +7,7 @@ import type {
   PluginContext,
   PluginManifest,
   PluginTier,
+  SessionMenuTarget,
 } from "./index";
 
 /**
@@ -40,6 +41,7 @@ type _PluginManifest = Assert<Mutual<PluginManifest, Pub.PluginManifest>>;
 type _JsonSchemaObject = Assert<Mutual<JsonSchemaObject, Pub.JsonSchemaObject>>;
 type _JsonSchemaProperty = Assert<Mutual<JsonSchemaProperty, Pub.JsonSchemaProperty>>;
 type _ComposerSlotId = Assert<Mutual<ComposerSlotId, Pub.ComposerSlotId>>;
+type _SessionMenuTarget = Assert<Mutual<SessionMenuTarget, Pub.SessionMenuTarget>>;
 type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
 type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
 
@@ -52,6 +54,8 @@ type _I18nKeys = Assert<KeyParity<PluginContext["i18n"], Pub.PluginContext["i18n
 type _StorageKeys = Assert<KeyParity<PluginContext["storage"], Pub.PluginContext["storage"]>>;
 type _EventsKeys = Assert<KeyParity<PluginContext["events"], Pub.PluginContext["events"]>>;
 type _ComposerKeys = Assert<KeyParity<PluginContext["composer"], Pub.PluginContext["composer"]>>;
+type _WorkspacesKeys = Assert<KeyParity<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;
+type _SessionsKeys = Assert<KeyParity<PluginContext["sessions"], Pub.PluginContext["sessions"]>>;
 type _BridgeKeys = Assert<KeyParity<PluginContext["bridge"], Pub.PluginContext["bridge"]>>;
 type _HostKeys = Assert<KeyParity<PluginContext["host"], Pub.PluginContext["host"]>>;
 
@@ -62,5 +66,7 @@ type _I18nShape = Assert<Mutual<PluginContext["i18n"], Pub.PluginContext["i18n"]
 type _StorageShape = Assert<Mutual<PluginContext["storage"], Pub.PluginContext["storage"]>>;
 type _EventsShape = Assert<Mutual<PluginContext["events"], Pub.PluginContext["events"]>>;
 type _ComposerShape = Assert<Mutual<PluginContext["composer"], Pub.PluginContext["composer"]>>;
+type _WorkspacesShape = Assert<Mutual<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;
+type _SessionsShape = Assert<Mutual<PluginContext["sessions"], Pub.PluginContext["sessions"]>>;
 type _BridgeShape = Assert<Mutual<PluginContext["bridge"], Pub.PluginContext["bridge"]>>;
 type _HostShape = Assert<Mutual<PluginContext["host"], Pub.PluginContext["host"]>>;

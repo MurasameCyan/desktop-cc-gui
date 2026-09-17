@@ -3,7 +3,7 @@ import {
   scopeEntries,
   searchEntries,
   workspaceRelativePrefix,
-} from "./FileSearchOverlay";
+} from "./file-search";
 import type { MentionEntry } from "@/components/application/ai-chat/mention-files";
 
 /**

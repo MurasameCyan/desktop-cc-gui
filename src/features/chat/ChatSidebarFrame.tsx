@@ -25,6 +25,7 @@ export function ChatSidebarFrame({
   sections,
   onThreadSelect,
   onThreadAction,
+  onCopyThreadId,
   onAddWorkspace,
   onRemoveWorkspace,
   onWorkspaceAlias,
@@ -32,6 +33,7 @@ export function ChatSidebarFrame({
   onNewSessionInWorkspace,
   onNewSession,
   onReorderWorkspaces,
+  onDropWorkspaceToSection,
   archivedRepos,
 }: {
   active: ActiveSession | null;
@@ -47,6 +49,7 @@ export function ChatSidebarFrame({
   sections?: AiChatRepoSection[];
   onThreadSelect: (id: string) => void;
   onThreadAction: (id: string, action: ThreadAction) => void;
+  onCopyThreadId: (id: string) => void;
   onAddWorkspace: () => void;
   onRemoveWorkspace: (workspaceId: string) => void;
   onWorkspaceAlias: (workspaceId: string) => void;
@@ -54,6 +57,8 @@ export function ChatSidebarFrame({
   onNewSessionInWorkspace: (workspaceId: string) => void;
   onNewSession: () => void;
   onReorderWorkspaces: (orderedIds: string[]) => void;
+  /** Workspace row dropped onto a group / 已归档 / ungrouped container. */
+  onDropWorkspaceToSection: (workspaceId: string, targetSectionId: string | null) => void;
   /** Archived workspaces for the sidebar's bottom 已归档 section. */
   archivedRepos: AiChatRepo[];
 }) {
@@ -79,6 +84,7 @@ export function ChatSidebarFrame({
         activeThreadId={active?.sessionId ? `${active.engine}/${active.sessionId}` : undefined}
         onThreadSelect={onThreadSelect}
         onThreadAction={onThreadAction}
+        onCopyThreadId={onCopyThreadId}
         onAddWorkspace={onAddWorkspace}
         onRemoveWorkspace={onRemoveWorkspace}
         onWorkspaceAlias={onWorkspaceAlias}
@@ -87,6 +93,7 @@ export function ChatSidebarFrame({
         onNewSessionInWorkspace={onNewSessionInWorkspace}
         onNewSession={onNewSession}
         onReorderWorkspaces={onReorderWorkspaces}
+        onDropWorkspaceToSection={onDropWorkspaceToSection}
         onOpenSettings={() => navigate("/settings")}
         onClose={onClose}
       />

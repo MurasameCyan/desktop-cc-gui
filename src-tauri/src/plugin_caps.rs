@@ -38,6 +38,8 @@
 
 use serde::Serialize;
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -242,23 +244,38 @@ fn parse_lifecycle(plugin_id: &str, lifecycle: Option<&str>) -> Result<Lifecycle
 /// by plugin id. Detached spawns never land here. Only children a plugin
 /// spawned itself are reachable through its id, so no entry in this map can
 /// ever be used to kill another plugin's (or the host's) processes.
-static TRACKED_CHILDREN: LazyLock<Mutex<HashMap<String, Vec<tokio::process::Child>>>> =
+struct TrackedChild {
+    child: tokio::process::Child,
+    /// Kill-on-close job guard (Windows): dropping the entry closes the job
+    /// and the kernel sweeps grandchildren the start_kill tree walk missed.
+    #[cfg(windows)]
+    _tree_guard: Option<Arc<crate::engine::job::KillOnCloseJob>>,
+}
+
+static TRACKED_CHILDREN: LazyLock<Mutex<HashMap<String, Vec<TrackedChild>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn tracked_children() -> &'static Mutex<HashMap<String, Vec<tokio::process::Child>>> {
+fn tracked_children() -> &'static Mutex<HashMap<String, Vec<TrackedChild>>> {
     &TRACKED_CHILDREN
 }
 
 pub(crate) fn register_tracked_child(plugin_id: &str, child: tokio::process::Child) {
+    #[cfg(windows)]
+    let tree_guard = crate::engine::job::assign_kill_on_close(&child);
     let mut registry = tracked_children().lock();
     let children = registry.entry(plugin_id.to_string()).or_default();
     // Prune dead handles before pushing: a plugin that respawns a child in
     // a loop would otherwise accumulate one entry per spawn until an
     // explicit kill/disable/uninstall/exit. try_wait reaps the zombie as a
     // side effect; an error means the handle can no longer be waited on, so
-    // treat it as exited too.
-    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
-    children.push(child);
+    // treat it as exited too. Pruning drops the entry — its job guard then
+    // sweeps any orphaned grandchildren of that dead child.
+    children.retain_mut(|entry| matches!(entry.child.try_wait(), Ok(None)));
+    children.push(TrackedChild {
+        child,
+        #[cfg(windows)]
+        _tree_guard: tree_guard,
+    });
 }
 
 /// Remove every tracked child of `plugin_id` and SIGKILL each one, returning
@@ -272,8 +289,9 @@ pub(crate) fn kill_tracked_children(plugin_id: &str) -> usize {
         .remove(plugin_id)
         .unwrap_or_default();
     let killed = children.len();
-    for mut child in children {
-        let _ = child.start_kill();
+    for mut entry in children {
+        let _ = entry.child.start_kill();
+        // Entry drops here: on Windows its job guard sweeps the whole tree.
     }
     killed
 }
@@ -285,8 +303,8 @@ pub(crate) fn kill_all_tracked_children() {
     let mut registry = tracked_children()
         .lock();
     for (_, children) in registry.drain() {
-        for mut child in children {
-            let _ = child.start_kill();
+        for mut entry in children {
+            let _ = entry.child.start_kill();
         }
     }
 }
@@ -447,6 +465,48 @@ pub(crate) async fn plugin_http_request(
     Ok(PluginHttpResponse { status, body })
 }
 
+/// Grant gate for `plugin_add_workspace`, pure for tests: base permission
+/// `host:workspace`; meta carrying a `wsl` key (remote execution steering)
+/// additionally requires `host:workspace:remote`.
+fn require_workspace_grants(
+    grants: &[String],
+    plugin_id: &str,
+    meta: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if !grants.iter().any(|p| p == "host:workspace") {
+        return Err(format!("{plugin_id}: missing permission host:workspace"));
+    }
+    if let Some(m) = meta {
+        if m.as_object().is_some_and(|o| o.contains_key("wsl"))
+            && !grants.iter().any(|p| p == "host:workspace:remote")
+        {
+            return Err(format!(
+                "{plugin_id}: meta.wsl requires permission host:workspace:remote"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Plugin-scoped workspace registration (SDK `ctx.workspaces.add`). Server-side
+/// counterpart of the JS permission gate in runtime/context.ts — a plugin that
+/// bypasses the webview gate (direct IPC from an async continuation, see
+/// hardening.ts) still lands here. `meta` carrying a `wsl` key steers engine
+/// traffic over ssh to a plugin-named host (出站 + 远程执行导向), so it
+/// requires the separate `host:workspace:remote` grant; the general
+/// `add_workspace` command refuses `wsl` meta outright.
+#[tauri::command]
+pub(crate) async fn plugin_add_workspace(
+    state: tauri::State<'_, crate::AppState>,
+    plugin_id: String,
+    path: String,
+    meta: Option<serde_json::Value>,
+) -> Result<crate::history::reader::Workspace, String> {
+    let grants = load_grants(&plugin_id)?;
+    require_workspace_grants(&grants, &plugin_id, meta.as_ref())?;
+    crate::history::reader::add_workspace_inner(&state, &path, meta)
+}
+
 /// Run a granted binary to completion, capturing stdout/stderr (64KB each).
 /// `timeoutMs` defaults to 30s and is capped at 300s; a timed-out process is
 /// killed (kill_on_drop) and reported as an error.
@@ -476,6 +536,10 @@ pub(crate) async fn plugin_exec_run(
     if let Some(env) = env {
         command.envs(env);
     }
+    // Own process group (unix) so the timeout sweep below can take the
+    // whole tree, not just the direct child.
+    #[cfg(unix)]
+    command.process_group(0);
     // Windows：别让控制台子进程弹出窗口/在 Windows Terminal 开选项卡（宿主其它 spawn 点
     // 都用了 hide_console，插件桥是唯一漏的；不加则插件每次 exec/spawn 都闪控制台）。
     #[cfg(windows)]
@@ -484,6 +548,12 @@ pub(crate) async fn plugin_exec_run(
     let mut child = command
         .spawn()
         .map_err(|error| format!("{plugin_id}: failed to start {bin}: {error}"))?;
+    let child_pid = child.id();
+    // Kill-on-close job (Windows): sweeps grandchildren whenever this guard
+    // drops — including the timeout path, where kill_on_drop only reaches
+    // the direct child and an orphaned grandchild would escape taskkill.
+    #[cfg(windows)]
+    let tree_guard = crate::engine::job::assign_kill_on_close(&child);
     // Bounded streaming reads of both pipes at once, then wait — all under
     // the same timeout; a timeout drops the child and kill_on_drop fires.
     let stdout_pipe = child.stdout.take().expect("stdout is piped");
@@ -496,9 +566,26 @@ pub(crate) async fn plugin_exec_run(
         let status = child.wait().await;
         (stdout, stderr, status)
     };
-    let (stdout, stderr, status) = tokio::time::timeout(Duration::from_millis(timeout_ms), run)
-        .await
-        .map_err(|_| format!("{plugin_id}: {bin} timed out after {timeout_ms}ms"))?;
+    let (stdout, stderr, status) = match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+        Ok(result) => result,
+        Err(_) => {
+            // The dropped run future kill_on_drop-kills the direct child;
+            // sweep the tree it may have orphaned before dying.
+            #[cfg(unix)]
+            if let Some(pid) = child_pid.filter(|p| *p != 0) {
+                crate::engine::kill_process_group(pid);
+            }
+            #[cfg(windows)]
+            drop(tree_guard);
+            return Err(format!("{plugin_id}: {bin} timed out after {timeout_ms}ms"));
+        }
+    };
+    // Settle sweep (unix): the group is empty on a clean exit (ESRCH no-op);
+    // anything left is an orphaned grandchild of the finished process.
+    #[cfg(unix)]
+    if let Some(pid) = child_pid.filter(|p| *p != 0) {
+        crate::engine::kill_process_group(pid);
+    }
     let stdout =
         stdout.map_err(|error| format!("{plugin_id}: failed to read {bin} stdout: {error}"))?;
     let stderr =
@@ -598,6 +685,24 @@ mod tests {
 
     fn spec() -> serde_json::Value {
         serde_json::from_str(PERMISSIONS_SPEC).expect("permissions spec JSON is valid")
+    }
+
+    #[test]
+    fn workspace_grants_gate() {
+        let wsl_meta =
+            serde_json::json!({"wsl": {"host": "10.0.0.2", "user": "d", "distro": "Ubuntu"}});
+        let plain_meta = serde_json::json!({"note": "x"});
+        // 无 host:workspace → 一律拒
+        assert!(require_workspace_grants(&grants(&[]), "p", None).is_err());
+        assert!(require_workspace_grants(&grants(&["host:session"]), "p", None).is_err());
+        // 有 host:workspace → 无 meta / 非 wsl meta 放行
+        let base = grants(&["host:workspace"]);
+        assert!(require_workspace_grants(&base, "p", None).is_ok());
+        assert!(require_workspace_grants(&base, "p", Some(&plain_meta)).is_ok());
+        // wsl meta 必须另有 host:workspace:remote(出站 + 远程执行导向)
+        assert!(require_workspace_grants(&base, "p", Some(&wsl_meta)).is_err());
+        let remote = grants(&["host:workspace", "host:workspace:remote"]);
+        assert!(require_workspace_grants(&remote, "p", Some(&wsl_meta)).is_ok());
     }
 
     #[test]

@@ -199,6 +199,8 @@ interface PluginContext {
     registerComposerSlot(slot: 'addMenu' | 'cliMenu' | 'permissionMenu', d: SlotDef): Disposer;
     registerStatusBarItem(d: StatusBarItemDef): Disposer;
     registerCommand(d: CommandDef): Disposer;                   // 命令面板（⌘K）
+    registerSessionMenuItem(d: SessionMenuItemDef): Disposer;   // 侧栏会话右键菜单追加行
+    openSettings(key?): void;                                   // 跳转到本插件设置页（0.3.6 起）
     registerMarkdownRenderer(d: MarkdownRendererDef): Disposer; // 自定义消息渲染组件
     registerPage(d: PageDef): Disposer;                         // 整页路由
   };
@@ -246,7 +248,7 @@ interface PluginContext {
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:panel-tab`、`ui:composer-slot`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`） | 对应 UI 扩展点 | 低 |
+| `ui:*`（`ui:settings-section`、`ui:panel-tab`、`ui:composer-slot`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:session-menu`） | 对应 UI 扩展点 | 低 |
 | `theme` | 注入 CSS / 覆盖 token | 低（Tier-0 隐含拥有） |
 | `i18n` | 注册语言资源 | 低 |
 | `events:usage` / `events:session` | 订阅对应宿主事件 | 中（涉及用户行为数据，需在 description 说明用途） |

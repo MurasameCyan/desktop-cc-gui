@@ -44,6 +44,7 @@ mod kimi;
 mod opencode;
 mod pi;
 mod qoder;
+mod wsl;
 
 /// Claude launch-time model resolution: picker alias → the custom id its
 /// ANTHROPIC_DEFAULT_<FAMILY>_MODEL override maps to (pass-through when
@@ -106,6 +107,11 @@ pub struct EngineCatalog {
     /// (config/registry/binary-derived). A stored pick outside it cannot
     /// run, so the frontend resets it to the leading entry.
     pub authoritative: bool,
+    /// True when the catalog was produced for a remote workspace (WSL
+    /// distro): the frontend must NOT merge local provider/custom models
+    /// into it — only the distro CLI's own list is runnable there.
+    #[serde(default)]
+    pub remote: bool,
 }
 
 impl EngineCatalog {
@@ -113,12 +119,52 @@ impl EngineCatalog {
         Self {
             models,
             authoritative: true,
+            remote: false,
+        }
+    }
+
+    /// Catalog sourced from inside a remote workspace; even when empty it
+    /// suppresses the frontend's local-config fallback.
+    fn authoritative_remote(models: Vec<EngineModel>) -> Self {
+        Self {
+            models,
+            authoritative: true,
+            remote: true,
         }
     }
 }
 
 #[tauri::command]
-pub async fn list_engine_models(engine: String) -> Result<EngineCatalog, String> {
+pub async fn list_engine_models(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    workspace: Option<String>,
+) -> Result<EngineCatalog, String> {
+    // WSL 工作区:模型目录必须来自发行版内的 CLI(探针 bin),不是本机。
+    if let Some(ws) = workspace.as_deref() {
+        if let Some(transport) =
+            crate::engine::wsl_transport::transport_for_workspace(&state.db, ws)
+        {
+            match engine.as_str() {
+                "pi" | "omp" => {
+                    return Ok(wsl::pi_family_catalog_remote(engine.as_str(), &transport).await);
+                }
+                "codex" => {
+                    return Ok(wsl::codex_catalog_remote(&transport).await);
+                }
+                "kimi" => {
+                    return Ok(wsl::kimi_catalog_remote(&transport).await);
+                }
+                "claude" => {
+                    return Ok(wsl::claude_catalog_remote(&transport).await);
+                }
+                // 其余引擎暂无远程 catalog 命令形态(grok/dsh/agy 等
+                // 是本机推导):空目录 + remote 旗标,前端不掺本机配置 ——
+                // 发行版里的 CLI 用自己配置里的默认模型。
+                _ => return Ok(EngineCatalog::authoritative_remote(Vec::new())),
+            }
+        }
+    }
     match engine.as_str() {
         "codex" => Ok(codex_catalog().await),
         "kimi" => Ok(kimi_catalog().await),
@@ -445,7 +491,7 @@ pub(super) fn promote_default(models: &mut Vec<EngineModel>, default: Option<&st
 /// The frontend auto-selects the first catalog entry when the user has no
 /// stored pick, so the CLI's effective default leads: moved to the front
 /// when already listed, prepended when the catalog doesn't name it.
-fn with_default_first(models: Vec<EngineModel>, default: Option<EngineModel>) -> Vec<EngineModel> {
+pub(super) fn with_default_first(models: Vec<EngineModel>, default: Option<EngineModel>) -> Vec<EngineModel> {
     let Some(default) = default else {
         return models;
     };

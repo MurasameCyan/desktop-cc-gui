@@ -4,6 +4,9 @@
  * dialog shows both when available, ordered by the active UI language.
  */
 
+/** Repo the dialog's Star banner links to; shared with Settings → About. */
+export const GITHUB_REPO_URL = "https://github.com/zhukunpenglinyutong/desktop-cc-gui";
+
 export interface ChangelogEntry {
   version: string;
   date: string;
@@ -14,6 +17,90 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
+  {
+    version: "1.0.3",
+    date: "2026-09-16",
+    content: {
+      zh: `✨ 新功能
+- Windows 可切换**仿 macOS 自绘标题栏**
+- 侧栏工作区行可**拖拽**到分组 / 未分组 / 已归档完成移动
+- 插件 SDK 0.3.5 / 0.3.6：新增会话右键菜单扩展点 ui:session-menu；ctx.ui.openSettings 让插件深链自身设置页
+
+🐛 修复
+- Windows 对话孙进程（pwsh/conhost）孤儿泄漏：改用 Job Object 内核级清扫，dsh host、登录 shell 探针、插件子进程一并封堵；Unix 侧同步清扫进程组
+- 上下文窗口显示：/compact 后分母不再回落 200k；新会话记住引擎上报的窗口；claude 回合结束自动重读真实占用，无需手动「刷新用量」
+- claude auto 模式联网被拦截：预批准 WebSearch / WebFetch
+- 模型目录探测死循环风暴；DSH 客户端本机 origin 恒直连
+- codex 旧 CLI 预检并给出可操作升级提示；stderr 为空时错误横幅兜底
+- dsh / 远程会话删除修复：新增 delete_remote_session IPC，dsh 删除不再失败复活`,
+      en: `✨ Features
+- Windows can switch to a **macOS-style custom title bar**
+- Sidebar workspace rows can be **dragged** into groups / ungrouped / archived containers
+- Plugin SDK 0.3.5 / 0.3.6: new session context-menu extension point ui:session-menu; ctx.ui.openSettings deep-links a plugin to its own settings page
+
+🐛 Fixes
+- Windows grandchild process (pwsh/conhost) orphan leaks: Job Object kernel-level cleanup now covers conversations, the dsh host, login-shell probes, and plugin child processes; Unix sides sweep the process group as well
+- Context window display: the denominator no longer falls back to 200k after /compact; new sessions remember the engine-reported window; claude turns auto-reread real usage on completion — no manual "refresh usage" needed
+- claude auto mode network access blocked: pre-approves WebSearch / WebFetch
+- Model catalog probe infinite loop storm; DSH client always connects directly for local origins
+- codex legacy CLI preflight with an actionable upgrade hint; error banner falls back when stderr is empty
+- dsh / remote session deletion fixed: new delete_remote_session IPC, dsh deletions no longer resurrect`,
+    },
+  },
+  {
+    version: "1.0.2",
+    date: "2026-09-15",
+    content: {
+      zh: `✨ 新功能
+- 接入 **OpenCode** 与 **Qoder** 两个一等引擎；Qoder 区分国际版与国内版（qoder-cn 兄弟引擎）
+- **WSL 插件**全链接入：会话源 / 文件源 / UI 桥 / 远程历史回放 / 远程模型目录
+- **快捷键系统迁移**：可配置键位、设置页录制编辑、快捷键指南
+- 会话行**右键菜单**：重命名 / 复制 ID / 删除
+
+🐛 修复
+- 新会话不再被刷新冲掉：侧栏即时显示，无需手动同步
+- Windows 检测不到新装 / 非 npm 渠道安装的 codex 与 claude
+- claude 上下文窗口改读 CLI 上报值
+- 放行 asset 协议在 Windows 上的可用 URL 形式，移除 CSP 冗余项
+- 移动端设置导航分组溢出重叠
+- WSL 接入安全审查修复：meta.wsl 全字段白名单、权限模型收紧、远程调用 30s 全局超时
+- 发版增加版本输入校验门禁，修复 latest.json 资产名空格 404`,
+      en: `✨ Features
+- Two new first-class engines: **OpenCode** and **Qoder**, with Qoder split into Global and CN distributions (qoder-cn sibling engine)
+- **WSL plugins** wired end to end: session source, file source, UI bridge, remote history replay, remote model catalog
+- **Shortcut system migration**: configurable keybindings, recording editor in Settings, and a shortcut guide
+- Session-row **context menu**: rename / copy ID / delete
+
+🐛 Fixes
+- New sessions no longer get wiped by refreshes — the sidebar shows them immediately, no manual sync
+- Windows now detects freshly installed or non-npm codex and claude builds
+- claude context window reads the value reported by the CLI
+- Allow the Windows-usable asset-protocol URL forms in CSP and drop a redundant entry
+- Mobile settings navigation groups no longer overflow and overlap
+- WSL integration security review fixes: full meta.wsl field allowlist, tightened permission model, 30s global timeout for remote calls
+- Release pipeline validates version input and fixes the latest.json asset-name space 404`,
+    },
+  },
+  {
+    version: "1.0.1",
+    date: "2026-09-14",
+    content: {
+      zh: `✨ 新功能
+- 右键文件夹**搜索工作区文件**
+- OMP 引擎补 plan / bypass 权限档
+
+🐛 修复
+- 「已编辑」行数改从会话编辑调用统计
+- 窄窗下侧边栏开关常显、幕布区留白修正、子代理行归并`,
+      en: `✨ Features
+- **Search workspace files** from a folder's right-click menu
+- OMP engine gains plan / bypass permission tiers
+
+🐛 Fixes
+- "Edited" line counts now come from the session's edit-call stats
+- Narrow windows keep the sidebar toggle visible, fix backdrop gaps, and merge subagent rows`,
+    },
+  },
   {
     version: "1.0.0",
     date: "2026-09-08",

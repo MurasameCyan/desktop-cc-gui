@@ -4,6 +4,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { commandRegistry } from "@ccgui/plugin-sdk";
 import type { CommandDef, Disposer } from "@ccgui/plugin-sdk";
 import { CommandPalette } from "./CommandPalette";
+import { startShortcutRuntime } from "@/features/shortcuts/runtime";
+
+// The palette toggle key lives in the shortcut runtime; its settings load
+// and backend listener are mocked so defaults (⌘K) apply.
+vi.mock("@/lib/ipc", () => ({
+  ipc: { getAppSettings: vi.fn(async () => ({})) },
+}));
+vi.mock("@/lib/events", () => ({
+  listenSettingsChanged: vi.fn(async () => () => {}),
+}));
+
+const pinPlatform = (platform: string) => {
+  Object.defineProperty(window.navigator, "platform", {
+    value: platform,
+    configurable: true,
+  });
+};
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -46,6 +63,7 @@ describe("CommandPalette", () => {
   let container: HTMLDivElement;
   let root: Root;
   let disposers: Disposer[];
+  let stopRuntime: () => void;
 
   const register = (def: CommandDef) => {
     act(() => {
@@ -57,6 +75,9 @@ describe("CommandPalette", () => {
     disposers = [];
     container = document.createElement("div");
     document.body.appendChild(container);
+    // Dispatch resolves the ⌘K default per-platform; pin macOS.
+    pinPlatform("MacIntel");
+    stopRuntime = startShortcutRuntime();
     root = createRoot(container);
     act(() => root.render(<CommandPalette />));
   });
@@ -66,6 +87,7 @@ describe("CommandPalette", () => {
       for (const dispose of disposers.splice(0)) dispose();
     });
     act(() => root.unmount());
+    stopRuntime();
     container.remove();
   });
 
@@ -84,6 +106,7 @@ describe("CommandPalette", () => {
   });
 
   it("Ctrl+K also toggles the palette (non-macOS)", () => {
+    pinPlatform("Win32");
     keydown({ key: "k", ctrlKey: true });
     expect(dialog()!.open).toBe(true);
     keydown({ key: "k", ctrlKey: true });

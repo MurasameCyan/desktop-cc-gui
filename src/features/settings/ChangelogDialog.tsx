@@ -59,7 +59,9 @@ export function ChangelogDialog({ entries, githubUrl, onClose }: ChangelogDialog
   return (
     <ModalShell
       onClose={onClose}
+      label={t("changelog.title")}
       className="flex max-h-[calc(100dvh-64px)] w-[560px] max-w-[calc(100vw-48px)] flex-col overflow-hidden rounded-2xl p-0"
+      dialogClassName="flex min-h-0 flex-col"
     >
       {/* Header */}
       <div className="flex items-center justify-between gap-3 border-b border-separator-border px-4 py-3">
@@ -70,30 +72,26 @@ export function ChangelogDialog({ entries, githubUrl, onClose }: ChangelogDialog
           </span>
           <span className="shrink-0 text-caption-1-regular text-text-tertiary">{entry.date}</span>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={t("common.close")}
-          className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-foreground-icon-secondary transition-colors hover:bg-background-secondary-hover hover:text-foreground-icon-primary"
-        >
-          <X className="size-4" aria-hidden />
-        </button>
-      </div>
 
-      {/* Open-source banner */}
-      <div className="flex items-center justify-between gap-3 border-b border-separator-border bg-background-secondary-default px-4 py-2">
-        <span className="text-body-2-regular text-text-secondary">
-          {t("settings.openSourceBanner")}
-        </span>
-        <button
-          type="button"
-          onClick={starRepo}
-          aria-label={t("settings.openSourceBannerStarAria")}
-          className="flex shrink-0 cursor-pointer items-center gap-1 rounded-lg border border-border-button-default bg-background-primary-default px-2 py-1 text-body-2-medium text-text-primary transition-colors hover:bg-background-secondary-hover"
-        >
-          <Star className="size-3.5 text-foreground-icon-secondary" aria-hidden />
-          {t("settings.openSourceBannerStar")}
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={starRepo}
+            aria-label={t("settings.openSourceBannerStarAria")}
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-lg border border-border-button-default bg-background-primary-default px-2 py-1 text-body-2-medium text-text-primary transition-colors hover:bg-background-secondary-hover"
+          >
+            <Star className="size-3.5 text-foreground-icon-secondary" aria-hidden />
+            {t("settings.openSourceBannerStar")}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-foreground-icon-secondary transition-colors hover:bg-background-secondary-hover hover:text-foreground-icon-primary"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
       </div>
 
       {/* Body */}

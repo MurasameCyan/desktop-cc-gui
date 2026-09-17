@@ -8,6 +8,7 @@ import {
   markdownRegistry,
   pageRegistry,
   panelTabRegistry,
+  sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
   timelineRowRegistry,
@@ -197,6 +198,12 @@ describe("createPluginContext", () => {
         ctx.ui.registerTimelineRowRenderer({ kind: "custom", component: () => null }),
       timelineRowRegistry,
     ],
+    [
+      "ui:session-menu",
+      (ctx: PluginContext) =>
+        ctx.ui.registerSessionMenuItem({ label: () => "S", run: () => {} }),
+      sessionMenuRegistry,
+    ],
   ])(
     "%s gates and registers under plugin:<id>, disposer removes (phase-2 ui points)",
     (permission, register, registry) => {
@@ -234,6 +241,26 @@ describe("createPluginContext", () => {
     expect(ran).toBe(1);
     dispose();
     expect(commandRegistry.get("plugin:test-plugin:go")).toBeUndefined();
+  });
+
+  it("registerSessionMenuItem wraps run with the plugin guard and passes the target", () => {
+    const { ctx } = createPluginContext(manifest(["ui:session-menu"]), fakeStorage(), {
+      appVersion: "1.0.0",
+    });
+    let got: unknown = null;
+    const dispose = ctx.ui.registerSessionMenuItem({
+      key: "re-title",
+      label: () => "Re-title",
+      run: (target) => {
+        got = target;
+      },
+    });
+    const entry = sessionMenuRegistry.get("plugin:test-plugin:re-title");
+    expect(entry?.label()).toBe("Re-title");
+    entry?.run({ engine: "omp", sessionId: "abc-123" });
+    expect(got).toEqual({ engine: "omp", sessionId: "abc-123" });
+    dispose();
+    expect(sessionMenuRegistry.get("plugin:test-plugin:re-title")).toBeUndefined();
   });
   it("composer.setDraft is gated by composer:draft and delegates with the plugin id", () => {
     const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });

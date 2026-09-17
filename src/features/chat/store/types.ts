@@ -70,7 +70,7 @@ export interface ChatStore {
    * history list, migrating the engine pref off a disabled CLI. */
   refreshEngines: () => Promise<void>;
   refreshWorkspaces: () => Promise<void>;
-  addWorkspace: (path: string) => Promise<void>;
+  addWorkspace: (path: string, meta?: Record<string, unknown>) => Promise<void>;
   reorderWorkspaces: (ids: string[]) => Promise<void>;
   removeWorkspace: (id: string) => Promise<void>;
   selectSession: (
@@ -105,7 +105,9 @@ export interface ChatStore {
   setModel: (engine: string, model: string) => Promise<void>;
   /** Pin several engines' models at once (startup defaulting); one settings
    * write instead of one per engine. */
-  pinModels: (updates: Record<string, string>) => Promise<void>;
+  /** persist=false keeps the update session-scoped (remote-catalog resets
+   *  must not rewrite the persisted default for local workspaces). */
+  pinModels: (updates: Record<string, string>, persist?: boolean) => Promise<void>;
   setThreadLimit: (limit: number) => void;
   /** Create a named sidebar group; throws on empty/duplicate names. */
   createWorkspaceGroup: (name: string) => Promise<WorkspaceGroup | null>;

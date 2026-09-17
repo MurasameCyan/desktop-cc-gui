@@ -7,6 +7,7 @@
 **English** · [简体中文](./README.zh-CN.md)
 
 <a href="https://trendshift.io/repositories/25546" target="_blank"><img src="https://trendshift.io/api/badge/repositories/25546" alt="zhukunpenglinyutong%2Fdesktop-cc-gui | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+<a href="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui" target="_blank"><img src="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui/star/new_badge.svg" alt="AtomGit G-Star" width="250" height="54"/></a>
 
 ![][github-contributors-shield] ![][github-forks-shield] ![][github-stars-shield] ![][github-issues-shield]
 
@@ -248,6 +249,10 @@ Not sure where to start? Browse the [Issues](https://github.com/zhukunpenglinyut
 ## Friendship Link
 
 Thanks for the support and feedback from the friends at [LINUX DO](https://linux.do/).
+
+[AtomGit](https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui): hosts this project in China, helping users in mainland China access the project and download Releases faster.
+
+Thank you for [AtomGit](https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui) platform G-Star certification
 
 ---
 

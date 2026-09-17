@@ -1,7 +1,7 @@
 "use client";
 
 import type { ComponentType, Ref, RefObject } from "react";
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import MessageSquarePlus from "lucide-react/dist/esm/icons/message-square-plus";
 import PanelLeft from "lucide-react/dist/esm/icons/panel-left";
@@ -12,16 +12,22 @@ import {
   WorkspaceContextMenu,
 } from "@/components/application/ai-chat/workspace-context-menu";
 import {
+  ThreadContextMenu,
+} from "@/components/application/ai-chat/thread-context-menu";
+import {
   ARCHIVED_SECTION_ID,
   useCollapsedGroups,
   useExpandedWorkspaces,
   useFilteredWorkspaces,
   useSidebarSearch,
   useWorkspaceMenu,
+  useThreadMenu,
 } from "@/components/application/ai-chat/use-sidebar-state";
 import { ArchivedSection, WorkspaceSection } from "@/components/application/ai-chat/workspace-sections";
 import type { AiChatRepo, AiChatRepoSection, ThreadAction } from "@/components/application/ai-chat/sidebar-types";
 import { cx } from "@/utils/cx";
+import { needsWindowControls, useTitlebarStyle } from "@/features/settings/titlebar";
+import { WindowControls } from "@/components/application/window-controls";
 import { useRemoteControl } from "@/hooks/use-remote-control";
 
 export type { AiChatRepo, AiChatRepoSection, AiChatThread, ThreadAction } from "@/components/application/ai-chat/sidebar-types";
@@ -124,10 +130,12 @@ export function AiChatSidebar({
   onNewSession,
   onReorderWorkspaces,
   onThreadAction,
+  onCopyThreadId,
   onAddWorkspace,
   onRemoveWorkspace,
   onWorkspaceAlias,
   onSetWorkspaceArchived,
+  onDropWorkspaceToSection,
   onOpenSettings,
   onClose,
   flat = false,
@@ -145,6 +153,8 @@ export function AiChatSidebar({
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
+  /** Thread context-menu action: copy the session id to the clipboard. */
+  onCopyThreadId?: (id: string) => void;
   onAddWorkspace?: () => void;
   onRemoveWorkspace?: (id: string) => void;
   /** Workspace context-menu action: open the set-alias dialog for the row. */
@@ -155,6 +165,9 @@ export function AiChatSidebar({
   onNewSessionInWorkspace?: (id: string) => void;
   /** Commit of a drag-handle reorder (ordered workspace ids). */
   onReorderWorkspaces?: (orderedIds: string[]) => void;
+  /** Workspace row dropped onto a section container: group id, the archived
+   *  sentinel (drop on 已归档), or null (ungrouped). */
+  onDropWorkspaceToSection?: (workspaceId: string, targetSectionId: string | null) => void;
   /** 新建会话 nav entry: start a new chat in the current workspace. */
   onNewSession?: () => void;
   onOpenSettings?: () => void;
@@ -173,6 +186,7 @@ export function AiChatSidebar({
   } = useSidebarSearch();
   const { collapsedGroups, toggleGroup } = useCollapsedGroups();
   const remoteActive = useRemoteControl();
+  const titlebarStyle = useTitlebarStyle();
   const allRepos = useMemo(
     () => (sections ? sections.flatMap((section) => section.repos) : repos),
     [sections, repos],
@@ -180,11 +194,28 @@ export function AiChatSidebar({
   const { isRepoExpanded, toggleRepoExpanded } = useExpandedWorkspaces(allRepos);
   const { workspaceMenu, closeWorkspaceMenu, openWorkspaceMenu, openArchivedMenu } =
     useWorkspaceMenu(onWorkspaceAlias, onSetWorkspaceArchived);
+  const { threadMenu, openThreadMenu, closeThreadMenu } = useThreadMenu(
+    onThreadAction,
+    onCopyThreadId,
+  );
   const { filteredRepos, filteredSections, filteredArchivedRepos } = useFilteredWorkspaces(
     repos,
     sections,
     archivedRepos,
     normalizedQuery,
+  );
+  // Mid-drag the sidebar reveals every drop target: empty group headers and
+  // the 已归档 section mount even when they have no rows.
+  const [workspaceDragging, setWorkspaceDragging] = useState(false);
+  const handleDropWorkspaceToSection = useCallback(
+    (workspaceId: string, target: string | null) => {
+      // Landing in a collapsed group expands it so the moved row is visible.
+      if (target && target !== ARCHIVED_SECTION_ID && collapsedGroups.has(target)) {
+        toggleGroup(target);
+      }
+      onDropWorkspaceToSection?.(workspaceId, target);
+    },
+    [collapsedGroups, toggleGroup, onDropWorkspaceToSection],
   );
 
   return (
@@ -200,12 +231,16 @@ export function AiChatSidebar({
       )}
     >
       {/* Window drag strip reaching the overlay titlebar: macOS traffic
-          lights float over its left edge, action icons pin right. */}
+          lights float over its left edge, action icons pin right. Windows
+          仿 mac 模式在这里放自绘三色按钮。 */}
       {!flat && (
         <div
           data-tauri-drag-region
-          className="flex h-10 w-full shrink-0 items-center justify-end gap-1 border-b border-separator-border px-3"
+          className="flex h-10 w-full shrink-0 items-center justify-between gap-1 border-b border-separator-border px-3"
         >
+          <div className="flex min-w-0 items-center">
+            {needsWindowControls(titlebarStyle) && <WindowControls />}
+          </div>
           <button
             type="button"
             aria-label={t("chat.collapseSidebar")}
@@ -254,14 +289,18 @@ export function AiChatSidebar({
             activeThreadId={activeThreadId}
             onThreadSelect={onThreadSelect}
             onThreadAction={onThreadAction}
+            onThreadContextMenu={openThreadMenu}
             onAddWorkspace={onAddWorkspace}
             onRemoveWorkspace={onRemoveWorkspace}
             onNewSessionInWorkspace={onNewSessionInWorkspace}
             onReorderWorkspaces={onReorderWorkspaces}
             onToggleGroup={toggleGroup}
             onRepoContextMenu={openWorkspaceMenu}
+            workspaceDragging={workspaceDragging}
+            onWorkspaceDragActiveChange={setWorkspaceDragging}
+            onDropWorkspaceToSection={handleDropWorkspaceToSection}
           />
-          {filteredArchivedRepos.length > 0 && (
+          {(filteredArchivedRepos.length > 0 || workspaceDragging) && (
             <ArchivedSection
               repos={filteredArchivedRepos}
               searching={Boolean(normalizedQuery)}
@@ -304,6 +343,14 @@ export function AiChatSidebar({
           onClose={closeWorkspaceMenu}
           onSetAlias={onWorkspaceAlias}
           onSetArchived={onSetWorkspaceArchived}
+        />
+      )}
+      {threadMenu && (onThreadAction || onCopyThreadId) && (
+        <ThreadContextMenu
+          menu={threadMenu}
+          onClose={closeThreadMenu}
+          onThreadAction={onThreadAction}
+          onCopyId={onCopyThreadId}
         />
       )}
     </aside>

@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
   ipc,
   type SessionMeta,
+  type SessionPage,
   type Workspace,
   type WorkspaceGroup,
   type EngineInfo,
@@ -41,6 +42,7 @@ import {
   settleLiveRows,
   untrackRun,
 } from "./store/stream";
+import { mergeUsage } from "./usage";
 import {
   dropRunUsage,
   firstLineTitle,
@@ -54,7 +56,11 @@ import {
 } from "./store/engine-events";
 import { effectivePermission, readPermissionPref } from "./store/permissions";
 import { persistSettings } from "./store/settings-persist";
-import { appendCommittedRows, visibleSessions } from "./store/session-utils";
+import {
+  listExternalSessionMetas,
+  setSessionSourcesChangedCallback,
+} from "@/features/plugins/runtime/session-source";
+import { appendCommittedRows, mergeExternalSessions, preserveUnscannedSessions, visibleSessions } from "./store/session-utils";
 import type { ChatStore } from "./store/types";
 
 // Facade re-exports: callers keep importing everything from "../store".
@@ -71,6 +77,43 @@ function omitKey(rec: Record<string, boolean>, key: string) {
   const next = { ...rec };
   delete next[key];
   return next;
+}
+
+/** Load a page of session history, routing remote (plugin-fed, e.g. WSL
+ *  distro CLI) transcripts through the host's remote fetch instead of the
+ *  local db lookup. `meta` is looked up from the current session catalog
+ *  when not supplied (usage refresh can't key by workspace). */
+function loadHistoryPage(
+  engine: string,
+  sessionId: string,
+  workspacePath: string,
+  limit?: number,
+  beforeSeq?: number | null,
+  meta?: SessionMeta,
+): Promise<SessionPage> {
+  const m =
+    meta ??
+    useChatStore
+      .getState()
+      .sessions.find(
+        (s) =>
+          s.engine === engine &&
+          s.sessionId === sessionId &&
+          s.workspacePath === workspacePath,
+      );
+  if (m?.remote && m.remotePath) {
+    return ipc.loadRemoteSessionPage(
+      workspacePath,
+      engine,
+      sessionId,
+      m.remotePath,
+      limit,
+      beforeSeq,
+    );
+  }
+  return beforeSeq === undefined
+    ? ipc.loadSessionPage(engine, sessionId, limit)
+    : ipc.loadSessionPage(engine, sessionId, limit, beforeSeq);
 }
 
 export const useChatStore = create<ChatStore>((set, get) => {
@@ -473,19 +516,26 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const onCliConfigChanged = () => void get().refreshEngines();
       window.addEventListener(CLI_CONFIG_CHANGED_EVENT, onCliConfigChanged);
       eventTeardowns.push(() =>
-        window.removeEventListener(
-          CLI_CONFIG_CHANGED_EVENT,
-          onCliConfigChanged,
-        ),
+        window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, onCliConfigChanged),
       );
       const [workspaces, sessions, engines] = await Promise.all([
         ipc.listWorkspaces().catch(() => [] as Workspace[]),
         ipc.listSessions().catch(() => [] as SessionMeta[]),
         ipc.listEngines().catch(() => [] as EngineInfo[]),
       ]);
+      // Plugin session sources (remote/容器内 CLI) merge under the local
+      // scan so WSL 等远端会话进侧栏,且重启时已开标签不至于因“会话表无
+      // 此会话”被清掉。
+      setSessionSourcesChangedCallback(() => void get().refreshSessions());
+      const external = await listExternalSessionMetas();
+      const allSessions = mergeExternalSessions(
+        sessions,
+        external,
+        workspaces.map((w) => w.path),
+      );
       set({
         workspaces,
-        sessions: visibleSessions(sessions, engines),
+        sessions: visibleSessions(allSessions, engines),
         engines,
       });
       ensureUsableEngine(engines);
@@ -494,7 +544,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         (t) =>
           workspaces.some((w) => w.path === t.workspacePath) &&
           (t.sessionId === null ||
-            sessions.some(
+            allSessions.some(
               (s) => s.engine === t.engine && s.sessionId === t.sessionId,
             )),
       );
@@ -540,12 +590,23 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
 
     refreshSessions: async () => {
-      const sessions = await ipc.listSessions().catch(() => null);
+      const [sessions, external] = await Promise.all([
+        ipc.listSessions().catch(() => null),
+        listExternalSessionMetas(),
+      ]);
       if (!sessions) return;
+      const merged = mergeExternalSessions(
+        sessions,
+        external,
+        get().workspaces.map((w) => w.path),
+      );
       set((s) => {
-        const visible = visibleSessions(sessions, s.engines);
+        const visible = visibleSessions(
+          preserveUnscannedSessions(merged, s.sessions, s.bySession),
+          s.engines,
+        );
         const bySession = { ...s.bySession };
-        for (const meta of sessions) {
+        for (const meta of merged) {
           const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
           const current = bySession[key];
           if (!current) continue;
@@ -560,15 +621,31 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
 
     refreshEngines: async () => {
-      const [engines, sessions] = await Promise.all([
+      const [engines, sessions, external] = await Promise.all([
         ipc.listEngines().catch(() => null),
         ipc.listSessions().catch(() => null),
+        listExternalSessionMetas(),
       ]);
       if (!engines) return;
-      set({
+      set((s) => ({
         engines,
-        ...(sessions ? { sessions: visibleSessions(sessions, engines) } : {}),
-      });
+        ...(sessions
+          ? {
+              sessions: visibleSessions(
+                preserveUnscannedSessions(
+                  mergeExternalSessions(
+                    sessions,
+                    external,
+                    s.workspaces.map((w) => w.path),
+                  ),
+                  s.sessions,
+                  s.bySession,
+                ),
+                engines,
+              ),
+            }
+          : {}),
+      }));
       ensureUsableEngine(engines);
     },
 
@@ -577,9 +654,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (workspaces) set({ workspaces });
     },
 
-    addWorkspace: async (path) => {
+    addWorkspace: async (path, meta) => {
       try {
-        await ipc.addWorkspace(path);
+        await ipc.addWorkspace(path, meta);
         await get().refreshWorkspaces();
         set({ actionError: null });
       } catch (error) {
@@ -708,7 +785,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (existing && existing.messages.length > 0) return;
       patchSession(set, key, { loading: true });
       try {
-        const page = await ipc.loadSessionPage(engine, sessionId, 100);
+        const page = await loadHistoryPage(engine, sessionId, workspacePath, 100);
         patchSession(set, key, {
           messages: page.messages,
           subagentHistory: page.subagentHistory,
@@ -902,7 +979,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         stampActiveTab({ model: model || undefined });
       }
     },
-    pinModels: async (updates) => {
+    pinModels: async (updates, persist = true) => {
       const entries = Object.entries(updates).filter(([, model]) =>
         model.trim(),
       );
@@ -910,6 +987,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       const models = { ...get().models };
       for (const [engine, model] of entries) models[engine] = model;
       set({ models });
+      if (!persist) return;
       await persistSettings((settings) => ({
         defaultModels: {
           ...settings.defaultModels,
@@ -1085,9 +1163,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (!state?.nextBefore || state.loading) return;
       patchSession(set, key, { loading: true });
       try {
-        const page = await ipc.loadSessionPage(
+        const page = await loadHistoryPage(
           active.engine,
           active.sessionId,
+          active.workspacePath,
           100,
           state.nextBefore,
         );
@@ -1304,8 +1383,17 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
 
     deleteSession: async (engine, sessionId) => {
+      // 远程(插件会话源,如 WSL 发行版内 CLI)会话没有本地 db 行,本地
+      // delete_session 只会 "session not found";走远程通道删 remotePath。
+      const meta = get().sessions.find(
+        (x) => x.engine === engine && x.sessionId === sessionId,
+      );
       try {
-        await ipc.deleteSession(engine, sessionId);
+        if (meta?.remote && meta.remotePath) {
+          await ipc.deleteRemoteSession(meta.workspacePath, engine, meta.remotePath);
+        } else {
+          await ipc.deleteSession(engine, sessionId);
+        }
       } catch (error) {
         set({ actionError: errorText(error) });
         return;
@@ -1474,15 +1562,21 @@ export const useChatStore = create<ChatStore>((set, get) => {
       if (!engine || !sessionId) return;
 
       try {
-        const page = await ipc.loadSessionPage(
+        const page = await loadHistoryPage(
           engine,
           sessionId,
+          targetTab?.workspacePath ?? "",
           100,
         );
         const latestUsage =
           [...page.messages].reverse().find((m) => m.usage)?.usage ?? null;
         if (latestUsage) {
-          patchSession(set, targetKey, { usage: latestUsage });
+          // The transcript carries the API's per-message usage and no window;
+          // only the live result line reports one. Keep the window already
+          // known for this session so the gauge holds its scale.
+          patchSession(set, targetKey, {
+            usage: mergeUsage(latestUsage, get().bySession[targetKey]?.usage),
+          });
         }
         void ipc.rescanSessions();
       } catch (error) {

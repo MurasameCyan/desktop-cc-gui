@@ -6,6 +6,7 @@ import { commandRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import type { CommandDef } from "@ccgui/plugin-sdk";
 // Side-effect import: registers the builtin commands into commandRegistry.
 import "./builtins";
+import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 
 /**
  * Command palette (plan §4.2 #9). ⌘K / Ctrl+K toggles it from anywhere
@@ -35,18 +36,12 @@ export function CommandPalette() {
   const listRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
-  // ⌘K / Ctrl+K toggles the palette (same global-keydown pattern as the
-  // ⌘J terminal toggle in ChatPage).
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setOpen((v) => !v);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  // Palette toggle key lives in the shortcut runtime (default ⌘K,
+  // configurable in Settings → Shortcuts).
+  useEffect(
+    () => registerShortcutHandler("commandPalette", () => setOpen((v) => !v)),
+    [],
+  );
 
   // Native <dialog>: keep the modal open state in sync with React state.
   // Declared before the focus effect below so showModal() runs first and the

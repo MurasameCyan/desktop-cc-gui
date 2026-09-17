@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ipc } from "@/lib/ipc";
+import { ipc, type SessionMeta } from "@/lib/ipc";
 import { useChatStore } from "./store";
 import { OPEN_TABS_KEY } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
@@ -10,7 +10,11 @@ vi.mock("@/lib/ipc", () => ({
     interruptSession: vi.fn(async () => true),
     rememberSessionModel: vi.fn(async () => {}),
     rememberSessionEffort: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
+    loadRemoteSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
+    deleteSession: vi.fn(async () => {}),
+    deleteRemoteSession: vi.fn(async () => {}),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
@@ -189,6 +193,84 @@ describe("compactContext and refreshSessionUsage", () => {
 
     expect(ipc.loadSessionPage).toHaveBeenCalledWith("claude", "sess-compact", 100);
     expect(useChatStore.getState().bySession[key]?.usage).toEqual(mockUsage);
+  });
+
+  it("loadHistoryPage routes remote metas through loadRemoteSessionPage", async () => {
+    useChatStore.setState({
+      sessions: [
+        {
+          engine: "codex",
+          sessionId: "remote-1",
+          workspacePath: WS,
+          filePath: "",
+          fileSize: 0,
+          fileMtimeMs: 0,
+          title: "remote",
+          preview: "",
+          createdAt: null,
+          updatedAt: null,
+          messageCount: 0,
+          pinned: false,
+          customTitle: null,
+          remote: true,
+          remotePath: "/home/u/x.jsonl",
+        } as any,
+      ],
+    });
+    await useChatStore.getState().selectSession("codex", "remote-1", WS);
+    expect(ipc.loadRemoteSessionPage).toHaveBeenCalledWith(WS, "codex", "remote-1", "/home/u/x.jsonl", 100, undefined);
+    expect(ipc.loadSessionPage).not.toHaveBeenCalledWith("codex", "remote-1", 100);
+  });
+
+  it("deleteSession routes remote metas through deleteRemoteSession", async () => {
+    const remoteMeta: SessionMeta = {
+      engine: "dsh",
+      sessionId: "remote-1",
+      workspacePath: WS,
+      filePath: "",
+      fileSize: 0,
+      fileMtimeMs: 0,
+      title: "remote",
+      preview: "",
+      createdAt: null,
+      updatedAt: null,
+      messageCount: 0,
+      pinned: false,
+      customTitle: null,
+      remote: true,
+      remotePath: "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
+    };
+    const localMeta: SessionMeta = { ...remoteMeta, engine: "omp", sessionId: "local-1", remote: false, remotePath: undefined };
+    useChatStore.setState({ sessions: [remoteMeta, localMeta] });
+
+    await useChatStore.getState().deleteSession("dsh", "remote-1");
+    expect(ipc.deleteRemoteSession).toHaveBeenCalledWith(
+      WS,
+      "dsh",
+      "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
+    );
+    expect(ipc.deleteSession).not.toHaveBeenCalled();
+    expect(useChatStore.getState().sessions.map((s) => s.sessionId)).toEqual(["local-1"]);
+
+    await useChatStore.getState().deleteSession("omp", "local-1");
+    expect(ipc.deleteSession).toHaveBeenCalledWith("omp", "local-1");
+    expect(useChatStore.getState().sessions).toEqual([]);
+  });
+
+  it("pinModels(updates, false) 只更新内存 models,不触碰 persisted 默认", async () => {
+    vi.mocked(ipc.updateAppSettings).mockClear();
+    await useChatStore.getState().pinModels({ omp: "remote-only-model" }, false);
+    expect(useChatStore.getState().models.omp).toBe("remote-only-model");
+    expect(ipc.updateAppSettings).not.toHaveBeenCalled();
+  });
+
+  it("pinModels 默认 persist:写 settings.defaultModels", async () => {
+    vi.mocked(ipc.updateAppSettings).mockClear();
+    await useChatStore.getState().pinModels({ omp: "m1" });
+    expect(useChatStore.getState().models.omp).toBe("m1");
+    expect(ipc.updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultModels: expect.objectContaining({ omp: "m1" }) }),
+    );
   });
 
   it("compactContext sends /compact and invokes refreshSessionUsage after compaction finishes", async () => {
@@ -393,5 +475,75 @@ describe("model selection is per session", () => {
     expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
       expect.objectContaining({ effort: "low" }),
     );
+  });
+});
+
+describe("refreshSessions and the not-yet-scanned session", () => {
+  beforeEach(() => {
+    resetStore();
+    useChatStore.setState({ sessions: [], engines: [], workspaces: [] });
+    vi.mocked(ipc.listSessions).mockResolvedValue([]);
+  });
+
+  const meta = (sessionId: string, title = "新会话"): SessionMeta => ({
+    engine: "omp",
+    sessionId,
+    workspacePath: WS,
+    filePath: "",
+    fileSize: 0,
+    fileMtimeMs: 0,
+    title,
+    preview: "",
+    createdAt: 1,
+    updatedAt: 2,
+    messageCount: 1,
+    pinned: false,
+    customTitle: null,
+  });
+
+  it("keeps the new chat's row when a refresh lands before the scanner ingests its file", async () => {
+    // The reported bug: the engine announces the session id and the sidebar
+    // row is upserted optimistically, but adopting the id also files the
+    // model (remember_session_model → sessions_changed) and the refresh it
+    // triggers replaced the list with a scan that has not seen the new file
+    // yet — the row vanished until a manual sync.
+    useChatStore.setState({
+      sessions: [meta("s-new")],
+      bySession: { "omp/s-new": { ...EMPTY_SESSION, streaming: true } },
+    });
+
+    await useChatStore.getState().refreshSessions();
+
+    expect(
+      useChatStore.getState().sessions.map((s) => s.sessionId),
+    ).toContain("s-new");
+  });
+
+  it("still drops rows with no local state (external delete cleanup)", async () => {
+    useChatStore.setState({ sessions: [meta("s-gone")] });
+
+    await useChatStore.getState().refreshSessions();
+
+    expect(useChatStore.getState().sessions).toEqual([]);
+  });
+
+  it("lets the scanned row win once the scanner ingests the file", async () => {
+    useChatStore.setState({
+      sessions: [meta("s-new")],
+      bySession: { "omp/s-new": { ...EMPTY_SESSION, streaming: true } },
+    });
+    vi.mocked(ipc.listSessions).mockResolvedValue([
+      { ...meta("s-new", "VPN 一直超时"), filePath: "s.jsonl" },
+    ]);
+
+    await useChatStore.getState().refreshSessions();
+
+    const sessions = useChatStore.getState().sessions;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      sessionId: "s-new",
+      title: "VPN 一直超时",
+      filePath: "s.jsonl",
+    });
   });
 });

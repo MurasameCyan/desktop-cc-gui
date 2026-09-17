@@ -40,11 +40,13 @@ export function WebAccessSection() {
    *  update would redraw the page for nothing — accepting already re-renders
    *  via setPane/setRiskPrompt. */
   const wanRiskAcceptedRef = useRef<boolean | null>(null);
-  if (wanRiskAcceptedRef.current === null) {
-    // Lazy init: useRef(readStoredBool(...)) would rebuild and discard the
-    // stored value on every render.
-    wanRiskAcceptedRef.current = readStoredBool(WAN_RISK_ACK_KEY, false);
-  }
+  useEffect(() => {
+    // Lazy init off the render path (react-doctor: no ref writes in render);
+    // runs before any user interaction can read the click-handler-only value.
+    if (wanRiskAcceptedRef.current === null) {
+      wanRiskAcceptedRef.current = readStoredBool(WAN_RISK_ACK_KEY, false);
+    }
+  }, []);
   /** Which tab to reveal once the warning is accepted; null when no ask is
    *  pending. Kept separate from `pane` so declining leaves 内网访问 showing. */
   const [riskPrompt, setRiskPrompt] = useState<"wan" | null>(null);

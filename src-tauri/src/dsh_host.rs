@@ -71,6 +71,14 @@ pub struct DshHostState {
 struct Spawned {
     child: Child,
     origin: String,
+    /// Kill-on-close job guard (Windows): conversation shells (pwsh.exe)
+    /// spawned by host sessions can orphan before the taskkill /T walk ever
+    /// sees them; dropping this guard closes the job and the kernel sweeps
+    /// every surviving member. Field order matters: the guard is declared
+    /// last so it drops after `Drop::drop` kills the host, sweeping any
+    /// grandchild that escaped the tree walk.
+    #[cfg(windows)]
+    _tree_guard: Option<std::sync::Arc<crate::engine::job::KillOnCloseJob>>,
 }
 
 impl Drop for Spawned {
@@ -293,22 +301,50 @@ impl TokenCapture {
 
 // ==================== Probes ====================
 
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// RPC client for the DSH host, split by origin locality.
+///
+/// Local origins never ride a proxy: the host runs on this machine, and
+/// letting the configured network proxy reroute a loopback dial turned a
+/// dead host into proxy chatter — every failed catalog probe surfaced as a
+/// refused proxied connection. Remote origins keep reqwest's default
+/// env-proxy behaviour so they stay reachable through a configured proxy.
+fn http_client(origin: &str) -> &'static reqwest::Client {
+    static LOCAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(DESCRIBE_CONNECT_TIMEOUT)
+            .timeout(DESCRIBE_TOTAL_TIMEOUT)
+            .no_proxy()
+            .build()
+            .expect("reqwest client")
+    });
+    static REMOTE: LazyLock<reqwest::Client> = LazyLock::new(|| {
         reqwest::Client::builder()
             .connect_timeout(DESCRIBE_CONNECT_TIMEOUT)
             .timeout(DESCRIBE_TOTAL_TIMEOUT)
             .build()
             .expect("reqwest client")
     });
-    &CLIENT
+    if origin_is_local(origin) {
+        &LOCAL
+    } else {
+        &REMOTE
+    }
 }
 
-/// Redirect-disabling client for the token exchange: the host answers
-/// `GET /?token=…` with 303 + set-cookie, and following the redirect would
-/// drop the header we need.
-fn exchange_client() -> &'static reqwest::Client {
-    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// Redirect-disabling client for the token exchange (same locality split as
+/// [`http_client`]): the host answers `GET /?token=…` with 303 + set-cookie,
+/// and following the redirect would drop the header we need.
+fn exchange_client(origin: &str) -> &'static reqwest::Client {
+    static LOCAL: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .connect_timeout(DESCRIBE_CONNECT_TIMEOUT)
+            .timeout(DESCRIBE_TOTAL_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("reqwest client")
+    });
+    static REMOTE: LazyLock<reqwest::Client> = LazyLock::new(|| {
         reqwest::Client::builder()
             .connect_timeout(DESCRIBE_CONNECT_TIMEOUT)
             .timeout(DESCRIBE_TOTAL_TIMEOUT)
@@ -316,13 +352,17 @@ fn exchange_client() -> &'static reqwest::Client {
             .build()
             .expect("reqwest client")
     });
-    &CLIENT
+    if origin_is_local(origin) {
+        &LOCAL
+    } else {
+        &REMOTE
+    }
 }
 
 /// Token → cookie: `GET {origin}/?token=…` without redirects; 303 +
 /// set-cookie yields the `name=value` pair (first attribute, before `;`).
 async fn exchange_token(origin: &str, token: &str) -> Option<String> {
-    let response = exchange_client()
+    let response = exchange_client(origin)
         .get(format!("{origin}/?token={token}"))
         .send()
         .await
@@ -359,7 +399,7 @@ pub(crate) fn host_cookie(origin: &str) -> Option<String> {
 /// to Err; a non-JSON body yields `Value::Null` with its status intact so
 /// callers can classify auth failures.
 async fn host_post(origin: &str, method: &str, args: Value) -> Result<(u16, Value), String> {
-    let mut request = http_client()
+    let mut request = http_client(origin)
         .post(format!("{origin}/api/{method}"))
         .header(reqwest::header::CONTENT_TYPE, "application/json");
     if let Some(cookie) = load_credentials(origin).map(|c| c.cookie) {
@@ -591,6 +631,10 @@ pub(crate) async fn ensure_host(
     let mut child = command.spawn().map_err(|e| {
         format!("无法启动 dsh web（{bin}）：{e}。请确认已安装 @deepseek-ai/dsh，或检查自定义路径。")
     })?;
+    // Kill-on-close job (Windows): same orphan class as engine runs — host
+    // sessions' grandchildren escape every tree walk once their parent exits.
+    #[cfg(windows)]
+    let tree_guard = crate::engine::job::assign_kill_on_close(&child);
     let output = Arc::new(Mutex::new(String::new()));
     let capture = Arc::new(TokenCapture {
         origin: cfg.origin.clone(),
@@ -613,6 +657,8 @@ pub(crate) async fn ensure_host(
             *lock(&host_state.spawned) = Some(Spawned {
                 child,
                 origin: cfg.origin.clone(),
+                #[cfg(windows)]
+                _tree_guard: tree_guard,
             });
             return Ok(());
         }
@@ -769,6 +815,23 @@ fn is_local_host(host: &str) -> bool {
     )
 }
 
+/// True when a configured `http(s)://host[:port]` origin points at this
+/// machine (see [`is_local_host`]).
+fn origin_is_local(origin: &str) -> bool {
+    let lowered = origin.trim().to_ascii_lowercase();
+    let authority = lowered
+        .strip_prefix("http://")
+        .or_else(|| lowered.strip_prefix("https://"))
+        .unwrap_or(lowered.as_str());
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or("");
+    // Stripping `:port` must leave `[::1]` intact when no port is present.
+    let host = match authority.rsplit_once(':') {
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => authority,
+    };
+    is_local_host(host)
+}
+
 /// Terminate whatever listens on `port`: SIGTERM, re-probe, SIGKILL if the
 /// host still answers.
 #[cfg(unix)]
@@ -858,6 +921,29 @@ async fn terminate_local_listener(_port: u16, _origin: &str) -> Result<(), Strin
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn origin_locality_is_detected_from_the_configured_origin() {
+        for origin in [
+            "http://127.0.0.1:3080",
+            "http://localhost:3080",
+            "http://0.0.0.0:3080",
+            "http://[::1]:3080",
+            "http://[::1]",
+            "http://127.0.0.1",
+            "https://LOCALHOST:3080",
+            "http://127.0.0.1:3080/",
+        ] {
+            assert!(origin_is_local(origin), "{origin}");
+        }
+        for origin in [
+            "https://dsh.example.com:3080",
+            "http://192.168.1.10:3080",
+            "http://[2001:db8::1]:3080",
+        ] {
+            assert!(!origin_is_local(origin), "{origin}");
+        }
+    }
 
     #[test]
     fn launch_token_is_extracted_from_web_url_line() {

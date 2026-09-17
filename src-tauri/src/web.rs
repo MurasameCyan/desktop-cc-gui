@@ -1011,6 +1011,7 @@ struct SessionIdArgs {
 #[serde(rename_all = "camelCase")]
 struct EngineArgs {
     engine: String,
+    workspace: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1036,6 +1037,23 @@ struct LoadSessionPageArgs {
     session_id: String,
     limit: Option<usize>,
     before_seq: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadRemoteSessionPageArgs {
+    workspace_path: String,
+    engine: String,
+    session_id: String,
+    remote_path: String,
+    limit: Option<usize>,
+    before_seq: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteRemoteSessionArgs {
+    workspace_path: String,
+    engine: String,
+    remote_path: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1086,6 +1104,17 @@ struct RememberEffortArgs {
 #[serde(rename_all = "camelCase")]
 struct PathArgs {
     path: String,
+    /// Optional workspace meta passthrough (plugin workspaces.add keeps
+    /// transport descriptions alive on the web runtime too).
+    meta: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAddWorkspaceArgs {
+    plugin_id: String,
+    path: String,
+    meta: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -1318,7 +1347,14 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "list_engines" => ser(Ok(crate::engine::list_engines())),
         "list_engine_models" => {
             let a: EngineArgs = parse_args(&raw)?;
-            ser(crate::engine::models::list_engine_models(a.engine).await)
+            ser(
+                crate::engine::models::list_engine_models(
+                    app.state(),
+                    a.engine,
+                    a.workspace,
+                )
+                .await,
+            )
         }
         "save_pasted_image" => {
             let a: SavePastedImageArgs = parse_args(&raw)?;
@@ -1363,9 +1399,28 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
             )
             .await)
         }
+        "load_remote_session_page" => {
+            let a: LoadRemoteSessionPageArgs = parse_args(&raw)?;
+            ser(
+                crate::history::reader::load_remote_session_page(
+                    app.state(),
+                    a.workspace_path,
+                    a.engine,
+                    a.session_id,
+                    a.remote_path,
+                    a.limit,
+                    a.before_seq,
+                )
+                .await,
+            )
+        }
         "delete_session" => {
             let a: EngineSessionArgs = parse_args(&raw)?;
             ser(crate::history::reader::delete_session(app.state(), a.engine, a.session_id).await)
+        }
+        "delete_remote_session" => {
+            let a: DeleteRemoteSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.remote_path).await)
         }
         "pin_session" => {
             let a: PinSessionArgs = parse_args(&raw)?;
@@ -1394,6 +1449,22 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
                 a.model,
             ))
         }
+        "add_workspace" => {
+            let a: PathArgs = parse_args(&raw)?;
+            ser(crate::history::reader::add_workspace(app.state(), a.path, a.meta))
+        }
+        "plugin_add_workspace" => {
+            let a: PluginAddWorkspaceArgs = parse_args(&raw)?;
+            ser(
+                crate::plugin_caps::plugin_add_workspace(
+                    app.state(),
+                    a.plugin_id,
+                    a.path,
+                    a.meta,
+                )
+                .await,
+            )
+        }
         "remember_session_effort" => {
             let a: RememberEffortArgs = parse_args(&raw)?;
             ser(crate::history::reader::remember_session_effort(
@@ -1408,10 +1479,6 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
             Ok(Value::Null)
         }
         "list_workspaces" => ser(crate::history::reader::list_workspaces(app.state())),
-        "add_workspace" => {
-            let a: PathArgs = parse_args(&raw)?;
-            ser(crate::history::reader::add_workspace(app.state(), a.path))
-        }
         "reorder_workspaces" => {
             let a: IdsArgs = parse_args(&raw)?;
             ser(crate::history::reader::reorder_workspaces(

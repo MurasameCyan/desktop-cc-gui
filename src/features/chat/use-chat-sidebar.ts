@@ -3,10 +3,12 @@ import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-chat-composer";
 import type { AiChatRepo, AiChatRepoSection, ThreadAction } from "@/components/application/ai-chat/ai-chat-sidebar";
+import { ARCHIVED_SECTION_ID } from "@/components/application/ai-chat/use-sidebar-state";
 import type { SessionMeta } from "@/lib/ipc";
 import { pickDirectory } from "@/lib/platform";
 import { useChatStore, sortedWorkspaceGroups } from "./store";
 import { relativeTime } from "./time";
+import { useWorkspaceUIHooks, workspaceLabelSuffix } from "./workspace-ui-bridge";
 import type { ChatPageDialog } from "./ChatPageDialogs";
 
 /** Sidebar data and actions: the workspace/thread repo list plus thread
@@ -39,7 +41,7 @@ export function useChatSidebar({
     })),
   );
   // Store actions are stable references — one shallow subscription for all.
-  const { selectSession, startNewChat, addWorkspace, reorderWorkspaces, pinSession, setWorkspaceArchived } =
+  const { selectSession, startNewChat, addWorkspace, reorderWorkspaces, pinSession, setWorkspaceArchived, assignWorkspaceGroup } =
     useChatStore(
       useShallow((s) => ({
         selectSession: s.selectSession,
@@ -48,12 +50,15 @@ export function useChatSidebar({
         reorderWorkspaces: s.reorderWorkspaces,
         pinSession: s.pinSession,
         setWorkspaceArchived: s.setWorkspaceArchived,
+        assignWorkspaceGroup: s.assignWorkspaceGroup,
       })),
     );
 
   // Archived workspaces hide from the main tree; everything else (group
   // bucketing, ordering, aliases) works on the visible subset.
   const archivedIds = useMemo(() => new Set(archivedWorkspaces), [archivedWorkspaces]);
+  // 订阅插件桥:插件 activate/热重载换 hooks 后,侧栏徽标随之重算。
+  const uiHooks = useWorkspaceUIHooks();
   const visibleWorkspaces = useMemo(
     () => workspaces.filter((w) => !archivedIds.has(w.id)),
     [workspaces, archivedIds],
@@ -72,10 +77,12 @@ export function useChatSidebar({
       // Sidebar alias: a user-set name replaces the folder name in the
       // sidebar only; the original stays on the row tooltip.
       const alias = workspaceAliases[w.id]?.trim();
+      const suffix = workspaceLabelSuffix(w.path);
       return {
         id: w.id,
         label: alias || w.name,
         originalLabel: alias ? w.name : undefined,
+        labelSuffix: suffix ?? undefined,
         defaultOpen: index === 0,
         threadLimit,
         threads: sorted.flatMap((s) => {
@@ -94,10 +101,11 @@ export function useChatSidebar({
         }),
       };
     });
-  }, [visibleWorkspaces, workspaceAliases, sessions, threadLimit, threadStreaming, unseen, i18n.language]);
+  }, [visibleWorkspaces, workspaceAliases, sessions, threadLimit, threadStreaming, unseen, i18n.language, uiHooks]);
   // 工作区二级分类: bucket repos by their workspace's group assignment.
-  // Ungrouped repos come first (no header), then groups in settings order;
-  // empty groups are hidden (matches the reference sidebar).
+  // Ungrouped repos come first (no header), then groups in settings order.
+  // Empty groups stay in the tree — the sidebar hides them at rest but
+  // reveals them as drop targets while a workspace is being dragged.
   const sections: AiChatRepoSection[] | undefined = useMemo(() => {
     const groups = sortedWorkspaceGroups(workspaceGroups);
     if (groups.length === 0) return undefined;
@@ -119,8 +127,7 @@ export function useChatSidebar({
     const result: AiChatRepoSection[] = [];
     if (ungrouped.length > 0) result.push({ id: null, name: "", repos: ungrouped });
     groups.forEach((group) => {
-      const list = byGroup.get(group.id);
-      if (list && list.length > 0) result.push({ id: group.id, name: group.name, repos: list });
+      result.push({ id: group.id, name: group.name, repos: byGroup.get(group.id) ?? [] });
     });
     return result.some((s) => s.id !== null) ? result : undefined;
   }, [repos, visibleWorkspaces, workspaceGroups]);
@@ -174,6 +181,16 @@ export function useChatSidebar({
     },
     [sessionById, pinSession, setDialog],
   );
+  // 右键菜单「复制 ID」:写入原生会话 uuid(CLI --resume 可用的那个),与
+  // 文件树「复制路径」一致——静默写剪贴板,失败不打扰。
+  const handleCopyThreadId = useCallback(
+    (id: string) => {
+      const session = sessionById.get(id);
+      if (!session) return;
+      void navigator.clipboard.writeText(session.sessionId).catch(() => {});
+    },
+    [sessionById],
+  );
   const handleRemoveWorkspace = useCallback(
     (workspaceId: string) => {
       setDialog({ kind: "removeWorkspace", workspaceId });
@@ -225,6 +242,19 @@ export function useChatSidebar({
     (orderedIds: string[]) => void reorderWorkspaces(orderedIds),
     [reorderWorkspaces],
   );
+  // Sidebar drag-and-drop: a workspace row released over a section container
+  // moves there — group assignment, ungroup (null), or archive (已归档
+  // sentinel, the row keeps its groupId so unarchiving restores it).
+  const handleDropWorkspaceToSection = useCallback(
+    (workspaceId: string, targetSectionId: string | null) => {
+      if (targetSectionId === ARCHIVED_SECTION_ID) {
+        void setWorkspaceArchived(workspaceId, true);
+      } else {
+        void assignWorkspaceGroup(workspaceId, targetSectionId);
+      }
+    },
+    [setWorkspaceArchived, assignWorkspaceGroup],
+  );
 
   return {
     active,
@@ -236,11 +266,13 @@ export function useChatSidebar({
     handleAddWorkspace,
     handleThreadSelect,
     handleThreadAction,
+    handleCopyThreadId,
     handleRemoveWorkspace,
     handleWorkspaceAlias,
     handleSetWorkspaceArchived,
     handleNewSession,
     handleNewSessionInWorkspace,
     handleReorderWorkspaces,
+    handleDropWorkspaceToSection,
   };
 }

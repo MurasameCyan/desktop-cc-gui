@@ -3,6 +3,8 @@ pub mod claude;
 pub mod codex;
 mod codex_provider_env;
 mod codex_usage;
+#[cfg(windows)]
+pub(crate) mod job;
 pub mod dsh;
 mod dsh_session;
 pub mod grok;
@@ -11,6 +13,7 @@ pub mod kimi;
 pub mod models;
 pub mod opencode;
 pub mod pi_family;
+pub mod wsl_transport;
 pub mod pi_family_auth;
 pub mod qoder;
 mod qoder_session;
@@ -1099,6 +1102,26 @@ fn spawn_stdin_writer(child: &mut Child, payload: Option<String>) {
     }
 }
 
+/// Diagnostics ring: keeps the last 4KB for the error banner.
+fn ring_push(buf: &Arc<Mutex<String>>, text: &str) {
+    const CAP: usize = 4096;
+    let mut guard = match buf.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.push_str(text);
+    if guard.len() > CAP {
+        // drain panics on a non-char-boundary start — snap forward. The old
+        // stderr ring could panic mid-CJK here, silently killing the
+        // capture task and starving the error banner of the failure text.
+        let mut keep = guard.len() - CAP;
+        while !guard.is_char_boundary(keep) {
+            keep += 1;
+        }
+        guard.drain(..keep);
+    }
+}
+
 /// Stderr capture ring: keeps the last 4KB for the error banner.
 fn spawn_stderr_capture(stderr: ChildStderr) -> Arc<Mutex<String>> {
     let buf = Arc::new(Mutex::new(String::new()));
@@ -1110,17 +1133,7 @@ fn spawn_stderr_capture(stderr: ChildStderr) -> Arc<Mutex<String>> {
             line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let mut guard = match target.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    guard.push_str(&line);
-                    if guard.len() > 4096 {
-                        let keep = guard.len() - 4096;
-                        guard.drain(..keep);
-                    }
-                }
+                Ok(_) => ring_push(&target, &line),
             }
         }
     });
@@ -1186,6 +1199,15 @@ struct RunContext {
     killed: Arc<std::sync::atomic::AtomicBool>,
     cleanup_files: Vec<PathBuf>,
     stderr_buf: Arc<Mutex<String>>,
+    /// Off-protocol stdout lines (plain text from CLI startup failures,
+    /// wrapper errors, node crashes): parse_line drops non-JSON lines, so
+    /// without this ring a failed run with empty stderr surfaces as a bare
+    /// "exited with status" banner.
+    stdout_plain_buf: Arc<Mutex<String>>,
+    /// Kill-on-close job guard: drops with this context at settle, sweeping
+    /// any grandchild the CLI orphaned (Windows pwsh.exe/conhost.exe).
+    #[cfg(windows)]
+    _tree_guard: Option<Arc<job::KillOnCloseJob>>,
 }
 
 /// Event-routing core shared by process runs ([`RunContext`]) and virtual
@@ -1513,6 +1535,12 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
             continue;
         }
         state.saw_any_output = true;
+        if serde_json::from_str::<Value>(trimmed).is_err() {
+            // Every engine protocol here is NDJSON: a non-JSON line is
+            // off-protocol diagnostics (clap usage errors, shell wrapper
+            // complaints, node crashes) that no parse_line would keep.
+            ring_push(&ctx.stdout_plain_buf, &format!("{trimmed}\n"));
+        }
         let mut events = Vec::new();
         ctx.engine_impl.parse_line(trimmed, &mut events);
         stream_session_id |= events
@@ -1536,6 +1564,16 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
         let mut guard = ctx.child.lock().await;
         guard.wait().await.ok()
     };
+    // Unix mirror of the Windows kill-on-close job guard: grandchildren the
+    // CLI orphaned (background shells that outlived the turn) are still in
+    // the run's process group — sweep them so a settled turn leaks nothing.
+    // Clean exit → empty group → ESRCH no-op; a pid-reuse hit would need a
+    // fresh process to take the just-reaped pid AND lead a new group within
+    // microseconds. pid 0 is never signalled: kill(0, …) targets OUR group.
+    #[cfg(unix)]
+    if ctx.pid != 0 {
+        kill_process_group(ctx.pid);
+    }
     for path in &ctx.cleanup_files {
         let _ = std::fs::remove_file(path);
     }
@@ -1590,6 +1628,18 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
             });
             if !stderr_tail.is_empty() {
                 message.push_str(&format!(": {stderr_tail}"));
+            } else {
+                // Startup failures of old/odd CLIs often land on stdout as
+                // plain text instead of stderr; without this fallback the
+                // banner is a bare exit code.
+                let stdout_tail = ctx
+                    .stdout_plain_buf
+                    .lock()
+                    .map(|g| redact_secrets(g.trim()))
+                    .unwrap_or_default();
+                if !stdout_tail.is_empty() {
+                    message.push_str(&format!(": {stdout_tail}"));
+                }
             }
             state.push(
                 &ctx.core.sink,
@@ -1673,14 +1723,52 @@ pub async fn send_message_inner(
         state.db.granted_roots().unwrap_or_default(),
     )?;
 
+    // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
+    let wsl_tp = wsl_transport::transport_for_workspace(&state.db, &workspace_path);
     // Host-stream engines drive their own transport: no child process — the
-    // registry entry only routes interrupts to the transport task.
+    // registry entry only routes interrupts to the transport task. 远程
+    // 工作区下没有可包装的子进程,本机 host 又对远端路径无意义,显式拒绝。
     if launch.engine_impl.drives_own_transport() {
+        if wsl_tp.is_some() {
+            return Err(format!("引擎 {engine} 不支持远程工作区(WSL)"));
+        }
         return send_host_stream(state, launch, engine).await;
     }
-
-    let mut command = launch.built.command;
-    if engine == "codex" {
+    let (mut command, extra_cleanup, skip_local_cwd) = match &wsl_tp {
+        Some(tp) => {
+            // 依赖本机 staging 文件的引擎(grok 等 cleanup_files 非空):
+            // 远端 CLI 读不到本机文件,直接拒绝而非跑出莫名其妙的失败;
+            // 已写盘的 staging 文件顺手清掉,不 strand。
+            if !launch.built.cleanup_files.is_empty() {
+                for path in &launch.built.cleanup_files {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(format!(
+                    "引擎 {engine} 不支持远程工作区(WSL):依赖本机临时文件"
+                ));
+            }
+            match wsl_transport::wrap(launch.built.command, tp).await {
+                Ok(wrapped) => (wrapped.command, wrapped.cleanup_files, wrapped.skip_local_cwd),
+                Err(error) => {
+                    // wrap 失败(ssh 上传失败等)同样不许 strand staging 文件。
+                    for path in &launch.built.cleanup_files {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        None => (launch.built.command, Vec::new(), false),
+    };
+    let mut cleanup_files = launch.built.cleanup_files;
+    cleanup_files.extend(extra_cleanup);
+    // 本地 env 不跨 ssh:WSL 分支的 command 是本地 ssh 进程,apply 无意义
+    // (还白跑一次登录 shell 解析);远端 codex 用发行版自己的配置。
+    if engine == "codex" && wsl_tp.is_none() {
+        // v1.0.0 switched codex to `codex exec --json`: a CLI that predates
+        // the exec transport exits 1 before any event, surfacing as a bare
+        // "exit code: 1" banner. Fail fast with an actionable message.
+        codex::check_exec_support(&launch.bin, launch.req.session_id.is_some()).await?;
         codex_provider_env::apply(&mut command).await;
     }
     command
@@ -1690,8 +1778,13 @@ pub async fn send_message_inner(
             std::process::Stdio::null()
         })
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .current_dir(&launch.req.workspace);
+        .stderr(std::process::Stdio::piped());
+    // 远程工作区路径在本机不存在 → cwd 落本地当前目录(wsl.exe/ssh 不关心)。
+    if skip_local_cwd {
+        command.current_dir(wsl_transport::fallback_cwd());
+    } else {
+        command.current_dir(&launch.req.workspace);
+    }
     // Own process group so interrupt can kill the whole tree (grandchildren
     // inherit the stdout pipe and would otherwise block EOF forever).
     #[cfg(unix)]
@@ -1702,8 +1795,9 @@ pub async fn send_message_inner(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            // Never strand the staging files build_command wrote (grok).
-            for path in &launch.built.cleanup_files {
+            // Never strand the staging files build_command wrote (grok) or
+            // the remote-run script marker (wsl transport).
+            for path in &cleanup_files {
                 let _ = std::fs::remove_file(path);
             }
             return Err(format!("failed to spawn {}: {error}", launch.bin));
@@ -1713,6 +1807,11 @@ pub async fn send_message_inner(
     spawn_stdin_writer(&mut child, launch.built.stdin_payload);
 
     let run_id = uuid::Uuid::new_v4().to_string();
+    // Join a kill-on-close job before the run can settle: an orphaned
+    // grandchild (claude's pwsh.exe/conhost.exe) must die with the run's
+    // context, not accumulate outside every tree taskkill can still walk.
+    #[cfg(windows)]
+    let tree_guard = job::assign_kill_on_close(&child);
     let pid = child.id().unwrap_or(0);
     // Detach both pipes while we still own the child outright. A missing pipe
     // after spawn is fatal: kill the child so it cannot run unobserved and
@@ -1723,7 +1822,7 @@ pub async fn send_message_inner(
             Some(pair) => pair,
             None => {
                 let _ = child.start_kill();
-                for path in &launch.built.cleanup_files {
+                for path in &cleanup_files {
                     let _ = std::fs::remove_file(path);
                 }
                 return Err("missing stdout/stderr pipe after spawn".to_string());
@@ -1781,8 +1880,11 @@ pub async fn send_message_inner(
         initial_model,
         child,
         killed,
-        cleanup_files: launch.built.cleanup_files,
+        cleanup_files,
         stderr_buf,
+        stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+        #[cfg(windows)]
+        _tree_guard: tree_guard,
     };
     let reader = tokio::spawn(run_reader(stdout, ctx));
     // Registration order is unchanged (entries land before the task can
@@ -2009,9 +2111,13 @@ mod permission_tests {
         assert!(auto.contains(&"--permission-mode".to_string()));
         assert!(auto.contains(&"acceptEdits".to_string()));
         assert!(!auto.contains(&"--dangerously-skip-permissions".to_string()));
+        // Headless cannot prompt: auto pre-approves the read-only network
+        // tools acceptEdits does not cover, or every web call is denied.
+        assert!(auto.windows(3).any(|w| w == ["--allowedTools", "WebSearch", "WebFetch"]));
 
         let manual = argv(&e, &req(Some("manual")));
         assert!(manual.contains(&"default".to_string()));
+        assert!(!manual.contains(&"--allowedTools".to_string()));
 
         let plan = argv(&e, &req(Some("plan")));
         assert!(plan.contains(&"plan".to_string()));
@@ -2260,10 +2366,71 @@ mod retry_lifecycle_tests {
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: vec![path],
             stderr_buf: Arc::new(Mutex::new(String::new())),
+            stdout_plain_buf: Arc::new(Mutex::new(String::new())),
         };
         run_reader(stdout, ctx).await;
         let events = std::mem::take(&mut *emitter.0.lock().unwrap());
         events
+    }
+
+    /// Old CLIs print startup failures (usage/config errors, node crashes)
+    /// to stdout as plain text: parse_line drops non-JSON lines, so the
+    /// settle path must fall back to the captured plain tail when stderr
+    /// is empty — otherwise the banner is a bare exit code.
+    #[tokio::test]
+    async fn plain_stdout_tail_surfaces_on_failed_exit_without_stderr() {
+        let mut command =
+            tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/c", "echo error: unrecognized arguments: --json & exit 1"]);
+        } else {
+            command.args(["-c", "echo 'error: unrecognized arguments: --json'; exit 1"]);
+        }
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let emitter = Arc::new(CollectingEmitter::default());
+        let ctx = RunContext {
+            core: TurnCore {
+                sink: event_sink::EventSink::new(emitter.clone()),
+                registry: Arc::new(ProcessRegistry::default()),
+                engine_id: "codex".to_string(),
+                run_id: "plain-stdout-run".to_string(),
+            },
+            engine_impl: Box::new(codex::CodexEngine),
+            pid: child.id().unwrap(),
+            preassigned_session_id: None,
+            initial_model: None,
+            child: Arc::new(TokioMutex::new(child)),
+            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cleanup_files: Vec::new(),
+            stderr_buf: Arc::new(Mutex::new(String::new())),
+            stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+        };
+        run_reader(stdout, ctx).await;
+        let events = std::mem::take(&mut *emitter.0.lock().unwrap());
+        let last = events.last().unwrap();
+        assert_eq!(last["kind"], "error");
+        let data = last["data"].as_str().unwrap();
+        assert!(data.contains("codex exited with status"), "{data}");
+        assert!(data.contains("unrecognized arguments"), "{data}");
+    }
+
+    /// The ring truncates by byte count: a naive drain start can land
+    /// mid-CJK and panic (killing the stderr capture task silently).
+    #[test]
+    fn ring_push_snaps_truncation_to_char_boundary() {
+        let buf = Arc::new(Mutex::new(String::new()));
+        ring_push(&buf, &"引擎错误".repeat(1000));
+        // std Mutex stays: ring buffers are deliberately poison-tolerant
+        // (a panicked capture task must not take down error reporting).
+        let kept = buf.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(kept.len() <= 4096);
+        assert!(kept.ends_with("引擎错误"));
     }
 
     #[tokio::test]
