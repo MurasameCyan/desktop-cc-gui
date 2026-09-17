@@ -81,6 +81,43 @@ function manifest(permissions: string[]): PluginManifest {
 }
 
 describe("createPluginContext", () => {
+  it("denies overlay and resource access without their source permissions", async () => {
+    const { ctx } = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => ctx.ui.registerOverlay({ component: () => null })).toThrow(/ui:overlay/);
+    expect(() => ctx.assets.bundleUrl("assets/icon.png")).toThrow(/assets:bundle/);
+    expect(() => ctx.assets.documentUrl("settings.jsonc")).toThrow(/plugin\.storage/);
+    expect(() => ctx.assets.directoryUrl("grant-one", "model.json")).toThrow(/assets:directory/);
+    await expect(ctx.assets.grantDirectory()).rejects.toThrow(/assets:directory/);
+    await expect(ctx.assets.listDirectories()).rejects.toThrow(/assets:directory/);
+    await expect(ctx.assets.revokeDirectory("grant-one")).rejects.toThrow(/assets:directory/);
+    await expect(ctx.shell.revealPath("C:/private/file.txt")).rejects.toThrow(/plugin\.storage|assets:directory/);
+  });
+
+  it("requires read permission for turn-start observers without granting prompt writes", () => {
+    const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => denied.ctx.hooks.registerTurnHooks({ onTurnStarted: () => {} })).toThrow(/runtime\.events\.read/);
+    const observer = createPluginContext(manifest(["runtime.events.read"]), fakeStorage(), { appVersion: "1.0.0" });
+    const dispose = observer.ctx.hooks.registerTurnHooks({ onTurnStarted: () => {} });
+    try {
+      expect(() => observer.ctx.hooks.registerTurnHooks({ beforeTurn: () => undefined })).toThrow(/prompt\.contribute\.internal/);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps remote resource URLs behind exact host and port grants", () => {
+    const { ctx } = createPluginContext(manifest(["network:assets.example:8443"]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => ctx.assets.remoteUrl("https://assets.example/model.json")).toThrow(/network/);
+    expect(() => ctx.assets.remoteUrl("https://child.assets.example:8443/model.json")).toThrow(/network/);
+    expect(() => ctx.assets.remoteUrl("file:///C:/private/model.json")).toThrow(/http/i);
+    expect(() => ctx.assets.remoteUrl("https://user:secret@assets.example:8443/model.json")).toThrow(/credential|user|password/i);
+    const proxied = new URL(ctx.assets.remoteUrl("https://assets.example:8443/models/a/model.json?revision=2"), window.location.origin);
+    expect(proxied.hostname).not.toBe("assets.example");
+    expect(proxied.pathname).toContain("/test-plugin/remote/");
+    expect(new URL("textures/texture.png", proxied).pathname).toBe(proxied.pathname.replace("model.json", "textures/texture.png"));
+    expect(proxied.search).toBe("?revision=2");
+  });
+
   it("registers a settings section under plugin:<id> and the disposer removes it", () => {
     const { ctx } = createPluginContext(manifest(["ui:settings-section"]), fakeStorage(), {
       appVersion: "1.0.0",

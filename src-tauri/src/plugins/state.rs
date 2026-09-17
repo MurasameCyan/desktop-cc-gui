@@ -48,6 +48,7 @@ pub struct PluginsState {
     pub plugins: HashMap<String, PluginRecord>,
     pub kv_tombstones: HashMap<String, i64>,
     pub document_storage: HashMap<String, DocumentStorageSelection>,
+    pub asset_directories: HashMap<String, Vec<super::assets::AssetDirectoryGrant>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

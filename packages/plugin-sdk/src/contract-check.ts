@@ -1,6 +1,7 @@
 import type * as Pub from "../plugin";
 import type {
   AfterTurnEvent,
+  AssetDirectoryGrant,
   AssistantCompletedEvent,
   BeforeTurnEvent,
   BeforeTurnResult,
@@ -19,6 +20,8 @@ import type {
   JsonSchemaObject,
   JsonSchemaProperty,
   NormalizedRuntimeEvent,
+  PermissionRequestedEvent,
+  PluginAssets,
   PluginContext,
   PluginManifest,
   PluginTier,
@@ -89,6 +92,7 @@ export type _FileChangedEvent = Assert<Mutual<FileChangedEvent, Pub.FileChangedE
 export type _CommandStartedEvent = Assert<Mutual<CommandStartedEvent, Pub.CommandStartedEvent>>;
 export type _CommandFinishedEvent = Assert<Mutual<CommandFinishedEvent, Pub.CommandFinishedEvent>>;
 export type _ToolFinishedEvent = Assert<Mutual<ToolFinishedEvent, Pub.ToolFinishedEvent>>;
+export type _PermissionRequestedEvent = Assert<Mutual<PermissionRequestedEvent, Pub.PermissionRequestedEvent>>;
 export type _AssistantCompletedEvent = Assert<Mutual<AssistantCompletedEvent, Pub.AssistantCompletedEvent>>;
 export type _TurnCancelledEvent = Assert<Mutual<TurnCancelledEvent, Pub.TurnCancelledEvent>>;
 export type _TurnFailedEvent = Assert<Mutual<TurnFailedEvent, Pub.TurnFailedEvent>>;
@@ -106,6 +110,8 @@ export type _ResolvedDocumentStorageLocation = Assert<
 export type _DocumentReadResult = Assert<Mutual<DocumentReadResult, Pub.DocumentReadResult>>;
 export type _DocumentWriteResult = Assert<Mutual<DocumentWriteResult, Pub.DocumentWriteResult>>;
 export type _DocumentStorage = Assert<Mutual<DocumentStorage, Pub.DocumentStorage>>;
+export type _AssetDirectoryGrant = Assert<Mutual<AssetDirectoryGrant, Pub.AssetDirectoryGrant>>;
+export type _PluginAssets = Assert<Mutual<PluginAssets, Pub.PluginAssets>>;
 
 // --- 可选成员漂移 -----------------------------------------------------------
 // Mutual 的双向可赋值对「一侧新增**可选**字段/可选参数」不敏感（可选属性
@@ -116,6 +122,7 @@ export type _DocumentStorage = Assert<Mutual<DocumentStorage, Pub.DocumentStorag
 type Params<F> = F extends (...args: infer P) => unknown ? P : never;
 
 export type _BeforeTurnResultKeys = Assert<KeyParity<BeforeTurnResult, Pub.BeforeTurnResult>>;
+export type _TurnHooksKeys = Assert<KeyParity<TurnHooks, Pub.TurnHooks>>;
 export type _InternalMessageCaptureKeys = Assert<
   KeyParity<InternalMessageCapture, Pub.InternalMessageCapture>
 >;
@@ -138,6 +145,8 @@ export type _BridgeKeys = Assert<KeyParity<PluginContext["bridge"], Pub.PluginCo
 export type _HostKeys = Assert<KeyParity<PluginContext["host"], Pub.PluginContext["host"]>>;
 export type _HooksKeys = Assert<KeyParity<PluginContext["hooks"], Pub.PluginContext["hooks"]>>;
 export type _WorkspaceKeys = Assert<KeyParity<PluginContext["workspace"], Pub.PluginContext["workspace"]>>;
+export type _AssetsKeys = Assert<KeyParity<PluginContext["assets"], Pub.PluginContext["assets"]>>;
+export type _ShellKeys = Assert<KeyParity<PluginContext["shell"], Pub.PluginContext["shell"]>>;
 export type _DocumentStorageKeys = Assert<
   KeyParity<PluginContext["documentStorage"], Pub.PluginContext["documentStorage"]>
 >;
@@ -155,6 +164,8 @@ export type _BridgeShape = Assert<Mutual<PluginContext["bridge"], Pub.PluginCont
 export type _HostShape = Assert<Mutual<PluginContext["host"], Pub.PluginContext["host"]>>;
 export type _HooksShape = Assert<Mutual<PluginContext["hooks"], Pub.PluginContext["hooks"]>>;
 export type _WorkspaceShape = Assert<Mutual<PluginContext["workspace"], Pub.PluginContext["workspace"]>>;
+export type _AssetsShape = Assert<Mutual<PluginContext["assets"], Pub.PluginContext["assets"]>>;
+export type _ShellShape = Assert<Mutual<PluginContext["shell"], Pub.PluginContext["shell"]>>;
 export type _DocumentStorageShape = Assert<
   Mutual<PluginContext["documentStorage"], Pub.PluginContext["documentStorage"]>
 >;
