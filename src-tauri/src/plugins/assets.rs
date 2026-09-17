@@ -221,8 +221,14 @@ fn reveal_target_at(
             allowed_roots.extend(entries.iter().map(|entry| PathBuf::from(&entry.path)));
         }
     }
-    // Check the spelling supplied by the caller before canonicalizing it, so
-    // a symlink that resolves back inside an allowed root is refused as well.
+    let denied = || format!("{id}: path is outside plugin.storage and granted asset directories");
+    if allowed_roots.is_empty() {
+        return Err(denied());
+    }
+    // Inspect the supplied path and all its ancestors before resolving aliases.
+    // Canonicalization alone would hide a symlink back into an allowed root.
+    storage::confine_to_root(path, path).map_err(|_| denied())?;
+    let canonical = dunce::canonicalize(path).map_err(|_| denied())?;
     for root in allowed_roots {
         let canonical_root = match dunce::canonicalize(&root) {
             Ok(root) => root,
@@ -231,22 +237,14 @@ fn reveal_target_at(
         if storage::confine_to_root(&root, &root).is_err() {
             continue;
         }
-        if path.starts_with(&root) || path.starts_with(&canonical_root) {
-            let boundary = if path.starts_with(&root) {
-                &root
-            } else {
-                &canonical_root
-            };
-            storage::confine_to_root(boundary, path)?;
-            let canonical = dunce::canonicalize(path).map_err(|e| e.to_string())?;
-            if canonical.starts_with(canonical_root) {
-                return Ok(canonical);
-            }
+        // Windows short names, case variants and verbatim paths can name the
+        // same file without sharing a lexical prefix with the stored root.
+        if canonical.starts_with(&canonical_root) {
+            storage::confine_to_root(&canonical_root, &canonical).map_err(|_| denied())?;
+            return Ok(canonical);
         }
     }
-    Err(format!(
-        "{id}: path is outside plugin.storage and granted asset directories"
-    ))
+    Err(denied())
 }
 
 #[tauri::command]
@@ -656,7 +654,30 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert!(grant_directory_at(&path, "vendor.two", &root.join("link")).is_err());
-        assert!(reveal_target_at(&path, None, "vendor.one", &root.join("ok")).is_ok());
+        let expected = dunce::canonicalize(root.join("ok")).unwrap();
+        assert_eq!(
+            reveal_target_at(&path, None, "vendor.one", &root.join("ok")).unwrap(),
+            expected
+        );
+        #[cfg(windows)]
+        {
+            let case_alias = PathBuf::from(root.join("ok").to_string_lossy().to_uppercase());
+            assert_eq!(
+                reveal_target_at(&path, None, "vendor.one", &case_alias).unwrap(),
+                expected
+            );
+            let verbatim_alias = fs::canonicalize(root.join("ok")).unwrap();
+            assert_eq!(
+                reveal_target_at(&path, None, "vendor.one", &verbatim_alias).unwrap(),
+                expected
+            );
+        }
+        let inward_link = root.join("inside-link");
+        assert!(create_dir_link(&inward_link, &root));
+        assert!(reveal_target_at(&path, None, "vendor.one", &inward_link.join("ok")).is_err());
+        fs::remove_dir(&inward_link)
+            .or_else(|_| fs::remove_file(&inward_link))
+            .unwrap();
         assert!(reveal_target_at(&path, None, "vendor.two", &root.join("ok")).is_err());
         assert!(reveal_target_at(&path, None, "vendor.one", &outside.join("secret")).is_err());
         assert!(reveal_target_at(&path, None, "vendor.one", &root.join("link/secret")).is_err());
