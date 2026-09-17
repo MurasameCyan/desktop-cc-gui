@@ -281,6 +281,7 @@ export const ChatConversation = memo(function ChatConversation({
   const {
     branch,
     branches,
+    branchRepoName,
     branchError,
     handleBranchSelect,
     dismissBranchError,
@@ -451,6 +452,7 @@ export const ChatConversation = memo(function ChatConversation({
         contextMax={contextMax}
         branch={branch}
         branches={branches}
+        branchRepoName={branchRepoName}
         onBranchSelect={handleBranchSelect}
         startNewChat={startNewChat}
       />

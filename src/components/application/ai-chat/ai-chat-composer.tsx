@@ -540,6 +540,7 @@ function ContextRing({ pct }: { pct: number }) {
 export function StatusBar({
   branch,
   branches,
+  branchRepoName,
   onBranchSelect,
   folders,
   selectedFolder,
@@ -556,6 +557,9 @@ export function StatusBar({
   branch?: string;
   /** Local branches for the switcher; empty until the first load. */
   branches?: BranchMenuItem[];
+  /** Repository display name when the chip tracks a nested repo (file-tree
+   *  selection inside a subfolder repository); prefixes the branch label. */
+  branchRepoName?: string;
   /** Present → the branch label becomes a switcher dropdown. */
   onBranchSelect?: (name: string) => void;
   /** Workspace folder display names. */
@@ -618,6 +622,7 @@ export function StatusBar({
             <BranchMenu
               branches={branches ?? []}
               currentName={branch}
+              repoName={branchRepoName}
               onSelect={onBranchSelect}
             />
           ) : (

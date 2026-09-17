@@ -26,15 +26,20 @@ export interface BranchMenuItem {
   isCurrent: boolean;
 }
 
-/** Status-bar trigger + branch popover. */
+/** Status-bar trigger + branch popover. `repoName` labels the repository the
+ * branch belongs to when the followed repo is a nested one (file-tree
+ * selection inside a subfolder repository), never the workspace default. */
 export function BranchMenu({
   branches,
   currentName,
+  repoName,
   onSelect,
 }: {
   /** Local branches; empty until the first load. */
   branches: BranchMenuItem[];
   currentName?: string;
+  /** Repository display name; renders as a prefix when set. */
+  repoName?: string;
   onSelect?: (name: string) => void;
 }) {
   const { t } = useTranslation();
@@ -53,6 +58,19 @@ export function BranchMenu({
           aria-hidden
         />
         <span className="flex items-center">
+          {repoName && (
+            <>
+              <span className="text-caption-1-medium whitespace-nowrap text-text-secondary">
+                {repoName}
+              </span>
+              <span
+                className="px-1 text-caption-1-regular text-text-tertiary"
+                aria-hidden
+              >
+                ·
+              </span>
+            </>
+          )}
           <span className="text-caption-1-regular whitespace-nowrap text-text-tertiary">
             {currentName ?? "…"}
           </span>
