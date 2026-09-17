@@ -93,12 +93,13 @@ fn version_of(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
+pub(super) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.contains('\\')
         || value.contains("//")
         || value.contains(':')
         || value.contains('\0')
+        || value.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(format!("unsafe relative path: {value:?}"));
     }
@@ -555,10 +556,17 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
 /// raced by swapping a directory for a junction. A residual race remains for
 /// the final component-to-syscall window; closing it needs handle-relative
 /// opens, which is out of scope for this hardening pass.
-fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
+pub(super) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
+    // The root and its ancestors are part of the boundary too: a replaced
+    // plugin root, selected directory, or parent junction must never be followed.
+    for ancestor in root.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+        if is_reparse_point(ancestor)? {
+            return Err(format!("path crosses a reparse point: {}", ancestor.display()));
+        }
+    }
     let canonical_root =
         fs::canonicalize(root).map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let mut cursor = root.to_path_buf();
@@ -914,7 +922,7 @@ pub fn plugin_document_storage_list(
 }
 
 /// Resolve the document root a plugin's uninstall would delete.
-fn document_root_at(
+pub(super) fn document_root_at(
     state_path: &Path,
     id: &str,
     roots: Option<&StorageRoots>,

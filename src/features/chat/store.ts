@@ -79,6 +79,7 @@ import {
   dispatchSessionClosed,
   dispatchSessionCreated,
   dispatchSessionRestored,
+  dispatchTurnStarted,
   isInternalMessageCaptureActive,
   runBeforeSwitch,
 } from "@/features/plugins/runtime/hooks";
@@ -159,6 +160,10 @@ function loadHistoryPage(
 }
 
 export const useChatStore = create<ChatStore>((set, get) => {
+  // Keep a send's cancellation fact across async hooks and the invoke response;
+  // a replacement turn may already have reset the session's interrupted flag.
+  const pendingSends = new Map<string, { cancelled: boolean }>();
+
   /** Activate a tab: existing sessions lazy-load via selectSession, pending chats just set. */
   function activateTab(tab: ActiveSession | null) {
     if (!tab) {
@@ -342,6 +347,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
     // Optimistic user message.
     const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
     const hookRunId = newId();
+    const previousSend = pendingSends.get(key);
+    if (previousSend) previousSend.cancelled = true;
+    const pendingSend = { cancelled: false };
+    pendingSends.set(key, pendingSend);
     // Optimistic user message, right away: the hooks below can take up to
     // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
@@ -389,6 +398,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         occurredAt: new Date().toISOString(),
       };
       await runBeforeSwitch(switchEvent);
+      if (pendingSend.cancelled) return;
     }
     const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
     const beforeTurn = await collectBeforeTurnContributions({
@@ -399,6 +409,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       workspace,
       occurredAt: new Date().toISOString(),
     });
+    if (pendingSend.cancelled) return;
     // Retire old owners and withdraw their native-history instructions once.
     const prepared = prepareSessionContributions(
       get().sessionContributions,
@@ -419,6 +430,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
       captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
     });
     try {
+      dispatchTurnStarted({
+        runId: hookRunId,
+        turnId: hookRunId,
+        engine,
+        sessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      });
       const result = await ipc.sendMessage({
         engine,
         workspacePath: tab.workspacePath,
@@ -549,16 +568,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
         result.sessionId && !tab.sessionId
           ? sessionKey(engine, result.sessionId, tab.workspacePath)
           : key;
-      if (get().bySession[liveKey]?.interrupted) {
+      if (pendingSend.cancelled || get().bySession[liveKey]?.interrupted) {
+        finishRunLifecycle(result.runId, "cancelled");
         runRouting.delete(result.runId);
         untrackRun(result.runId);
         dropRunUsage(result.runId);
-        await Promise.all([
-          ipc.interruptSession(result.runId).catch(() => false),
-          ...(result.sessionId
-            ? [ipc.interruptSession(result.sessionId).catch(() => false)]
-            : []),
-        ]);
+        // A replacement may already own the same native session. Only the
+        // immutable run id belongs to this late acknowledgement.
+        await ipc.interruptSession(result.runId).catch(() => false);
       }
     } catch (error) {
       finishRunLifecycle(hookRunId, "failed", String(error));
@@ -576,6 +593,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
       // coming. Each drain consumes one item, so a run of failures empties
       // the queue instead of looping.
       if (!get().bySession[key]?.interrupted) drainQueue(key);
+    } finally {
+      if (pendingSends.get(key) === pendingSend) pendingSends.delete(key);
     }
   }
 
@@ -1521,6 +1540,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
         active.sessionId,
         active.workspacePath,
       );
+      const pendingSend = pendingSends.get(key);
+      if (pendingSend) {
+        pendingSend.cancelled = true;
+        pendingSends.delete(key);
+      }
       // Settle locally FIRST: the killed run's done event can arrive while
       // the kill IPCs below are still in flight, and onDone drains the queue
       // whenever interrupted is still false — that would fire the next

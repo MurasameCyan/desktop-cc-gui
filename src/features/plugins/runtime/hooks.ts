@@ -135,6 +135,10 @@ export function dispatchSessionClosed(event: SessionClosedEvent): void {
   dispatchNonBlocking(sessionRegistrations, "onClosed", ({ onClosed }) => onClosed, event);
 }
 
+export function dispatchTurnStarted(event: BeforeTurnEvent): void {
+  dispatchNonBlocking(turnRegistrations, "onTurnStarted", ({ onTurnStarted }) => onTurnStarted, event);
+}
+
 export function dispatchRuntimeEvent(event: NormalizedRuntimeEvent): void {
   dispatchNonBlocking(turnRegistrations, "onRuntimeEvent", ({ onRuntimeEvent }) => onRuntimeEvent, event);
 }

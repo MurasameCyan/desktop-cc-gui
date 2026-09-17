@@ -11,6 +11,7 @@ import {
   dispatchAfterTurn,
   dispatchRuntimeEvent,
   dispatchSessionCreated,
+  dispatchTurnStarted,
   registerRuntimeSwitchHooks,
   registerSessionHooks,
   registerTurnHooks,
@@ -85,12 +86,15 @@ describe("plugin hook runtime", () => {
   });
 
   it("does not deliver queued events after the owning registration is disposed", async () => {
+    const onTurnStarted = vi.fn();
     const afterTurn = vi.fn();
-    const dispose = registerTurnHooks("retired-owner", { afterTurn });
+    const dispose = registerTurnHooks("retired-owner", { onTurnStarted, afterTurn });
+    dispatchTurnStarted(beforeTurnEvent);
     dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" });
     dispose();
     await Promise.resolve();
     expect(afterTurn).not.toHaveBeenCalled();
+    expect(onTurnStarted).not.toHaveBeenCalled();
   });
 
   it("discards a before-turn result that resolves after its owner is disposed", async () => {
@@ -415,27 +419,35 @@ describe("plugin hook runtime", () => {
     expect(reached).toEqual(["runs"]);
   });
 
-  it("schedules runtime events and after-turn hooks without blocking their callers", async () => {
-    const runtimeSeen: string[] = [];
-    const afterSeen: string[] = [];
+  it("schedules turn observers in order without waiting for them to settle", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const seen: string[] = [];
+    const pending = Promise.withResolvers<void>();
     disposers.push(
+      registerTurnHooks("throws", {
+        onTurnStarted: () => { throw new Error("broken start observer"); },
+      }),
+      registerTurnHooks("rejects", {
+        onTurnStarted: async () => { throw new Error("rejected start observer"); },
+      }),
       registerTurnHooks("plugin", {
-        onRuntimeEvent: () => {
-          runtimeSeen.push("runtime");
+        onTurnStarted: async () => {
+          seen.push("started");
+          await pending.promise;
         },
-        afterTurn: async () => {
-          afterSeen.push("after");
-          await Promise.withResolvers<void>().promise;
-        },
+        onRuntimeEvent: () => { seen.push("runtime"); },
+        afterTurn: () => { seen.push("after"); },
       }),
     );
 
-    expect(dispatchRuntimeEvent({ kind: "assistant-completed" } as never)).toBeUndefined();
-    expect(dispatchAfterTurn({ turnId: "turn-1" } as never)).toBeUndefined();
-    expect(runtimeSeen).toEqual([]);
-    expect(afterSeen).toEqual([]);
+    dispatchTurnStarted(beforeTurnEvent);
+    dispatchRuntimeEvent({ kind: "assistant-completed" } as never);
+    dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" });
+    expect(seen).toEqual([]);
     await Promise.resolve();
-    expect(runtimeSeen).toEqual(["runtime"]);
-    expect(afterSeen).toEqual(["after"]);
+    expect(seen).toEqual(["started", "runtime", "after"]);
+    pending.resolve();
+    await Promise.resolve();
+    expect(console.error).toHaveBeenCalledTimes(2);
   });
 });

@@ -7,6 +7,7 @@
     "ui:composer",
     "ui:panel-tab",
     "ui:status-bar",
+    "ui:overlay",
     "ui:command",
     "ui:markdown",
     "ui:page",
@@ -26,7 +27,9 @@
     "runtime.switch.observe",
     "prompt.contribute.internal",
     "workspace.metadata.read",
-    "plugin.storage"
+    "plugin.storage",
+    "assets:bundle",
+    "assets:directory"
   ],
   "pluginIdShapes": {
     "$comment": "插件 id 语法单一事实源，与 Rust src-tauri/src/plugins/manifest.rs::is_valid_id 逐字节一致：总长（字节）2..=64；点分段，每段为 [a-z0-9][a-z0-9-]*（首字节小写字母或数字，其余小写字母/数字/连字符）。id 同时用作目录名，故本规则也是路径穿越护栏。",

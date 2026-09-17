@@ -623,6 +623,7 @@ fn build_router(ctx: WebCtx) -> Router {
         .route("/unlock", post(unlock_handler).get(unlock_get))
         .route("/ws", get(ws_handler))
         .route("/file", get(file_handler))
+        .route("/plugin-asset/{*asset_path}", get(plugin_asset_handler).options(plugin_asset_handler))
         .fallback(get(static_handler))
         .with_state(ctx)
 }
@@ -837,7 +838,7 @@ async fn static_handler(
     }
 }
 
-fn content_type(path: &str) -> &'static str {
+pub(crate) fn content_type(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "html" => "text/html; charset=utf-8",
@@ -857,6 +858,12 @@ fn content_type(path: &str) -> &'static str {
         "pdf" => "application/pdf",
         "txt" | "md" => "text/plain; charset=utf-8",
         "wasm" => "application/wasm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
         _ => "application/octet-stream",
     }
 }
@@ -890,6 +897,29 @@ async fn file_handler(
         Some((bytes, mime)) => ([(header::CONTENT_TYPE, mime)], bytes).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn plugin_asset_handler(
+    AxumState(ctx): AxumState<WebCtx>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: Uri,
+) -> Response {
+    if let Gate::Waiting(page) = gate(&ctx, &headers, peer) {
+        return page;
+    }
+    // Do not use Path: axum decodes that extractor, and a second decode in
+    // the shared protocol would turn literal percent sequences into traversal.
+    let Some((credential, asset_path)) = uri.path().strip_prefix("/plugin-asset/").and_then(|path| path.split_once('/')) else {
+        return crate::plugins::asset_protocol::rejection(StatusCode::BAD_REQUEST).map(axum::body::Body::from);
+    };
+    if token_required(&headers, peer) && credential != &*ctx.token {
+        return crate::plugins::asset_protocol::rejection(StatusCode::FORBIDDEN).map(axum::body::Body::from);
+    }
+    let prefix = format!("/plugin-asset/{credential}");
+    let path = format!("/{asset_path}");
+    crate::plugins::asset_protocol::handle(&method, &path, uri.query(), &prefix).await.map(axum::body::Body::from)
 }
 
 /// Same scope as tauri.conf.json's assetProtocol: everything under $HOME
@@ -947,6 +977,26 @@ struct PluginReadFileArgs {
 struct PluginStorageGetArgs {
     id: String,
     key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetIdArgs {
+    plugin_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetPathArgs {
+    plugin_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetRevokeArgs {
+    plugin_id: String,
+    grant_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1713,6 +1763,24 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "plugin_storage_get" => {
             let a: PluginStorageGetArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_storage_get(app.state(), a.id, a.key))
+        }
+        // Asset capabilities use the same authenticated bridge and backend
+        // permission gates as desktop; they do not grant general file access.
+        "plugin_asset_grant_directory" => {
+            let a: PluginAssetPathArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_grant_directory(a.plugin_id, a.path).await)
+        }
+        "plugin_asset_list_directories" => {
+            let a: PluginAssetIdArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_list_directories(a.plugin_id))
+        }
+        "plugin_asset_revoke_directory" => {
+            let a: PluginAssetRevokeArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_revoke_directory(a.plugin_id, a.grant_id))
+        }
+        "plugin_reveal_path" => {
+            let a: PluginAssetPathArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_reveal_path(a.plugin_id, a.path).await)
         }
         // Marketplace browsing is read-only too, so the web client renders
         // the market page; plugin_install_from_marketplace stays desktop-only.
