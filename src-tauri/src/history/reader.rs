@@ -429,7 +429,10 @@ pub async fn load_session_page(
 /// 用「绝对 .jsonl + 落在该引擎已知会话目录形态」收口,挡住借 IPC 读
 /// 发行版内任意 .jsonl 文件。
 fn is_plausible_remote_session_path(engine: &str, path: &str) -> bool {
-    if !path.ends_with(".jsonl") || !path.starts_with('/') {
+    // dsh 转录本是 zstd 压缩的 session*.jsonl.zstd;其余引擎均为 .jsonl。
+    let suffix_ok =
+        path.ends_with(".jsonl") || (engine == "dsh" && path.ends_with(".jsonl.zstd"));
+    if !suffix_ok || !path.starts_with('/') {
         return false;
     }
     // 拒绝 `..` 段与 NUL:防止借拼路径逃出会话树。
@@ -513,12 +516,12 @@ pub async fn load_remote_session_page(
     .map_err(|e| e.to_string())?
 }
 
-/// Remove the session's on-disk file/dir. kimi/grok wire files live under a
-/// per-session dir — validated against the engine home before removal so a
-/// corrupt/stale db row can never point remove_dir_all at an arbitrary tree.
-/// Returns Ok when the disk state is gone (or wisely skipped), Err when the
-/// removal failed — callers keep the db row on Err so a session cannot
-/// "delete then resurrect" on the next scan.
+/// Remove the session's on-disk file/dir. kimi/grok/dsh transcripts live
+/// under a per-session dir — validated against the engine's anchor roots
+/// before removal so a corrupt/stale db row can never point remove_dir_all
+/// at an arbitrary tree. Returns Ok when the disk state is gone (or wisely
+/// skipped), Err when the removal failed — callers keep the db row on Err
+/// so a session cannot "delete then resurrect" on the next scan.
 fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
     match engine {
         "claude" | "codex" | "pi" | "omp" | "agy" | "qoder" | "qoder-cn" => {
@@ -532,57 +535,78 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
         // the transcript also lives in `storage/message/<id>/` and one
         // `storage/part/<msg>/` dir per message — all under the same storage root.
         "opencode" => delete_opencode_session_disk(path),
+        "kimi" | "grok" | "dsh" => delete_dir_session_disk(engine, path),
+        // 未知引擎硬失败:宁可删除报错,也不能静默跳过磁盘删除让会话在下次
+        // 扫描"复活"(dsh 曾落进 kimi/grok 兜底 arm,锚定校验必失败而删不掉)。
+        _ => Err(format!("delete_session: unknown engine {engine}")),
+    }
+}
+
+/// kimi/grok/dsh:db 行指向会话目录内的主转录本,删除整个会话目录
+/// (subagent 日志等随目录一起清)。锚定根与扫描器
+/// dir_session_anchor_roots 同源——扫得到的会话必然删得掉(含 v0.9
+/// legacy/provider home),stale/损坏的 db 行也无法把 remove_dir_all
+/// 指向任意目录树。
+fn delete_dir_session_disk(engine: &str, path: &Path) -> Result<(), String> {
+    delete_dir_session_disk_anchored(engine, path, &super::scanner::dir_session_anchor_roots(engine))
+}
+
+/// 根列表可注入:单测不依赖 HOME/DSH_HOME 等进程级环境变量。
+fn delete_dir_session_disk_anchored(
+    engine: &str,
+    path: &Path,
+    roots: &[PathBuf],
+) -> Result<(), String> {
+    // kimi: .../<sessionDir>/agents/main/wire.jsonl -> <sessionDir>
+    // grok: .../<sessionDir>/chat_history.jsonl -> <sessionDir>
+    // dsh:  .../<sessionDir>/session*.jsonl.zstd -> <sessionDir>
+    let Some(session_dir) = (if engine == "kimi" {
+        path.parent()
+            .and_then(|p| p.parent())
+            .and_then(|a| a.parent())
+    } else {
+        path.parent()
+    }) else {
+        return Err(format!("no session dir for {}", path.display()));
+    };
+    let anchored = roots.iter().any(|root| {
+        crate::files::canonicalize_lenient(session_dir)
+            .map(|resolved| {
+                crate::files::canonicalize_lenient(root)
+                    .map(|base| resolved.starts_with(base))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    });
+    let structure_ok = match engine {
+        // Kimi dirs must show the expected agents/main/wire.jsonl shape.
+        "kimi" => session_dir
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl")
+            .is_file(),
+        "grok" => session_dir.join("chat_history.jsonl").is_file(),
+        // dsh 主转录本的世代文件名即结构标记(db 路径本就来自同名规则的扫描)。
         _ => {
-            // kimi: .../<sessionDir>/agents/main/wire.jsonl -> <sessionDir>
-            // grok: .../<sessionDir>/chat_history.jsonl -> <sessionDir>
-            let Some(session_dir) = (if engine == "kimi" {
-                path.parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|a| a.parent())
-            } else {
-                path.parent()
-            }) else {
-                return Err(format!("no session dir for {}", path.display()));
-            };
-            let home = crate::engine::engine_home(
-                None,
-                if engine == "kimi" {
-                    ".kimi-code"
-                } else {
-                    ".grok"
-                },
-            );
-            let anchored = crate::files::canonicalize_lenient(session_dir)
-                .map(|resolved| {
-                    crate::files::canonicalize_lenient(&home)
-                        .map(|root| resolved.starts_with(root))
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            // Kimi dirs must show the expected agents/main/wire.jsonl shape.
-            let structure_ok = if engine == "kimi" {
-                session_dir
-                    .join("agents")
-                    .join("main")
-                    .join("wire.jsonl")
-                    .is_file()
-            } else {
-                session_dir.join("chat_history.jsonl").is_file()
-            };
-            if !anchored || !structure_ok {
-                eprintln!(
-                    "[history] refusing disk delete outside {} home or unexpected layout: {}",
-                    engine,
-                    session_dir.display()
-                );
-                return Ok(());
-            }
-            match std::fs::remove_dir_all(session_dir) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(format!("remove {}: {e}", session_dir.display())),
-            }
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| super::scanner::dsh_log_generation(name).is_some())
         }
+    };
+    if !anchored || !structure_ok {
+        eprintln!(
+            "[history] refusing disk delete outside {} home or unexpected layout: {}",
+            engine,
+            session_dir.display()
+        );
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(session_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove {}: {e}", session_dir.display())),
     }
 }
 
@@ -683,6 +707,36 @@ pub async fn delete_session(
     .await
     .map_err(|e| e.to_string())??;
     sink.emit_sessions_changed();
+    Ok(())
+}
+
+/// 远程(WSL 发行版内)会话删除:插件会话源上报的 remotePath 经与
+/// load_remote_session_page 相同的形状白名单校验后,走同一套远程通道
+/// rm。dsh 的同目录旧世代日志一并清掉,目录仅在删空时移除(有其它文件
+/// 则保留)。远程会话没有本地 db 行,无需 emit_sessions_changed——前端
+/// 删除后自行刷新,插件源重新 list 时文件已不存在。
+#[tauri::command]
+pub async fn delete_remote_session(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_path: String,
+    engine: String,
+    remote_path: String,
+) -> Result<(), String> {
+    if !is_plausible_remote_session_path(&engine, &remote_path) {
+        return Err(format!("远程会话路径不合法: {remote_path}"));
+    }
+    let transport = crate::engine::wsl_transport::transport_for_workspace(&state.db, &workspace_path)
+        .ok_or_else(|| format!("工作区 {workspace_path} 未登记远程传输"))?;
+    let quoted = crate::engine::wsl_transport::sh_quote(&remote_path);
+    let mut script = format!("rm -f -- {quoted}");
+    if engine == "dsh" {
+        // 世代日志同目录共存(session.jsonl.zstd / session.vN.jsonl.zstd),
+        // 只删当前代会留下旧代被插件源重新列出;目录删空才移除。
+        script.push_str(&format!(
+            "\ndir=$(dirname -- {quoted})\nrm -f -- \"$dir\"/session.jsonl.zstd \"$dir\"/session.v*.jsonl.zstd\nrmdir -- \"$dir\" 2>/dev/null || true"
+        ));
+    }
+    crate::engine::wsl_transport::run_script_output(&transport, &script).await?;
     Ok(())
 }
 
@@ -1480,5 +1534,103 @@ mod tests {
         std::fs::write(&stray, "{}").unwrap();
         delete_session_disk("opencode", &stray).unwrap();
         assert!(stray.exists());
+    }
+    /// dsh sessions live in a per-session dir (`<home>/sessions/<cwd>/<dir>/
+    /// session*.jsonl.zstd`) with subagent logs alongside — deleting takes
+    /// the whole dir. Regression: dsh used to fall into the kimi/grok
+    /// fallback arm, whose `.grok` anchor always rejected the delete, so the
+    /// transcript survived and the next scan resurrected the session.
+    #[test]
+    fn delete_dsh_removes_session_dir() {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("dsh").join("sessions");
+        let dir = root.join("-home-dev-ws").join("sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("session.v1.jsonl.zstd");
+        std::fs::write(&log, b"zstd-bytes").unwrap();
+        std::fs::write(dir.join("subagent.log"), b"x").unwrap();
+
+        delete_dir_session_disk_anchored("dsh", &log, &[root]).unwrap();
+        assert!(!dir.exists());
+    }
+
+    /// A dsh dir outside every anchor root is refused (stale db rows must
+    /// never aim remove_dir_all at an arbitrary tree).
+    #[test]
+    fn delete_dsh_refuses_outside_anchor() {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("dsh").join("sessions");
+        let dir = root.join("-home-dev-ws").join("sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("session.jsonl.zstd");
+        std::fs::write(&log, b"zstd-bytes").unwrap();
+
+        let elsewhere = scratch.0.join("other-home");
+        delete_dir_session_disk_anchored("dsh", &log, &[elsewhere]).unwrap();
+        assert!(log.exists());
+    }
+
+    /// A non-generation file name is not a dsh transcript — refuse.
+    #[test]
+    fn delete_dsh_refuses_non_generation_name() {
+        let scratch = Scratch::new();
+        let root = scratch.0.join("dsh").join("sessions");
+        let dir = root.join("-home-dev-ws").join("sess-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("session.jsonl");
+        std::fs::write(&log, b"{}").unwrap();
+
+        delete_dir_session_disk_anchored("dsh", &log, &[root]).unwrap();
+        assert!(log.exists());
+    }
+
+    /// kimi discovery spans the current home plus legacy/provider homes; the
+    /// delete anchor must accept every root discovery scans, or sessions
+    /// from a legacy home delete-then-resurrect.
+    #[test]
+    fn delete_kimi_anchors_every_discovery_root() {
+        let scratch = Scratch::new();
+        let primary = scratch.0.join(".kimi-code");
+        let legacy = scratch.0.join(".kimi");
+        let dir = legacy.join("sess-9");
+        let wire = dir.join("agents").join("main").join("wire.jsonl");
+        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        std::fs::write(&wire, b"{}").unwrap();
+
+        // 只锚定主 home(旧行为):legacy home 的会话被拒删。
+        delete_dir_session_disk_anchored("kimi", &wire, &[primary.clone()]).unwrap();
+        assert!(wire.exists());
+        // 锚定根与发现同源:删除成功。
+        delete_dir_session_disk_anchored("kimi", &wire, &[primary, legacy]).unwrap();
+        assert!(!dir.exists());
+    }
+
+    /// Unknown engines fail loudly instead of silently skipping the disk
+    /// delete (the silent path is how deleted sessions resurrect).
+    #[test]
+    fn delete_unknown_engine_errors() {
+        let scratch = Scratch::new();
+        let path = scratch.0.join("sess.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        assert!(delete_session_disk("future-engine", &path).is_err());
+        assert!(path.exists());
+    }
+
+    /// dsh 远程转录本是 zstd 压缩:同 /sessions/ 形态下放行 .jsonl.zstd。
+    #[test]
+    fn remote_dsh_zstd_path_shape() {
+        assert!(is_plausible_remote_session_path(
+            "dsh",
+            "/home/dev/.dsh/sessions/-home-dev-ws/sess-1/session.v2.jsonl.zstd"
+        ));
+        // 其它引擎不认 zstd 后缀;dsh 的 zstd 也得落在会话目录形态内。
+        assert!(!is_plausible_remote_session_path(
+            "claude",
+            "/home/dev/.claude/projects/p/session.jsonl.zstd"
+        ));
+        assert!(!is_plausible_remote_session_path(
+            "dsh",
+            "/home/dev/notes/session.jsonl.zstd"
+        ));
     }
 }

@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import Copy from "lucide-react/dist/esm/icons/copy";
 import Pencil from "lucide-react/dist/esm/icons/pencil";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
+import { sessionMenuRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import { ContextMenu, type ContextMenuEntry } from "@/components/context-menu";
 import type { ThreadAction } from "@/components/application/ai-chat/sidebar-types";
 
@@ -30,6 +31,9 @@ export function ThreadContextMenu({
   onCopyId?: (id: string) => void;
 }) {
   const { t } = useTranslation();
+  // 插件追加行（ctx.ui.registerSessionMenuItem）：label 是 thunk，
+  // 语言切换即时重命名；run 收到菜单所在的会话。
+  const pluginDefs = useRegistry(sessionMenuRegistry);
 
   const entries: (ContextMenuEntry | "separator")[] = [];
   if (onThreadAction) {
@@ -57,6 +61,27 @@ export function ThreadContextMenu({
       danger: true,
       onSelect: () => onThreadAction(menu.threadId, "delete"),
     });
+  }
+  if (pluginDefs.length > 0) {
+    // threadId 约定为 "<engine>/<sessionId>"（侧栏行 id），引擎段不含 "/"。
+    const slash = menu.threadId.indexOf("/");
+    const target =
+      slash > 0
+        ? { engine: menu.threadId.slice(0, slash), sessionId: menu.threadId.slice(slash + 1) }
+        : null;
+    if (target) {
+      if (entries.length > 0) entries.push("separator");
+      for (const def of pluginDefs) {
+        const Icon = def.icon;
+        entries.push({
+          id: def.id,
+          label: def.label(),
+          icon: Icon ? <Icon className="size-4" aria-hidden /> : null,
+          danger: def.danger,
+          onSelect: () => def.run(target),
+        });
+      }
+    }
   }
 
   return (

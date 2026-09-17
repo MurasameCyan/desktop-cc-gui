@@ -42,6 +42,7 @@ import {
   settleLiveRows,
   untrackRun,
 } from "./store/stream";
+import { mergeUsage } from "./usage";
 import {
   bindRunLifecycle,
   finishRunLifecycle,
@@ -1568,8 +1569,17 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
 
     deleteSession: async (engine, sessionId) => {
+      // 远程(插件会话源,如 WSL 发行版内 CLI)会话没有本地 db 行,本地
+      // delete_session 只会 "session not found";走远程通道删 remotePath。
+      const meta = get().sessions.find(
+        (x) => x.engine === engine && x.sessionId === sessionId,
+      );
       try {
-        await ipc.deleteSession(engine, sessionId);
+        if (meta?.remote && meta.remotePath) {
+          await ipc.deleteRemoteSession(meta.workspacePath, engine, meta.remotePath);
+        } else {
+          await ipc.deleteSession(engine, sessionId);
+        }
       } catch (error) {
         set({ actionError: errorText(error) });
         return;
@@ -1749,7 +1759,12 @@ export const useChatStore = create<ChatStore>((set, get) => {
         const latestUsage =
           [...page.messages].reverse().find((m) => m.usage)?.usage ?? null;
         if (latestUsage) {
-          patchSession(set, targetKey, { usage: latestUsage });
+          // The transcript carries the API's per-message usage and no window;
+          // only the live result line reports one. Keep the window already
+          // known for this session so the gauge holds its scale.
+          patchSession(set, targetKey, {
+            usage: mergeUsage(latestUsage, get().bySession[targetKey]?.usage),
+          });
         }
         void ipc.rescanSessions();
       } catch (error) {

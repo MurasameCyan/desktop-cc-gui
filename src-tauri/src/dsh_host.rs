@@ -71,6 +71,14 @@ pub struct DshHostState {
 struct Spawned {
     child: Child,
     origin: String,
+    /// Kill-on-close job guard (Windows): conversation shells (pwsh.exe)
+    /// spawned by host sessions can orphan before the taskkill /T walk ever
+    /// sees them; dropping this guard closes the job and the kernel sweeps
+    /// every surviving member. Field order matters: the guard is declared
+    /// last so it drops after `Drop::drop` kills the host, sweeping any
+    /// grandchild that escaped the tree walk.
+    #[cfg(windows)]
+    _tree_guard: Option<std::sync::Arc<crate::engine::job::KillOnCloseJob>>,
 }
 
 impl Drop for Spawned {
@@ -623,6 +631,10 @@ pub(crate) async fn ensure_host(
     let mut child = command.spawn().map_err(|e| {
         format!("无法启动 dsh web（{bin}）：{e}。请确认已安装 @deepseek-ai/dsh，或检查自定义路径。")
     })?;
+    // Kill-on-close job (Windows): same orphan class as engine runs — host
+    // sessions' grandchildren escape every tree walk once their parent exits.
+    #[cfg(windows)]
+    let tree_guard = crate::engine::job::assign_kill_on_close(&child);
     let output = Arc::new(Mutex::new(String::new()));
     let capture = Arc::new(TokenCapture {
         origin: cfg.origin.clone(),
@@ -645,6 +657,8 @@ pub(crate) async fn ensure_host(
             *lock(&host_state.spawned) = Some(Spawned {
                 child,
                 origin: cfg.origin.clone(),
+                #[cfg(windows)]
+                _tree_guard: tree_guard,
             });
             return Ok(());
         }

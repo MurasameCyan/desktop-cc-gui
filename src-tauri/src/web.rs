@@ -1052,6 +1052,13 @@ struct LoadRemoteSessionPageArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DeleteRemoteSessionArgs {
+    workspace_path: String,
+    engine: String,
+    remote_path: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UsageSummaryArgs {
     days: u32,
     tz_offset_minutes: i32,
@@ -1421,6 +1428,10 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "delete_session" => {
             let a: EngineSessionArgs = parse_args(&raw)?;
             ser(crate::history::reader::delete_session(app.state(), a.engine, a.session_id).await)
+        }
+        "delete_remote_session" => {
+            let a: DeleteRemoteSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.remote_path).await)
         }
         "pin_session" => {
             let a: PinSessionArgs = parse_args(&raw)?;

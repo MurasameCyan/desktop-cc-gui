@@ -80,6 +80,12 @@ export interface PluginManifest {
 
 export type ComposerSlotId = "addMenu" | "cliMenu" | "permissionMenu";
 
+/** 侧栏会话右键菜单被打开时所在的会话行。 */
+export interface SessionMenuTarget {
+  engine: string;
+  sessionId: string;
+}
+
 export type ComponentLike<P = Record<string, never>> = (props: P) => unknown;
 export interface WorkspaceMetadata {
   id: string;
@@ -336,6 +342,19 @@ export interface PluginContext {
       keywords?: () => string[];
       run: () => void;
     }): Disposer;
+    /** 侧栏会话右键菜单追加行（权限 ui:session-menu，0.3.5 起）；
+     *  run 收到打开菜单的会话。 */
+    registerSessionMenuItem(def: {
+      key?: string;
+      label: () => string;
+      icon?: ComponentLike<{ className?: string }>;
+      danger?: boolean;
+      run: (target: SessionMenuTarget) => void;
+    }): Disposer;
+    /** 跳转到本插件的设置页（权限 `ui:settings-section`，0.3.6 起）。
+     *  `key` 对应 registerSettingsSection 的子 key，省略时打开主 section；
+     *  供状态栏 chip、面板按钮等做深链入口。 */
+    openSettings(key?: string): void;
     /** Markdown 渲染管线追加（权限 ui:markdown）。 */
     registerMarkdownRenderer(def: {
       key?: string;

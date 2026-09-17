@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { sessionMenuRegistry } from "@ccgui/plugin-sdk";
 import { AiChatSidebar } from "./ai-chat-sidebar";
 import type { AiChatRepo } from "./ai-chat-sidebar";
 import type * as ReactI18next from "react-i18next";
@@ -140,6 +141,34 @@ it("opens the thread context menu on right-click and dispatches its entries", as
   menu = openMenu();
   await act(async () => menuItem(menu, "chat.deleteSession").click());
   expect(onThreadAction).toHaveBeenCalledWith("claude/abc-123", "delete");
+});
+
+it("renders plugin session-menu items and dispatches the parsed target", async () => {
+  const run = vi.fn();
+  const dispose = sessionMenuRegistry.register({
+    id: "plugin:auto-title:rename",
+    label: () => "AI Rename",
+    run,
+  });
+  try {
+    const thread = { id: "omp/sid-42", label: "拖入分组", time: "1分钟" };
+    await act(async () => {
+      root.render(
+        <AiChatSidebar
+          repos={[{ id: "a", label: "a", defaultOpen: true, threads: [thread] }]}
+          onThreadAction={vi.fn()}
+        />,
+      );
+    });
+
+    await rightClick(threadRow("拖入分组"));
+    const menu = openMenu();
+    await act(async () => menuItem(menu, "AI Rename").click());
+    expect(run).toHaveBeenCalledWith({ engine: "omp", sessionId: "sid-42" });
+    expect(document.body.querySelector("[role='menu']")).toBeNull();
+  } finally {
+    dispose();
+  }
 });
 
 it("keeps right-click inert when no thread handler is wired", async () => {

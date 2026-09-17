@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
@@ -31,7 +31,8 @@ import { useTabModelDisplay } from "./use-tab-model-display";
 import type { EngineInfo, Workspace } from "@/lib/ipc";
 import type { OmpServiceTier } from "@/lib/omp-service-tier";
 import { EmptyState } from "@/components/base/empty-state";
-import { ASSUMED_CONTEXT_WINDOW, parseUsage } from "../usage";
+import { parseUsage } from "../usage";
+import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -320,15 +321,25 @@ export const ChatConversation = memo(function ChatConversation({
     [pendingEngines],
   );
 
+  const displayModel = displayModels[activeEngine];
   // Conversation-reported window (Codex token_count, Claude's modelUsage)
-  // wins; the model catalog is the fallback for engines that never report
-  // one, and the shared constant is the last resort.
-  const contextMax =
-    parseUsage(sessionUsage)?.contextWindow ||
-    (catalogs[activeEngine]?.models ?? []).find(
-      (m) => m.id === displayModels[activeEngine],
-    )?.contextWindow ||
-    ASSUMED_CONTEXT_WINDOW;
+  // wins; a fresh session starts from the last window this engine+model was
+  // seen reporting; the model catalog is the fallback for engines that never
+  // report one, and the shared constant is the last resort.
+  const contextMax = resolveContextMax({
+    usage: sessionUsage,
+    engine: activeEngine,
+    model: displayModel,
+    catalogWindow: (catalogs[activeEngine]?.models ?? []).find(
+      (m) => m.id === displayModel,
+    )?.contextWindow,
+  });
+  const observedWindow = parseUsage(sessionUsage)?.contextWindow;
+  useEffect(() => {
+    if (observedWindow) {
+      rememberContextWindow(activeEngine, displayModel, observedWindow);
+    }
+  }, [observedWindow, activeEngine, displayModel]);
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;

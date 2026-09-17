@@ -154,11 +154,7 @@ fn legacy_provider_homes(dir_name: &str) -> Vec<PathBuf> {
 }
 
 fn discover_kimi(workspace: &Path) -> Vec<SessionFile> {
-    // Current CLI home, the v0.9-era CLI home (`~/.kimi`, KIMI_HOME
-    // override), and every v0.9 managed provider home.
-    let mut homes = vec![crate::engine::engine_home(None, ".kimi-code")];
-    homes.push(crate::engine::engine_home(Some("KIMI_HOME"), ".kimi"));
-    homes.extend(legacy_provider_homes("kimi-provider-homes"));
+    let homes = dir_session_anchor_roots("kimi");
     let mut out = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     for base in homes {
@@ -442,17 +438,40 @@ fn grok_url_decode(encoded: &str) -> String {
 }
 
 fn discover_grok(workspace: &Path) -> Vec<SessionFile> {
-    let mut roots = vec![crate::engine::engine_home(None, ".grok").join("sessions")];
-    roots.extend(
-        legacy_provider_homes("grok-provider-homes")
-            .into_iter()
-            .map(|home| home.join("sessions")),
-    );
+    let roots = dir_session_anchor_roots("grok");
     let mut out = Vec::new();
     for root in roots {
         out.extend(discover_grok_in(&root, workspace));
     }
     out
+}
+
+/// 目录型引擎(kimi/grok/dsh)会话目录的锚定根。kimi 的会话目录直接落在
+/// 各 home 下(session_index 记录绝对路径);grok/dsh 落在 <home>/sessions/
+/// 的 cwd 子目录下。发现(本模块)与删除(reader)共用这一份,保证
+/// 「扫得到的会话必然删得掉」——v0.9 的 legacy/provider home 也在其列。
+pub(crate) fn dir_session_anchor_roots(engine: &str) -> Vec<PathBuf> {
+    match engine {
+        "kimi" => {
+            // Current CLI home, the v0.9-era CLI home (`~/.kimi`, KIMI_HOME
+            // override), and every v0.9 managed provider home.
+            let mut homes = vec![crate::engine::engine_home(None, ".kimi-code")];
+            homes.push(crate::engine::engine_home(Some("KIMI_HOME"), ".kimi"));
+            homes.extend(legacy_provider_homes("kimi-provider-homes"));
+            homes
+        }
+        "grok" => {
+            let mut roots = vec![crate::engine::engine_home(None, ".grok").join("sessions")];
+            roots.extend(
+                legacy_provider_homes("grok-provider-homes")
+                    .into_iter()
+                    .map(|home| home.join("sessions")),
+            );
+            roots
+        }
+        "dsh" => vec![crate::engine::engine_home(Some("DSH_HOME"), ".dsh").join("sessions")],
+        _ => Vec::new(),
+    }
 }
 
 fn discover_grok_in(sessions_root: &Path, workspace: &Path) -> Vec<SessionFile> {
@@ -756,7 +775,7 @@ fn pi_family_candidates(home_dir_name: &str) -> Vec<PathBuf> {
 
 /// Canonical compressed DSH log generation. v0 is `session.jsonl.zstd`;
 /// later formats are `session.vN.jsonl.zstd` (no leading zeros).
-fn dsh_log_generation(name: &str) -> Option<u32> {
+pub(crate) fn dsh_log_generation(name: &str) -> Option<u32> {
     const SUFFIX: &str = ".jsonl.zstd";
     let stem = name.strip_suffix(SUFFIX)?;
     if stem == "session" {
@@ -793,18 +812,19 @@ fn dsh_session_log(dir: &Path) -> Option<PathBuf> {
 }
 
 fn dsh_candidates() -> Vec<PathBuf> {
-    let root = crate::engine::engine_home(Some("DSH_HOME"), ".dsh").join("sessions");
     let mut out = Vec::new();
-    let Ok(cwd_dirs) = std::fs::read_dir(&root) else {
-        return out;
-    };
-    for cwd_entry in cwd_dirs.flatten() {
-        let Ok(session_dirs) = std::fs::read_dir(cwd_entry.path()) else {
+    for root in dir_session_anchor_roots("dsh") {
+        let Ok(cwd_dirs) = std::fs::read_dir(&root) else {
             continue;
         };
-        for session_entry in session_dirs.flatten() {
-            if let Some(file) = dsh_session_log(&session_entry.path()) {
-                out.push(file);
+        for cwd_entry in cwd_dirs.flatten() {
+            let Ok(session_dirs) = std::fs::read_dir(cwd_entry.path()) else {
+                continue;
+            };
+            for session_entry in session_dirs.flatten() {
+                if let Some(file) = dsh_session_log(&session_entry.path()) {
+                    out.push(file);
+                }
             }
         }
     }

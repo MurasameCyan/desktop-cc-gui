@@ -78,7 +78,12 @@ function ThreadItem({
             title={t("chat.sessionUnseen")}
           />
         ) : null}
-        <span className="min-w-0 flex-1 truncate text-body-2-medium text-text-secondary">
+        {/* Native title tooltip: hover a moment to read the full title when
+            the row truncates it (same pattern as the repo row below). */}
+        <span
+          className="min-w-0 flex-1 truncate text-body-2-medium text-text-secondary"
+          title={label}
+        >
           {pinned && (
             <Pin
               fill="currentColor"

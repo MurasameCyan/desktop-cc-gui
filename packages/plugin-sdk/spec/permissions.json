@@ -12,6 +12,7 @@
     "ui:page",
     "ui:timeline-row",
     "ui:workspace-menu",
+    "ui:session-menu",
     "theme",
     "i18n",
     "events",

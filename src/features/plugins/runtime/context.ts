@@ -12,6 +12,7 @@ import {
   pageRegistry,
   panelTabRegistry,
   scopedPluginId,
+  sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
   timelineRowRegistry,
@@ -336,6 +337,23 @@ export function createPluginContext(
             run: () => runAsPlugin(def.run),
           }),
         );
+      },
+      registerSessionMenuItem(def) {
+        requirePermission("ui:session-menu");
+        return track(
+          sessionMenuRegistry.register({
+            id: scopedPluginId(id, def.key),
+            label: def.label,
+            icon: def.icon,
+            danger: def.danger,
+            run: (target) => runAsPlugin(() => def.run(target)),
+          }),
+        );
+      },
+      openSettings(key) {
+        requirePermission("ui:settings-section");
+        // 宿主是 hash 路由（见 features/commands/builtins.ts 的设置命令）。
+        window.location.hash = `#/settings?page=${scopedPluginId(id, key)}`;
       },
       registerMarkdownRenderer(def) {
         requirePermission("ui:markdown");

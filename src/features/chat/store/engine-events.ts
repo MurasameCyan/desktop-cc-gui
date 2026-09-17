@@ -871,8 +871,12 @@ function onUsage(
 ) {
   const parsed = parseUsage(event.data);
   const totals = parsed ? addTurnUsage(event.runId, parsed) : null;
+  // A compaction report carries only the new occupancy, so the window is
+  // taken from the last snapshot that had one: the gauge must not drop to
+  // the assumed 200k just because this report is narrower (see mergeUsage).
+  const prev = deps.get().bySession[key]?.usage;
   patchSession(deps.set, key, {
-    usage: event.data,
+    usage: mergeUsage(event.data, prev),
     ...(totals ? { turnUsage: usageSnapshot(totals) } : {}),
   });
   if (parsed) recordUsageReport(deps, event, key, parsed);
@@ -1256,10 +1260,13 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   // stopped the session, the next message is theirs to send.
   if (!prev.interrupted) {
     deps.drainQueue(key);
-    // If this turn was a /compact command, refresh latest token usage from session history
-    // once the engine settles the session file on disk.
+    // Claude's result line reports the turn's summed usage (every request of
+    // the turn added up), not the occupancy the meter shows — so re-read the
+    // latest per-message snapshot from the session file once the engine has
+    // settled it. /compact turns need the same re-read on every engine.
     const lastUser = [...prev.messages].reverse().find((m) => m.role === "user");
-    if (lastUser?.text.trim().startsWith("/compact")) {
+    const compactTurn = Boolean(lastUser?.text.trim().startsWith("/compact"));
+    if (event.engine === "claude" || compactTurn) {
       setTimeout(() => {
         deps.refreshSessionUsage?.(key)?.catch(() => {});
       }, 400);

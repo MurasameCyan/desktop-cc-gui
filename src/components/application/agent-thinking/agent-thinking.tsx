@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { cx } from "@/utils/cx";
 
 /**
@@ -295,6 +295,76 @@ function ElapsedTimer({
 
 /* ----------------------------------------------------------------- loader */
 
+function VariantIndicator({ variant }: { variant: AgentThinkingVariant }) {
+  if (variant === "wave" || variant === "spin") {
+    return <DotsIndicator variant={variant} />;
+  }
+  if (variant === "stars") {
+    return <StarsIndicator />;
+  }
+  return <InfinityIndicator />;
+}
+
+/** One meta-row entry, preceded by the "·" separator. */
+function MetaItem({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <span aria-hidden className="text-text-tertiary">·</span>
+      {children}
+    </>
+  );
+}
+
+type MetaRowProps = Pick<
+  AgentThinkingProps,
+  | "showTimer"
+  | "startedAt"
+  | "durationFormatter"
+  | "usage"
+  | "model"
+  | "effort"
+  | "retry"
+  | "retryDetail"
+>;
+
+function MetaRow({
+  showTimer,
+  startedAt,
+  durationFormatter,
+  usage,
+  model,
+  effort,
+  retry,
+  retryDetail,
+}: MetaRowProps) {
+  if (!(showTimer || model || effort || usage || retry)) {
+    return null;
+  }
+  return (
+    <div className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary tabular-nums">
+      {showTimer && (
+        <ElapsedTimer
+          startedAt={startedAt}
+          formatter={durationFormatter}
+        />
+      )}
+      {usage && <MetaItem><span>{usage}</span></MetaItem>}
+      {model && <MetaItem><span>{model}</span></MetaItem>}
+      {effort && <MetaItem><span>{effort}</span></MetaItem>}
+      {retry && (
+        <MetaItem>
+          {/* Progress, not an error: a retry that recovers is invisible
+              apart from this chip, and one that fails surfaces as the
+              turn's own error banner. */}
+          <span title={retryDetail ?? undefined} className="text-text-warning-primary">
+            {retry}
+          </span>
+        </MetaItem>
+      )}
+    </div>
+  );
+}
+
 export function AgentThinking({
   variant = "wave",
   label,
@@ -318,54 +388,23 @@ export function AgentThinking({
       className={cx("flex items-center gap-2.5", className)}
       style={{ color, "--bui-agent-thinking-tone": color } as CSSProperties}
     >
-      {(variant === "wave" || variant === "spin") && <DotsIndicator variant={variant} />}
-      {variant === "stars" && <StarsIndicator />}
-      {variant === "infinity" && <InfinityIndicator />}
+      <VariantIndicator variant={variant} />
       <span
         aria-label={label}
         className={cx("text-body-medium", shimmer && "bui-agent-thinking-label")}
       >
         {label}
       </span>
-      {(showTimer || model || effort || usage || retry) && (
-        <div className="flex items-center gap-1.5 text-caption-1-regular text-text-tertiary tabular-nums">
-          {showTimer && (
-            <ElapsedTimer
-              startedAt={startedAt}
-              formatter={durationFormatter}
-            />
-          )}
-          {usage && (
-            <>
-              <span aria-hidden className="text-text-tertiary">·</span>
-              <span>{usage}</span>
-            </>
-          )}
-          {model && (
-            <>
-              <span aria-hidden className="text-text-tertiary">·</span>
-              <span>{model}</span>
-            </>
-          )}
-          {effort && (
-            <>
-              <span aria-hidden className="text-text-tertiary">·</span>
-              <span>{effort}</span>
-            </>
-          )}
-          {retry && (
-            <>
-              <span aria-hidden className="text-text-tertiary">·</span>
-              {/* Progress, not an error: a retry that recovers is invisible
-                  apart from this chip, and one that fails surfaces as the
-                  turn's own error banner. */}
-              <span title={retryDetail ?? undefined} className="text-text-warning-primary">
-                {retry}
-              </span>
-            </>
-          )}
-        </div>
-      )}
+      <MetaRow
+        showTimer={showTimer}
+        startedAt={startedAt}
+        durationFormatter={durationFormatter}
+        usage={usage}
+        model={model}
+        effort={effort}
+        retry={retry}
+        retryDetail={retryDetail}
+      />
     </div>
   );
 }

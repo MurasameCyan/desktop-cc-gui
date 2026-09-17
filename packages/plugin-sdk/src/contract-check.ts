@@ -30,6 +30,7 @@ import type {
   SessionClosedEvent,
   SessionCreatedEvent,
   SessionHooks,
+  SessionMenuTarget,
   SessionRestoredEvent,
   ToolFinishedEvent,
   TurnCancelledEvent,
@@ -69,6 +70,7 @@ export type _PluginManifest = Assert<Mutual<PluginManifest, Pub.PluginManifest>>
 export type _JsonSchemaObject = Assert<Mutual<JsonSchemaObject, Pub.JsonSchemaObject>>;
 export type _JsonSchemaProperty = Assert<Mutual<JsonSchemaProperty, Pub.JsonSchemaProperty>>;
 export type _ComposerSlotId = Assert<Mutual<ComposerSlotId, Pub.ComposerSlotId>>;
+export type _SessionMenuTarget = Assert<Mutual<SessionMenuTarget, Pub.SessionMenuTarget>>;
 export type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
 export type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
 export type _PluginIdValidator = Assert<Mutual<typeof isValidPluginId, typeof Pub.isValidPluginId>>;
@@ -108,12 +110,12 @@ export type _DocumentStorage = Assert<Mutual<DocumentStorage, Pub.DocumentStorag
 // --- 可选成员漂移 -----------------------------------------------------------
 // Mutual 的双向可赋值对「一侧新增**可选**字段/可选参数」不敏感（可选属性
 // 与尾随可选参数在结构赋值中被忽略）。故对本次新增的可选成员单列断言：
-// InternalMessageCapture.validate（可选字段 → key 集合）与
-// DocumentStorage.remove 的 expectedVersion（可选参数 → 参数元组）。
+// 带可选字段的结构检查 key 集合，带可选参数的方法检查参数元组。
 
 /** 单方法的参数元组——捕获可选参数差异，Mutual 对参数列表不敏感。 */
 type Params<F> = F extends (...args: infer P) => unknown ? P : never;
 
+export type _BeforeTurnResultKeys = Assert<KeyParity<BeforeTurnResult, Pub.BeforeTurnResult>>;
 export type _InternalMessageCaptureKeys = Assert<
   KeyParity<InternalMessageCapture, Pub.InternalMessageCapture>
 >;

@@ -20,10 +20,11 @@ vi.mock("@/lib/ipc", () => ({
     listSessions: vi.fn(async () => []),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     loadRemoteSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
+    deleteSession: vi.fn(async () => {}),
+    deleteRemoteSession: vi.fn(async () => {}),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
-    deleteSession: vi.fn(async () => {}),
   },
 }));
 vi.mock("@/lib/events", () => ({
@@ -251,6 +252,41 @@ describe("compactContext and refreshSessionUsage", () => {
     await useChatStore.getState().selectSession("codex", "remote-1", WS);
     expect(ipc.loadRemoteSessionPage).toHaveBeenCalledWith(WS, "codex", "remote-1", "/home/u/x.jsonl", 100, undefined);
     expect(ipc.loadSessionPage).not.toHaveBeenCalledWith("codex", "remote-1", 100);
+  });
+
+  it("deleteSession routes remote metas through deleteRemoteSession", async () => {
+    const remoteMeta: SessionMeta = {
+      engine: "dsh",
+      sessionId: "remote-1",
+      workspacePath: WS,
+      filePath: "",
+      fileSize: 0,
+      fileMtimeMs: 0,
+      title: "remote",
+      preview: "",
+      createdAt: null,
+      updatedAt: null,
+      messageCount: 0,
+      pinned: false,
+      customTitle: null,
+      remote: true,
+      remotePath: "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
+    };
+    const localMeta: SessionMeta = { ...remoteMeta, engine: "omp", sessionId: "local-1", remote: false, remotePath: undefined };
+    useChatStore.setState({ sessions: [remoteMeta, localMeta] });
+
+    await useChatStore.getState().deleteSession("dsh", "remote-1");
+    expect(ipc.deleteRemoteSession).toHaveBeenCalledWith(
+      WS,
+      "dsh",
+      "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
+    );
+    expect(ipc.deleteSession).not.toHaveBeenCalled();
+    expect(useChatStore.getState().sessions.map((s) => s.sessionId)).toEqual(["local-1"]);
+
+    await useChatStore.getState().deleteSession("omp", "local-1");
+    expect(ipc.deleteSession).toHaveBeenCalledWith("omp", "local-1");
+    expect(useChatStore.getState().sessions).toEqual([]);
   });
 
   it("pinModels(updates, false) 只更新内存 models,不触碰 persisted 默认", async () => {

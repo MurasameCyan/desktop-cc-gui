@@ -18,6 +18,36 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.0.3",
+    date: "2026-09-16",
+    content: {
+      zh: `✨ 新功能
+- Windows 可切换**仿 macOS 自绘标题栏**
+- 侧栏工作区行可**拖拽**到分组 / 未分组 / 已归档完成移动
+- 插件 SDK 0.3.5 / 0.3.6：新增会话右键菜单扩展点 ui:session-menu；ctx.ui.openSettings 让插件深链自身设置页
+
+🐛 修复
+- Windows 对话孙进程（pwsh/conhost）孤儿泄漏：改用 Job Object 内核级清扫，dsh host、登录 shell 探针、插件子进程一并封堵；Unix 侧同步清扫进程组
+- 上下文窗口显示：/compact 后分母不再回落 200k；新会话记住引擎上报的窗口；claude 回合结束自动重读真实占用，无需手动「刷新用量」
+- claude auto 模式联网被拦截：预批准 WebSearch / WebFetch
+- 模型目录探测死循环风暴；DSH 客户端本机 origin 恒直连
+- codex 旧 CLI 预检并给出可操作升级提示；stderr 为空时错误横幅兜底
+- dsh / 远程会话删除修复：新增 delete_remote_session IPC，dsh 删除不再失败复活`,
+      en: `✨ Features
+- Windows can switch to a **macOS-style custom title bar**
+- Sidebar workspace rows can be **dragged** into groups / ungrouped / archived containers
+- Plugin SDK 0.3.5 / 0.3.6: new session context-menu extension point ui:session-menu; ctx.ui.openSettings deep-links a plugin to its own settings page
+
+🐛 Fixes
+- Windows grandchild process (pwsh/conhost) orphan leaks: Job Object kernel-level cleanup now covers conversations, the dsh host, login-shell probes, and plugin child processes; Unix sides sweep the process group as well
+- Context window display: the denominator no longer falls back to 200k after /compact; new sessions remember the engine-reported window; claude turns auto-reread real usage on completion — no manual "refresh usage" needed
+- claude auto mode network access blocked: pre-approves WebSearch / WebFetch
+- Model catalog probe infinite loop storm; DSH client always connects directly for local origins
+- codex legacy CLI preflight with an actionable upgrade hint; error banner falls back when stderr is empty
+- dsh / remote session deletion fixed: new delete_remote_session IPC, dsh deletions no longer resurrect`,
+    },
+  },
+  {
     version: "1.0.2",
     date: "2026-09-15",
     content: {

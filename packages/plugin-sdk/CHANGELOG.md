@@ -6,6 +6,7 @@
 - 新增 `BeforeTurnResult.isCurrent` 同步生命周期守卫：插件可在不卸载其他工作区功能的情况下撤销已返回的提示和捕获声明；宿主在收集、再次注入及接纳时检查，失效结果不会消费交接。
 - 宿主缓存提示绑定原注册生命周期，复用贡献对象或重新注册不能复活旧提示。停用后下一次发送携带一次性旧指令撤销，启动失败时保留重试，超出所有者记账容量时保留通用撤销覆盖。
 - 受权限控制的 SDK 操作可从插件回调调用；桥命令先固定最终 JSON 载荷，再校验授权并绑定插件身份，序列化钩子不能替换已检查请求。
+- 合并保留上游 0.3.5 的会话右键菜单（`ctx.ui.registerSessionMenuItem`、`ui:session-menu`）与 0.3.6 的设置页深链（`ctx.ui.openSettings`、`ui:settings-section`）；对应历史条目及原始日期保留如下。
 
 ## 0.4.0 — 2026-09-13
 
@@ -33,6 +34,17 @@
 - `plugin_exec_spawn` 桥命令成功时 resolve 为 void（Rust 返回 ()），文档同步更正。
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
+
+## 0.3.6 — 2026-09-16
+- **新增能力**：`ctx.ui.openSettings(key?)`（复用权限 `ui:settings-section`）——跳转到
+  本插件的设置页（hash 路由 `#/settings?page=plugin:<id>[:<key>]`），供状态栏 chip、
+  面板按钮等做深链入口。首个消费者：auto-title 状态栏 chip 点击改跳设置页。
+
+## 0.3.5 — 2026-09-16
+- **新增能力**：`ctx.ui.registerSessionMenuItem({ key?, label, icon?, danger?, run })`（权限
+  `ui:session-menu`）——在侧栏会话右键菜单追加一行，`run` 收到打开菜单的会话
+  `{ engine, sessionId }`；label 为 thunk，语言切换即时重命名。首个消费者：auto-title
+  插件的「重新命名（自动命名）」菜单项。
 
 ## 0.3.4 — 2026-09-14
 - **新增能力**:`ctx.sessions.registerSource({ id, list })`(权限 `host:session`)——登记

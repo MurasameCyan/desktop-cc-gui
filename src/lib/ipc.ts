@@ -197,6 +197,9 @@ export interface CliConfig {
 
 export interface AppSettings {
   theme: string;
+  /** Windows 标题栏样式："native" | "mac"（仿 mac 自绘标题栏）。仅 Windows 生效，
+   *  改动需重启应用；macOS 恒为系统原生红绿灯。 */
+  titlebar: string;
   /** Sidebar workspace groups (工作区二级分类), ordered by sortOrder then name.
    *  The assignment lives on each workspace (`Workspace.groupId`). */
   workspaceGroups: WorkspaceGroup[];
@@ -689,6 +692,8 @@ export const ipc = {
   },
   setWindowTheme: (dark: boolean) =>
     invoke<void>("set_window_theme", { dark }),
+  /** 立即重启应用（标题栏样式等需重启生效的设置项用）。 */
+  restartApp: () => invoke<void>("restart_app"),
   // engine
   sendMessage: (args: {
     engine: string;
@@ -766,6 +771,11 @@ export const ipc = {
     }),
   deleteSession: (engine: string, sessionId: string) =>
     invoke<void>("delete_session", { engine, sessionId }),
+  /** Remote (plugin-fed, e.g. WSL distro) session delete: no local db row
+   *  exists, so the host rm's the validated remotePath over the same remote
+   *  channel loadRemoteSessionPage reads through. */
+  deleteRemoteSession: (workspacePath: string, engine: string, remotePath: string) =>
+    invoke<void>("delete_remote_session", { workspacePath, engine, remotePath }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>

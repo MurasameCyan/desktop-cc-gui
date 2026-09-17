@@ -79,6 +79,23 @@ export interface CommandDef {
   run: () => void;
 }
 
+/** Session row the sidebar right-click menu was opened on. */
+export interface SessionMenuTarget {
+  engine: string;
+  sessionId: string;
+}
+
+/** Sidebar session context-menu item: one extra row under the host's
+ *  rename/copy/delete entries. `label` is a thunk so language flips
+ *  re-label live menus. */
+export interface SessionMenuItemDef {
+  id: string;
+  label: () => string;
+  icon?: ComponentType<{ className?: string }>;
+  danger?: boolean;
+  run: (target: SessionMenuTarget) => void;
+}
+
 /** Markdown pipeline contributions (plan §4.2 #5): extra remark/rehype
  *  plugins and react-markdown component overrides, merged over the host
  *  defaults at render time. remark/rehype arrays are typed loosely — plugin
@@ -195,6 +212,9 @@ export const statusBarRegistry = new Registry<StatusBarItemDef>();
 
 /** Command palette registry (plan §4.2 #9). */
 export const commandRegistry = new Registry<CommandDef>();
+
+/** Sidebar session context-menu item registry. */
+export const sessionMenuRegistry = new Registry<SessionMenuItemDef>();
 
 /** Markdown pipeline registry (plan §4.2 #5). */
 export const markdownRegistry = new Registry<MarkdownRendererDef>();
