@@ -113,11 +113,16 @@ pub(super) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
         };
         let name = name.to_string_lossy();
         let stem = name.split('.').next().unwrap_or("");
-        let reserved = matches!(stem.to_ascii_uppercase().as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || stem.get(..3).is_some_and(|prefix| {
-                matches!(prefix.to_ascii_uppercase().as_str(), "COM" | "LPT")
-                    && stem.as_bytes().get(3).is_some_and(|digit| matches!(digit, b'1'..=b'9'))
-            });
+        let reserved = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL"
+        ) || stem.get(..3).is_some_and(|prefix| {
+            matches!(prefix.to_ascii_uppercase().as_str(), "COM" | "LPT")
+                && stem
+                    .as_bytes()
+                    .get(3)
+                    .is_some_and(|digit| matches!(digit, b'1'..=b'9'))
+        });
         if name.ends_with('.') || name.ends_with(' ') || reserved {
             return Err(format!("unsafe relative path: {value:?}"));
         }
@@ -269,10 +274,8 @@ fn select_location_at_with_writer(
     let old_exists = old_root.exists();
     let target_exists = new_root.exists();
     let target_empty = target_exists && tree_is_empty(&new_root)?;
-    let target_identical = old_exists
-        && target_exists
-        && !target_empty
-        && trees_are_identical(&old_root, &new_root)?;
+    let target_identical =
+        old_exists && target_exists && !target_empty && trees_are_identical(&old_root, &new_root)?;
     if target_exists && !target_empty && !target_identical {
         return Err(format!(
             "storage migration conflict: target {} contains a different document tree",
@@ -434,7 +437,9 @@ fn roots_are_equivalent(old_base: &Path, new_base: &Path, id: &str) -> bool {
 fn sibling_transaction_path(root: &Path, label: &str, id: uuid::Uuid) -> PathBuf {
     root.with_file_name(format!(
         ".{}.ccgui-{label}-{id}",
-        root.file_name().and_then(|name| name.to_str()).unwrap_or("plugin")
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("plugin")
     ))
 }
 
@@ -446,8 +451,10 @@ fn tree_is_empty(root: &Path) -> Result<bool, String> {
 }
 
 fn trees_are_identical(left: &Path, right: &Path) -> Result<bool, String> {
-    let left_meta = fs::symlink_metadata(left).map_err(|e| format!("stat {}: {e}", left.display()))?;
-    let right_meta = fs::symlink_metadata(right).map_err(|e| format!("stat {}: {e}", right.display()))?;
+    let left_meta =
+        fs::symlink_metadata(left).map_err(|e| format!("stat {}: {e}", left.display()))?;
+    let right_meta =
+        fs::symlink_metadata(right).map_err(|e| format!("stat {}: {e}", right.display()))?;
     if left_meta.is_dir() != right_meta.is_dir() || left_meta.is_file() != right_meta.is_file() {
         return Ok(false);
     }
@@ -459,11 +466,19 @@ fn trees_are_identical(left: &Path, right: &Path) -> Result<bool, String> {
     }
     let mut left_entries = fs::read_dir(left)
         .map_err(|e| format!("list {}: {e}", left.display()))?
-        .map(|entry| entry.map(|entry| entry.file_name()).map_err(|e| e.to_string()))
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|e| e.to_string())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut right_entries = fs::read_dir(right)
         .map_err(|e| format!("list {}: {e}", right.display()))?
-        .map(|entry| entry.map(|entry| entry.file_name()).map_err(|e| e.to_string()))
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|e| e.to_string())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     left_entries.sort();
     right_entries.sort();
@@ -497,9 +512,13 @@ fn files_are_identical(left: &Path, right: &Path) -> Result<bool, String> {
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     if is_reparse_point(source)? {
-        return Err(format!("refusing storage migration: {} is a reparse point", source.display()));
+        return Err(format!(
+            "refusing storage migration: {} is a reparse point",
+            source.display()
+        ));
     }
-    let metadata = fs::symlink_metadata(source).map_err(|e| format!("stat {}: {e}", source.display()))?;
+    let metadata =
+        fs::symlink_metadata(source).map_err(|e| format!("stat {}: {e}", source.display()))?;
     if metadata.is_dir() {
         fs::create_dir(destination).map_err(|e| format!("mkdir {}: {e}", destination.display()))?;
         for entry in fs::read_dir(source).map_err(|e| format!("list {}: {e}", source.display()))? {
@@ -509,11 +528,18 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
         return Ok(());
     }
     if !metadata.is_file() {
-        return Err(format!("refusing storage migration: unsupported file type at {}", source.display()));
+        return Err(format!(
+            "refusing storage migration: unsupported file type at {}",
+            source.display()
+        ));
     }
-    fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(|e| format!("copy {} to {}: {e}", source.display(), destination.display()))
+    fs::copy(source, destination).map(|_| ()).map_err(|e| {
+        format!(
+            "copy {} to {}: {e}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 fn remove_tree_if_exists(path: &Path) {
@@ -560,20 +586,27 @@ pub(super) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> 
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
-    // The root and its ancestors are part of the boundary too: a replaced
-    // plugin root, selected directory, or parent junction must never be followed.
-    for ancestor in root.ancestors().filter(|path| !path.as_os_str().is_empty()) {
-        if is_reparse_point(ancestor)? {
-            return Err(format!("path crosses a reparse point: {}", ancestor.display()));
+    // Walk from the volume/share root down: probing a child first would follow
+    // a parent junction before discovering its reparse attribute.
+    let mut cursor = PathBuf::with_capacity(target.as_os_str().len());
+    for component in root.components() {
+        cursor.push(component);
+        if !matches!(component, Component::Prefix(_)) && is_reparse_point(&cursor)? {
+            return Err(format!(
+                "path crosses a reparse point: {}",
+                cursor.display()
+            ));
         }
     }
     let canonical_root =
         fs::canonicalize(root).map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    let mut cursor = root.to_path_buf();
     for component in relative.components() {
         cursor.push(component);
         if is_reparse_point(&cursor)? {
-            return Err(format!("path crosses a reparse point: {}", cursor.display()));
+            return Err(format!(
+                "path crosses a reparse point: {}",
+                cursor.display()
+            ));
         }
         if !cursor.exists() {
             return Ok(()); // the rest of the path does not exist yet
@@ -590,7 +623,10 @@ pub(super) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> 
 fn backup_path(target: &Path) -> PathBuf {
     target.with_file_name(format!(
         "{}.bak",
-        target.file_name().and_then(|n| n.to_str()).unwrap_or("document")
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document")
     ))
 }
 
@@ -638,10 +674,15 @@ fn read_text_at(
     authorize(state_path, id)?;
     let (_, base) = selected_base(state_path, roots, id)?;
     let target = checked_target(&plugin_root(&base, id), relative, false)?;
-    let Some(bytes) = read_bytes(&target)? else { return Ok(None) };
+    let Some(bytes) = read_bytes(&target)? else {
+        return Ok(None);
+    };
     let content = String::from_utf8(bytes.clone())
         .map_err(|e| format!("{} is not UTF-8: {e}", target.display()))?;
-    Ok(Some(StoredText { content, version: version_of(&bytes) }))
+    Ok(Some(StoredText {
+        content,
+        version: version_of(&bytes),
+    }))
 }
 
 fn current_version(path: &Path) -> Result<Option<String>, String> {
@@ -678,7 +719,10 @@ pub(crate) fn write_text_at(
 
     let tmp = target.with_file_name(format!(
         ".{}.{}.tmp",
-        target.file_name().and_then(|n| n.to_str()).unwrap_or("document"),
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document"),
         uuid::Uuid::new_v4()
     ));
     // Re-validate immediately before mutating: the parent chain may have been
@@ -700,8 +744,7 @@ pub(crate) fn write_text_at(
         if backup.exists() {
             fs::remove_file(&backup).map_err(|e| format!("remove {}: {e}", backup.display()))?;
         }
-        fs::rename(&target, &backup)
-            .map_err(|e| format!("backup {}: {e}", target.display()))?;
+        fs::rename(&target, &backup).map_err(|e| format!("backup {}: {e}", target.display()))?;
     }
     if let Err(error) = fs::rename(&tmp, &target) {
         if backup.exists() && !target.exists() {
@@ -715,7 +758,10 @@ pub(crate) fn write_text_at(
             let _ = directory.sync_all();
         }
     }
-    Ok(StoredText { content: content.into(), version: version_of(content.as_bytes()) })
+    Ok(StoredText {
+        content: content.into(),
+        version: version_of(content.as_bytes()),
+    })
 }
 
 fn list_at(
@@ -730,23 +776,25 @@ fn list_at(
     let (_, base) = selected_base(state_path, roots, id)?;
     let root = plugin_root(&base, id);
     let prefix = safe_prefix(prefix)?;
-    let start = prefix.as_ref().map_or_else(|| root.clone(), |prefix| root.join(prefix));
+    let start = prefix
+        .as_ref()
+        .map_or_else(|| root.clone(), |prefix| root.join(prefix));
     if is_reparse_point(&start)? {
         return Err(format!("path crosses a reparse point: {}", start.display()));
     }
     if !start.exists() {
         return Ok(Vec::new());
     }
-    let canonical_root = fs::canonicalize(&root)
-        .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
+    let canonical_root =
+        fs::canonicalize(&root).map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let mut stack = vec![start];
     let mut output = Vec::new();
     while let Some(dir) = stack.pop() {
         if is_reparse_point(&dir)? {
             return Err(format!("path crosses a reparse point: {}", dir.display()));
         }
-        let canonical = fs::canonicalize(&dir)
-            .map_err(|e| format!("canonicalize {}: {e}", dir.display()))?;
+        let canonical =
+            fs::canonicalize(&dir).map_err(|e| format!("canonicalize {}: {e}", dir.display()))?;
         if !canonical.starts_with(&canonical_root) {
             return Err(format!("path escapes plugin storage: {}", dir.display()));
         }
@@ -769,14 +817,22 @@ fn list_at(
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "lowercase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum WriteResult {
     Written { version: String },
     Conflict { current_version: Option<String> },
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "lowercase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum RemoveResult {
     Removed,
     Conflict { current_version: Option<String> },
@@ -786,7 +842,11 @@ pub enum RemoveResult {
 pub fn plugin_document_storage_get_location(
     plugin_id: String,
 ) -> Result<ResolvedStorageLocation, String> {
-    get_location_at(&super::state::state_path(), &StorageRoots::system()?, &plugin_id)
+    get_location_at(
+        &super::state::state_path(),
+        &StorageRoots::system()?,
+        &plugin_id,
+    )
 }
 
 #[tauri::command]
@@ -799,7 +859,10 @@ pub fn plugin_document_storage_select_location(
         &super::state::state_path(),
         &StorageRoots::system()?,
         &plugin_id,
-        StorageLocationSelection { kind, path: custom_path },
+        StorageLocationSelection {
+            kind,
+            path: custom_path,
+        },
     )
 }
 
@@ -833,12 +896,16 @@ pub fn plugin_document_storage_write_text_atomic(
         &content,
         expected_version,
     ) {
-        Ok(stored) => Ok(WriteResult::Written { version: stored.version }),
+        Ok(stored) => Ok(WriteResult::Written {
+            version: stored.version,
+        }),
         Err(error) if error.starts_with("version conflict") => {
             authorize(&state_path, &plugin_id)?;
             let (_, base) = selected_base(&state_path, &roots, &plugin_id)?;
             let target = checked_target(&plugin_root(&base, &plugin_id), &relative_path, false)?;
-            Ok(WriteResult::Conflict { current_version: current_version(&target)? })
+            Ok(WriteResult::Conflict {
+                current_version: current_version(&target)?,
+            })
         }
         Err(error) => Err(error),
     }
@@ -884,7 +951,9 @@ fn remove_with_version_at(
     let current = current_version(&target)?;
     if let Some(expected) = expected_version {
         if current.as_deref() != Some(expected) {
-            return Ok(RemoveResult::Conflict { current_version: current });
+            return Ok(RemoveResult::Conflict {
+                current_version: current,
+            });
         }
     }
     // Re-validate immediately before mutating (TOCTOU: the parent chain may
@@ -1015,7 +1084,10 @@ mod tests {
 
     #[test]
     fn path_table_rejects_escape_and_accepts_safe_nested_paths() {
-        assert_eq!(safe_relative_path("one/two.txt").unwrap(), PathBuf::from("one/two.txt"));
+        assert_eq!(
+            safe_relative_path("one/two.txt").unwrap(),
+            PathBuf::from("one/two.txt")
+        );
         for bad in ["", ".", "..", "../x", "x/../y", "/absolute", "x\\y", "x//y"] {
             assert!(safe_relative_path(bad).is_err(), "accepted {bad:?}");
         }
@@ -1037,12 +1109,16 @@ mod tests {
         state.plugins.get_mut(id).unwrap().enabled = true;
         state.plugins.get_mut(id).unwrap().quarantined = true;
         crate::plugins::state::write_state(&state_path, &state).unwrap();
-        assert!(authorize(&state_path, id).unwrap_err().contains("quarantined"));
+        assert!(authorize(&state_path, id)
+            .unwrap_err()
+            .contains("quarantined"));
 
         state.plugins.get_mut(id).unwrap().quarantined = false;
         state.plugins.get_mut(id).unwrap().permissions.clear();
         crate::plugins::state::write_state(&state_path, &state).unwrap();
-        assert!(authorize(&state_path, id).unwrap_err().contains("plugin.storage"));
+        assert!(authorize(&state_path, id)
+            .unwrap_err()
+            .contains("plugin.storage"));
     }
 
     #[test]
@@ -1051,16 +1127,31 @@ mod tests {
         let state_path = scratch.path("plugins.json");
         enabled_state(&state_path, "vendor.one");
         let roots = roots(&scratch);
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.one").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(
+            get_location_at(&state_path, &roots, "vendor.one")
+                .unwrap()
+                .kind,
+            StorageLocationKind::Data
+        );
         assert!(!roots.data.exists());
 
         let selected = select_location_at(
             &state_path,
             &roots,
             "vendor.one",
-            StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(scratch.path("chosen").to_string_lossy().into()) },
-        ).unwrap();
-        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor.one"));
+            StorageLocationSelection {
+                kind: StorageLocationKind::Custom,
+                path: Some(scratch.path("chosen").to_string_lossy().into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            PathBuf::from(selected.root),
+            scratch
+                .path("chosen")
+                .join("plugin-data")
+                .join("vendor.one")
+        );
         assert!(scratch.path("chosen").is_dir());
         assert!(!scratch.path("chosen/plugin-data/vendor.one").exists());
     }
@@ -1072,8 +1163,15 @@ mod tests {
         let id = "vendor.plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
-        write_text_at(&state_path, &roots, id, "state/nested/doc.json", "document", None)
-            .unwrap();
+        write_text_at(
+            &state_path,
+            &roots,
+            id,
+            "state/nested/doc.json",
+            "document",
+            None,
+        )
+        .unwrap();
         let old_root = plugin_root(&roots.data, id);
         let custom = scratch.path("custom");
 
@@ -1090,7 +1188,10 @@ mod tests {
 
         let new_root = plugin_root(&custom, id);
         assert_eq!(PathBuf::from(selected.root), new_root);
-        assert_eq!(std::fs::read_to_string(new_root.join("state/nested/doc.json")).unwrap(), "document");
+        assert_eq!(
+            std::fs::read_to_string(new_root.join("state/nested/doc.json")).unwrap(),
+            "document"
+        );
         assert!(!old_root.exists(), "old canonical root remained visible");
     }
 
@@ -1120,9 +1221,18 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("conflict"), "unexpected error: {error}");
-        assert_eq!(get_location_at(&state_path, &roots, id).unwrap().kind, StorageLocationKind::Data);
-        assert_eq!(std::fs::read_to_string(old_root.join("doc")).unwrap(), "old");
-        assert_eq!(std::fs::read_to_string(target_root.join("doc")).unwrap(), "different");
+        assert_eq!(
+            get_location_at(&state_path, &roots, id).unwrap().kind,
+            StorageLocationKind::Data
+        );
+        assert_eq!(
+            std::fs::read_to_string(old_root.join("doc")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_root.join("doc")).unwrap(),
+            "different"
+        );
     }
 
     #[test]
@@ -1150,8 +1260,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(get_location_at(&state_path, &roots, id).unwrap().kind, StorageLocationKind::Custom);
-        assert_eq!(std::fs::read_to_string(target_root.join("nested/doc")).unwrap(), "same");
+        assert_eq!(
+            get_location_at(&state_path, &roots, id).unwrap().kind,
+            StorageLocationKind::Custom
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_root.join("nested/doc")).unwrap(),
+            "same"
+        );
         assert!(!old_root.exists());
     }
 
@@ -1207,7 +1323,10 @@ mod tests {
             let selected = get_location_at(&state_path, &roots, id).unwrap();
             assert_eq!(selected.kind, old_kind);
             assert_eq!(PathBuf::from(selected.root), old_root);
-            assert_eq!(std::fs::read_to_string(old_root.join("doc")).unwrap(), "preserve");
+            assert_eq!(
+                std::fs::read_to_string(old_root.join("doc")).unwrap(),
+                "preserve"
+            );
             let restored_target = plugin_root(&new_base, id);
             assert!(restored_target.is_dir());
             assert!(std::fs::read_dir(restored_target).unwrap().next().is_none());
@@ -1263,7 +1382,9 @@ mod tests {
             result
         });
         started_rx.recv().unwrap();
-        assert!(finished_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
 
         let (remove_started_tx, remove_started_rx) = mpsc::channel();
         let remove_state = state_path.clone();
@@ -1275,14 +1396,22 @@ mod tests {
             result
         });
         remove_started_rx.recv().unwrap();
-        assert!(finished_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(finished_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
 
         release_tx.send(()).unwrap();
         migration.join().unwrap().unwrap();
         writer.join().unwrap().unwrap();
-        assert!(matches!(remover.join().unwrap().unwrap(), RemoveResult::Removed));
+        assert!(matches!(
+            remover.join().unwrap().unwrap(),
+            RemoveResult::Removed
+        ));
         assert!(!old_root.exists());
-        assert_eq!(std::fs::read_to_string(target_root.join("written")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(target_root.join("written")).unwrap(),
+            "new"
+        );
         assert!(!target_root.join("remove").exists());
     }
 
@@ -1314,9 +1443,15 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("reparse point"), "unexpected error: {error}");
-        assert_eq!(get_location_at(&state_path, &roots, id).unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(
+            get_location_at(&state_path, &roots, id).unwrap().kind,
+            StorageLocationKind::Data
+        );
         assert!(old_root.exists());
-        assert_eq!(std::fs::read_to_string(outside.join("keep")).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep")).unwrap(),
+            "keep"
+        );
     }
 
     #[test]
@@ -1328,15 +1463,43 @@ mod tests {
         let roots = roots(&scratch);
 
         let first = write_text_at(&state_path, &roots, id, "state/doc.json", "one", None).unwrap();
-        assert_eq!(read_text_at(&state_path, &roots, id, "state/doc.json").unwrap().unwrap().content, "one");
-        let second = write_text_at(&state_path, &roots, id, "state/doc.json", "two", Some(first.version.clone())).unwrap();
+        assert_eq!(
+            read_text_at(&state_path, &roots, id, "state/doc.json")
+                .unwrap()
+                .unwrap()
+                .content,
+            "one"
+        );
+        let second = write_text_at(
+            &state_path,
+            &roots,
+            id,
+            "state/doc.json",
+            "two",
+            Some(first.version.clone()),
+        )
+        .unwrap();
         assert_ne!(first.version, second.version);
         let root = roots.data.join("plugin-data").join(id);
-        assert_eq!(std::fs::read_to_string(root.join("state/doc.json.bak")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_to_string(root.join("state/doc.json.bak")).unwrap(),
+            "one"
+        );
 
-        let conflict = write_text_at(&state_path, &roots, id, "state/doc.json", "stale", Some(first.version)).unwrap_err();
+        let conflict = write_text_at(
+            &state_path,
+            &roots,
+            id,
+            "state/doc.json",
+            "stale",
+            Some(first.version),
+        )
+        .unwrap_err();
         assert!(conflict.contains("version conflict"));
-        assert_eq!(std::fs::read_to_string(root.join("state/doc.json")).unwrap(), "two");
+        assert_eq!(
+            std::fs::read_to_string(root.join("state/doc.json")).unwrap(),
+            "two"
+        );
     }
 
     #[test]
@@ -1353,11 +1516,21 @@ mod tests {
         let b_roots = roots.clone();
         let version_a = initial.version.clone();
         let version_b = initial.version;
-        let a = std::thread::spawn(move || write_text_at(&a_state, &a_roots, id, "doc", "a", Some(version_a)));
-        let b = std::thread::spawn(move || write_text_at(&b_state, &b_roots, id, "doc", "b", Some(version_b)));
+        let a = std::thread::spawn(move || {
+            write_text_at(&a_state, &a_roots, id, "doc", "a", Some(version_a))
+        });
+        let b = std::thread::spawn(move || {
+            write_text_at(&b_state, &b_roots, id, "doc", "b", Some(version_b))
+        });
         let results = [a.join().unwrap(), b.join().unwrap()];
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-        assert_eq!(results.iter().filter(|r| r.as_ref().is_err_and(|e| e.contains("version conflict"))).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| r.as_ref().is_err_and(|e| e.contains("version conflict")))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1373,15 +1546,59 @@ mod tests {
         let roots = roots(&scratch);
         let custom = scratch.path("custom");
         for id in ["vendor.one", "vendor.two"] {
-            select_location_at(&state_path, &roots, id, StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(custom.to_string_lossy().into()) }).unwrap();
+            select_location_at(
+                &state_path,
+                &roots,
+                id,
+                StorageLocationSelection {
+                    kind: StorageLocationKind::Custom,
+                    path: Some(custom.to_string_lossy().into()),
+                },
+            )
+            .unwrap();
         }
-        write_text_at(&state_path, &roots, "vendor.one", "shared/file", "one", None).unwrap();
-        write_text_at(&state_path, &roots, "vendor.two", "shared/file", "two", None).unwrap();
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().unwrap().content, "one");
-        assert_eq!(list_at(&state_path, &roots, "vendor.one", Some("shared")).unwrap(), vec!["shared/file"]);
+        write_text_at(
+            &state_path,
+            &roots,
+            "vendor.one",
+            "shared/file",
+            "one",
+            None,
+        )
+        .unwrap();
+        write_text_at(
+            &state_path,
+            &roots,
+            "vendor.two",
+            "shared/file",
+            "two",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_text_at(&state_path, &roots, "vendor.one", "shared/file")
+                .unwrap()
+                .unwrap()
+                .content,
+            "one"
+        );
+        assert_eq!(
+            list_at(&state_path, &roots, "vendor.one", Some("shared")).unwrap(),
+            vec!["shared/file"]
+        );
         remove_with_version_at(&state_path, &roots, "vendor.one", "shared/file", None).unwrap();
-        assert!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().is_none());
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.two", "shared/file").unwrap().unwrap().content, "two");
+        assert!(
+            read_text_at(&state_path, &roots, "vendor.one", "shared/file")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            read_text_at(&state_path, &roots, "vendor.two", "shared/file")
+                .unwrap()
+                .unwrap()
+                .content,
+            "two"
+        );
     }
 
     #[test]
@@ -1392,9 +1609,22 @@ mod tests {
         let roots = roots(&scratch);
         let file = scratch.path("not-a-directory");
         std::fs::write(&file, "x").unwrap();
-        let result = select_location_at(&state_path, &roots, "vendor.plugin", StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(file.to_string_lossy().into()) });
+        let result = select_location_at(
+            &state_path,
+            &roots,
+            "vendor.plugin",
+            StorageLocationSelection {
+                kind: StorageLocationKind::Custom,
+                path: Some(file.to_string_lossy().into()),
+            },
+        );
         assert!(result.is_err());
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.plugin").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(
+            get_location_at(&state_path, &roots, "vendor.plugin")
+                .unwrap()
+                .kind,
+            StorageLocationKind::Data
+        );
         assert!(!roots.data.exists());
     }
 
@@ -1406,12 +1636,23 @@ mod tests {
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let stored = write_text_at(&state_path, &roots, id, "doc", "one", None).unwrap();
-        let conflict = remove_with_version_at(&state_path, &roots, id, "doc", Some("stale")).unwrap();
-        assert!(matches!(conflict, RemoveResult::Conflict { current_version: Some(_) }));
-        assert!(read_text_at(&state_path, &roots, id, "doc").unwrap().is_some());
-        let removed = remove_with_version_at(&state_path, &roots, id, "doc", Some(&stored.version)).unwrap();
+        let conflict =
+            remove_with_version_at(&state_path, &roots, id, "doc", Some("stale")).unwrap();
+        assert!(matches!(
+            conflict,
+            RemoveResult::Conflict {
+                current_version: Some(_)
+            }
+        ));
+        assert!(read_text_at(&state_path, &roots, id, "doc")
+            .unwrap()
+            .is_some());
+        let removed =
+            remove_with_version_at(&state_path, &roots, id, "doc", Some(&stored.version)).unwrap();
         assert!(matches!(removed, RemoveResult::Removed));
-        assert!(read_text_at(&state_path, &roots, id, "doc").unwrap().is_none());
+        assert!(read_text_at(&state_path, &roots, id, "doc")
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(unix)]
@@ -1455,23 +1696,35 @@ mod tests {
         assert!(root.join("state/doc.json.bak").exists());
 
         let conflict =
-            remove_with_version_at(&state_path, &roots, id, "state/doc.json", Some("stale")).unwrap();
+            remove_with_version_at(&state_path, &roots, id, "state/doc.json", Some("stale"))
+                .unwrap();
         assert!(matches!(conflict, RemoveResult::Conflict { .. }));
         assert!(root.join("state/doc.json").exists());
         assert!(root.join("state/doc.json.bak").exists());
 
-        let removed =
-            remove_with_version_at(&state_path, &roots, id, "state/doc.json", Some(&second.version))
-                .unwrap();
+        let removed = remove_with_version_at(
+            &state_path,
+            &roots,
+            id,
+            "state/doc.json",
+            Some(&second.version),
+        )
+        .unwrap();
         assert!(matches!(removed, RemoveResult::Removed));
         assert!(!root.join("state/doc.json").exists());
-        assert!(!root.join("state/doc.json.bak").exists(), "backup survived removal");
+        assert!(
+            !root.join("state/doc.json.bak").exists(),
+            "backup survived removal"
+        );
         assert!(list_at(&state_path, &roots, id, None).unwrap().is_empty());
 
         // Removing an already-gone document is a no-op, not a resurrection.
-        let again = remove_with_version_at(&state_path, &roots, id, "state/doc.json", None).unwrap();
+        let again =
+            remove_with_version_at(&state_path, &roots, id, "state/doc.json", None).unwrap();
         assert!(matches!(again, RemoveResult::Removed));
-        assert!(read_text_at(&state_path, &roots, id, "state/doc.json").unwrap().is_none());
+        assert!(read_text_at(&state_path, &roots, id, "state/doc.json")
+            .unwrap()
+            .is_none());
     }
 
     /// H11: a reparse point inside the root is refused by every operation,
@@ -1489,18 +1742,27 @@ mod tests {
         let outside = scratch.path("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("escape"), "secret").unwrap();
-        assert!(create_dir_link(&root.join("link"), &outside), "could not create a directory link");
+        assert!(
+            create_dir_link(&root.join("link"), &outside),
+            "could not create a directory link"
+        );
 
         let error = write_text_at(&state_path, &roots, id, "link/escape", "bad", None).unwrap_err();
         assert!(error.contains("reparse point"), "unexpected: {error}");
-        assert_eq!(std::fs::read_to_string(outside.join("escape")).unwrap(), "secret");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("escape")).unwrap(),
+            "secret"
+        );
         assert!(!outside.join("escape.bak").exists());
 
         assert!(read_text_at(&state_path, &roots, id, "link/escape").is_err());
         assert!(list_at(&state_path, &roots, id, None).is_err());
         assert!(remove_with_version_at(&state_path, &roots, id, "link/escape", None).is_err());
         assert!(remove_with_version_at(&state_path, &roots, id, "link", None).is_err());
-        assert_eq!(std::fs::read_to_string(outside.join("escape")).unwrap(), "secret");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("escape")).unwrap(),
+            "secret"
+        );
     }
 
     /// H11: uninstall deletion must scan for reparse points and refuse before
@@ -1518,11 +1780,18 @@ mod tests {
         let outside = scratch.path("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep"), "keep").unwrap();
-        assert!(create_dir_link(&root.join("escape"), &outside), "could not create a directory link");
+        assert!(
+            create_dir_link(&root.join("escape"), &outside),
+            "could not create a directory link"
+        );
 
-        let error = delete_plugin_documents_with_roots_at(&state_path, id, Some(&roots)).unwrap_err();
+        let error =
+            delete_plugin_documents_with_roots_at(&state_path, id, Some(&roots)).unwrap_err();
         assert!(error.contains("reparse point"), "unexpected: {error}");
-        assert!(root.join("state/doc.json").exists(), "documents were removed anyway");
+        assert!(
+            root.join("state/doc.json").exists(),
+            "documents were removed anyway"
+        );
         assert!(outside.join("keep").exists());
     }
 }

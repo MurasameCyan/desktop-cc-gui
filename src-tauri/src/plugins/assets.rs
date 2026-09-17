@@ -204,6 +204,43 @@ pub fn plugin_asset_revoke_directory(plugin_id: String, grant_id: String) -> Res
     revoke_directory_at(&state::state_path(), &plugin_id, &grant_id)
 }
 
+// Pure preflight: resolving an ungranted UNC path can itself cause network
+// authentication. Only local aliases in an already-authorized namespace may
+// reach filesystem checks; device namespaces are never accepted here.
+fn reveal_prefix_matches(path: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        let (Some(Component::Prefix(path)), Some(Component::Prefix(root))) =
+            (path.components().next(), root.components().next())
+        else {
+            return false;
+        };
+        match (path.kind(), root.kind()) {
+            (
+                Prefix::Disk(a) | Prefix::VerbatimDisk(a),
+                Prefix::Disk(b) | Prefix::VerbatimDisk(b),
+            ) => a.eq_ignore_ascii_case(&b),
+            (
+                Prefix::UNC(a_host, a_share) | Prefix::VerbatimUNC(a_host, a_share),
+                Prefix::UNC(b_host, b_share) | Prefix::VerbatimUNC(b_host, b_share),
+            ) => {
+                a_host
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&b_host.to_string_lossy())
+                    && a_share
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&b_share.to_string_lossy())
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(root)
+    }
+}
+
 fn reveal_target_at(
     state_path: &Path,
     roots: Option<&storage::StorageRoots>,
@@ -222,6 +259,7 @@ fn reveal_target_at(
         }
     }
     let denied = || format!("{id}: path is outside plugin.storage and granted asset directories");
+    allowed_roots.retain(|root| reveal_prefix_matches(path, root));
     if allowed_roots.is_empty() {
         return Err(denied());
     }
@@ -230,13 +268,13 @@ fn reveal_target_at(
     storage::confine_to_root(path, path).map_err(|_| denied())?;
     let canonical = dunce::canonicalize(path).map_err(|_| denied())?;
     for root in allowed_roots {
+        if storage::confine_to_root(&root, &root).is_err() {
+            continue;
+        }
         let canonical_root = match dunce::canonicalize(&root) {
             Ok(root) => root,
             Err(_) => continue,
         };
-        if storage::confine_to_root(&root, &root).is_err() {
-            continue;
-        }
         // Windows short names, case variants and verbatim paths can name the
         // same file without sharing a lexical prefix with the stored root.
         if canonical.starts_with(&canonical_root) {
@@ -703,6 +741,46 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reveal_preflight_separates_volumes_shares_and_device_namespaces() {
+        let local = Path::new(r"C:\Users\owner\models");
+        assert!(reveal_prefix_matches(
+            Path::new(r"c:\Users\OWNER~1\models\ok"),
+            local
+        ));
+        assert!(reveal_prefix_matches(
+            Path::new(r"\\?\C:\Users\owner\models\ok"),
+            local
+        ));
+        assert!(!reveal_prefix_matches(Path::new(r"D:\models\ok"), local));
+        assert!(!reveal_prefix_matches(
+            Path::new(r"\\ungranted.invalid\share\ok"),
+            local
+        ));
+        assert!(!reveal_prefix_matches(
+            Path::new(r"\\?\UNC\ungranted.invalid\share\ok"),
+            local
+        ));
+        assert!(!reveal_prefix_matches(
+            Path::new(r"\\.\C:\models\ok"),
+            local
+        ));
+        let share = Path::new(r"\\files.invalid\models\allowed");
+        assert!(reveal_prefix_matches(
+            Path::new(r"\\?\UNC\FILES.INVALID\MODELS\allowed\ok"),
+            share
+        ));
+        assert!(!reveal_prefix_matches(
+            Path::new(r"\\files.invalid\other-share\ok"),
+            share
+        ));
+        assert!(!reveal_prefix_matches(
+            Path::new(r"\\other.invalid\models\ok"),
+            share
+        ));
     }
 
     #[test]
