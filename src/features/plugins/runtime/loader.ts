@@ -67,6 +67,7 @@ export const ipcBackend: LoaderBackend = {
     if (!workspacePath) throw new Error("no active workspace");
     return ipc.pluginWorkspaceMetadata(id, workspacePath);
   },
+  workspaceList: (id) => ipc.pluginListWorkspaces(id),
   pickDirectory: () => pickDirectory("Select plugin document storage directory"),
   documentStorageGetLocation: (id) => ipc.pluginDocumentStorageGetLocation(id),
   documentStorageSelectLocation: (id, kind, customPath) =>

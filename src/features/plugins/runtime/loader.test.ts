@@ -27,6 +27,7 @@ function fakeBackend(files: Record<string, string> = {}) {
     delete: async () => {},
     bridgeInvoke: async () => null,
     workspaceMetadata: async () => ({ id: "workspace-id", path: "C:/work" }),
+    workspaceList: async () => [],
     pickDirectory: async () => null,
     documentStorageGetLocation: async () => ({
       kind: "data",

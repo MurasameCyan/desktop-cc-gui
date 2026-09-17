@@ -21,6 +21,15 @@ pub struct WorkspaceMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
 }
+/// Minimal workspace identity exposed through the plugin capability boundary.
+/// UI-only ordering/grouping and opaque metadata stay inside the host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginWorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
 
 pub struct Db(pub Mutex<Connection>);
 
@@ -100,7 +109,26 @@ impl Db {
         }
         Ok(metadata)
     }
-
+    /// List registered workspaces for the plugin read-only capability.
+    pub fn workspace_list(&self) -> Result<Vec<PluginWorkspaceSummary>, String> {
+        let conn = self.0.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, path FROM workspaces
+                 ORDER BY sort_order IS NULL, sort_order, COALESCE(last_opened_at, 0) DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PluginWorkspaceSummary {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
 
     /// Directories the user explicitly granted file access to on top of the
     /// registered workspaces (the on-demand grant flow, files::grant_root).
@@ -498,6 +526,23 @@ pub fn workspace_metadata(
     }
     db.workspace_metadata(workspace_path.trim())?
         .ok_or_else(|| format!("workspace is not registered: {}", workspace_path.trim()))
+}
+#[tauri::command]
+pub fn plugin_list_workspaces(
+    db: tauri::State<'_, std::sync::Arc<Db>>,
+    plugin_id: String,
+) -> Result<Vec<PluginWorkspaceSummary>, String> {
+    let (enabled, quarantined, permissions) = crate::plugins::plugin_access(&plugin_id)?;
+    if !enabled {
+        return Err(format!("{plugin_id}: plugin is disabled"));
+    }
+    if quarantined {
+        return Err(format!("{plugin_id}: plugin is quarantined"));
+    }
+    if !permissions.iter().any(|permission| permission == "workspace.metadata.read") {
+        return Err(format!("{plugin_id}: missing workspace.metadata.read permission"));
+    }
+    db.workspace_list()
 }
 
 /// One-time import of the legacy desktop-cc-gui workspace list
@@ -1101,6 +1146,32 @@ mod tests {
         assert_eq!(indexed.signature, signature);
         assert!(!table_signature.is_empty());
         assert!(index.get("codex").is_none());
+    }
+
+    #[test]
+    fn plugin_workspace_list_returns_only_identity_fields() {
+        let scratch = Scratch::new();
+        let db = Db::open_at(&scratch.path("app.db")).unwrap();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name, sort_order, group_id, meta)
+                 VALUES('plugin-id', '/ws/plugin', 'Plugin', 0, 'group', '{\"secret\":true}')",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = db.workspace_list().unwrap();
+        assert_eq!(rows, vec![PluginWorkspaceSummary {
+            id: "plugin-id".into(),
+            name: "Plugin".into(),
+            path: "/ws/plugin".into(),
+        }]);
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert!(json.get("meta").is_none());
+        assert!(json.get("groupId").is_none());
+        assert!(json.get("sortOrder").is_none());
     }
 
     #[test]

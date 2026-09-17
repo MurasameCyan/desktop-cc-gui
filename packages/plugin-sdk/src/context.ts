@@ -1,13 +1,19 @@
 import type { ComponentType } from "react";
 import type * as React from "react";
 import type { Disposer } from "./manifest";
-import type { ComposerSlotId, SessionMenuTarget } from "./registry";
+import type { ComposerSlotId, SessionMenuTarget, WorkspaceMenuLabelValue } from "./registry";
 export interface WorkspaceMetadata {
   id: string;
   path: string;
   gitBranch?: string;
   gitHead?: string;
   dirty?: boolean;
+}
+
+export interface RegisteredWorkspace {
+  id: string;
+  name: string;
+  path: string;
 }
 
 export interface PromptContribution {
@@ -349,7 +355,7 @@ export interface PluginContext {
     /** Sidebar workspace row context-menu entry. */
     registerWorkspaceMenuItem(def: {
       key?: string;
-      label: (ctx: { workspaceId: string; archived: boolean }) => string;
+      label: (ctx: { workspaceId: string; archived: boolean }) => WorkspaceMenuLabelValue;
       icon?: ComponentType<{ className?: string }>;
       visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
       onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
@@ -394,6 +400,8 @@ export interface PluginContext {
    *  TOFU 而非严格 pinning。 */
   workspaces: {
     add(path: string, meta?: Record<string, unknown>): Promise<void>;
+    /** List registered workspaces without exposing UI-only metadata. */
+    list(): Promise<RegisteredWorkspace[]>;
   };
   /** 会话打开 + 外部会话源(权限 `host:session`;selectSession 0.3.3 起,
    *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话

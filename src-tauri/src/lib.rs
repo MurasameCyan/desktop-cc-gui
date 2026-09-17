@@ -248,6 +248,7 @@ pub fn run() {
             plugins::storage::plugin_document_storage_remove,
             plugins::storage::plugin_document_storage_list,
             db::workspace_metadata,
+            db::plugin_list_workspaces,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,

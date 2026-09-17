@@ -594,6 +594,13 @@ export interface PluginWorkspaceMetadata {
   gitHead?: string;
   dirty?: boolean;
 }
+/** Minimal registered workspace row exposed to plugins; UI-only fields and
+ * opaque metadata never cross the plugin boundary. */
+export interface PluginWorkspaceSummary {
+  id: string;
+  name: string;
+  path: string;
+}
 
 export type PluginDocumentStorageLocationKind = "data" | "program" | "custom";
 
@@ -912,6 +919,8 @@ export const ipc = {
     invoke<void>("plugin_storage_delete", { id, key }),
   pluginWorkspaceMetadata: (pluginId: string, workspacePath: string) =>
     invoke<PluginWorkspaceMetadata>("workspace_metadata", { pluginId, workspacePath }),
+  pluginListWorkspaces: (pluginId: string) =>
+    invoke<PluginWorkspaceSummary[]>("plugin_list_workspaces", { pluginId }),
   pluginDocumentStorageGetLocation: (pluginId: string) =>
     invoke<PluginDocumentStorageLocationResponse>("plugin_document_storage_get_location", {
       pluginId,

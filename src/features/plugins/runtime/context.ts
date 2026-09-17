@@ -23,7 +23,7 @@ import type {
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
-  WorkspaceMetadata,
+  RegisteredWorkspace,
 } from "@ccgui/plugin-sdk";
 import {
   registerRuntimeSwitchHooks,
@@ -62,7 +62,7 @@ export type DocumentStorageRemoveResponse =
  * the loader binds these calls to IPC and tests bind minimal fakes. */
 export interface PluginContextBackend extends PluginStorageBackend {
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
-  workspaceMetadata(id: string): Promise<WorkspaceMetadata>;
+  workspaceList(id: string): Promise<RegisteredWorkspace[]>;
   pickDirectory(): Promise<string | null>;
   documentStorageGetLocation(id: string): Promise<DocumentStorageLocationResponse>;
   documentStorageSelectLocation(
@@ -464,6 +464,10 @@ export function createPluginContext(
         return addPluginWorkspace(id, path, meta, () =>
           requirePermission("host:workspace:remote"),
         );
+      },
+      async list() {
+        requirePermission("workspace.metadata.read");
+        return withAuthorizedHostInvoke(() => backend.workspaceList(id));
       },
     },
     sessions: {
