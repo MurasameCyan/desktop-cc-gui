@@ -43,6 +43,10 @@ export interface InternalMessageCapture {
 export interface BeforeTurnResult {
   promptContributions?: PromptContribution[];
   internalMessageCapture?: InternalMessageCapture;
+  /** Pure synchronous lifetime guard, checked during collection, replay and
+   * launch acceptance. False or throwing retires this result's prompts and
+   * capture; a retired lifetime must never become current again. */
+  isCurrent?: () => boolean;
 }
 
 interface SessionEventBase {
@@ -325,6 +329,15 @@ export interface PluginContext {
       kind: string;
       key?: string;
       component: ComponentType<{ row: { kind: string } }>;
+    }): Disposer;
+    /** Sidebar workspace row context-menu entry. */
+    registerWorkspaceMenuItem(def: {
+      key?: string;
+      label: (ctx: { workspaceId: string; archived: boolean }) => string;
+      icon?: ComponentType<{ className?: string }>;
+      visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
+      onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
+      order?: number;
     }): Disposer;
   };
   theme: {

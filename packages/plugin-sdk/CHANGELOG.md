@@ -1,5 +1,12 @@
 # @ccgui/plugin-sdk changelog
 
+## 0.4.1 — 2026-09-17
+
+- 新增 `ctx.ui.registerWorkspaceMenuItem` 与 `ui:workspace-menu` 权限：按右键目标工作区提供菜单项，支持动态标签、可见性和卸载撤销；不改变活动工作区。
+- 新增 `BeforeTurnResult.isCurrent` 同步生命周期守卫：插件可在不卸载其他工作区功能的情况下撤销已返回的提示和捕获声明；宿主在收集、再次注入及接纳时检查，失效结果不会消费交接。
+- 宿主缓存提示绑定原注册生命周期，复用贡献对象或重新注册不能复活旧提示。停用后下一次发送携带一次性旧指令撤销，启动失败时保留重试，超出所有者记账容量时保留通用撤销覆盖。
+- 受权限控制的 SDK 操作可从插件回调调用；桥命令先固定最终 JSON 载荷，再校验授权并绑定插件身份，序列化钩子不能替换已检查请求。
+
 ## 0.4.0 — 2026-09-13
 
 - 新增通用 session/turn/runtime-switch hooks、标准化运行时事件、内部提示贡献与消息捕获、稳定 workspace metadata，以及 opaque-version CAS 文档存储契约。

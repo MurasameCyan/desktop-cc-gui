@@ -5,6 +5,7 @@ import { OPEN_TABS_KEY } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
 import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
 import {
+  collectBeforeTurnContributions,
   registerRuntimeSwitchHooks,
   registerSessionHooks,
   registerTurnHooks,
@@ -878,6 +879,112 @@ describe("session-scoped internal contributions", () => {
     placement: "system-tail" as const,
     visibility: "internal" as const,
     persistence: "session" as const,
+  });
+
+  it("preserves and withdraws instructions whose identities resemble object prototype keys", async () => {
+    useChatStore.setState({ activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    const protocol = { ...contribution("retained task instructions"), id: "__proto__" };
+    let first = true;
+    const dispose = registerTurnHooks("constructor", {
+      beforeTurn: () => {
+        if (!first) return;
+        first = false;
+        return { promptContributions: [protocol] };
+      },
+    });
+    try {
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-first", sessionId: "prototype-session" });
+      await useChatStore.getState().send("one", []);
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-next", sessionId: null });
+      await useChatStore.getState().send("two", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions).toEqual([protocol]);
+      dispose();
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-off", sessionId: null });
+      await useChatStore.getState().send("three", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions)
+        .toEqual([expect.objectContaining({ id: "host:internal-instructions-reset:constructor" })]);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("withdraws every retired owner after a large turn exhausts the owner journal", async () => {
+    useChatStore.setState({ activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    const dispose = Array.from({ length: 40 }, (_, index) => registerTurnHooks(`test.overflow-${index}`, {
+      beforeTurn: () => ({ promptContributions: [{ ...contribution("p"), id: `protocol-${index}`, persistence: "turn" }] }),
+    }));
+    try {
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "overflow-seed", sessionId: "overflow-session" });
+      await useChatStore.getState().send("one", []);
+      for (const stop of dispose.slice(0, -1)) stop();
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "overflow-clear", sessionId: null });
+      await useChatStore.getState().send("two", []);
+      const outgoing = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions!;
+      const ids = new Set(outgoing.map((entry) => entry.id));
+      for (let index = 0; index < dispose.length - 1; index++) {
+        expect(ids.has("host:internal-instructions-reset:") || ids.has(`host:internal-instructions-reset:test.overflow-${index}`)).toBe(true);
+      }
+      expect(ids.has("protocol-39")).toBe(true);
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "overflow-followup", sessionId: null });
+      await useChatStore.getState().send("three", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions)
+        .toEqual([expect.objectContaining({ id: "protocol-39" })]);
+    } finally {
+      for (const stop of dispose) stop();
+    }
+  });
+
+  it("withdraws old turn instructions once and retries withdrawal after a rejected launch", async () => {
+    useChatStore.setState({ activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    const dispose = registerTurnHooks("test.turn-instruction", {
+      beforeTurn: () => ({ promptContributions: [{ ...contribution("private turn protocol"), persistence: "turn" }] }),
+    });
+    vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "protocol-run", sessionId: "protocol-session" });
+    await useChatStore.getState().send("one", []);
+    dispose();
+
+    vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("launch offline"));
+    await useChatStore.getState().send("two", []);
+    const withdrawal = vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions;
+    expect(withdrawal).toEqual([expect.objectContaining({ id: "host:internal-instructions-reset:test.turn-instruction" })]);
+
+    vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "clear-run", sessionId: null });
+    await useChatStore.getState().send("retry", []);
+    expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions).toEqual(withdrawal);
+
+    vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "plain-run", sessionId: null });
+    await useChatStore.getState().send("three", []);
+    expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions).toEqual([]);
+  });
+
+  it("does not revive a retired session prompt when replacement hooks reuse its source object", async () => {
+    useChatStore.setState({ activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    const protocol = contribution("retired instructions");
+    const dispose = registerTurnHooks("test.retired-contribution", {
+      beforeTurn: () => ({ promptContributions: [protocol] }),
+    });
+    vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "retired-run", sessionId: "retired-session" });
+    await useChatStore.getState().send("one", []);
+    dispose();
+    const replacement = registerTurnHooks("test.retired-contribution", {
+      beforeTurn: (event) => event.sessionId === "other-native-session" ? { promptContributions: [protocol] } : undefined,
+    });
+    try {
+      await collectBeforeTurnContributions({
+        engine: "claude", sessionId: "other-native-session", workspace: REGISTERED_WORKSPACE,
+        runId: "other-run", turnId: "other-run", occurredAt: "2026-09-17T00:00:00.000Z",
+      });
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "replacement-run", sessionId: null });
+      await useChatStore.getState().send("two", []);
+      expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions)
+        .not.toContainEqual(expect.objectContaining({ id: "task-state" }));
+    } finally {
+      replacement();
+    }
   });
 
   it("re-injects a remembered session contribution and migrates it to the native id", async () => {

@@ -1,4 +1,5 @@
-import { describe, expect, it, vi, type Mock } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   createPluginContext,
   DocumentStorageConflictError,
@@ -16,11 +17,13 @@ import {
   settingsRegistry,
   statusBarRegistry,
   timelineRowRegistry,
+  workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
 import { pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import type { PluginManifest } from "@ccgui/plugin-sdk";
 import { dispatchSessionCreated, dispatchRuntimeEvent } from "./hooks";
+import { installHardening, runAsPlugin } from "./hardening";
 // composer.setDraft 的 store 落点由 composer-draft.test.ts 单独覆盖；
 // 这里只验证权限门与委派，不拉入 chat store 依赖链。
 vi.mock("./composer-draft", () => ({ setActiveComposerDraft: vi.fn() }));
@@ -303,27 +306,11 @@ describe("createPluginContext", () => {
     expect(backend.documentStorageList).toHaveBeenCalledWith("test-plugin", "state");
   });
 
-  it("forwards an explicit remove expectedVersion and defaults an omitted one to null", async () => {
+  it("reports a stale document deletion as a typed storage conflict", async () => {
     const backend = fakeStorage();
     const { ctx } = createPluginContext(manifest(["plugin.storage"]), backend, {
       appVersion: "1.0.0",
     });
-
-    // A caller holding a read version deletes conditionally (CAS): the opaque
-    // token must reach the backend, not be hardcoded to null.
-    await ctx.documentStorage.remove("state.json", "v2");
-    expect(backend.documentStorageRemove).toHaveBeenLastCalledWith(
-      "test-plugin",
-      "state.json",
-      "v2",
-    );
-
-    await ctx.documentStorage.remove("state.json");
-    expect(backend.documentStorageRemove).toHaveBeenLastCalledWith(
-      "test-plugin",
-      "state.json",
-      null,
-    );
 
     backend.documentStorageRemove.mockResolvedValueOnce({
       status: "conflict",
@@ -433,6 +420,12 @@ describe("createPluginContext", () => {
       (ctx: PluginContext) =>
         ctx.ui.registerTimelineRowRenderer({ kind: "custom", component: () => null }),
       timelineRowRegistry,
+    ],
+    [
+      "ui:workspace-menu",
+      (ctx: PluginContext) =>
+        ctx.ui.registerWorkspaceMenuItem({ label: () => "W", onSelect: () => {} }),
+      workspaceMenuRegistry,
     ],
   ])(
     "%s gates and registers under plugin:<id>, disposer removes (phase-2 ui points)",
@@ -587,5 +580,176 @@ describe("createPluginContext", () => {
       await expect(ctx.bridge.invoke("tt_proxy", {})).rejects.toThrow(/unknown bridge command/);
       expect(backend.bridgeInvoke).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("permissioned SDK calls from guarded plugin callbacks", () => {
+  const originalInternals = window.__TAURI_INTERNALS__;
+  const nativeInvoke = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
+
+  beforeAll(() => {
+    window.__TAURI_INTERNALS__ = { invoke: nativeInvoke };
+    installHardening();
+  });
+  beforeEach(() => { nativeInvoke.mockClear(); });
+  afterAll(() => {
+    if (originalInternals) window.__TAURI_INTERNALS__ = originalInternals;
+    else delete window.__TAURI_INTERNALS__;
+  });
+
+  // Follow the loader's synchronous backend -> Tauri path instead of a fake
+  // backend that skips hardening (and therefore cannot expose this regression).
+  function ipcStorage(): PluginContextBackend {
+    return {
+      ...fakeStorage(),
+      get: (id, key) => tauriInvoke("plugin_storage_get", { id, key }),
+      set: (id, key, value) => tauriInvoke("plugin_storage_set", { id, key, value }),
+      delete: (id, key) => tauriInvoke("plugin_storage_delete", { id, key }),
+      workspaceMetadata: (pluginId) => tauriInvoke("workspace_metadata", { pluginId }),
+      documentStorageReadText: (pluginId, relativePath) =>
+        tauriInvoke("plugin_document_storage_read_text", { pluginId, relativePath }),
+      documentStorageWriteTextAtomic: (pluginId, relativePath, content, expectedVersion) =>
+        tauriInvoke("plugin_document_storage_write_text_atomic", {
+          pluginId, relativePath, content, expectedVersion,
+        }),
+      pickDirectory: () => tauriInvoke("plugin:dialog|open"),
+      documentStorageSelectLocation: (pluginId, kind, customPath) =>
+        tauriInvoke("plugin_document_storage_select_location", { pluginId, kind, customPath }),
+      bridgeInvoke: (command, args) => tauriInvoke(command, args),
+    };
+  }
+
+  it("persists workspace menu changes while rejecting direct IPC in that callback", async () => {
+    const data = new Map<string, unknown>();
+    nativeInvoke.mockImplementation(async (cmd, args) => {
+      const input = JSON.parse(JSON.stringify(args)) as { id: string; key: string; value?: unknown };
+      const key = `${input.id}:${input.key}`;
+      if (cmd === "plugin_storage_set") data.set(key, input.value);
+      if (cmd === "plugin_storage_delete") data.delete(key);
+      return cmd === "plugin_storage_get" ? data.get(key) ?? null : null;
+    });
+    const { ctx } = createPluginContext(manifest(["storage", "ui:workspace-menu"]), ipcStorage(), {
+      appVersion: "1.0.0",
+    });
+    let direct: Promise<unknown> | undefined;
+    const dispose = ctx.ui.registerWorkspaceMenuItem({
+      key: "toggle",
+      label: () => "Toggle",
+      onSelect: ({ workspaceId }) => {
+        const saved = ctx.storage.set(workspaceId, { enabled: false });
+        direct = tauriInvoke("plugin_storage_delete", { id: ctx.pluginId, key: workspaceId });
+        return saved;
+      },
+    });
+    try {
+      await workspaceMenuRegistry.get("plugin:test-plugin:toggle")!.onSelect({
+        workspaceId: "work", archived: false,
+      });
+      await expect(direct).rejects.toThrow(/blocked/);
+      await expect(runAsPlugin(() => ctx.storage.get("work"))).resolves.toEqual({ enabled: false });
+      await runAsPlugin(() => ctx.storage.delete("work"));
+      await expect(runAsPlugin(() => ctx.storage.get("work"))).resolves.toBeNull();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("allows document, chooser, metadata and granted bridge operations during activation", async () => {
+    nativeInvoke.mockImplementation(async (cmd) => {
+      if (cmd === "workspace_metadata") return { id: "work", path: "C:/work" };
+      if (cmd === "plugin_document_storage_read_text") return { content: "saved", version: "v1" };
+      if (cmd === "plugin_document_storage_write_text_atomic") return { status: "written", version: "v2" };
+      if (cmd === "plugin:dialog|open") return "C:/chosen";
+      if (cmd === "plugin_document_storage_select_location") {
+        return { kind: "custom", displayPath: "C:/chosen/plugin-data/test-plugin", writable: true };
+      }
+      if (cmd === "plugin_exec_run") return { code: 0, stdout: "ready", stderr: "" };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const { ctx } = createPluginContext(
+      manifest(["workspace.metadata.read", "plugin.storage", "exec:tool"]),
+      ipcStorage(),
+      { appVersion: "1.0.0" },
+    );
+    const results = runAsPlugin(() => Promise.all([
+      ctx.workspace.getMetadata(),
+      ctx.documentStorage.readText("state.json"),
+      ctx.documentStorage.writeTextAtomic("state.json", "next", "v1"),
+      ctx.documentStorage.selectLocation("custom"),
+      ctx.bridge.invoke("plugin_exec_run", { bin: "tool", args: [] }),
+    ]));
+    await expect(results).resolves.toEqual([
+      { id: "work", path: "C:/work" },
+      { content: "saved", version: "v1" },
+      { version: "v2" },
+      { kind: "custom", path: "C:/chosen/plugin-data/test-plugin" },
+      { code: 0, stdout: "ready", stderr: "" },
+    ]);
+  });
+
+  it("does not authorize undeclared SDK permissions or unknown bridge commands", async () => {
+    const { ctx } = createPluginContext(manifest([]), ipcStorage(), { appVersion: "1.0.0" });
+    const results = runAsPlugin(() => [
+      ctx.storage.set("work", false),
+      ctx.documentStorage.writeTextAtomic("state.json", "next", null),
+      ctx.bridge.invoke("plugin_exec_run", { bin: "tool" }),
+      ctx.bridge.invoke("plugin_http_request", { url: "https://example.com" }),
+      ctx.bridge.invoke("plugin_storage_delete", { id: ctx.pluginId, key: "work" }),
+    ]);
+    for (const [index, permission] of [/storage/, /plugin\.storage/, /exec:/, /network:/, /unknown bridge command/].entries()) {
+      await expect(results[index]).rejects.toThrow(permission);
+    }
+    expect(nativeInvoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects an executable replaced during JSON serialization before dispatch", async () => {
+    nativeInvoke.mockImplementation(async (_cmd, args) => JSON.parse(JSON.stringify(args)));
+    const { ctx } = createPluginContext(manifest(["exec:tool"]), ipcStorage(), { appVersion: "1.0.0" });
+    const result = runAsPlugin(() => ctx.bridge.invoke("plugin_exec_run", {
+      bin: "tool",
+      toJSON: () => ({ pluginId: "another-plugin", bin: "ungranted-tool" }),
+    }));
+    await expect(result).rejects.toThrow(/exec:/);
+    expect(nativeInvoke).not.toHaveBeenCalled();
+  });
+
+  it("binds serialized bridge requests to the calling plugin and excludes IPC serializer hooks", async () => {
+    nativeInvoke.mockImplementation(async (_cmd, args) => JSON.parse(JSON.stringify(args, (_key, value) => {
+      if (value && typeof value === "object" && "__TAURI_TO_IPC_KEY__" in value) return value.__TAURI_TO_IPC_KEY__();
+      return value;
+    })));
+    const { ctx } = createPluginContext(manifest(["exec:tool"]), ipcStorage(), { appVersion: "1.0.0" });
+    await expect(runAsPlugin(() => ctx.bridge.invoke("plugin_exec_run", {
+      bin: "tool",
+      toJSON: () => ({ pluginId: "another-plugin", bin: "tool", args: ["--version"] }),
+    }))).resolves.toEqual({ pluginId: ctx.pluginId, bin: "tool", args: ["--version"] });
+    await expect(runAsPlugin(() => ctx.bridge.invoke("plugin_exec_run", {
+      bin: "tool",
+      __TAURI_TO_IPC_KEY__: () => ({ pluginId: "another-plugin", bin: "ungranted-tool" }),
+    }))).resolves.toEqual({ pluginId: ctx.pluginId, bin: "tool" });
+  });
+
+  it("prepares bridge getters without authority and checks the exact values sent", async () => {
+    nativeInvoke.mockImplementationOnce(async (_cmd, args) => {
+      if (!args || typeof args !== "object" || !("bin" in args)) {
+        throw new Error("missing executable in IPC request");
+      }
+      return { code: 0, stdout: args.bin, stderr: "" };
+    });
+    const { ctx } = createPluginContext(manifest(["exec:tool"]), ipcStorage(), { appVersion: "1.0.0" });
+    let fromGetter: Promise<unknown> | undefined;
+    let binReads = 0;
+    const result = runAsPlugin(() => ctx.bridge.invoke("plugin_exec_run", {
+      get bin() {
+        return ++binReads === 1 ? "tool" : "ungranted-tool";
+      },
+      get args() {
+        fromGetter = tauriInvoke("plugin_exec_run", { bin: "ungranted-tool" });
+        return [];
+      },
+    }));
+    await expect(result).resolves.toEqual({ code: 0, stdout: "tool", stderr: "" });
+    await expect(fromGetter).rejects.toThrow(/blocked/);
+    expect(nativeInvoke.mock.calls.map(([cmd]) => cmd)).toEqual(["plugin_exec_run"]);
   });
 });

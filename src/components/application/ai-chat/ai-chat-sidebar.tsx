@@ -310,7 +310,10 @@ export function AiChatSidebar({
         </div>
       </div>
 
-      {workspaceMenu && (onWorkspaceAlias || onSetWorkspaceArchived) && (
+      {/* useWorkspaceMenu only opens when something will render (a builtin
+          handler or a visible registered entry), so state presence is the
+          whole gate here. */}
+      {workspaceMenu && (
         <WorkspaceContextMenu
           menu={workspaceMenu}
           onClose={closeWorkspaceMenu}

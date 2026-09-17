@@ -6,7 +6,7 @@
  * 插件仓用法（包未发布 npm 前的过渡方案）：复制本文件为插件仓的
  * `src/ccgui-plugin.d.ts`，首行版本戳必须与所用宿主 SDK 一致。
  *
- * @ccgui/plugin-sdk v0.4.0
+ * @ccgui/plugin-sdk v0.4.1
  */
 
 /** 宿主实现的 SDK 契约版本。 */
@@ -119,6 +119,10 @@ export interface InternalMessageCapture {
 export interface BeforeTurnResult {
   promptContributions?: PromptContribution[];
   internalMessageCapture?: InternalMessageCapture;
+  /** Pure synchronous lifetime guard, checked during collection, replay and
+   * launch acceptance. False or throwing retires this result's prompts and
+   * capture; a retired lifetime must never become current again. */
+  isCurrent?: () => boolean;
 }
 
 interface SessionEventBase {
@@ -350,6 +354,15 @@ export interface PluginContext {
       kind: string;
       key?: string;
       component: ComponentLike<{ row: { kind: string } }>;
+    }): Disposer;
+    /** 侧边栏工作区行右键菜单条目（权限 ui:workspace-menu）。 */
+    registerWorkspaceMenuItem(def: {
+      key?: string;
+      label: (ctx: { workspaceId: string; archived: boolean }) => string;
+      icon?: ComponentLike<{ className?: string }>;
+      visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
+      onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
+      order?: number;
     }): Disposer;
   };
   theme: {

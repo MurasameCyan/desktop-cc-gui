@@ -83,24 +83,71 @@ describe("plugin hook runtime", () => {
     });
   });
 
-  it("associates internal message capture metadata with its plugin", async () => {
-    disposers.push(
-      registerTurnHooks("capture-owner", {
-        beforeTurn: () => ({
-          internalMessageCapture: { channel: "facts", nonce: "n-1", maxBytes: 256 },
-        }),
-      }),
-    );
+  it("does not deliver queued events after the owning registration is disposed", async () => {
+    const afterTurn = vi.fn();
+    const dispose = registerTurnHooks("retired-owner", { afterTurn });
+    dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" });
+    dispose();
+    await Promise.resolve();
+    expect(afterTurn).not.toHaveBeenCalled();
+  });
 
-    await expect(collectBeforeTurnContributions(beforeTurnEvent)).resolves.toEqual({
-      promptContributions: [],
-      internalMessageCaptures: [
-        {
-          pluginId: "capture-owner",
-          capture: { channel: "facts", nonce: "n-1", maxBytes: 256 },
-        },
-      ],
+  it("discards a before-turn result that resolves after its owner is disposed", async () => {
+    const pending = Promise.withResolvers<{
+      promptContributions: PromptContribution[];
+      internalMessageCapture: { channel: string; nonce: string; maxBytes: number };
+    }>();
+    const dispose = registerTurnHooks("retired-owner", { beforeTurn: () => pending.promise });
+    const collecting = collectBeforeTurnContributions(beforeTurnEvent);
+    dispose();
+    pending.resolve({
+      promptContributions: [contribution("obsolete")],
+      internalMessageCapture: { channel: "facts", nonce: "retired", maxBytes: 256 },
     });
+    expect(await collecting).toEqual({ promptContributions: [], internalMessageCaptures: [] });
+  });
+
+  it("revokes a workspace result while another plugin hook is still pending", async () => {
+    const gate = Promise.withResolvers<void>();
+    let current = true;
+    disposers.push(registerTurnHooks("workspace-owner", {
+      beforeTurn: () => ({
+        isCurrent: () => current,
+        promptContributions: [contribution("obsolete")],
+        internalMessageCapture: { channel: "facts", nonce: "retired", maxBytes: 256 },
+      }),
+    }));
+    disposers.push(registerTurnHooks("pending-owner", {
+      beforeTurn: async () => { await gate.promise; return { promptContributions: [contribution("still-active")] }; },
+    }));
+    const pending = collectBeforeTurnContributions(beforeTurnEvent);
+    await Promise.resolve();
+    current = false;
+    gate.resolve();
+    expect(await pending).toEqual({ promptContributions: [contribution("still-active")], internalMessageCaptures: [] });
+  });
+
+  it("does not commit a collected contribution whose workspace lifetime has expired", async () => {
+    let current = true;
+    const onAccepted = vi.fn();
+    disposers.push(registerTurnHooks("workspace-owner", {
+      beforeTurn: () => ({ isCurrent: () => current, promptContributions: [{ ...contribution("obsolete"), onAccepted }] }),
+    }));
+    const result = await collectBeforeTurnContributions(beforeTurnEvent);
+    current = false;
+    confirmPromptContributions(result.promptContributions);
+    expect(onAccepted).not.toHaveBeenCalled();
+  });
+
+  it("does not confirm a contribution after its registration has been disposed", async () => {
+    const onAccepted = vi.fn();
+    const dispose = registerTurnHooks("retired-owner", {
+      beforeTurn: () => ({ promptContributions: [{ ...contribution("obsolete"), onAccepted }] }),
+    });
+    const result = await collectBeforeTurnContributions(beforeTurnEvent);
+    dispose();
+    confirmPromptContributions(result.promptContributions);
+    expect(onAccepted).not.toHaveBeenCalled();
   });
 
   it("clamps a plugin's declared capture budget to what the host can record", async () => {
@@ -199,6 +246,8 @@ describe("plugin hook runtime", () => {
     expect(overflow).not.toHaveBeenCalled();
     confirmPromptContributions(result.promptContributions);
     confirmPromptContributions(result.promptContributions);
+    const repeated = await collectBeforeTurnContributions(beforeTurnEvent, { maxBytes: 4 });
+    confirmPromptContributions(repeated.promptContributions);
     expect(accepted).toHaveBeenCalledTimes(1);
     expect(overflow).not.toHaveBeenCalled();
   });

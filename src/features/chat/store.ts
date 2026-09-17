@@ -60,9 +60,8 @@ import {
 import { effectivePermission, readPermissionPref } from "./store/permissions";
 import {
   forgetSessionContributions,
-  mergeSessionContributions,
   migrateSessionContributions,
-  rememberSessionContributions,
+  prepareSessionContributions,
   sessionContributionScope,
 } from "./store/session-contributions";
 import { persistSettings } from "./store/settings-persist";
@@ -79,10 +78,10 @@ import {
   dispatchSessionClosed,
   dispatchSessionCreated,
   dispatchSessionRestored,
+  isInternalMessageCaptureActive,
   runBeforeSwitch,
 } from "@/features/plugins/runtime/hooks";
-import type { PromptContribution, RuntimeSwitchEvent, WorkspaceMetadata } from "@ccgui/plugin-sdk";
-import type { RegisteredInternalMessageCapture } from "@/features/plugins/runtime/hooks";
+import type { RuntimeSwitchEvent, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 
 // Facade re-exports: callers keep importing everything from "../store".
 export { sessionKey } from "./store/persistence";
@@ -271,14 +270,6 @@ export const useChatStore = create<ChatStore>((set, get) => {
     };
   }
 
-  /** Remember this turn's session-scoped contributions, keyed by id (latest
-   * wins); capacities bound the cache. */
-  function rememberScopedContributions(scope: string, fresh: PromptContribution[]) {
-    set((s) => {
-      const next = rememberSessionContributions(s.sessionContributions, scope, fresh);
-      return next ? { sessionContributions: next } : {};
-    });
-  }
 
   /** A pending tab just adopted its native id: carry the remembered session
    * contributions from the placeholder scope onto the real one. */
@@ -406,13 +397,15 @@ export const useChatStore = create<ChatStore>((set, get) => {
       workspace,
       occurredAt: new Date().toISOString(),
     });
-    // Session-scoped contributions persist across turns of the same session:
-    // re-inject the remembered ones, then this turn's (same id wins).
-    const promptContributions = mergeSessionContributions(
-      get().sessionContributions[scope],
+    // Retire old owners and withdraw their native-history instructions once.
+    const prepared = prepareSessionContributions(
+      get().sessionContributions,
+      scope,
       beforeTurn.promptContributions,
+      tab.sessionId !== null,
     );
-    rememberScopedContributions(scope, beforeTurn.promptContributions);
+    if (prepared.next) set({ sessionContributions: prepared.next });
+    const promptContributions = prepared.promptContributions;
     // Register the run lifecycle BEFORE the send: a fast engine's
     // session/delta/done events may outrun the send result, and unregistered
     // events would lose their runtime and afterTurn delivery.
@@ -421,7 +414,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       engine,
       sessionId: tab.sessionId,
       workspace,
-      captures: beforeTurn.internalMessageCaptures as RegisteredInternalMessageCapture[],
+      captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
     });
     try {
       const result = await ipc.sendMessage({

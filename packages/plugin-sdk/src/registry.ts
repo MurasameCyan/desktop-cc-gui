@@ -114,6 +114,20 @@ export interface TimelineRowRendererDef {
   component: ComponentType<{ row: { kind: string } }>;
 }
 
+/** Sidebar workspace row context-menu entry (generic extension point). The
+ *  host renders its builtin entries (别名 / 归档) first and appends registry
+ *  entries after a separator; an owner decides per workspace what it shows. */
+export interface WorkspaceMenuItemDef {
+  id: string;
+  /** Resolved at menu-open time; receives the workspace the user right-clicked. */
+  label: (ctx: { workspaceId: string; archived: boolean }) => string;
+  icon?: ComponentType<{ className?: string }>;
+  /** Hidden when false; lets an owner scope its entry to some workspaces. */
+  visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
+  onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
+  order?: number;
+}
+
 // ---------------------------------------------------------------------------
 // 注册表
 // ---------------------------------------------------------------------------
@@ -190,6 +204,9 @@ export const pageRegistry = new Registry<PageDef>();
 
 /** Chat timeline row renderer registry (plan §4.2 #5). */
 export const timelineRowRegistry = new Registry<TimelineRowRendererDef>();
+
+/** Sidebar workspace row context-menu registry (generic extension point). */
+export const workspaceMenuRegistry = new Registry<WorkspaceMenuItemDef>();
 
 // ---------------------------------------------------------------------------
 // 注册表 id / 排序辅助

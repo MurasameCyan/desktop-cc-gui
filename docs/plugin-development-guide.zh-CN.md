@@ -211,6 +211,7 @@ interface PluginContext {
     registerMarkdownRenderer(d: MarkdownRendererDef): Disposer;
     registerPage(d: PageDef): Disposer;
     registerTimelineRowRenderer(d: TimelineRowRendererDef): Disposer;
+    registerWorkspaceMenuItem(d: Omit<WorkspaceMenuItemDef, "id"> & { key?: string }): Disposer;
   };
   theme: { injectCss(css: string): Disposer; setTokens(tokens: ThemeTokens): Disposer };
   i18n: { addBundle(lang: string, ns: string, resources: object): Disposer };
@@ -228,6 +229,12 @@ interface PluginContext {
 生命周期 hook 按插件注册顺序调用且逐插件隔离错误；`beforeTurn` 与 `beforeSwitch` 最多等待 2 秒，超时或异常均不阻断聊天或客户端切换。`beforeTurn` 可返回 `PromptContribution[]` 及内部消息捕获声明。内部提示不会进入 CCGUI 聊天画布、乐观用户消息或标题；当 CLI 无真正 system channel 时，`system-tail` 会降级为带清晰标记的 request tail，因此仍可能进入 CLI 自身原生历史。
 
 `turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用；失败的发送不能据此登记为已消费。
+
+`BeforeTurnResult.isCurrent` 是可选的纯同步生命周期守卫，用于某个工作区关闭功能、但插件仍在其他工作区运行的情形。宿主在收集结果、再次注入及启动接纳时检查；返回 `false` 或抛错会撤销该结果，已失效的生命周期不得再返回 `true`。已返回的结果必须捕获其原始生命周期，不能只读取可能再次开启的全局布尔值。
+
+宿主不会重新注入已注销注册者的缓存提示。原生 CLI 历史无法抹去，因而停用后的下一次发送会携带一次性旧指令撤销；启动失败则保留重试，接纳后不重复发送。撤销不删除历史任务事实，也不启动插件读写。
+
+`ctx.ui.registerWorkspaceMenuItem`（权限 `ui:workspace-menu`）的 `label`、`visible` 和 `onSelect` 接收右键目标 `{ workspaceId, archived }`，不是当前活动工作区。菜单项应绑定用户看到的动作，避免异步保存完成后把旧的“停用”选择反转成“启用”。返回的 Disposer 及插件卸载均会移除菜单项。
 
 `ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
 
@@ -248,7 +255,7 @@ interface PluginContext {
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`） | 对应 UI 扩展点 | 低 |
+| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`） | 对应 UI 扩展点 | 低 |
 | `theme` / `i18n` / `events` | 样式 token、语言资源、插件事件总线 | 低 |
 | `session.lifecycle.read` | 观察 session 新建、恢复、关闭 | 中 |
 | `runtime.events.read` | 读取标准化运行时事实 | 中 |

@@ -11,6 +11,7 @@
     "ui:markdown",
     "ui:page",
     "ui:timeline-row",
+    "ui:workspace-menu",
     "theme",
     "i18n",
     "events",
