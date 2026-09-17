@@ -34,9 +34,10 @@ export function ThreadContextMenu({
   // 插件追加行（ctx.ui.registerSessionMenuItem）：label 是 thunk，
   // 语言切换即时重命名；run 收到菜单所在的会话。
   const pluginDefs = useRegistry(sessionMenuRegistry);
+  const isDraft = menu.threadId.startsWith("new:");
 
   const entries: (ContextMenuEntry | "separator")[] = [];
-  if (onThreadAction) {
+  if (onThreadAction && !isDraft) {
     entries.push({
       id: "rename",
       label: t("chat.renameSession"),
@@ -44,7 +45,7 @@ export function ThreadContextMenu({
       onSelect: () => onThreadAction(menu.threadId, "rename"),
     });
   }
-  if (onCopyId) {
+  if (onCopyId && !isDraft) {
     entries.push({
       id: "copy-id",
       label: t("chat.copySessionId"),
@@ -62,7 +63,7 @@ export function ThreadContextMenu({
       onSelect: () => onThreadAction(menu.threadId, "delete"),
     });
   }
-  if (pluginDefs.length > 0) {
+  if (pluginDefs.length > 0 && !isDraft) {
     // threadId 约定为 "<engine>/<sessionId>"（侧栏行 id），引擎段不含 "/"。
     const slash = menu.threadId.indexOf("/");
     const target =

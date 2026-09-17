@@ -85,7 +85,7 @@ import {
 import type { RuntimeSwitchEvent, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 
 // Facade re-exports: callers keep importing everything from "../store".
-export { sessionKey } from "./store/persistence";
+export { parseDraftSessionKey, sessionKey } from "./store/persistence";
 export type { ActiveSession } from "./store/persistence";
 export type { QueuedMessage, SessionState } from "./store/stream";
 export type { ChatStore } from "./store/types";

@@ -85,7 +85,7 @@ function writeExpandedWorkspaces(expanded: Set<string>) {
 
 /** Workspace expansion: likewise persisted. null = the user never toggled a
  *  workspace, so the built-in default (the first one open) still applies. */
-export function useExpandedWorkspaces(allRepos: AiChatRepo[]) {
+export function useExpandedWorkspaces(allRepos: AiChatRepo[], activeThreadId?: string) {
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string> | null>(
     readExpandedWorkspaces,
   );
@@ -115,6 +115,20 @@ export function useExpandedWorkspaces(allRepos: AiChatRepo[]) {
     },
     [allRepos, expandedWorkspaces],
   );
+  // Reveal a pending "新对话" once so it is not born inside a collapsed
+  // folder. Do not keep forcing it open — that would fight the user
+  // collapsing the workspace afterwards.
+  const revealedDraftId = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeThreadId) return;
+    const repo = allRepos.find((item) =>
+      item.threads.some((thread) => thread.id === activeThreadId && thread.isDraft),
+    );
+    if (!repo?.id) return;
+    if (revealedDraftId.current === activeThreadId) return;
+    revealedDraftId.current = activeThreadId;
+    if (!isRepoExpanded(repo)) toggleRepoExpanded(repo);
+  }, [activeThreadId, allRepos, isRepoExpanded, toggleRepoExpanded]);
   return { isRepoExpanded, toggleRepoExpanded };
 }
 

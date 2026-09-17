@@ -191,7 +191,7 @@ export function AiChatSidebar({
     () => (sections ? sections.flatMap((section) => section.repos) : repos),
     [sections, repos],
   );
-  const { isRepoExpanded, toggleRepoExpanded } = useExpandedWorkspaces(allRepos);
+  const { isRepoExpanded, toggleRepoExpanded } = useExpandedWorkspaces(allRepos, activeThreadId);
   const { workspaceMenu, closeWorkspaceMenu, openWorkspaceMenu, openArchivedMenu } =
     useWorkspaceMenu(onWorkspaceAlias, onSetWorkspaceArchived);
   const { threadMenu, openThreadMenu, closeThreadMenu } = useThreadMenu(

@@ -67,6 +67,38 @@ it("remembers which workspaces the user expanded", async () => {
   expect(rowFor("c").getAttribute("aria-expanded")).toBe("false");
 });
 
+it("active draft 新对话会展开其所在的折叠工作区", async () => {
+  localStorage.setItem(KEY, JSON.stringify([]));
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        activeThreadId="new:codex:/ws/b"
+        repos={[
+          repo("a", true),
+          {
+            id: "b",
+            label: "b",
+            threads: [
+              {
+                id: "new:codex:/ws/b",
+                label: "新对话",
+                time: "",
+                isDraft: true,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+  });
+  expect(rowFor("b").getAttribute("aria-expanded")).toBe("true");
+  expect(JSON.parse(localStorage.getItem(KEY) ?? "[]")).toContain("b");
+
+  await act(async () => rowFor("b").click());
+  expect(rowFor("b").getAttribute("aria-expanded")).toBe("false");
+  expect(JSON.parse(localStorage.getItem(KEY) ?? "[]")).not.toContain("b");
+});
+
 it("remembers collapses too, and the default never overrides a stored set", async () => {
   await render([repo("a", true), repo("b")]);
   expect(rowFor("a").getAttribute("aria-expanded")).toBe("true");
@@ -79,6 +111,40 @@ it("remembers collapses too, and the default never overrides a stored set", asyn
   // defaultOpen would open "a" again, but the user's choice wins.
   await render([repo("a", true), repo("b")]);
   expect(rowFor("a").getAttribute("aria-expanded")).toBe("false");
+});
+
+function namedThreadCount(): number {
+  return [...node.querySelectorAll("button")].filter((el) =>
+    /^对话\d+$/.test((el.textContent ?? "").replace(/\s+/g, "")),
+  ).length;
+}
+
+it("展开只显示 threadLimit 条,收起再展开不会保留加载更多", async () => {
+  const threads = Array.from({ length: 12 }, (_, index) => ({
+    id: `codex/s-${index}`,
+    label: `对话${index}`,
+    time: "1m",
+  }));
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        activeThreadId="codex/s-10"
+        repos={[{ id: "a", label: "a", defaultOpen: true, threadLimit: 5, threads }]}
+      />,
+    );
+  });
+  expect(namedThreadCount()).toBe(5);
+
+  const more = [...node.querySelectorAll("button")].find((el) =>
+    el.textContent?.includes("chat.showMoreSessions"),
+  );
+  if (!more) throw new Error("no load-more row");
+  await act(async () => more.click());
+  expect(namedThreadCount()).toBe(12);
+
+  await act(async () => rowFor("a").click());
+  await act(async () => rowFor("a").click());
+  expect(namedThreadCount()).toBe(5);
 });
 /** The session row whose label is inside it (the hover-action div wrapping
  *  the row button). */
@@ -166,6 +232,52 @@ it("renders plugin session-menu items and dispatches the parsed target", async (
     await act(async () => menuItem(menu, "AI Rename").click());
     expect(run).toHaveBeenCalledWith({ engine: "omp", sessionId: "sid-42" });
     expect(document.body.querySelector("[role='menu']")).toBeNull();
+  } finally {
+    dispose();
+  }
+});
+
+it("draft 新对话右键只提供删除,不暴露重命名/复制 ID/插件项", async () => {
+  const onThreadAction = vi.fn();
+  const onCopyThreadId = vi.fn();
+  const dispose = sessionMenuRegistry.register({
+    id: "plugin:auto-title:rename",
+    label: () => "AI Rename",
+    run: vi.fn(),
+  });
+  try {
+    await act(async () => {
+      root.render(
+        <AiChatSidebar
+          repos={[
+            {
+              id: "a",
+              label: "a",
+              defaultOpen: true,
+              threads: [
+                {
+                  id: "new:codex:/ws/a",
+                  label: "新对话",
+                  time: "",
+                  isDraft: true,
+                },
+              ],
+            },
+          ]}
+          onThreadAction={onThreadAction}
+          onCopyThreadId={onCopyThreadId}
+        />,
+      );
+    });
+
+    await rightClick(threadRow("新对话"));
+    const menu = openMenu();
+    expect([...menu.querySelectorAll("[role='menuitem']")].map((el) => el.textContent)).toEqual([
+      "chat.deleteSession",
+    ]);
+    await act(async () => menuItem(menu, "chat.deleteSession").click());
+    expect(onThreadAction).toHaveBeenCalledWith("new:codex:/ws/a", "delete");
+    expect(onCopyThreadId).not.toHaveBeenCalled();
   } finally {
     dispose();
   }

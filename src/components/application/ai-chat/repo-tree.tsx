@@ -1,7 +1,7 @@
 "use client";
 
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import FolderOpen from "lucide-react/dist/esm/icons/folder-open";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
@@ -26,6 +26,7 @@ function ThreadItem({
   isSelected = false,
   streaming = false,
   unseen = false,
+  isDraft = false,
   tabIndex,
   onSelect,
   onAction,
@@ -96,28 +97,32 @@ function ThreadItem({
       </button>
       {id && onAction && (
         <span className="hidden shrink-0 items-center gap-1.5 group-hover:inline-flex">
-          <button
-            type="button"
-            aria-label={pinned ? t("chat.unpin") : t("chat.pin")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onAction(id, "pin");
-            }}
-            className="text-foreground-icon-secondary hover:text-foreground-icon-primary"
-          >
-            <Pin className="size-3.5" aria-hidden />
-          </button>
-          <button
-            type="button"
-            aria-label={t("chat.renameSession")}
-            onClick={(event) => {
-              event.stopPropagation();
-              onAction(id, "rename");
-            }}
-            className="text-foreground-icon-secondary hover:text-foreground-icon-primary"
-          >
-            <Pencil className="size-3.5" aria-hidden />
-          </button>
+          {!isDraft && (
+            <button
+              type="button"
+              aria-label={pinned ? t("chat.unpin") : t("chat.pin")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onAction(id, "pin");
+              }}
+              className="text-foreground-icon-secondary hover:text-foreground-icon-primary"
+            >
+              <Pin className="size-3.5" aria-hidden />
+            </button>
+          )}
+          {!isDraft && (
+            <button
+              type="button"
+              aria-label={t("chat.renameSession")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onAction(id, "rename");
+              }}
+              className="text-foreground-icon-secondary hover:text-foreground-icon-primary"
+            >
+              <Pencil className="size-3.5" aria-hidden />
+            </button>
+          )}
           <button
             type="button"
             aria-label={t("chat.deleteSession")}
@@ -131,9 +136,11 @@ function ThreadItem({
           </button>
         </span>
       )}
-      <span className="inline-flex shrink-0 items-center justify-center rounded-sm bg-background-tertiary-default px-1 py-px text-caption-2-medium whitespace-nowrap text-text-secondary group-hover:hidden">
-        {time}
-      </span>
+      {time ? (
+        <span className="inline-flex shrink-0 items-center justify-center rounded-sm bg-background-tertiary-default px-1 py-px text-caption-2-medium whitespace-nowrap text-text-secondary group-hover:hidden">
+          {time}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -182,20 +189,16 @@ interface DragHandleProps {
 
 /**
  * Thread pagination for one repo: page 0 caps at `threadLimit`, page 1 adds
- * PAGE_SIZE, page 2 shows all — but the selected thread is never hidden.
+ * PAGE_SIZE, page 2 shows all. Collapse/expand resets to page 0 so the
+ * folder reopens to a short recent list (Codex / Cursor).
  */
-function paginateThreads(
+export function paginateThreads(
   threads: AiChatThread[],
   threadLimit: number | undefined,
   page: number,
-  activeThreadId?: string,
 ): { visibleThreads: AiChatThread[]; hiddenCount: number } {
   const limit = threadLimit ?? threads.length;
-  const activeIndex = activeThreadId
-    ? threads.findIndex((thread) => thread.id === activeThreadId)
-    : -1;
-  const visibleCount =
-    page >= 2 ? threads.length : Math.max(limit + page * PAGE_SIZE, activeIndex + 1);
+  const visibleCount = page >= 2 ? threads.length : limit + page * PAGE_SIZE;
   const visibleThreads =
     threads.length <= visibleCount ? threads : threads.slice(0, visibleCount);
   return { visibleThreads, hiddenCount: threads.length - visibleThreads.length };
@@ -473,12 +476,15 @@ export function RepoItem({
     (repo.id && onNewSession) || dragHandleProps || (repo.id && onRemove),
   );
 
-  const { visibleThreads, hiddenCount } = paginateThreads(
-    repo.threads,
-    repo.threadLimit,
-    page,
-    activeThreadId,
-  );
+  // Collapse drops the "load more" window so the next expand is a short list
+  // again, matching Codex / Cursor project folders.
+  useEffect(() => {
+    if (!expanded) setPage(0);
+  }, [expanded]);
+
+  const { visibleThreads, hiddenCount } = forceOpen
+    ? { visibleThreads: repo.threads, hiddenCount: 0 }
+    : paginateThreads(repo.threads, repo.threadLimit, page);
 
   return (
     <div className="flex w-full flex-col">

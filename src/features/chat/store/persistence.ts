@@ -28,6 +28,17 @@ export function sessionKey(
     : `new:${engine}:${workspacePath}`;
 }
 
+/** Inverse of `sessionKey` for pending (never-sent) tabs. */
+export function parseDraftSessionKey(
+  key: string,
+): { engine: string; workspacePath: string } | null {
+  if (!key.startsWith("new:")) return null;
+  const rest = key.slice(4);
+  const colon = rest.indexOf(":");
+  if (colon <= 0) return null;
+  return { engine: rest.slice(0, colon), workspacePath: rest.slice(colon + 1) };
+}
+
 export const OPEN_TABS_KEY = "ccgui-next.openTabs:v1";
 const ACTIVE_SESSION_KEY = "ccgui-next.activeSession:v1";
 const LEGACY_OPEN_TABS_KEY = "ccgui-next.openTabs";

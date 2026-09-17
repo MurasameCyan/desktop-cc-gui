@@ -13,6 +13,8 @@ export interface AiChatThread {
   streaming?: boolean;
   /** Finished activity the user has not opened yet — solid green dot. */
   unseen?: boolean;
+  /** Pending tab: first message not sent, so pin/rename/copy-id do not apply. */
+  isDraft?: boolean;
 }
 
 export interface AiChatRepo {
