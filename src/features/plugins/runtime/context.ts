@@ -15,6 +15,7 @@ import {
   sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
+  composerStatusRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -326,6 +327,17 @@ export function createPluginContext(
             id: scopedPluginId(id, def.key),
             component: def.component,
             order: def.order,
+            zone: def.zone,
+          }),
+        );
+      },
+      registerComposerStatusItem(def) {
+        requirePermission("ui:composer-status");
+        return track(
+          composerStatusRegistry.register({
+            id: scopedPluginId(id, def.key),
+            component: def.component,
+            order: def.order,
           }),
         );
       },
@@ -488,6 +500,16 @@ export function createPluginContext(
         // 的模块环（store → plugins/runtime/session-source）。
         return import("@/features/chat/store").then((m) =>
           m.useChatStore.getState().refreshSessions(),
+        );
+      },
+      setEffort(engine, sessionId, workspacePath, effort) {
+        requirePermission("host:session");
+        // 校验失败走 rejection（与 selectSession 一致）。store 侧拒绝未知
+        // 会话键——错误的 workspacePath 不得经 patchSession 造出幽灵条目。
+        return Promise.resolve().then(() =>
+          import("@/features/chat/store").then((m) =>
+            m.setPluginSessionEffort(engine, sessionId, workspacePath, effort),
+          ),
         );
       },
       registerSource(def) {

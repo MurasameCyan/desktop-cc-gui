@@ -310,6 +310,17 @@ export interface PluginContext {
       key?: string;
       component: ComponentType;
       order?: number;
+      /** Placement zone (0.3.8): "start" = left-aligned zone; omitted/"end"
+       *  = legacy slot after sync status, before version. */
+      zone?: "start" | "end";
+    }): Disposer;
+    /** Composer status-row chip (permission `ui:composer-status`, 0.3.9):
+     *  renders in the composer's status row (branch/context meter row),
+     *  left group after the branch switcher. */
+    registerComposerStatusItem(def: {
+      key?: string;
+      component: ComponentType;
+      order?: number;
     }): Disposer;
     /** Command palette entry (plan §4.2 #9). */
     registerCommand(def: {
@@ -414,6 +425,10 @@ export interface PluginContext {
      *  插件绕过宿主直写会话数据（如 sqlite custom_title、转录 title 行）后
      *  调用——否则变更要等用户手动同步或下次常规刷新才可见。 */
     refresh(): Promise<void>;
+    /** 修改已有会话的 effort 档位，0.3.10 起。直写宿主会话状态并持久化
+     *  （等价于用户在会话内切换档位，refreshSessions 不会回滚）。未知会话
+     *  或空 effort 以 rejection 失败——不会创建幽灵会话条目。 */
+    setEffort(engine: string, sessionId: string, workspacePath: string, effort: string): Promise<void>;
     registerSource(def: {
       /** 源 id,插件内唯一;同 id 重复登记覆盖(热重载语义)。 */
       id: string;

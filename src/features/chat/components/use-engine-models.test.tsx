@@ -59,7 +59,7 @@ function Harness({
   pinModels: (updates: Record<string, string>, persist?: boolean) => Promise<void>;
   workspacePath?: string;
 }) {
-  latest = useEngineModels(engines, models, pinModels, workspacePath);
+  latest = useEngineModels(engines, models, pinModels, {}, workspacePath);
   return null;
 }
 

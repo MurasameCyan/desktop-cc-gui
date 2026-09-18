@@ -100,35 +100,45 @@ export function useExpandedWorkspaces(allRepos: AiChatRepo[], activeThreadId?: s
     (repo: AiChatRepo) => {
       const id = repo.id;
       if (!id) return;
-      // First toggle materializes the current defaults, so workspaces the
-      // user never touched keep the state they were showing.
-      const base =
-        expandedWorkspaces ??
-        new Set(
-          allRepos.flatMap((r) => (r.defaultOpen && r.id ? [r.id] : [])),
-        );
-      const next = new Set(base);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      writeExpandedWorkspaces(next);
-      setExpandedWorkspaces(next);
+      setExpandedWorkspaces((prev) => {
+        // First toggle materializes the current defaults, so workspaces the
+        // user never touched keep the state they were showing.
+        const base =
+          prev ??
+          new Set(
+            allRepos.flatMap((r) => (r.defaultOpen && r.id ? [r.id] : [])),
+          );
+        const next = new Set(base);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
     },
-    [allRepos, expandedWorkspaces],
+    [allRepos],
   );
+  // Persist after commit, not inside the updater: React may replay updater
+  // functions, and a replayed localStorage write would be a duplicate side
+  // effect. null = the user never toggled, so there is nothing to store yet;
+  // a stored set rewritten on mount is idempotent.
+  useEffect(() => {
+    if (expandedWorkspaces) writeExpandedWorkspaces(expandedWorkspaces);
+  }, [expandedWorkspaces]);
   // Reveal a pending "新对话" once so it is not born inside a collapsed
   // folder. Do not keep forcing it open — that would fight the user
-  // collapsing the workspace afterwards.
-  const revealedDraftId = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeThreadId) return;
+  // collapsing the workspace afterwards. Adjusting state during render (the
+  // documented replacement for a prop-change effect): the revealed-draft
+  // guard makes each draft id expand at most once, and React re-renders
+  // immediately before committing.
+  const [revealedDraftId, setRevealedDraftId] = useState<string | null>(null);
+  if (activeThreadId && revealedDraftId !== activeThreadId) {
     const repo = allRepos.find((item) =>
       item.threads.some((thread) => thread.id === activeThreadId && thread.isDraft),
     );
-    if (!repo?.id) return;
-    if (revealedDraftId.current === activeThreadId) return;
-    revealedDraftId.current = activeThreadId;
-    if (!isRepoExpanded(repo)) toggleRepoExpanded(repo);
-  }, [activeThreadId, allRepos, isRepoExpanded, toggleRepoExpanded]);
+    if (repo?.id) {
+      setRevealedDraftId(activeThreadId);
+      if (!isRepoExpanded(repo)) toggleRepoExpanded(repo);
+    }
+  }
   return { isRepoExpanded, toggleRepoExpanded };
 }
 

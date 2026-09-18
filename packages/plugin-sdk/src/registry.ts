@@ -67,6 +67,18 @@ export interface StatusBarItemDef {
   id: string;
   component: ComponentType;
   order?: number;
+  /** Placement zone (0.3.8): "start" renders left-aligned ahead of the
+   *  builtin cluster; omitted/"end" keeps the legacy slot after the sync
+   *  status, before the version. */
+  zone?: "start" | "end";
+}
+/** Composer status-row item (0.3.9): a chip in the composer's status row
+ *  (branch/context meter row), rendered in the left group after the branch
+ *  switcher. Same ownership/boundary rules as StatusBarItemDef. */
+export interface ComposerStatusItemDef {
+  id: string;
+  component: ComponentType;
+  order?: number;
 }
 
 /** Command palette entry (plan §4.2 #9). */
@@ -218,6 +230,8 @@ export const panelTabRegistry = new Registry<PanelTabDef>();
 
 /** App status bar item registry (plan §4.2 #8). */
 export const statusBarRegistry = new Registry<StatusBarItemDef>();
+/** Composer status-row item registry (0.3.9). */
+export const composerStatusRegistry = new Registry<ComposerStatusItemDef>();
 
 /** Command palette registry (plan §4.2 #9). */
 export const commandRegistry = new Registry<CommandDef>();

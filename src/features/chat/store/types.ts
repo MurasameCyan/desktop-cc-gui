@@ -30,6 +30,10 @@ export interface ChatStore {
   codexServiceTier: OmpServiceTier;
   /** Per-engine model override ("" = CLI/provider default), persisted in app settings. */
   models: Record<string, string>;
+  /** Per-engine default channel (settings `current`). New chats and sessions
+   *  that never recorded one fall back to this; spawn injects env, never
+   *  writes the CLI's own config file. */
+  providers: Record<string, string>;
   /** Max sessions listed per workspace in the sidebar, persisted in app settings. */
   threadLimit: number;
   /** Sidebar workspace groups, persisted in app settings. The assignment
@@ -120,6 +124,9 @@ export interface ChatStore {
   setOmpServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setModel: (engine: string, model: string) => Promise<void>;
+  /** Session-scoped channel. An existing conversation keeps the pick; only a
+   *  pending new-chat tab also updates the engine default for the next chat. */
+  setProvider: (engine: string, providerId: string) => Promise<void>;
   /** Pin several engines' models at once (startup defaulting); one settings
    * write instead of one per engine. */
   /** persist=false keeps the update session-scoped (remote-catalog resets
@@ -163,6 +170,13 @@ export interface ChatStore {
   /** Answer a permission-denial grant card: persist the directory grant
    * (accept) or mark the card declined. */
   respondToGrant: (key: string, seq: number, accept: boolean) => Promise<void>;
+  /** Answer a pending AskUserQuestion card: send the picked labels (null =
+   * skipped) to the parked CLI process via the control protocol. */
+  respondToQuestion: (
+    key: string,
+    seq: number,
+    answers: Record<string, string | string[]> | null,
+  ) => Promise<void>;
   /** Re-send the session's last user message (grant card's one-click retry
    * after a directory grant takes effect on the next launch). */
   resendLastUser: (key: string) => Promise<void>;

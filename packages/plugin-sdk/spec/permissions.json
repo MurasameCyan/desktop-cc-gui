@@ -4,7 +4,7 @@
     "storage",
     "ui:settings-section",
     "ui:add-menu",
-    "ui:composer",
+    "ui:composer-status",
     "ui:panel-tab",
     "ui:status-bar",
     "ui:command",

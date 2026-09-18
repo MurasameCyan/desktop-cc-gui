@@ -41,7 +41,7 @@ pub struct SlashCommandEntry {
     pub kind: SlashEntryKind,
 }
 
-fn sanitize_meta_value(value: &str) -> Option<String> {
+pub(crate) fn sanitize_meta_value(value: &str) -> Option<String> {
     let mut val = value.trim().to_string();
     if val.len() >= 2 {
         let bytes = val.as_bytes();
@@ -59,7 +59,7 @@ fn sanitize_meta_value(value: &str) -> Option<String> {
     }
 }
 
-fn parse_meta_line(line: &str, description: &mut Option<String>, argument_hint: &mut Option<String>) {
+pub(crate) fn parse_meta_line(line: &str, description: &mut Option<String>, argument_hint: &mut Option<String>) {
     let Some((key, value)) = line.split_once(':') else {
         return;
     };

@@ -26,11 +26,15 @@ export interface SessionState {
   turnStartedAt: number | null;
   activeModel?: string | null;
   activeEffort?: string | null;
+  /** In-app channel this session runs; spawn injects its env. */
+  activeProvider?: string | null;
   /** Newest single report: the context meter reads occupancy from it. */
   usage: unknown;
   /** Running total of the reply in flight (sum of its reports), so the tail
    *  indicator counts this reply instead of showing one request's slice. */
   turnUsage: unknown;
+  /** Bounded terminal-run history; late events must not revive a finished turn. */
+  settledRunIds?: string[];
   error: string | null;
   /** Live provider-retry progress for the running turn ("重试中 2/5"). The
    * CLI is backing off and will re-issue the request, so this is progress,
@@ -53,6 +57,7 @@ export const EMPTY_SESSION: SessionState = {
   turnStartedAt: null,
   activeModel: null,
   activeEffort: null,
+  activeProvider: null,
   usage: null,
   turnUsage: null,
   error: null,
@@ -112,6 +117,21 @@ export function resolveSessionEffort(
   return engineDefault;
 }
 
+/** The in-app channel one session runs with. A native session owns it in
+ * SessionState / session_providers; only a not-yet-created tab may carry a
+ * starting override. There is no message-history scan: the transcript does
+ * not record the channel. */
+export function resolveSessionProvider(
+  tab: { engine: string; sessionId?: string | null; provider?: string | null } | null | undefined,
+  session: Pick<SessionState, "activeProvider"> | undefined,
+  engineDefault?: string,
+): string | undefined {
+  if (!tab) return engineDefault;
+  if (tab.sessionId === null && tab.provider) return tab.provider;
+  if (session?.activeProvider) return session.activeProvider;
+  return engineDefault;
+}
+
 /** Minimal store shape these helpers touch. */
 export interface BySessionSlice {
   bySession: Record<string, SessionState>;
@@ -123,6 +143,10 @@ export type SetFn<T extends BySessionSlice> = (fn: (s: T) => Partial<T>) => void
  * the run settles (done/error) or is interrupted — the map must not grow
  * monotonically over the app's lifetime. */
 export const runRouting = new Map<string, string>();
+
+export function rememberSettledRun(session: SessionState | undefined, runId: string): string[] {
+  return [...(session?.settledRunIds ?? []).filter((id) => id !== runId), runId].slice(-32);
+}
 /** runId -> last activity (stamped at routing, refreshed on each routed
  * event). A run that dies without done/error (engine crash, killed process)
  * never gets its routing entry removed by the settling paths, so each newly

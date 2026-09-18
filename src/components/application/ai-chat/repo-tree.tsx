@@ -12,6 +12,7 @@ import Plus from "lucide-react/dist/esm/icons/plus";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
 import X from "lucide-react/dist/esm/icons/x";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
+import { paginateThreads } from "@/components/application/ai-chat/repo-pagination";
 import type { AiChatRepo, AiChatThread, ThreadAction } from "@/components/application/ai-chat/sidebar-types";
 import { cx } from "@/utils/cx";
 
@@ -179,30 +180,11 @@ function TreeConnector({ count }: { count: number }) {
   );
 }
 
-/** Threads revealed by the first "还有 N 个对话" click. */
-const PAGE_SIZE = 50;
-
 /** Immediate drag entry attached to a repo row's grip handle. */
 interface DragHandleProps {
   onPointerDown: (event: ReactPointerEvent) => void;
 }
 
-/**
- * Thread pagination for one repo: page 0 caps at `threadLimit`, page 1 adds
- * PAGE_SIZE, page 2 shows all. Collapse/expand resets to page 0 so the
- * folder reopens to a short recent list (Codex / Cursor).
- */
-export function paginateThreads(
-  threads: AiChatThread[],
-  threadLimit: number | undefined,
-  page: number,
-): { visibleThreads: AiChatThread[]; hiddenCount: number } {
-  const limit = threadLimit ?? threads.length;
-  const visibleCount = page >= 2 ? threads.length : limit + page * PAGE_SIZE;
-  const visibleThreads =
-    threads.length <= visibleCount ? threads : threads.slice(0, visibleCount);
-  return { visibleThreads, hiddenCount: threads.length - visibleThreads.length };
-}
 
 /** The repo row itself: merged folder/reorder-grip button, label, hover
  *  actions (new session / remove) and the thread count chip. Right-click
@@ -352,34 +334,30 @@ function RepoHeaderRow({
   );
 }
 
-/** The collapsible thread area under a repo row: tree connector, paged
- *  thread rows, and the show-more/fewer pagination buttons. */
+/** The collapsible thread area under a repo row: the wrapper owns the
+ *  grid-rows collapse animation; the paged content only mounts while
+ *  expanded, so collapsing unmounts it and the next expand restarts at
+ *  page 0 — a short recent list again, matching Codex / Cursor folders. */
 function RepoThreadList({
   expanded,
-  visibleThreads,
-  hiddenCount,
-  page,
+  threads,
+  threadLimit,
+  forceShowAll,
   activeThreadId,
   onThreadSelect,
   onThreadAction,
   onThreadContextMenu,
-  onShowMore,
-  onShowFewer,
 }: {
   expanded: boolean;
-  visibleThreads: AiChatThread[];
-  hiddenCount: number;
-  page: number;
+  threads: AiChatThread[];
+  threadLimit?: number;
+  /** Query-driven filtering pins the list open and shows every thread. */
+  forceShowAll: boolean;
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
   onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
-  onShowMore: () => void;
-  onShowFewer: () => void;
 }) {
-  const { t } = useTranslation();
-  const pageButtonClasses =
-    "flex w-full cursor-pointer items-center rounded-2lg py-[5px] pr-2 pl-4 text-caption-1-medium text-text-tertiary transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-text-secondary";
   return (
     <div
       aria-hidden={!expanded}
@@ -389,41 +367,81 @@ function RepoThreadList({
       )}
     >
       <div className="overflow-hidden">
-        <div className="relative flex w-full flex-col gap-0.5 pt-0.5">
-          <TreeConnector count={visibleThreads.length} />
-          {visibleThreads.map((thread) => (
-            <ThreadItem
-              key={thread.id ?? thread.label}
-              {...thread}
-              isSelected={thread.id ? thread.id === activeThreadId : thread.isSelected}
-              onSelect={onThreadSelect}
-              onAction={onThreadAction}
-              onContextMenu={onThreadContextMenu}
-              tabIndex={expanded ? undefined : -1}
-            />
-          ))}
-          {hiddenCount > 0 ? (
-            <button
-              type="button"
-              tabIndex={expanded ? undefined : -1}
-              onClick={onShowMore}
-              className={pageButtonClasses}
-            >
-              <span className="truncate">{t("chat.showMoreSessions")}</span>
-            </button>
-          ) : null}
-          {page > 0 ? (
-            <button
-              type="button"
-              tabIndex={expanded ? undefined : -1}
-              onClick={onShowFewer}
-              className={pageButtonClasses}
-            >
-              {t("chat.showFewerSessions")}
-            </button>
-          ) : null}
-        </div>
+        {expanded ? (
+          <PagedThreadList
+            threads={threads}
+            threadLimit={threadLimit}
+            forceShowAll={forceShowAll}
+            activeThreadId={activeThreadId}
+            onThreadSelect={onThreadSelect}
+            onThreadAction={onThreadAction}
+            onThreadContextMenu={onThreadContextMenu}
+          />
+        ) : null}
       </div>
+    </div>
+  );
+}
+
+/** Paged thread rows with the tree connector and the show-more/fewer
+ *  pagination buttons. Owns the page state; it only exists while the repo
+ *  is expanded, so remounting on expand naturally resets to page 0. */
+function PagedThreadList({
+  threads,
+  threadLimit,
+  forceShowAll,
+  activeThreadId,
+  onThreadSelect,
+  onThreadAction,
+  onThreadContextMenu,
+}: {
+  threads: AiChatThread[];
+  threadLimit?: number;
+  forceShowAll: boolean;
+  activeThreadId?: string;
+  onThreadSelect?: (id: string) => void;
+  onThreadAction?: (id: string, action: ThreadAction) => void;
+  onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
+}) {
+  const { t } = useTranslation();
+  // Pagination: 0 = 初始 limit 条, 1 = +50 条, 2 = 全部。
+  const [page, setPage] = useState(0);
+  const { visibleThreads, hiddenCount } = forceShowAll
+    ? { visibleThreads: threads, hiddenCount: 0 }
+    : paginateThreads(threads, threadLimit, page);
+  const pageButtonClasses =
+    "flex w-full cursor-pointer items-center rounded-2lg py-[5px] pr-2 pl-4 text-caption-1-medium text-text-tertiary transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-text-secondary";
+  return (
+    <div className="relative flex w-full flex-col gap-0.5 pt-0.5">
+      <TreeConnector count={visibleThreads.length} />
+      {visibleThreads.map((thread) => (
+        <ThreadItem
+          key={thread.id ?? thread.label}
+          {...thread}
+          isSelected={thread.id ? thread.id === activeThreadId : thread.isSelected}
+          onSelect={onThreadSelect}
+          onAction={onThreadAction}
+          onContextMenu={onThreadContextMenu}
+        />
+      ))}
+      {hiddenCount > 0 ? (
+        <button
+          type="button"
+          onClick={() => setPage((value) => value + 1)}
+          className={pageButtonClasses}
+        >
+          <span className="truncate">{t("chat.showMoreSessions")}</span>
+        </button>
+      ) : null}
+      {page > 0 ? (
+        <button
+          type="button"
+          onClick={() => setPage(0)}
+          className={pageButtonClasses}
+        >
+          {t("chat.showFewerSessions")}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -468,23 +486,12 @@ export function RepoItem({
   dragHandleProps?: DragHandleProps | null;
 }) {
   const dragDownPos = useRef<{ x: number; y: number } | null>(null);
-  // Pagination: 0 = 初始 limit 条, 1 = +50 条, 2 = 全部。
-  const [page, setPage] = useState(0);
   const expanded = open || forceOpen;
   const toggleOpen = useCallback(() => onToggleOpen?.(), [onToggleOpen]);
   const hasHoverActions = Boolean(
     (repo.id && onNewSession) || dragHandleProps || (repo.id && onRemove),
   );
 
-  // Collapse drops the "load more" window so the next expand is a short list
-  // again, matching Codex / Cursor project folders.
-  useEffect(() => {
-    if (!expanded) setPage(0);
-  }, [expanded]);
-
-  const { visibleThreads, hiddenCount } = forceOpen
-    ? { visibleThreads: repo.threads, hiddenCount: 0 }
-    : paginateThreads(repo.threads, repo.threadLimit, page);
 
   return (
     <div className="flex w-full flex-col">
@@ -502,15 +509,13 @@ export function RepoItem({
       />
       <RepoThreadList
         expanded={expanded}
-        visibleThreads={visibleThreads}
-        hiddenCount={hiddenCount}
-        page={page}
+        threads={repo.threads}
+        threadLimit={repo.threadLimit}
+        forceShowAll={forceOpen}
         activeThreadId={activeThreadId}
         onThreadSelect={onThreadSelect}
         onThreadAction={onThreadAction}
         onThreadContextMenu={onThreadContextMenu}
-        onShowMore={() => setPage((value) => value + 1)}
-        onShowFewer={() => setPage(0)}
       />
     </div>
   );

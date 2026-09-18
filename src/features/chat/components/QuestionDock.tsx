@@ -1,0 +1,38 @@
+import { sessionKey, useChatStore } from "../store";
+import { QuestionCard } from "./QuestionCard";
+
+/**
+ * The active session's pending AskUserQuestion, or null. The dock takes over
+ * the composer while a question is pending, so both the footer (to hide the
+ * composer) and the dock itself resolve it through this hook.
+ */
+export function usePendingQuestion() {
+  const active = useChatStore((s) => s.active);
+  return useChatStore((s) => {
+    if (!active) return null;
+    const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
+    const messages = s.bySession[key]?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "question" && m.question?.status === "pending") return m;
+    }
+    return null;
+  });
+}
+
+/**
+ * Question panel that replaces the composer area while the CLI waits on the
+ * control protocol: it covers the input box instead of pushing chat content
+ * around, and the only exits are answering, the free-form input, or ignore.
+ */
+export function QuestionDock() {
+  const pending = usePendingQuestion();
+  if (!pending) return null;
+  return (
+    <div className="mx-auto w-full max-w-3xl">
+      <div className="rounded-xl border border-border-secondary bg-background-secondary-default px-3.5 py-3 shadow-lg">
+        <QuestionCard message={pending} />
+      </div>
+    </div>
+  );
+}

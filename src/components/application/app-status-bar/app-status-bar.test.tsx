@@ -96,6 +96,26 @@ describe("AppStatusBar plugin items (plan §4.2 #8)", () => {
     expect(text.indexOf("EARLY")).toBeGreaterThanOrEqual(0);
     expect(text.indexOf("EARLY")).toBeLessThan(text.indexOf("LATE"));
   });
+  it("places zone:\"start\" chips in the left zone ahead of the builtin cluster", async () => {
+    await act(async () => {
+      disposers.push(
+        statusBarRegistry.register({
+          id: "plugin:z:left",
+          zone: "start",
+          component: () => <span>LEFT CHIP</span>,
+        }),
+        statusBarRegistry.register({
+          id: "plugin:z:right",
+          component: () => <span>RIGHT CHIP</span>,
+        }),
+      );
+    });
+    // The left zone is the me-auto container that pushes builtins right.
+    expect(container.querySelector(".me-auto")?.textContent).toContain("LEFT CHIP");
+    expect(container.querySelector(".me-auto")?.textContent).not.toContain("RIGHT CHIP");
+    const text = container.textContent ?? "";
+    expect(text.indexOf("LEFT CHIP")).toBeLessThan(text.indexOf("RIGHT CHIP"));
+  });
 
   it("a crashing chip unmounts itself without taking down the rest of the bar", async () => {
     // The boundary and React both console.error on a caught render crash.

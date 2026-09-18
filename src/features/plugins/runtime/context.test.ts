@@ -17,6 +17,7 @@ import {
   sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
+  composerStatusRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -435,6 +436,12 @@ describe("createPluginContext", () => {
       (ctx: PluginContext) =>
         ctx.ui.registerStatusBarItem({ component: () => null }),
       statusBarRegistry,
+    ],
+    [
+      "ui:composer-status",
+      (ctx: PluginContext) =>
+        ctx.ui.registerComposerStatusItem({ component: () => null }),
+      composerStatusRegistry,
     ],
     [
       "ui:markdown",

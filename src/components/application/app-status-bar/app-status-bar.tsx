@@ -44,6 +44,7 @@ function formatMb(bytes: number): number {
  * registration would buy little. The registry is the plugin extension point
  * (plan §4.2 #8): entries registered via ctx.ui.registerStatusBarItem render
  * after the sync status, before the version, each inside a PluginBoundary.
+ * zone:"start" entries (SDK 0.3.8) render left-aligned ahead of the cluster.
  */
 export function AppStatusBar() {
   const { t } = useTranslation();
@@ -53,6 +54,10 @@ export function AppStatusBar() {
   const [version, setVersion] = useState<string | null>(null);
   const [showChangelog, setShowChangelog] = useState(false);
   const pluginItems = useRegistry(statusBarRegistry);
+  // zone (SDK 0.3.8): "start" chips render left-aligned ahead of the
+  // builtin cluster; everything else keeps the legacy right-side slot.
+  const startItems = pluginItems.filter((def) => def.zone === "start");
+  const endItems = pluginItems.filter((def) => def.zone !== "start");
 
   // Re-apply the persisted zoom on startup; Tauri does not restore it.
   useEffect(() => applyZoom(readZoomPct()), []);
@@ -118,6 +123,22 @@ export function AppStatusBar() {
     <div
       className="flex h-7 shrink-0 items-center justify-end border-t border-separator-border bg-background-primary-default px-3 text-caption-1-medium text-text-tertiary select-none max-md:hidden"
     >
+      {startItems.length > 0 && (
+        <div className="me-auto flex min-w-0 items-center gap-3">
+          {[...startItems].sort(compareByOrder).map((def, i) => {
+            const pluginId = pluginIdFromRegistryKey(def.id);
+            const Chip = def.component;
+            return (
+              <Fragment key={def.id}>
+                {i > 0 && <span className="text-text-disabled">·</span>}
+                <PluginBoundary pluginId={pluginId}>
+                  <Chip />
+                </PluginBoundary>
+              </Fragment>
+            );
+          })}
+        </div>
+      )}
       <div className="flex min-w-0 items-center gap-3">
         <span
           className="flex items-center gap-1"
@@ -205,7 +226,7 @@ export function AppStatusBar() {
          *  own PluginBoundary so a render crash unmounts only that chip; the
          *  plugin owns the chip's look — the host provides placement and the
          *  row gap only. */}
-        {[...pluginItems]
+        {[...endItems]
           // compareByOrder: undefined order sorts last, ties break by id.
           .sort(compareByOrder)
           .map((def) => {
