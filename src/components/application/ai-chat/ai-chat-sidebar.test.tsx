@@ -146,6 +146,35 @@ it("展开只显示 threadLimit 条,收起再展开不会保留加载更多", as
   await act(async () => rowFor("a").click());
   expect(namedThreadCount()).toBe(5);
 });
+
+it("收起会话列表时裁切高度而不做透明度淡出", async () => {
+  const threads = Array.from({ length: 3 }, (_, index) => ({
+    id: `codex/s-${index}`,
+    label: `对话${index}`,
+    time: "1m",
+  }));
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[{ id: "a", label: "a", defaultOpen: true, threads }]}
+      />,
+    );
+  });
+  expect(namedThreadCount()).toBe(3);
+
+  await act(async () => rowFor("a").click());
+
+  const panel = [...node.querySelectorAll<HTMLElement>("[aria-hidden]")].find((el) =>
+    (el.getAttribute("class") ?? "").includes("grid-rows-"),
+  );
+  if (!panel) throw new Error("no collapse panel");
+  expect(panel.className).toContain("grid-rows-[0fr]");
+  expect(panel.className).not.toMatch(/opacity-0/);
+  expect(panel.querySelector(".min-h-0.overflow-hidden")).toBeTruthy();
+  // Still in the DOM so the height can clip shut; the next workspace must
+  // not see a faded copy of these rows.
+  expect(namedThreadCount()).toBe(3);
+});
 /** The session row whose label is inside it (the hover-action div wrapping
  *  the row button). */
 function threadRow(label: string): HTMLElement {

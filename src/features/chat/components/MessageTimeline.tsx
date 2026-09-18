@@ -231,7 +231,7 @@ function UserMessageRow({ message }: { message: Message }) {
   const { t } = useTranslation();
   const stripped = useMemo(() => stripAgentBlock(message.text), [message.text]);
   return (
-    <div className="group -mr-1.5 ml-auto flex w-fit max-w-[85%] flex-col items-end">
+    <div className="group -mr-1.5 ml-auto flex w-full min-w-0 flex-col items-end">
       {stripped.agentName && (
         <span
           aria-label={t("chat.agentBadge", { name: stripped.agentName })}
@@ -241,7 +241,7 @@ function UserMessageRow({ message }: { message: Message }) {
           {stripped.agentName}
         </span>
       )}
-      <div className="flex flex-col rounded-xl bg-bubble-user px-3.5 py-2.5 text-left text-body-regular whitespace-pre-wrap break-words text-text-white">
+      <div className="flex w-fit min-w-0 max-w-[72%] flex-col rounded-xl bg-bubble-user px-3.5 py-2.5 text-left text-body-regular whitespace-pre-wrap [overflow-wrap:anywhere] text-text-white max-md:max-w-[85%]">
         <CollapsibleMessage>
           {message.images && message.images.length > 0 && (
             <MessageImages images={message.images} />

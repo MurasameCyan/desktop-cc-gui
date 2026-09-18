@@ -170,6 +170,25 @@ describe("ProcessDisclosure thinking expansion", () => {
     expect(container.textContent).toContain("先分析需求");
   });
 
+  it("clips height when folding instead of fading a scaled ghost", async () => {
+    await render([{ type: "thinking", text: "先分析需求" }], { autoExpand: true });
+    expect(headerExpanded()).toBe(true);
+
+    const header = container.querySelector("button[aria-expanded]");
+    await act(async () => {
+      header!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const panel = [...container.querySelectorAll<HTMLElement>("[aria-hidden]")].find((el) =>
+      (el.getAttribute("class") ?? "").includes("grid-rows-"),
+    );
+    expect(panel).toBeTruthy();
+    expect(panel!.className).toContain("grid-rows-[0fr]");
+    expect(panel!.className).not.toMatch(/opacity-0/);
+    expect(panel!.style.transform).toBe("");
+    expect(container.textContent).toContain("先分析需求");
+  });
+
   it("still lets the user collapse thinking after it settles", async () => {
     await render([{ type: "thinking", text: "先分析需求", live: true }], {
       turnLive: true,

@@ -289,7 +289,9 @@ export interface PluginContext {
       onSelect: () => void;
     }): Disposer;
     /** Extra control rendered beside a composer slot's builtin control
-     *  (plan §4.2 #2). */
+     *  (plan §4.2 #2). Permission `ui:composer-status` (shared with
+     *  registerComposerStatusItem — both gate on the same composer-area
+     *  grant; there is no separate `ui:composer` permission). */
     registerComposerSlot(def: {
       slot: ComposerSlotId;
       key?: string;

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ipc } from "@/lib/ipc";
 import { useChatStore } from "./store";
 import {
   handleEngineEvents,
@@ -140,6 +141,28 @@ describe("provider retry progress", () => {
       turnStartedAt: null,
     });
     expect(state.streamingByKey[KEY]).toBeUndefined();
+  });
+
+  it.each(["claude", "codex"])("rescans %s history after retries are exhausted", (engine) => {
+    const key = sessionKey(engine, "s-1", "/tmp/ws");
+    const terminalError = "provider failed after 10 attempts";
+    useChatStore.setState({
+      bySession: {
+        [key]: { ...EMPTY_SESSION, streaming: true },
+      },
+      streamingByKey: { [key]: true },
+    });
+
+    handleEngineEvents([{ ...retry(1, 10), engine }], deps());
+    expect(ipc.rescanSessions).not.toHaveBeenCalled();
+    handleEngineEvents([{ ...ev("error", 2, terminalError), engine }], deps());
+
+    expect(ipc.rescanSessions).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().bySession[key]).toMatchObject({
+      streaming: false,
+      retry: null,
+      error: terminalError,
+    });
   });
 
   it.each(["done", "error"] as const)(

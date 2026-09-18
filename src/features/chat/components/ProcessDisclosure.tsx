@@ -1,11 +1,10 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { m, useReducedMotion } from "motion/react";
+import { useReducedMotion } from "motion/react";
 import Brain from "lucide-react/dist/esm/icons/brain";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import { cx } from "@/utils/cx";
-import { SOFT_EASE } from "@/components/application/agent-log/agent-log-motion";
 import { StepRow, type TaskListChip } from "@/components/application/task-list/task-list";
 import { getFileTreeIconSvg } from "@/features/files/fileIcons";
 import { markToolKeys, toolEntranceKey, type ProcessItem } from "./timeline-rows";
@@ -360,12 +359,20 @@ function ProcessDisclosureBody({
   );
 }
 
+const PROCESS_COLLAPSE_MS = 300;
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /** A run of middle steps (thinking + tool calls) between chat bubbles: one
  * collapsed summary line ("思考 N 次 工具调用 M 次 >").
  * Expanding shows every step in order — thinking as railed sections, tool
- * sub-runs as tree rows. The wrapper stays mounted and collapses by transform so
- * AnimatePresence cannot swallow each StepRow's blur-in; historical bodies
- * unmount while collapsed so the virtualizer does not keep every SVG tree. */
+ * sub-runs as tree rows. Height clips via grid-rows (no scaleY/opacity — those
+ * leave a compositor ghost over the next bubble). Historical bodies unmount
+ * after the close animation so the virtualizer does not keep every SVG tree. */
 
 export const ProcessDisclosure = memo(function ProcessDisclosure({
   items,
@@ -407,9 +414,23 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
   const label = processSummaryLabel(t, singleThinking, thinkingCount, toolCount);
   // Body stays mounted while expanded or while this row's own thinking is
   // streaming (the auto-open above makes both true then); once the thinking
-  // settles the body unmounts, so expanding later re-renders the FULL
-  // settled text — the 2000-char live window only ever applies live.
+  // settles the body stays mounted only through the close animation, so
+  // expanding later re-renders the FULL settled text — the 2000-char live
+  // window only ever applies live.
   const showBody = expanded || hasLiveThinking;
+  const [bodyMounted, setBodyMounted] = useState(showBody);
+  useLayoutEffect(() => {
+    if (showBody) {
+      setBodyMounted(true);
+      return;
+    }
+    if (reduceMotion || prefersReducedMotion()) {
+      setBodyMounted(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setBodyMounted(false), PROCESS_COLLAPSE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [showBody, reduceMotion]);
   return (
     <div className="mb-1.5 flex flex-col">
       <button
@@ -427,36 +448,29 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
           />
         </span>
       </button>
-      {/* Scale-animate in place rather than through AnimatePresence: a presence
-          context with initial={false} silently cancels each StepRow's blur-in.
-          initial={false} here only pins THIS element's first paint, so a
-          virtualized remount of an already-open row does not flash shut. */}
-      <m.div
-        initial={false}
-        animate={{ scaleY: expanded ? 1 : 0, opacity: expanded ? 1 : 0 }}
-        transition={
-          reduceMotion
-            ? { duration: 0 }
-            : {
-                scaleY: { duration: 0.3, ease: SOFT_EASE },
-                opacity: { duration: 0.22, ease: "easeOut" },
-              }
-        }
-        style={{ transformOrigin: "top" }}
-        className={cx("overflow-hidden", !expanded && "h-0")}
+      {/* Height-only clip, not AnimatePresence / scaleY: a presence context
+          with initial={false} silently cancels each StepRow's blur-in, and
+          scaleY+opacity leaves a compositor ghost over the next bubble. */}
+      <div
         aria-hidden={!expanded}
+        className={cx(
+          "grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none",
+          expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+        )}
       >
-        {showBody ? (
-          <ProcessDisclosureBody
-            sections={sections}
-            expanded={expanded}
-            reduceMotion={reduceMotion}
-            singleThinking={singleThinking}
-            processId={processId}
-            seenTools={seenTools}
-          />
-        ) : null}
-      </m.div>
+        <div className="min-h-0 overflow-hidden">
+          {bodyMounted ? (
+            <ProcessDisclosureBody
+              sections={sections}
+              expanded={expanded}
+              reduceMotion={reduceMotion}
+              singleThinking={singleThinking}
+              processId={processId}
+              seenTools={seenTools}
+            />
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 });
