@@ -1520,6 +1520,8 @@ mod staging_tests {
                 child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
                 stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+                #[cfg(windows)]
+                _tree_guard: None,
             };
             let task = tokio::spawn(async move {
                 if abort { std::future::pending::<()>().await; }
@@ -2248,6 +2250,7 @@ async fn send_reserved(
     workspace_path: String,
     session_id: Option<String>,
     prompt: String,
+    prompt_contributions: Vec<PromptContribution>,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
