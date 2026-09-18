@@ -4,7 +4,14 @@ import Archive from "lucide-react/dist/esm/icons/archive";
 import ArchiveRestore from "lucide-react/dist/esm/icons/archive-restore";
 import Pencil from "lucide-react/dist/esm/icons/pencil";
 import Puzzle from "lucide-react/dist/esm/icons/puzzle";
-import { compareByOrder, pluginIdFromRegistryKey, useRegistry, workspaceMenuRegistry } from "@ccgui/plugin-sdk";
+import {
+  compareByOrder,
+  pluginIdFromRegistryKey,
+  useRegistry,
+  workspaceMenuRegistry,
+  type WorkspaceMenuLabelValue,
+  type WorkspaceMenuStatusTone,
+} from "@ccgui/plugin-sdk";
 import { ContextMenu, type ContextMenuEntry } from "@/components/context-menu";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
 
@@ -15,6 +22,28 @@ export interface WorkspaceMenuState {
   /** Row lives in the 已归档 section: the archive entry flips to 取消归档. */
   archived: boolean;
 }
+const workspaceMenuStatusClassNames: Record<WorkspaceMenuStatusTone, string> = {
+  success: "text-notification-success-foreground",
+  muted: "text-text-tertiary",
+};
+
+function renderWorkspaceMenuLabel(label: WorkspaceMenuLabelValue): ContextMenuEntry["label"] {
+  if (typeof label === "string") return label;
+  if (!label.status) return label.text;
+
+  return (
+    <>
+      {label.text}{" "}
+      <span
+        className={workspaceMenuStatusClassNames[label.status.tone]}
+        data-workspace-menu-status
+      >
+        ({label.status.text})
+      </span>
+    </>
+  );
+}
+
 
 /**
  * Right-click menu for sidebar workspace rows. Chrome (portal anchoring,
@@ -73,7 +102,7 @@ export function WorkspaceContextMenu({
       if (def.visible?.(target) === false) continue;
       extensionEntries.push({
         id: def.id,
-        label: def.label(target),
+        label: renderWorkspaceMenuLabel(def.label(target)),
         icon: def.icon ? (
           <PluginBoundary pluginId={pluginIdFromRegistryKey(def.id)} fallback={<Puzzle className="size-4" aria-hidden />}>
             <Icon className="size-4" aria-hidden />

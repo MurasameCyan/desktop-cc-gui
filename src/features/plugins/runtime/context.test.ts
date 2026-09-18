@@ -17,6 +17,7 @@ import {
   sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
+  composerStatusRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -33,6 +34,7 @@ function fakeStorage(): PluginContextBackend & {
   data: Map<string, unknown>;
   bridgeInvoke: Mock;
   workspaceMetadata: Mock;
+  workspaceList: Mock;
   pickDirectory: Mock;
   documentStorageGetLocation: Mock;
   documentStorageSelectLocation: Mock;
@@ -49,6 +51,10 @@ function fakeStorage(): PluginContextBackend & {
     set: async (id, key, value) => void data.set(`${id}:${key}`, value),
     delete: async (id, key) => void data.delete(`${id}:${key}`),
     workspaceMetadata: vi.fn(async () => ({ id: "workspace-id", path: "C:/work" })),
+    workspaceList: vi.fn(async () => [
+      { id: "workspace-id", name: "Work", path: "C:/work" },
+      { id: "other-id", name: "Other", path: "D:/other" },
+    ]),
     pickDirectory: vi.fn(async () => "C:/chosen"),
     documentStorageGetLocation: vi.fn(async () => ({
       kind: "data" as const,
@@ -337,6 +343,11 @@ describe("createPluginContext", () => {
       path: "C:/work",
     });
     expect(backend.workspaceMetadata).toHaveBeenCalledWith("test-plugin");
+    await expect(ctx.workspaces.list()).resolves.toEqual([
+      { id: "workspace-id", name: "Work", path: "C:/work" },
+      { id: "other-id", name: "Other", path: "D:/other" },
+    ]);
+    expect(backend.workspaceList).toHaveBeenCalledWith("test-plugin");
 
     await expect(ctx.documentStorage.getLocation()).resolves.toEqual({
       kind: "data",
@@ -439,6 +450,8 @@ describe("createPluginContext", () => {
     await expect(ctx.workspace.getMetadata()).rejects.toThrow(/workspace\.metadata\.read/);
     await expect(ctx.documentStorage.getLocation()).rejects.toThrow(/plugin\.storage/);
     expect(backend.workspaceMetadata).not.toHaveBeenCalled();
+    await expect(ctx.workspaces.list()).rejects.toThrow(/workspace\.metadata\.read/);
+    expect(backend.workspaceList).not.toHaveBeenCalled();
     expect(backend.documentStorageGetLocation).not.toHaveBeenCalled();
   });
 
@@ -460,6 +473,12 @@ describe("createPluginContext", () => {
       (ctx: PluginContext) =>
         ctx.ui.registerStatusBarItem({ component: () => null }),
       statusBarRegistry,
+    ],
+    [
+      "ui:composer-status",
+      (ctx: PluginContext) =>
+        ctx.ui.registerComposerStatusItem({ component: () => null }),
+      composerStatusRegistry,
     ],
     [
       "ui:markdown",

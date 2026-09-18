@@ -133,6 +133,7 @@ impl Engine for PiFamilyEngine {
         Ok(BuiltCommand {
             command: cmd,
             stdin_payload: Some(req.prompt.clone()),
+            keep_stdin_open: false,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })

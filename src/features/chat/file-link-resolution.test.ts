@@ -69,7 +69,6 @@ describe("resolveChatFileLink", () => {
     mocks.listFileIndex.mockResolvedValueOnce({ entries: [{ rel: "nested/release/app.exe", isDir: false }], truncated: true });
     expect(await resolveChatFileLink("release/app.exe", WS)).toBe(`${WS}/release/app.exe`);
   });
-
   it("leaves paths outside the workspace as written and never probes them", async () => {
     const got = await resolveChatFileLink("D:\\other\\tool.exe", WS);
     expect(got).toBe("D:\\other\\tool.exe");

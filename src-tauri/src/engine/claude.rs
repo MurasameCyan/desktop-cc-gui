@@ -55,6 +55,12 @@ impl Engine for ClaudeEngine {
         cmd.arg("stream-json");
         cmd.arg("--verbose");
         cmd.arg("--include-partial-messages");
+        // SDK control protocol over stdin/stdout: permission asks — including
+        // AskUserQuestion, whose dialog is this client's job — arrive as
+        // can_use_tool control_requests. Without the flag the CLI treats
+        // every ask as terminal and never mounts AskUserQuestion at all.
+        cmd.arg("--permission-prompt-tool");
+        cmd.arg("stdio");
         // Headless -p cannot prompt mid-turn: "manual" maps onto claude's
         // default mode, where approval-needing tools are denied and the
         // agent is told to work around them (honest degrade, no fake ask).
@@ -82,10 +88,9 @@ impl Engine for ClaudeEngine {
         }
         if let Some(model) = req.model.as_deref() {
             cmd.arg("--model");
-            // Launch with the id the picker names: family aliases resolve
-            // through their ANTHROPIC_DEFAULT_<FAMILY>_MODEL override here,
-            // so relay setups don't depend on the CLI's own alias remap.
-            cmd.arg(super::models::resolve_claude_launch_model(model));
+            // prepare_launch resolves aliases against the selected channel;
+            // reading native settings here would remap independent channels.
+            cmd.arg(model);
         }
         // Claude Code has no effort flag; the thinking budget env var is the
         // effort knob. "low" stays at the CLI default (no forced thinking).
@@ -124,6 +129,7 @@ impl Engine for ClaudeEngine {
         Ok(BuiltCommand {
             command: cmd,
             stdin_payload: Some(stdin_payload),
+            keep_stdin_open: true,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })
@@ -290,6 +296,55 @@ impl Engine for ClaudeEngine {
                     out.push(EngineEvent::Error(message));
                 } else {
                     out.push(EngineEvent::Done { session_id, usage });
+                }
+            }
+            "control_request" => {
+                // SDK control protocol asks. AskUserQuestion surfaces to the
+                // UI; every other ask is denied in place (this client has no
+                // approval card), preserving the old headless behavior.
+                let request = value.get("request");
+                let subtype = request
+                    .and_then(|r| r.get("subtype"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let request_id = value
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if request_id.is_empty() {
+                    return;
+                }
+                if subtype == "can_use_tool" {
+                    let tool_name = request
+                        .and_then(|r| r.get("tool_name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if tool_name == "AskUserQuestion" {
+                        out.push(EngineEvent::Question {
+                            request_id: request_id.to_string(),
+                            tool_use_id: request
+                                .and_then(|r| r.get("tool_use_id"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            input: request
+                                .and_then(|r| r.get("input"))
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        });
+                    } else {
+                        out.push(EngineEvent::ControlPermissionDeny {
+                            request_id: request_id.to_string(),
+                            tool_name,
+                        });
+                    }
+                }
+            }
+            "control_cancel_request" => {
+                if let Some(request_id) = value.get("request_id").and_then(Value::as_str) {
+                    out.push(EngineEvent::QuestionSettled {
+                        request_id: request_id.to_string(),
+                    });
                 }
             }
             _ => {}
@@ -605,6 +660,75 @@ fn parse_content_block_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ask_user_question_control_request_emits_question() {
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "tool_use_id": "call_1",
+                "requires_user_interaction": true,
+                "input": { "questions": [ { "question": "Q?", "header": "H",
+                    "options": [ {"label": "A", "description": "a"}, {"label": "B", "description": "b"} ] } ] }
+            }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            EngineEvent::Question {
+                request_id,
+                tool_use_id,
+                input,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(tool_use_id.as_deref(), Some("call_1"));
+                assert_eq!(input["questions"][0]["header"], "H");
+            }
+            other => panic!("expected question event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_control_asks_are_denied_in_place() {
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": "req-2",
+            "request": { "subtype": "can_use_tool", "tool_name": "Bash", "input": {} }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        match &out[..] {
+            [EngineEvent::ControlPermissionDeny {
+                request_id,
+                tool_name,
+            }] => {
+                assert_eq!(request_id, "req-2");
+                assert_eq!(tool_name, "Bash");
+            }
+            other => panic!("expected control deny event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_cancel_request_settles_the_question() {
+        let line = serde_json::json!({
+            "type": "control_cancel_request",
+            "request_id": "req-3"
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        match &out[..] {
+            [EngineEvent::QuestionSettled { request_id }] => assert_eq!(request_id, "req-3"),
+            other => panic!("expected settled event, got {other:?}"),
+        }
+    }
 
     #[test]
     fn tool_use_block_start_emits_tool_message() {

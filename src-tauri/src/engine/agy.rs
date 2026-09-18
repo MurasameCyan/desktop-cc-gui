@@ -91,6 +91,7 @@ impl Engine for AgyEngine {
         Ok(BuiltCommand {
             command: cmd,
             stdin_payload: None,
+            keep_stdin_open: false,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })
@@ -232,6 +233,7 @@ mod tests {
             service_tier: None,
             permission: permission.map(str::to_string),
             additional_dirs: Vec::new(),
+            provider_id: None,
         }
     }
 

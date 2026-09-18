@@ -238,6 +238,13 @@ interface PluginContext {
 
 SDK 0.4.3 新增 `TurnHooks.onTurnStarted(event)`：只需 `runtime.events.read`，不要求 `prompt.contribute.internal`。它在 `beforeTurn` 收集完成、即将发送给引擎时派发；不等待观察者返回的 Promise，异常不会阻断发送。与 `afterTurn` 使用相同 `turnId`。发送准备阶段已经取消的回合不发布开始事件；开始后取消、发送拒绝和提前到达的终态均有对应结算。它不是可写提示钩子。
 
+| 事件 topic | 载荷 | 所需权限 |
+|---|---|---|
+| `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起） | `events` |
+| `usage://done`（SDK 0.3.8 起） | 同上形状，`kind: "done"`；`data.usage` 携带该轮最终用量——claude/grok 等不发独立 usage 事件的引擎只经此上报，其它引擎用作轮结束信号 | `events` |
+| `session://activated`（SDK 0.3.8 起） | `{ engine, sessionId }`；pending 标签 `sessionId` 为 null，无活动标签两者皆 null | `events` |
+| `composer://draft` | `{ text }`；草稿变化/清空/会话切换均发射 | `events` |
+
 SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动的 `beforeSwitch` 与 `afterSwitch` 共享此身份。插件应同时核对切换身份与原生命周期，不能让停用前的迟到完成覆盖重新启用后的切换状态。
 
 `BeforeTurnResult.isCurrent` 是可选的纯同步生命周期守卫，用于某个工作区关闭功能、但插件仍在其他工作区运行的情形。宿主在收集结果、再次注入、启动接纳及内部帧解析和投递时检查；返回 `false` 或抛错会撤销该结果，已失效的生命周期不得再返回 `true`。已返回的结果必须捕获其原始生命周期，不能只读取可能再次开启的全局布尔值。失效后不再隐藏新候选帧，也不再投递已排队的内部消息。这不是回滚或取消已发出任务的接口：已发出的工作允许自然完成。

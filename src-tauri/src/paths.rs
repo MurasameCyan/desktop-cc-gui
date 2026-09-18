@@ -50,6 +50,30 @@ pub fn legacy_settings_path() -> PathBuf {
         .join("settings.json")
 }
 
+/// Legacy desktop-cc-gui's agent catalog: `~/.ccgui/agent.json` (singular —
+/// the new app's catalog is `agents.json`). Imported on upgrade.
+pub fn legacy_agents_path() -> PathBuf {
+    legacy_home().join("agent.json")
+}
+
+/// Legacy desktop-cc-gui's Tauri app-data dir: per-workspace custom prompts
+/// lived under `workspaces/<id>/prompts` here.
+pub fn legacy_app_data_dir() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(home_dir);
+    base.join("com.zhukunpenglinyutong.ccgui")
+}
+
+/// Legacy global prompts: the default Codex home's `prompts` dir, shared
+/// with the Codex CLI itself (CODEX_HOME wins, matching the legacy
+/// resolver). Migration copies out of it — never moves — because the CLI
+/// still reads this directory.
+pub fn legacy_global_prompts_dir() -> PathBuf {
+    if let Some(value) = std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()) {
+        return PathBuf::from(value).join("prompts");
+    }
+    home_dir().join(".codex").join("prompts")
+}
+
 pub fn config_path() -> PathBuf {
     app_home().join("config.json")
 }

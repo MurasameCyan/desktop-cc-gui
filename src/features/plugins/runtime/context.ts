@@ -16,6 +16,7 @@ import {
   sessionMenuRegistry,
   settingsRegistry,
   statusBarRegistry,
+  composerStatusRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -25,6 +26,7 @@ import type {
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
+  RegisteredWorkspace,
   WorkspaceMetadata,
 } from "@ccgui/plugin-sdk";
 import {
@@ -66,6 +68,7 @@ export type DocumentStorageRemoveResponse =
 export interface PluginContextBackend extends PluginStorageBackend {
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
   workspaceMetadata(id: string): Promise<WorkspaceMetadata>;
+  workspaceList(id: string): Promise<RegisteredWorkspace[]>;
   pickDirectory(title?: string): Promise<string | null>;
   documentStorageGetLocation(id: string): Promise<DocumentStorageLocationResponse>;
   documentStorageSelectLocation(
@@ -388,6 +391,17 @@ export function createPluginContext(
             id: scopedPluginId(id, def.key),
             component: def.component,
             order: def.order,
+            zone: def.zone,
+          }),
+        );
+      },
+      registerComposerStatusItem(def) {
+        requirePermission("ui:composer-status");
+        return track(
+          composerStatusRegistry.register({
+            id: scopedPluginId(id, def.key),
+            component: def.component,
+            order: def.order,
           }),
         );
       },
@@ -537,6 +551,10 @@ export function createPluginContext(
           requirePermission("host:workspace:remote"),
         );
       },
+      async list() {
+        requirePermission("workspace.metadata.read");
+        return withAuthorizedHostInvoke(() => backend.workspaceList(id));
+      },
     },
     sessions: {
       selectSession(engine, sessionId, workspacePath) {
@@ -554,6 +572,16 @@ export function createPluginContext(
         // 的模块环（store → plugins/runtime/session-source）。
         return import("@/features/chat/store").then((m) =>
           m.useChatStore.getState().refreshSessions(),
+        );
+      },
+      setEffort(engine, sessionId, workspacePath, effort) {
+        requirePermission("host:session");
+        // 校验失败走 rejection（与 selectSession 一致）。store 侧拒绝未知
+        // 会话键——错误的 workspacePath 不得经 patchSession 造出幽灵条目。
+        return Promise.resolve().then(() =>
+          import("@/features/chat/store").then((m) =>
+            m.setPluginSessionEffort(engine, sessionId, workspacePath, effort),
+          ),
         );
       },
       registerSource(def) {

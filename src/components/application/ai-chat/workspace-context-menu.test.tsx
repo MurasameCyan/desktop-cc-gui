@@ -45,6 +45,21 @@ describe("workspace menu plugin isolation", () => {
     expect(renamed).toBe(true);
     expect(document.querySelector('[role="menuitem"] button')).toBeNull();
   });
+  it("renders the workspace status in a colored parenthetical", () => {
+    disposers.push(workspaceMenuRegistry.register({
+      id: "plugin:workspace-status-test:action",
+      label: () => ({ text: "CCB", status: { text: "已启用", tone: "success" } }),
+      onSelect: () => {},
+    }));
+    act(() => root.render(<WorkspaceContextMenu menu={menu} onClose={() => {}} />));
+    const item = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")]
+      .find((button) => button.textContent === "CCB (已启用)");
+    expect(item).toBeDefined();
+    const status = item!.querySelector("[data-workspace-menu-status]");
+    expect(status?.textContent).toBe("(已启用)");
+    expect(status?.className).toContain("text-notification-success-foreground");
+  });
+
 
   it("removes an open plugin-only menu when its last owner unloads", () => {
     const dispose = workspaceMenuRegistry.register({

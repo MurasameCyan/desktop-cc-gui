@@ -35,6 +35,7 @@ import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 
+
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
 /** Message list with its own bySession subscription: stream flushes swap the
@@ -74,6 +75,8 @@ function useConversationMenus({
   modelsByEngine,
   displayModels,
   displayEfforts,
+  channelsByEngine,
+  displayProviders,
   ompServiceTier,
   codexServiceTier,
   permission,
@@ -81,6 +84,7 @@ function useConversationMenus({
   setPermission,
   setModel,
   setEffort,
+  setProvider,
   setOmpServiceTier,
   setCodexServiceTier,
   refreshModels,
@@ -96,6 +100,8 @@ function useConversationMenus({
   modelsByEngine: Record<string, ModelOption[]>;
   displayModels: Record<string, string>;
   displayEfforts: Record<string, EffortLevel>;
+  channelsByEngine: Record<string, { id: string; label: string }[]>;
+  displayProviders: Record<string, string>;
   ompServiceTier: OmpServiceTier;
   codexServiceTier: OmpServiceTier;
   permission: ComposerPermission;
@@ -103,6 +109,7 @@ function useConversationMenus({
   setPermission: (permission: ComposerPermission) => void;
   setModel: (engine: string, model: string) => Promise<void>;
   setEffort: (engine: string, effort: EffortLevel) => Promise<void>;
+  setProvider: (engine: string, providerId: string) => Promise<void>;
   setOmpServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   refreshModels: () => Promise<void>;
@@ -129,6 +136,10 @@ function useConversationMenus({
   const handleEffortChange = useCallback(
     (engine: string, level: EffortLevel) => void setEffort(engine, level),
     [setEffort],
+  );
+  const handleChannelChange = useCallback(
+    (engine: string, id: string) => void setProvider(engine, id),
+    [setProvider],
   );
 
 
@@ -160,6 +171,9 @@ function useConversationMenus({
           onModelChange={handleModelChange}
           efforts={displayEfforts}
           onEffortChange={handleEffortChange}
+          channelsByEngine={channelsByEngine}
+          selectedChannels={displayProviders}
+          onChannelChange={handleChannelChange}
           ompServiceTier={ompServiceTier}
           onOmpServiceTierChange={setOmpServiceTier}
           codexServiceTier={codexServiceTier}
@@ -180,6 +194,9 @@ function useConversationMenus({
       handleModelChange,
       displayEfforts,
       handleEffortChange,
+      channelsByEngine,
+      displayProviders,
+      handleChannelChange,
       ompServiceTier,
       setOmpServiceTier,
       codexServiceTier,
@@ -244,13 +261,14 @@ export const ChatConversation = memo(function ChatConversation({
   const draft = useChatStore((s) => s.drafts[key] ?? "");
   const sendShortcut = useChatStore((s) => s.sendShortcut);
   // Engine/effort/model prefs: low-frequency, grouped into one shallow watch.
-  const { activeEngine, efforts, models, ompServiceTier, codexServiceTier } = useChatStore(
+  const { activeEngine, efforts, models, providers, ompServiceTier, codexServiceTier } = useChatStore(
     useShallow((s) => ({
       activeEngine: s.activeEngine,
       efforts: s.efforts,
       ompServiceTier: s.ompServiceTier,
       codexServiceTier: s.codexServiceTier,
       models: s.models,
+      providers: s.providers,
     })),
   );
   const {
@@ -259,6 +277,7 @@ export const ChatConversation = memo(function ChatConversation({
     setOmpServiceTier,
     setCodexServiceTier,
     setModel,
+    setProvider,
     pinModels,
     loadEarlier,
     removeQueued,
@@ -271,6 +290,7 @@ export const ChatConversation = memo(function ChatConversation({
       setOmpServiceTier: s.setOmpServiceTier,
       setCodexServiceTier: s.setCodexServiceTier,
       setModel: s.setModel,
+      setProvider: s.setProvider,
       pinModels: s.pinModels,
       loadEarlier: s.loadEarlier,
       removeQueued: s.removeQueued,
@@ -303,20 +323,22 @@ export const ChatConversation = memo(function ChatConversation({
     dismissImageError,
   } = useComposerImages();
 
-  const { displayModels, displayEfforts } = useTabModelDisplay({
+  const { displayModels, displayEfforts, displayProviders } = useTabModelDisplay({
     active,
     activeEngine,
     sessionKey: key,
     models,
     efforts,
+    providers,
   });
 
   const {
     catalogs,
     modelsByEngine,
+    channelsByEngine,
     refresh: refreshModels,
     pendingEngines,
-  } = useEngineModels(engines, models, pinModels, active?.workspacePath);
+  } = useEngineModels(engines, models, pinModels, displayProviders, active?.workspacePath);
   const loadingEngines = useMemo(
     () => Object.keys(pendingEngines),
     [pendingEngines],
@@ -385,6 +407,8 @@ export const ChatConversation = memo(function ChatConversation({
       onPickSkills: handlePickSkills,
       displayModels,
       displayEfforts,
+      channelsByEngine,
+      displayProviders,
       ompServiceTier,
       codexServiceTier,
       permission,
@@ -392,6 +416,7 @@ export const ChatConversation = memo(function ChatConversation({
       setPermission,
       setModel,
       setEffort,
+      setProvider,
       setOmpServiceTier,
       setCodexServiceTier,
       refreshModels,

@@ -32,29 +32,22 @@ import {
 import { ComposerResizeHandle } from "@/components/application/ai-chat/composer-resize-handle";
 import { ComposerEditable } from "@/components/application/ai-chat/composer-editable";
 import { ComposerToolbar } from "@/components/application/ai-chat/composer-toolbar";
-import { useMentionPicker } from "@/components/application/ai-chat/use-mention-picker";
-import { useSlashPicker } from "@/components/application/ai-chat/use-slash-picker";
+import { ComposerPickerMenus } from "@/components/application/ai-chat/composer-picker-menus";
+import { SelectedAgentChip } from "@/components/application/ai-chat/composer-agent-chip";
+import { useComposerPickers } from "@/components/application/ai-chat/use-composer-pickers";
+import { useComposerInputHandle } from "@/components/application/ai-chat/use-composer-input-handle";
 import { useResizableComposer } from "@/components/application/ai-chat/use-resizable-composer";
 import {
   FILE_TAG_CLASS,
   extractText,
-  findMentionTrigger,
-  getCaretOffset,
   htmlFromText,
-  insertTextAtCaret,
-  mentionToken,
   renderFileTags,
   sanitizeEditableHtml,
   setCaretOffset,
 } from "@/components/application/ai-chat/file-tags";
-import { FileMentionMenu } from "@/components/application/ai-chat/file-mention-menu";
-import { SlashCommandMenu } from "@/components/application/ai-chat/slash-command-menu";
-import { findSlashTrigger } from "@/components/application/ai-chat/slash-commands";
-import { type MentionEntry } from "@/components/application/ai-chat/mention-files";
-import { ipc, type SlashCommandEntry } from "@/lib/ipc";
+import { ipc } from "@/lib/ipc";
 import { listenSettingsChanged } from "@/lib/events";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
-import { joinPath } from "@/features/files/store";
 import { ASSUMED_CONTEXT_WINDOW } from "@/features/chat/usage";
 import {
   usePromptCompletion,
@@ -62,6 +55,13 @@ import {
 } from "@/components/application/ai-chat/use-prompt-history";
 import { cx } from "@/utils/cx";
 import { useDismissOnOutsidePress, useTriggerToggle } from "@/utils/use-dismiss-on-outside-press";
+import {
+  compareByOrder,
+  composerStatusRegistry,
+  pluginIdFromRegistryKey,
+  useRegistry,
+} from "@ccgui/plugin-sdk";
+import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
 
 /**
  * Board UI → "ai_chat" composer + status bar, adapted to live data. The pill
@@ -147,24 +147,6 @@ export function Composer({
   /** Last text we emitted upward; the value-sync effect skips our own echoes. */
   const lastEmittedRef = useRef("");
 
-  // @-mention file picker: trigger tracking, caret anchoring, and workspace
-  // lifecycle live in useMentionPicker; the menu + select action stay wired
-  // here. The parent owns the wrapper ref (root div + popover anchor).
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const { mention, setMention, mentionMenuRef, updateMentionTrigger } =
-    useMentionPicker({ editableRef, wrapperRef, workspacePath, value, lastEmittedRef });
-  // `/` command picker: same trigger-tracking model as the mention picker.
-  const { slash, setSlash, slashMenuRef, updateSlashTrigger } =
-    useSlashPicker({ editableRef, wrapperRef, workspacePath, value, lastEmittedRef });
-
-  // One detection pass per input, `/` first (desktop-cc-gui parity: a
-  // line-start slash owns the completion surface; `@` inside a slash query
-  // must not open the file picker on top of it).
-  const updateTriggers = useCallback(() => {
-    if (updateSlashTrigger()) setMention(null);
-    else updateMentionTrigger();
-  }, [updateSlashTrigger, updateMentionTrigger, setMention]);
-
   const emitChange = useCallback(() => {
     const el = editableRef.current;
     if (!el) return;
@@ -181,65 +163,35 @@ export function Composer({
     if (el && !isComposingRef.current) renderFileTags(el);
   }, []);
 
-  /** Replace the active `@query` trigger with the picked file's mention
-   *  token (+ trailing space) and render it as a chip. */
-  const handleMentionSelect = useCallback(
-    (entry: MentionEntry) => {
-      const el = editableRef.current;
-      if (!el || !workspacePath) return;
-      setMention(null);
-      const token = mentionToken(joinPath(workspacePath, entry.rel)) + " ";
-      const caret = getCaretOffset(el);
-      const text = extractText(el);
-      // Recompute the trigger at select time — the caret may have moved
-      // since the menu last sampled it.
-      const trigger = caret >= 0 ? findMentionTrigger(text, caret) : null;
-      el.focus();
-      if (!trigger) {
-        insertTextAtCaret(el, token);
-      } else {
-        const next =
-          text.slice(0, trigger.start) +
-          token +
-          text.slice(trigger.start + 1 + trigger.query.length);
-        el.innerHTML = sanitizeEditableHtml(htmlFromText(next));
-        setCaretOffset(el, trigger.start + token.length);
-      }
-      emitChange();
-      syncTags();
-    },
-    [workspacePath, emitChange, syncTags, setMention],
-  );
-  /** Replace the active `/query` trigger with the picked command
-   *  (+ trailing space). Plain text, no chip: the CLI expands `/name args`
-   *  itself when the prompt is sent. */
-  const handleSlashSelect = useCallback(
-    (entry: SlashCommandEntry) => {
-      const el = editableRef.current;
-      if (!el) return;
-      setSlash(null);
-      const token = `/${entry.name} `;
-      const caret = getCaretOffset(el);
-      const text = extractText(el);
-      // Recompute the trigger at select time — the caret may have moved
-      // since the menu last sampled it.
-      const trigger = caret >= 0 ? findSlashTrigger(text, caret) : null;
-      el.focus();
-      if (!trigger) {
-        insertTextAtCaret(el, token);
-      } else {
-        const next =
-          text.slice(0, trigger.start) +
-          token +
-          text.slice(trigger.start + 1 + trigger.query.length);
-        el.innerHTML = sanitizeEditableHtml(htmlFromText(next));
-        setCaretOffset(el, trigger.start + token.length);
-      }
-      emitChange();
-      syncTags();
-    },
-    [emitChange, syncTags, setSlash],
-  );
+  // `@` mention / `/` slash / `#` agent / `!` prompt pickers: trigger
+  // tracking, priority arbitration, and select actions live in
+  // useComposerPickers. The parent owns the wrapper ref (root div + popover
+  // anchor).
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const pickers = useComposerPickers({
+    editableRef,
+    wrapperRef,
+    workspacePath,
+    value,
+    lastEmittedRef,
+    emitChange,
+    syncTags,
+  });
+  const {
+    mention,
+    slash,
+    agent,
+    prompt,
+    mentionMenuRef,
+    slashMenuRef,
+    agentMenuRef,
+    promptMenuRef,
+    updateSlashTrigger,
+    updateTriggers,
+    selectedAgent,
+    clearSelectedAgent,
+  } = pickers;
+
   // Ghost-text completion from prompt history (desktop-cc-gui parity):
   // suffix is painted via data-completion-suffix and accepted with Tab.
   const completion = usePromptCompletion(isComposing ? "" : (value ?? ""));
@@ -277,43 +229,13 @@ export function Composer({
   }, [value]);
 
   // Expose the field handle (focus + mention insertion from the file tree).
-  useEffect(() => {
-    if (!inputRef) return;
-    const handle: ComposerInputHandle = {
-      focus: () => editableRef.current?.focus(),
-      insertText: (text) => {
-        const el = editableRef.current;
-        if (!el) return;
-        insertTextAtCaret(el, text);
-        emitChange();
-        syncTags();
-      },
-      openSlashPicker: () => {
-        const el = editableRef.current;
-        if (!el) return;
-        el.focus();
-        // Append at the end: the trigger regex only accepts a line-start
-        // `/`, so an arbitrary caret position mid-line could not open the
-        // picker anyway.
-        const text = extractText(el);
-        setCaretOffset(el, text.length);
-        if (!findSlashTrigger(text, text.length)) {
-          insertTextAtCaret(el, text === "" || text.endsWith("\n") ? "/" : "\n/");
-        }
-        emitChange();
-        syncTags();
-        updateSlashTrigger();
-        // react-aria restores focus to the popover trigger when the add
-        // menu unmounts — after our focus() above. Reclaim the field so
-        // typing reaches it once the picker is open.
-        requestAnimationFrame(() => editableRef.current?.focus());
-      },
-    };
-    inputRef.current = handle;
-    return () => {
-      if (inputRef.current === handle) inputRef.current = null;
-    };
-  }, [inputRef, emitChange, syncTags, updateSlashTrigger]);
+  useComposerInputHandle({
+    inputRef,
+    editableRef,
+    emitChange,
+    syncTags,
+    updateSlashTrigger,
+  });
 
   // Chip × removal via delegation (chips are raw DOM, not React).
   useEffect(() => {
@@ -348,25 +270,16 @@ export function Composer({
         isResizing={isResizing}
         isCollapsed={isCollapsed}
       />
-      {!isCollapsed && mention && workspacePath && (
-        <FileMentionMenu
-          root={workspacePath}
-          query={mention.query}
-          left={mention.left}
-          onSelect={handleMentionSelect}
-          onClose={() => setMention(null)}
-          menuRef={mentionMenuRef}
-        />
-      )}
-      {!isCollapsed && slash && workspacePath && (
-        <SlashCommandMenu
-          root={workspacePath}
-          query={slash.query}
-          left={slash.left}
-          onSelect={handleSlashSelect}
-          onClose={() => setSlash(null)}
-          menuRef={slashMenuRef}
-        />
+      <ComposerPickerMenus
+        isCollapsed={isCollapsed}
+        workspacePath={workspacePath}
+        pickers={pickers}
+      />
+
+      {/* Pinned-agent chip above the input, styled after the attachment
+          chips (ConversationFooter); × clears the selection. */}
+      {!isCollapsed && selectedAgent && (
+        <SelectedAgentChip agent={selectedAgent} onClear={clearSelectedAgent} />
       )}
 
       {!isCollapsed && (
@@ -375,12 +288,16 @@ export function Composer({
           sendShortcut={sendShortcut}
           mentionOpen={mention != null}
           slashOpen={slash != null}
+          agentOpen={agent != null}
+          promptOpen={prompt != null}
           completionSuffix={completion.suffix}
           acceptCompletion={completion.accept}
           setEditableText={setEditableText}
           handleHistoryKeyDown={handleHistoryKeyDown}
           mentionMenuRef={mentionMenuRef}
           slashMenuRef={slashMenuRef}
+          agentMenuRef={agentMenuRef}
+          promptMenuRef={promptMenuRef}
           isComposingRef={isComposingRef}
           lastCompositionEndTimeRef={lastCompositionEndTimeRef}
           setIsComposing={setIsComposing}
@@ -588,6 +505,9 @@ export function StatusBar({
     contextPopoverRef,
   ]);
   const allowContextOpenChange = useTriggerToggle(contextOpen, contextTriggerRef);
+  // Plugin chips (SDK 0.3.9, permission ui:composer-status) render in the
+  // left group after the branch switcher, each behind its own boundary.
+  const pluginItems = useRegistry(composerStatusRegistry);
   const limitsContext = useMemo(
     () => ({ max: contextMax ?? ASSUMED_CONTEXT_WINDOW, segments: contextSegments ?? [] }),
     [contextMax, contextSegments],
@@ -636,6 +556,15 @@ export function StatusBar({
               </span>
             </span>
           ))}
+        {[...pluginItems].sort(compareByOrder).map((def) => {
+          const pluginId = pluginIdFromRegistryKey(def.id);
+          const Chip = def.component;
+          return (
+            <PluginBoundary key={def.id} pluginId={pluginId}>
+              <Chip />
+            </PluginBoundary>
+          );
+        })}
       </div>
       <div className="flex items-center gap-3">
         <ProxyQuickToggle />

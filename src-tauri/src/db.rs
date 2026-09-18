@@ -21,6 +21,15 @@ pub struct WorkspaceMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
 }
+/// Minimal workspace identity exposed through the plugin capability boundary.
+/// UI-only ordering/grouping and opaque metadata stay inside the host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginWorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
 
 pub struct Db(pub Mutex<Connection>);
 
@@ -100,7 +109,26 @@ impl Db {
         }
         Ok(metadata)
     }
-
+    /// List registered workspaces for the plugin read-only capability.
+    pub fn workspace_list(&self) -> Result<Vec<PluginWorkspaceSummary>, String> {
+        let conn = self.0.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, path FROM workspaces
+                 ORDER BY sort_order IS NULL, sort_order, COALESCE(last_opened_at, 0) DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PluginWorkspaceSummary {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
 
     /// Directories the user explicitly granted file access to on top of the
     /// registered workspaces (the on-demand grant flow, files::grant_root).
@@ -248,6 +276,28 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(engine, session_id) DO UPDATE SET effort=excluded.effort, updated_at=excluded.updated_at",
             rusqlite::params![engine, session_id, effort, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Remember the in-app channel a session ran. Spawn injects that channel's
+    /// env onto the child and never rewrites the CLI's own files, so this row
+    /// is what keeps two concurrent sessions of the same engine on different
+    /// channels across restarts and other clients.
+    pub fn remember_session_provider(
+        &self,
+        engine: &str,
+        session_id: &str,
+        provider_id: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        let conn = self.0.lock();
+        conn.execute(
+            "INSERT INTO session_providers(engine, session_id, provider_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(engine, session_id) DO UPDATE SET provider_id=excluded.provider_id, updated_at=excluded.updated_at",
+            rusqlite::params![engine, session_id, provider_id, now],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -499,6 +549,23 @@ pub fn workspace_metadata(
     db.workspace_metadata(workspace_path.trim())?
         .ok_or_else(|| format!("workspace is not registered: {}", workspace_path.trim()))
 }
+#[tauri::command]
+pub fn plugin_list_workspaces(
+    db: tauri::State<'_, std::sync::Arc<Db>>,
+    plugin_id: String,
+) -> Result<Vec<PluginWorkspaceSummary>, String> {
+    let (enabled, quarantined, permissions) = crate::plugins::plugin_access(&plugin_id)?;
+    if !enabled {
+        return Err(format!("{plugin_id}: plugin is disabled"));
+    }
+    if quarantined {
+        return Err(format!("{plugin_id}: plugin is quarantined"));
+    }
+    if !permissions.iter().any(|permission| permission == "workspace.metadata.read") {
+        return Err(format!("{plugin_id}: missing workspace.metadata.read permission"));
+    }
+    db.workspace_list()
+}
 
 /// One-time import of the legacy desktop-cc-gui workspace list
 /// (`paths::legacy_workspaces_path`): old users open the upgrade and find
@@ -714,6 +781,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(engine, session_id)
         );
+        -- Channel the session last ran. Spawn injects env from this id; the
+        -- CLI's own files stay official so concurrent sessions can differ.
+        CREATE TABLE IF NOT EXISTS session_providers(
+            engine TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(engine, session_id)
+        );
         ",
     )?;
     // NB: no `cache_version` meta row — it was written but never read; cache
@@ -857,6 +933,43 @@ mod tests {
 
         db.remember_session_effort("omp", "s1", "low", 20).unwrap();
         assert_eq!(read().as_deref(), Some("low"), "newest wins");
+    }
+
+    #[test]
+    fn session_provider_record_round_trips_and_takes_the_newest() {
+        let scratch = Scratch::new();
+        let db = Db::open_at(&scratch.path("app.db")).unwrap();
+        db.0.lock()
+            .execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title)
+                 VALUES('claude', 's1', '/ws', 'f.jsonl', 1, 1, 'first message')",
+                [],
+            )
+            .unwrap();
+        let read = || -> Option<String> {
+            let conn = db.0.lock();
+            conn.query_row(
+                "SELECT p.provider_id FROM sessions s
+                 LEFT JOIN session_providers p ON p.engine = s.engine AND p.session_id = s.session_id
+                 WHERE s.engine='claude' AND s.session_id='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(), None, "no record yet");
+
+        db.remember_session_provider("claude", "s1", "chan-a", 10)
+            .unwrap();
+        assert_eq!(read().as_deref(), Some("chan-a"), "the channel survives");
+
+        db.remember_session_provider("claude", "s1", "__local_settings_json__", 20)
+            .unwrap();
+        assert_eq!(
+            read().as_deref(),
+            Some("__local_settings_json__"),
+            "newest wins"
+        );
     }
 
     #[test]
@@ -1101,6 +1214,32 @@ mod tests {
         assert_eq!(indexed.signature, signature);
         assert!(!table_signature.is_empty());
         assert!(index.get("codex").is_none());
+    }
+
+    #[test]
+    fn plugin_workspace_list_returns_only_identity_fields() {
+        let scratch = Scratch::new();
+        let db = Db::open_at(&scratch.path("app.db")).unwrap();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name, sort_order, group_id, meta)
+                 VALUES('plugin-id', '/ws/plugin', 'Plugin', 0, 'group', '{\"secret\":true}')",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = db.workspace_list().unwrap();
+        assert_eq!(rows, vec![PluginWorkspaceSummary {
+            id: "plugin-id".into(),
+            name: "Plugin".into(),
+            path: "/ws/plugin".into(),
+        }]);
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert!(json.get("meta").is_none());
+        assert!(json.get("groupId").is_none());
+        assert!(json.get("sortOrder").is_none());
     }
 
     #[test]

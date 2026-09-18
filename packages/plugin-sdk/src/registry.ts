@@ -67,6 +67,18 @@ export interface StatusBarItemDef {
   id: string;
   component: ComponentType;
   order?: number;
+  /** Placement zone (0.3.8): "start" renders left-aligned ahead of the
+   *  builtin cluster; omitted/"end" keeps the legacy slot after the sync
+   *  status, before the version. */
+  zone?: "start" | "end";
+}
+/** Composer status-row item (0.3.9): a chip in the composer's status row
+ *  (branch/context meter row), rendered in the left group after the branch
+ *  switcher. Same ownership/boundary rules as StatusBarItemDef. */
+export interface ComposerStatusItemDef {
+  id: string;
+  component: ComponentType;
+  order?: number;
 }
 
 /** Persistent viewport content. The host does not control its placement. */
@@ -138,13 +150,22 @@ export interface TimelineRowRendererDef {
   component: ComponentType<{ row: { kind: string } }>;
 }
 
+export type WorkspaceMenuStatusTone = "success" | "muted";
+
+export interface WorkspaceMenuLabel {
+  text: string;
+  status?: { text: string; tone: WorkspaceMenuStatusTone };
+}
+
+export type WorkspaceMenuLabelValue = string | WorkspaceMenuLabel;
+
 /** Sidebar workspace row context-menu entry (generic extension point). The
  *  host renders its builtin entries (别名 / 归档) first and appends registry
  *  entries after a separator; an owner decides per workspace what it shows. */
 export interface WorkspaceMenuItemDef {
   id: string;
   /** Resolved at menu-open time; receives the workspace the user right-clicked. */
-  label: (ctx: { workspaceId: string; archived: boolean }) => string;
+  label: (ctx: { workspaceId: string; archived: boolean }) => WorkspaceMenuLabelValue;
   icon?: ComponentType<{ className?: string }>;
   /** Hidden when false; lets an owner scope its entry to some workspaces. */
   visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
@@ -216,6 +237,8 @@ export const panelTabRegistry = new Registry<PanelTabDef>();
 
 /** App status bar item registry (plan §4.2 #8). */
 export const statusBarRegistry = new Registry<StatusBarItemDef>();
+/** Composer status-row item registry (0.3.9). */
+export const composerStatusRegistry = new Registry<ComposerStatusItemDef>();
 
 /** Non-modal viewport mounts, independent of the current route. */
 export const overlayRegistry = new Registry<OverlayDef>();

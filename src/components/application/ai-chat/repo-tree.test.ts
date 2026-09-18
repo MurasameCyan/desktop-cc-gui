@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { paginateThreads } from "./repo-tree";
+import { paginateThreads } from "./repo-pagination";
 import type { AiChatThread } from "./sidebar-types";
 
 function threads(count: number): AiChatThread[] {

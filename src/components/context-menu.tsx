@@ -4,7 +4,7 @@ import { cx } from "@/utils/cx";
 
 export interface ContextMenuEntry {
   id: string;
-  label: string;
+  label: ReactNode;
   icon: ReactNode;
   danger?: boolean;
   disabled?: boolean;
