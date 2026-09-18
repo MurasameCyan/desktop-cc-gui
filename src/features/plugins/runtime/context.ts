@@ -24,6 +24,7 @@ import type {
   PluginContext,
   PluginManifest,
   RegisteredWorkspace,
+  WorkspaceMetadata,
 } from "@ccgui/plugin-sdk";
 import {
   registerRuntimeSwitchHooks,
@@ -62,6 +63,7 @@ export type DocumentStorageRemoveResponse =
  * the loader binds these calls to IPC and tests bind minimal fakes. */
 export interface PluginContextBackend extends PluginStorageBackend {
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
+  workspaceMetadata(id: string): Promise<WorkspaceMetadata>;
   workspaceList(id: string): Promise<RegisteredWorkspace[]>;
   pickDirectory(): Promise<string | null>;
   documentStorageGetLocation(id: string): Promise<DocumentStorageLocationResponse>;
