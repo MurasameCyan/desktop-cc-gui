@@ -727,20 +727,6 @@ function onSession(
     lifecycle.sessionId = nativeId;
     persistAcceptedFrames(lifecycle);
   }
-  const sentModel = pendingSessionModels.get(key);
-  if (sentModel) {
-    pendingSessionModels.delete(key);
-    void ipc
-      .rememberSessionModel(event.engine, nativeId, sentModel)
-      .catch(() => {});
-  }
-  const sentEffort = pendingSessionEfforts.get(key);
-  if (sentEffort) {
-    pendingSessionEfforts.delete(key);
-    void ipc
-      .rememberSessionEffort(event.engine, nativeId, sentEffort)
-      .catch(() => {});
-  }
   // Resolve the workspace from the tab that owns this key — not from the
   // active tab. A first message sent on a background tab must not adopt the
   // foreground tab's workspace (the session would be orphaned there).
