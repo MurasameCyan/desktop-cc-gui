@@ -53,9 +53,10 @@ export const CollapsibleMessage = memo(function CollapsibleMessage({
 
   const collapsed = collapsible && !expanded;
   return (
-    <div className="relative">
+    <div className="relative min-w-0 max-w-full">
       <div
         ref={contentRef}
+        className="min-w-0 max-w-full [overflow-wrap:anywhere]"
         style={
           collapsible
             ? {

@@ -1107,6 +1107,8 @@ function onError(
   runRouting.delete(event.runId);
   untrackRun(event.runId);
   dropRunUsage(event.runId);
+  // Failed turns can still create a transcript; index it just as onDone does.
+  ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
   dispatchNormalized(event);
   finishRunLifecycle(event.runId, "failed", typeof event.data === "string" ? event.data : undefined, event.sessionId);

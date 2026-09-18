@@ -362,7 +362,7 @@ export function createPluginContext(
         );
       },
       registerComposerSlot(def) {
-        requirePermission("ui:composer");
+        requirePermission("ui:composer-status");
         return track(
           composerSlotRegistry.register({
             id: scopedPluginId(id, def.key),

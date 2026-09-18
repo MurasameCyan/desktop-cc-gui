@@ -1,5 +1,6 @@
 use super::{parse_session_file, Message, ParsedSession, SessionMeta};
 use base64::Engine as _;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -175,14 +176,24 @@ fn session_file_path(
     engine: &str,
     session_id: &str,
 ) -> Result<PathBuf, String> {
+    find_session_file_path(db, engine, session_id)?
+        .ok_or_else(|| format!("session not found: {engine}/{session_id}"))
+}
+
+fn find_session_file_path(
+    db: &crate::db::Db,
+    engine: &str,
+    session_id: &str,
+) -> Result<Option<PathBuf>, String> {
     let conn = db.0.lock();
     conn.query_row(
         "SELECT file_path FROM sessions WHERE engine=?1 AND session_id=?2",
         rusqlite::params![engine, session_id],
         |r| r.get::<_, String>(0),
     )
-    .map(PathBuf::from)
-    .map_err(|_| format!("session not found: {engine}/{session_id}"))
+    .optional()
+    .map(|path| path.map(PathBuf::from))
+    .map_err(|e| format!("lookup session {engine}/{session_id}: {e}"))
 }
 
 /// One cache entry: the parse plus the subagent fold over all its messages,
@@ -710,29 +721,39 @@ fn delete_opencode_session_disk(path: &Path) -> Result<(), String> {
 }
 
 /// Sync body of `delete_session` (disk + db work off the main thread).
-fn delete_session_blocking(
+pub(super) fn delete_session_blocking(
     db: &crate::db::Db,
     engine: &str,
     session_id: &str,
 ) -> Result<(), String> {
-    let path = session_file_path(db, engine, session_id)?;
-    delete_session_disk(engine, &path)?;
+    // A failed first turn can announce an id before its transcript is indexed.
+    // Hold the scan lock through deletion so an older scan cannot reinsert it.
+    if !crate::config::ENGINES.contains(&engine) {
+        return Err(format!("delete_session: unknown engine {engine}"));
+    }
+    let scan_guard = super::scanner::SCAN_LOCK.lock();
+    let mut path = find_session_file_path(db, engine, session_id)?;
+    if path.is_none() {
+        super::scanner::scan_with_guard(db, || {}, &scan_guard)
+            .map_err(|e| format!("scan before deleting {engine}/{session_id}: {e}"))?;
+        path = find_session_file_path(db, engine, session_id)?;
+    }
+    if let Some(path) = path {
+        delete_session_disk(engine, &path)?;
+    }
+    // No indexed transcript after the scan is a valid empty/failed session.
+    // Model and effort can already exist even when no transcript was created.
     let mut conn = db.0.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    // The recorded frame identities are scoped to this session and become
-    // unreachable with it. Every scan reads and hashes the whole table, so
-    // leaving them behind would tax every later scan for the life of the
-    // install.
-    tx.execute(
-        "DELETE FROM accepted_internal_frames WHERE engine=?1 AND session_id=?2",
-        rusqlite::params![engine, session_id],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.execute(
-        "DELETE FROM sessions WHERE engine=?1 AND session_id=?2",
-        rusqlite::params![engine, session_id],
-    )
-    .map_err(|e| e.to_string())?;
+    // Recorded frame identities become unreachable with their session and
+    // must be reclaimed in the same transaction as its indexed metadata.
+    for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE engine=?1 AND session_id=?2"),
+            rusqlite::params![engine, session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -1635,6 +1656,49 @@ mod tests {
             let cut = serde_json::to_value(subagent_history_until(&messages, &fold, start)).unwrap();
             let fresh = serde_json::to_value(subagent_history(&messages[..start])).unwrap();
             assert_eq!(cut, fresh, "start={start}");
+        }
+    }
+
+    #[test]
+    fn delete_session_preserves_database_errors() {
+        let scratch = Scratch::new();
+        let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
+        db.0.lock().execute("DROP TABLE sessions", []).unwrap();
+
+        let error = delete_session_blocking(&db, "codex", "missing").unwrap_err();
+        assert!(error.contains("lookup session codex/missing"), "{error}");
+        assert!(error.contains("no such table"), "{error}");
+        assert!(!error.contains("session not found"));
+    }
+
+    #[test]
+    fn delete_session_keeps_records_when_disk_removal_fails() {
+        let scratch = Scratch::new();
+        // remove_file on a directory fails on both Unix and Windows.
+        let path = scratch.0.join("not-a-transcript.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
+        for engine in ["claude", "codex"] {
+            db.0.lock().execute(
+                "INSERT INTO sessions(engine,session_id,workspace_path,file_path,file_size,file_mtime_ms) VALUES(?1,'failed','/ws',?2,0,0)",
+                rusqlite::params![engine, path.to_string_lossy().as_ref()],
+            ).unwrap();
+            db.remember_session_model(engine, "failed", "model", 1).unwrap();
+            db.remember_session_effort(engine, "failed", "high", 1).unwrap();
+            db.record_accepted_internal_frame_hash(engine, "failed", &"a".repeat(64), "/ws")
+                .unwrap();
+
+            let error = delete_session_blocking(&db, engine, "failed").unwrap_err();
+            assert!(error.contains("remove "), "{error}");
+            assert!(path.is_dir());
+            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
+                let count: i64 = db.0.lock().query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id='failed'"),
+                    [engine],
+                    |r| r.get(0),
+                ).unwrap();
+                assert_eq!(count, 1, "{engine}: {table}");
+            }
         }
     }
 

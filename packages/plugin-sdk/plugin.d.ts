@@ -372,7 +372,9 @@ export interface PluginContext {
       icon?: ComponentLike<{ className?: string }>;
       onSelect: () => void;
     }): Disposer;
-    /** Composer 工具栏插槽额外控件（权限 ui:composer）。 */
+    /** Composer 工具栏插槽额外控件（权限 ui:composer-status；历史上曾要求
+     *  不存在的 `ui:composer`，1.0.4 及更早版本据此拒绝一切声明，现已随
+     *  spec/permissions.json 收敛为同一权限字符串）。 */
     registerComposerSlot(def: {
       slot: ComposerSlotId;
       key?: string;

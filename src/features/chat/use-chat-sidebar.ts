@@ -5,7 +5,7 @@ import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-ch
 import type { AiChatRepo, AiChatRepoSection, ThreadAction } from "@/components/application/ai-chat/ai-chat-sidebar";
 import { ARCHIVED_SECTION_ID } from "@/components/application/ai-chat/use-sidebar-state";
 import type { SessionMeta } from "@/lib/ipc";
-import { pickDirectory } from "@/lib/platform";
+import { isWeb, pickDirectory } from "@/lib/platform";
 import { parseDraftSessionKey, sessionKey, useChatStore, sortedWorkspaceGroups } from "./store";
 import { relativeTime } from "./time";
 import { useWorkspaceUIHooks, workspaceLabelSuffix } from "./workspace-ui-bridge";
@@ -168,6 +168,8 @@ export function useChatSidebar({
   }, [workspaces, archivedIds, workspaceAliases]);
 
   const handleAddWorkspace = useCallback(() => {
+    // 移动端/网页访问模式没有目录选择器，侧栏也不渲染添加入口。
+    if (isWeb) return;
     void pickDirectory(t("chat.addWorkspace"))
       .then((path) => {
         if (path) void addWorkspace(path);

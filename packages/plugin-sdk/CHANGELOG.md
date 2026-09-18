@@ -51,6 +51,21 @@
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
 
+## 0.3.11 — 2026-09-18
+- **修复权限漂移**：`registerComposerSlot` 运行时一直校验 `ui:composer`，
+  但该字符串在 0.3.9 改名为 `ui:composer-status` 时未同步更新
+  （`spec/permissions.json` 的 `knownPermissions` 早已只保留
+  `ui:composer-status`），导致 `registerComposerSlot` 自 0.3.9 起对任何
+  manifest 声明都必然拒绝——没有任何权限字符串能通过校验。改为校验
+  `ui:composer-status`，与 `registerComposerStatusItem` 共享同一权限，
+  两个注册点现在都能正常声明使用。
+
+## 0.3.9 — 2026-09-16
+- **新增能力**：`ctx.ui.registerComposerStatusItem({ key?, component, order? })`
+  （新权限 `ui:composer-status`）——在 composer 状态行（分支/上下文用量那行）
+  左组、分支切换器之后渲染 chip。首个消费者：token-meter 指标插件从底部状态栏
+  迁至会话工具行。
+
 ## 0.3.7 — 2026-09-16
 - **新增能力**：`ctx.sessions.refresh()`（复用权限 `host:session`）——请求宿主立即
   刷新会话目录（侧栏/标签页）。插件绕过宿主直写会话数据（sqlite custom_title、

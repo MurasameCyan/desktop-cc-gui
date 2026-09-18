@@ -886,16 +886,28 @@ mod tests {
             .unwrap();
     }
 
+    fn clone_without_crlf_conversion(origin: &Path, local: &Path) -> Repository {
+        git2::build::RepoBuilder::new()
+            .remote_create(|repo, name, url| {
+                // Set this before clone's first checkout; changing it afterward
+                // makes inherited CRLF worktree files differ from the LF index.
+                repo.config()?.set_bool("core.autocrlf", false)?;
+                repo.remote(name, url)
+            })
+            .clone(origin.to_str().unwrap(), local)
+            .unwrap()
+    }
+
     #[test]
     fn pull_conflict_preserves_head_index_and_worktree() {
         for staged in [false, true] {
             let scratch = Scratch::new();
             let origin_path = scratch.0.join("origin");
             let origin = Repository::init(&origin_path).unwrap();
+            origin.config().unwrap().set_bool("core.autocrlf", false).unwrap();
             commit_file(&origin, "shared.txt", "base\n");
             let local_path = scratch.0.join("local");
-            let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-            local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+            let local = clone_without_crlf_conversion(&origin_path, &local_path);
             let old_head = local.head().unwrap().target().unwrap();
             std::fs::write(local_path.join("shared.txt"), "local\n").unwrap();
             if staged {
@@ -918,11 +930,11 @@ mod tests {
         let scratch = Scratch::new();
         let origin_path = scratch.0.join("origin");
         let origin = Repository::init(&origin_path).unwrap();
+        origin.config().unwrap().set_bool("core.autocrlf", false).unwrap();
         commit_file(&origin, "shared.txt", "base\n");
         commit_file(&origin, "local.txt", "base\n");
         let local_path = scratch.0.join("local");
-        let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-        local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+        let local = clone_without_crlf_conversion(&origin_path, &local_path);
         std::fs::write(local_path.join("local.txt"), "staged\n").unwrap();
         let mut index = local.index().unwrap();
         index.add_path(Path::new("local.txt")).unwrap();

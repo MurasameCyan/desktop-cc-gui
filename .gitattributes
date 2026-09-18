@@ -1,0 +1,2 @@
+# Catalog prompt hashes require identical bytes on every platform.
+src-tauri/resources/agent-catalogs/agency-agents/prompts/** text eol=lf

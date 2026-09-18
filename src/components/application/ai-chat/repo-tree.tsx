@@ -1,7 +1,7 @@
 "use client";
 
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import FolderOpen from "lucide-react/dist/esm/icons/folder-open";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
@@ -334,10 +334,20 @@ function RepoHeaderRow({
   );
 }
 
+/** Keep the list mounted through the close animation, then drop it so the
+ *  next expand remounts at page 0. Instant unmount + opacity fade left a
+ *  compositor ghost over the workspace rows below. */
+const THREAD_LIST_COLLAPSE_MS = 300;
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /** The collapsible thread area under a repo row: the wrapper owns the
- *  grid-rows collapse animation; the paged content only mounts while
- *  expanded, so collapsing unmounts it and the next expand restarts at
- *  page 0 — a short recent list again, matching Codex / Cursor folders. */
+ *  grid-rows collapse animation. Content stays mounted while the height
+ *  clips shut (no opacity fade — fading the last paint leaves a ghost). */
 function RepoThreadList({
   expanded,
   threads,
@@ -358,17 +368,33 @@ function RepoThreadList({
   onThreadAction?: (id: string, action: ThreadAction) => void;
   onThreadContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
 }) {
+  const [mounted, setMounted] = useState(expanded);
+  useLayoutEffect(() => {
+    if (expanded) {
+      setMounted(true);
+      return;
+    }
+    if (prefersReducedMotion()) {
+      setMounted(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setMounted(false), THREAD_LIST_COLLAPSE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [expanded]);
+
   return (
     <div
       aria-hidden={!expanded}
+      {...(!expanded ? { inert: "" } : {})}
       className={cx(
-        "grid transition-[grid-template-rows,opacity] duration-300 ease-in-out",
-        expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        "grid transition-[grid-template-rows] duration-300 ease-in-out motion-reduce:transition-none",
+        expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
       )}
     >
-      <div className="overflow-hidden">
-        {expanded ? (
+      <div className="min-h-0 overflow-hidden">
+        {mounted ? (
           <PagedThreadList
+            expanded={expanded}
             threads={threads}
             threadLimit={threadLimit}
             forceShowAll={forceShowAll}
@@ -384,9 +410,10 @@ function RepoThreadList({
 }
 
 /** Paged thread rows with the tree connector and the show-more/fewer
- *  pagination buttons. Owns the page state; it only exists while the repo
- *  is expanded, so remounting on expand naturally resets to page 0. */
+ *  pagination buttons. Stays mounted through the close animation; page
+ *  resets on collapse so a remount or a quick re-expand both start at 0. */
 function PagedThreadList({
+  expanded,
   threads,
   threadLimit,
   forceShowAll,
@@ -395,6 +422,7 @@ function PagedThreadList({
   onThreadAction,
   onThreadContextMenu,
 }: {
+  expanded: boolean;
   threads: AiChatThread[];
   threadLimit?: number;
   forceShowAll: boolean;
@@ -406,6 +434,11 @@ function PagedThreadList({
   const { t } = useTranslation();
   // Pagination: 0 = 初始 limit 条, 1 = +50 条, 2 = 全部。
   const [page, setPage] = useState(0);
+  // Reset immediately on collapse so a quick re-expand (before unmount)
+  // still restarts as a short recent list.
+  useEffect(() => {
+    if (!expanded) setPage(0);
+  }, [expanded]);
   const { visibleThreads, hiddenCount } = forceShowAll
     ? { visibleThreads: threads, hiddenCount: 0 }
     : paginateThreads(threads, threadLimit, page);

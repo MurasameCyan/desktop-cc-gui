@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import BookOpen from "lucide-react/dist/esm/icons/book-open";
 import Check from "lucide-react/dist/esm/icons/check";
-import History from "lucide-react/dist/esm/icons/history";
 import { Button } from "@/components/base/buttons/button";
 import {
   SettingsCard,
@@ -11,8 +10,7 @@ import {
 } from "@/components/application/settings/settings-rows";
 import { getAppVersion, openExternal } from "@/lib/platform";
 import { useUpdateStore } from "@/features/update/store";
-import { CHANGELOG_DATA, GITHUB_REPO_URL } from "@/version/changelog";
-import { ChangelogDialog } from "./ChangelogDialog";
+import { GITHUB_REPO_URL } from "@/version/changelog";
 import wxqImage from "@/assets/images/wxq.png";
 import douyinImage from "@/assets/images/douyin.png";
 
@@ -112,7 +110,6 @@ function DouyinChip() {
 export function AboutSection() {
   const { t } = useTranslation();
   const [version, setVersion] = useState<string | null>(null);
-  const [showChangelog, setShowChangelog] = useState(false);
   const updateStage = useUpdateStore((s) => s.stage);
   const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
   const updateError = useUpdateStore((s) => s.error);
@@ -182,7 +179,7 @@ export function AboutSection() {
         </div>
       </div>
 
-      {/* Social links + docs + version history */}
+      {/* Social links + docs */}
       <div className="flex w-full flex-col gap-2">
         <div className="flex w-full items-center justify-between gap-3">
           <SettingsSectionLabel className="w-auto">{t("settings.socialTitle")}</SettingsSectionLabel>
@@ -194,15 +191,6 @@ export function AboutSection() {
               onClick={() => openExternal(DOCS_URL)}
             >
               {t("settings.socialDocs")}
-            </Button>
-            <Button
-              size="small"
-              variant="secondary"
-              leadingIcon={History}
-              title={t("settings.versionHistoryDesc")}
-              onClick={() => setShowChangelog(true)}
-            >
-              {t("settings.versionHistory")}
             </Button>
           </div>
         </div>
@@ -220,13 +208,6 @@ export function AboutSection() {
         </div>
       </div>
 
-      {showChangelog && (
-        <ChangelogDialog
-          entries={CHANGELOG_DATA}
-          githubUrl={GITHUB_REPO_URL}
-          onClose={() => setShowChangelog(false)}
-        />
-      )}
     </div>
   );
 }

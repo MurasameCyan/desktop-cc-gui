@@ -10,6 +10,7 @@ import {
   WorkspaceSortableList,
 } from "@/components/application/ai-chat/workspace-sortable-list";
 import { ARCHIVED_SECTION_ID } from "@/components/application/ai-chat/use-sidebar-state";
+import { isWeb } from "@/lib/platform";
 import { RepoItem } from "@/components/application/ai-chat/repo-tree";
 import type { AiChatRepo, AiChatRepoSection, ThreadAction } from "@/components/application/ai-chat/sidebar-types";
 import { cx } from "@/utils/cx";
@@ -233,15 +234,17 @@ export function WorkspaceSection({
         <span className="text-body-2-medium text-text-secondary">
           {t("chat.workspaces")}
         </span>
-        <button
-          type="button"
-          aria-label={t("chat.addWorkspace")}
-          title={t("chat.addWorkspace")}
-          onClick={onAddWorkspace}
-          className="flex size-7 cursor-pointer items-center justify-center rounded-full text-foreground-icon-secondary transition-colors duration-150 hover:bg-background-tertiary-hover/55 hover:text-foreground-icon-primary"
-        >
-          <FolderPlus className="size-4" aria-hidden />
-        </button>
+        {!isWeb && (
+          <button
+            type="button"
+            aria-label={t("chat.addWorkspace")}
+            title={t("chat.addWorkspace")}
+            onClick={onAddWorkspace}
+            className="flex size-7 cursor-pointer items-center justify-center rounded-full text-foreground-icon-secondary transition-colors duration-150 hover:bg-background-tertiary-hover/55 hover:text-foreground-icon-primary"
+          >
+            <FolderPlus className="size-4" aria-hidden />
+          </button>
+        )}
       </div>
       {!hasGroups && renderRepoList(filteredRepos, null)}
       {hasGroups &&
