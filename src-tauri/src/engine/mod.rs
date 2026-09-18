@@ -2223,6 +2223,7 @@ pub async fn send_message_inner(
         workspace_path,
         session_id,
         prompt,
+        prompt_contributions,
         image_paths,
         model,
         effort,
