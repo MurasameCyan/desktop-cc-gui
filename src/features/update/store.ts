@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -19,6 +20,12 @@ interface UpdateStore {
   stage: UpdateStage;
   /** Version of the pending update, when one was found. */
   version?: string;
+  /** Latest release on the server, shown on the "up to date" result so the
+   *  user can see what the check compared against. `check()` returns null
+   *  when current, so this comes from a separate manifest probe. */
+  latestVersion?: string;
+  /** ISO publish date of the latest release, when the manifest has one. */
+  latestPubDate?: string;
   downloadedBytes: number;
   totalBytes?: number;
   error?: string;
@@ -35,7 +42,12 @@ interface UpdateStore {
 // update server is unreachable the promise never settles and the UI would
 // sit on "checking" forever. Treat a timeout as a failed check.
 const CHECK_TIMEOUT_MS = 15_000;
-const LATEST_RESET_MS = 2_000;
+
+/** Mirrors `LatestReleaseInfo` in src-tauri/src/updater.rs. */
+interface LatestReleaseInfo {
+  version: string;
+  pubDate?: string | null;
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   const { promise: result, resolve, reject } = Promise.withResolvers<T>();
@@ -57,7 +69,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
  *  closed so a superseded check never leaks a downloaded bundle. */
 let pendingUpdate: Update | null = null;
 let checkRequestId = 0;
-let latestResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function closeUpdateHandle(update: Update | null) {
   try {
@@ -79,25 +90,38 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
     const requestId = ++checkRequestId;
     const isStale = () => checkRequestId !== requestId;
 
-    if (latestResetTimer !== null) {
-      clearTimeout(latestResetTimer);
-      latestResetTimer = null;
-    }
-
-    const applyNoUpdate = async () => {
+    const applyNoUpdate = async (sameVersion: Update | null) => {
       const current = pendingUpdate;
       pendingUpdate = null;
       await closeUpdateHandle(current);
 
-      if (options?.interactive) {
-        set({ stage: "latest", error: undefined });
-        latestResetTimer = setTimeout(() => {
-          latestResetTimer = null;
-          if (!isStale()) set({ stage: "idle" });
-        }, LATEST_RESET_MS);
+      if (!options?.interactive) {
+        set({ stage: "idle" });
         return;
       }
-      set({ stage: "idle" });
+
+      // The result stays visible until the next check — a "latest" message
+      // that vanishes after two seconds reads as "no feedback at all".
+      let latestVersion = sameVersion?.version.trim().replace(/^v/i, "");
+      let latestPubDate = sameVersion?.date ?? undefined;
+      if (!latestVersion) {
+        // check() hands back null when already current, so the manifest's
+        // version/date need a separate probe for the feedback line. Failing
+        // that, the bare "up to date" message still shows.
+        try {
+          const info = await withTimeout(
+            invoke<LatestReleaseInfo>("fetch_latest_release_info"),
+            CHECK_TIMEOUT_MS,
+            "latest release info timed out",
+          );
+          latestVersion = info.version.trim().replace(/^v/i, "");
+          latestPubDate = info.pubDate ?? undefined;
+        } catch (error) {
+          console.warn("[updater] latest release info fetch failed", error);
+        }
+      }
+      if (isStale()) return;
+      set({ stage: "latest", latestVersion, latestPubDate, error: undefined });
     };
 
     let update: Update | null = null;
@@ -107,7 +131,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       if (isStale()) return;
 
       if (!update) {
-        await applyNoUpdate();
+        await applyNoUpdate(null);
         return;
       }
 
@@ -116,7 +140,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       // Both sides normalized: the endpoint tags versions "v1.0.0".
       const currentVersion = (await getAppVersion())?.trim().replace(/^v/i, "") ?? null;
       if (currentVersion && update.version.trim().replace(/^v/i, "") === currentVersion) {
-        await applyNoUpdate();
+        await applyNoUpdate(update);
         return;
       }
 
@@ -124,7 +148,12 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       pendingUpdate = update;
       if (previous && previous !== update) void closeUpdateHandle(previous);
 
-      set({ stage: "available", version: update.version });
+      set({
+        stage: "available",
+        version: update.version,
+        latestVersion: undefined,
+        latestPubDate: undefined,
+      });
     } catch (error) {
       if (isStale()) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -173,13 +202,15 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
   dismiss: () => {
     checkRequestId += 1;
-    if (latestResetTimer !== null) {
-      clearTimeout(latestResetTimer);
-      latestResetTimer = null;
-    }
     const current = pendingUpdate;
     pendingUpdate = null;
     void closeUpdateHandle(current);
-    set({ stage: "idle", version: undefined, error: undefined });
+    set({
+      stage: "idle",
+      version: undefined,
+      latestVersion: undefined,
+      latestPubDate: undefined,
+      error: undefined,
+    });
   },
 }));

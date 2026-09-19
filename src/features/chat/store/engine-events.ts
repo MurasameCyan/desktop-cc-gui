@@ -482,6 +482,9 @@ export function upsertSessionMetaInto(
   meta: SessionMeta,
 ) {
   set((s) => {
+    if (s.archivedSessionKeys[sessionKey(meta.engine, meta.sessionId, meta.workspacePath)]) {
+      return {};
+    }
     const idx = s.sessions.findIndex(
       (x) => x.engine === meta.engine && x.sessionId === meta.sessionId,
     );

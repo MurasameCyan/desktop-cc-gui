@@ -141,6 +141,25 @@ function workspaceMetadata(workspaces: Workspace[], workspacePath: string): Work
     : { id: derivedWorkspaceId(workspacePath), path: workspacePath };
 }
 
+function archivedKeyMap(sessions: SessionMeta[]): Record<string, true> {
+  return Object.fromEntries(
+    sessions.map((session) => [
+      sessionKey(session.engine, session.sessionId, session.workspacePath),
+      true as const,
+    ]),
+  );
+}
+
+function withoutArchived(
+  sessions: SessionMeta[],
+  archived: Record<string, true>,
+): SessionMeta[] {
+  return sessions.filter(
+    (session) =>
+      !archived[sessionKey(session.engine, session.sessionId, session.workspacePath)],
+  );
+}
+
 /** Load a page of session history, routing remote (plugin-fed, e.g. WSL
  *  distro CLI) transcripts through the host's remote fetch instead of the
  *  local db lookup. `meta` is looked up from the current session catalog
@@ -491,7 +510,8 @@ export const useChatStore = create<ChatStore>((set, get) => {
     });
     // Refresh independently: a slow history read must not delay sending or Stop.
     void get().refreshSessionUsage(key);
-    const requestedRunId = `run-${newId()}`;
+    // Stop and early events must address the same lifecycle registered above.
+    const requestedRunId = hookRunId;
     settleOrphanedRuns(set, routeRun(requestedRunId, key));
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
@@ -736,6 +756,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
   return {
     workspaces: [],
     sessions: [],
+    archivedSessionKeys: {},
     engines: [],
     active: null,
     openTabs: [],
@@ -791,9 +812,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
       eventTeardowns.push(() =>
         window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, onCliConfigChanged),
       );
-      const [workspaces, sessions, engines] = await Promise.all([
+      const [workspaces, sessions, archivedSessions, engines] = await Promise.all([
         ipc.listWorkspaces().catch(() => [] as Workspace[]),
         ipc.listSessions().catch(() => [] as SessionMeta[]),
+        ipc.listArchivedSessions().catch(() => [] as SessionMeta[]),
         ipc.listEngines().catch(() => [] as EngineInfo[]),
       ]);
       // Plugin session sources (remote/容器内 CLI) merge under the local
@@ -801,14 +823,15 @@ export const useChatStore = create<ChatStore>((set, get) => {
       // 此会话”被清掉。
       setSessionSourcesChangedCallback(() => void get().refreshSessions());
       const external = await listExternalSessionMetas();
-      const allSessions = mergeExternalSessions(
-        sessions,
-        external,
-        workspaces.map((w) => w.path),
+      const archivedSessionKeys = archivedKeyMap(archivedSessions);
+      const allSessions = withoutArchived(
+        mergeExternalSessions(sessions, external, workspaces.map((w) => w.path)),
+        archivedSessionKeys,
       );
       set({
         workspaces,
         sessions: visibleSessions(allSessions, engines),
+        archivedSessionKeys,
         engines,
       });
       ensureUsableEngine(engines);
@@ -867,22 +890,42 @@ export const useChatStore = create<ChatStore>((set, get) => {
     },
 
     refreshSessions: async () => {
-      const [sessions, external] = await Promise.all([
+      const [sessions, external, archivedSessions] = await Promise.all([
         ipc.listSessions().catch(() => null),
         listExternalSessionMetas(),
+        ipc.listArchivedSessions().catch(() => null),
       ]);
-      if (!sessions) return;
-      const merged = mergeExternalSessions(
-        sessions,
-        external,
-        get().workspaces.map((w) => w.path),
+      if (!sessions || !archivedSessions) return;
+      const archivedSessionKeys = archivedKeyMap(archivedSessions);
+      const merged = withoutArchived(
+        mergeExternalSessions(sessions, external, get().workspaces.map((w) => w.path)),
+        archivedSessionKeys,
       );
+      for (const session of archivedSessions) {
+        clearScopedContributions(session.engine, session.sessionId, session.workspacePath);
+        const tab = get().openTabs.find((candidate) =>
+          sameTab(candidate, session.engine, session.sessionId, session.workspacePath),
+        );
+        if (tab) dispatchSessionClosed(sessionLifecycleBase(tab));
+      }
       set((s) => {
         const visible = visibleSessions(
-          preserveUnscannedSessions(merged, s.sessions, s.bySession),
+          withoutArchived(
+            preserveUnscannedSessions(merged, s.sessions, s.bySession),
+            archivedSessionKeys,
+          ),
           s.engines,
         );
         const bySession = { ...s.bySession };
+        const drafts = { ...s.drafts };
+        const unseen = { ...s.unseen };
+        const streamingByKey = { ...s.streamingByKey };
+        for (const key of Object.keys(archivedSessionKeys)) {
+          delete bySession[key];
+          delete drafts[key];
+          delete unseen[key];
+          delete streamingByKey[key];
+        }
         for (const meta of merged) {
           const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
           const current = bySession[key];
@@ -894,38 +937,70 @@ export const useChatStore = create<ChatStore>((set, get) => {
             activeProvider: meta.provider ?? current.activeProvider,
           };
         }
-        return { sessions: visible, bySession };
+        const openTabs = s.openTabs.filter(
+          (tab) =>
+            tab.sessionId === null ||
+            !archivedSessionKeys[sessionKey(tab.engine, tab.sessionId, tab.workspacePath)],
+        );
+        const active =
+          s.active?.sessionId &&
+          archivedSessionKeys[
+            sessionKey(s.active.engine, s.active.sessionId, s.active.workspacePath)
+          ]
+            ? (openTabs[0] ?? null)
+            : s.active;
+        persistTabs(openTabs, active);
+        return {
+          sessions: visible,
+          archivedSessionKeys,
+          bySession,
+          drafts,
+          unseen,
+          streamingByKey,
+          openTabs,
+          active,
+        };
       });
     },
 
     refreshEngines: async () => {
-      const [engines, sessions, external, config] = await Promise.all([
+      const [engines, sessions, external, archivedSessions, config] = await Promise.all([
         ipc.listEngines().catch(() => null),
         ipc.listSessions().catch(() => null),
         listExternalSessionMetas(),
+        ipc.listArchivedSessions().catch(() => null),
         ipc.getCliConfig?.().catch(() => null) ?? Promise.resolve(null),
       ]);
       if (!engines) return;
-      set((s) => ({
-        engines,
-        ...(sessions
-          ? {
-              sessions: visibleSessions(
-                preserveUnscannedSessions(
-                  mergeExternalSessions(
-                    sessions,
-                    external,
-                    s.workspaces.map((w) => w.path),
+      set((s) => {
+        const keys = archivedSessions
+          ? archivedKeyMap(archivedSessions)
+          : s.archivedSessionKeys;
+        return {
+          engines,
+          archivedSessionKeys: keys,
+          ...(sessions
+            ? {
+                sessions: visibleSessions(
+                  withoutArchived(
+                    preserveUnscannedSessions(
+                      mergeExternalSessions(
+                        sessions,
+                        external,
+                        s.workspaces.map((w) => w.path),
+                      ),
+                      s.sessions,
+                      s.bySession,
+                    ),
+                    keys,
                   ),
-                  s.sessions,
-                  s.bySession,
+                  engines,
                 ),
-                engines,
-              ),
-            }
-          : {}),
-        ...(config ? { providers: engineCurrents(config) } : {}),
-      }));
+              }
+            : {}),
+          ...(config ? { providers: engineCurrents(config) } : {}),
+        };
+      });
       ensureUsableEngine(engines);
     },
 
@@ -1753,6 +1828,44 @@ export const useChatStore = create<ChatStore>((set, get) => {
       void get().refreshSessionUsage(key);
     },
 
+    archiveSession: async (session) => {
+      const { engine, sessionId, workspacePath } = session;
+      const key = sessionKey(engine, sessionId, workspacePath);
+      if (get().streamingByKey[key]) {
+        set({ actionError: i18n.t("chat.archiveRunning") });
+        return;
+      }
+      try {
+        await ipc.archiveSession(session);
+      } catch (error) {
+        set({ actionError: errorText(error) });
+        return;
+      }
+      set((s) => {
+        const bySession = { ...s.bySession };
+        const drafts = { ...s.drafts };
+        delete bySession[key];
+        delete drafts[key];
+        return {
+          sessions: s.sessions.filter(
+            (item) => !(item.engine === engine && item.sessionId === sessionId),
+          ),
+          archivedSessionKeys: { ...s.archivedSessionKeys, [key]: true },
+          bySession,
+          drafts,
+          unseen: omitKey(s.unseen, key),
+          actionError: null,
+        };
+      });
+      const cacheIdx = closedTabCache.indexOf(key);
+      if (cacheIdx >= 0) closedTabCache.splice(cacheIdx, 1);
+      const tab = get().openTabs.find(
+        (item) => item.engine === engine && item.sessionId === sessionId,
+      );
+      if (tab) get().closeTab(engine, sessionId, tab.workspacePath);
+      else clearScopedContributions(engine, sessionId, workspacePath);
+    },
+
     deleteSession: async (engine, sessionId) => {
       // 远程(插件会话源,如 WSL 发行版内 CLI)会话没有本地 db 行,本地
       // delete_session 只会 "session not found";走远程通道删 remotePath。
@@ -1935,6 +2048,13 @@ export const useChatStore = create<ChatStore>((set, get) => {
         // outright — live data wins and the file catches up on a later
         // refresh; patching it back would resurrect the stale totals and drop
         // the live context window.
+        //
+        // "Newer" is decided by object identity, not by comparing totals: a
+        // claude result line carries the turn's *summed* billing (every
+        // request of the turn added up), so the settled value is always
+        // larger than the file's occupancy snapshot. A magnitude test would
+        // therefore read every claude re-read as stale and leave the meter
+        // parked on the sum, far past the window it is measured against.
         for (let attempt = 0; attempt < 3; attempt += 1) {
           const page = await loadHistoryPage(
             engine,
@@ -1946,15 +2066,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
             [...page.messages].reverse().find((m) => m.usage)?.usage ?? null;
           if (!latestUsage) return;
           const current = get().bySession[targetKey]?.usage;
+          // A report that landed while this read was in flight replaced the
+          // usage object; anything else left it untouched (patches spread the
+          // session and pass `usage` through by reference).
+          if (current !== before.usage) return;
           const latestTotal = parseUsage(latestUsage)?.total ?? null;
-          const currentTotal = parseUsage(current)?.total ?? null;
-          if (
-            latestTotal !== null &&
-            currentTotal !== null &&
-            latestTotal < currentTotal
-          ) {
-            return;
-          }
           if (beforeTotal !== null && latestTotal === beforeTotal && attempt < 2) {
             const wait = Promise.withResolvers<void>();
             setTimeout(wait.resolve, 300);

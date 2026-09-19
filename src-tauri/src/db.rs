@@ -716,6 +716,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY(engine, session_id)
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_path);
+        -- App-owned archive markers. CLI transcripts remain untouched; the
+        -- independent marker survives scanner upserts and workspace re-adds.
+        -- The snapshot also covers plugin-fed remote sessions, which have no
+        -- local row in `sessions`.
+        CREATE TABLE IF NOT EXISTS session_archives(
+            engine TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            archived_at INTEGER NOT NULL,
+            PRIMARY KEY(engine, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_archives_workspace
+            ON session_archives(workspace_path);
         CREATE TABLE IF NOT EXISTS meta(
             key TEXT PRIMARY KEY,
             value TEXT

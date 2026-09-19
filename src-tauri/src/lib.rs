@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod agent_catalog;
 pub mod baidu_tongji;
+pub mod browser;
 pub mod cc_switch;
 pub mod cli_lifecycle;
 pub mod config;
@@ -25,6 +26,7 @@ pub mod usage;
 pub mod slash_commands;
 pub mod terminal;
 pub mod relay;
+pub mod updater;
 pub mod web;
 
 use std::sync::Arc;
@@ -236,6 +238,16 @@ pub fn run() {
             provider_files::official_config_write,
             config::reorder_providers,
             config::set_engine_enabled,
+            // in-app browser tabs (child webviews)
+            browser::browser_create,
+            browser::browser_close,
+            browser::browser_navigate,
+            browser::browser_set_bounds,
+            browser::browser_set_visible,
+            browser::browser_go_back,
+            browser::browser_go_forward,
+            browser::browser_reload,
+            browser::browser_current_url,
             // cc-switch interop
             cc_switch::check_cc_switch,
             cc_switch::dismiss_cc_switch,
@@ -246,6 +258,8 @@ pub fn run() {
             settings::get_app_settings,
             settings::update_app_settings,
             settings::set_window_theme,
+            // updater
+            updater::fetch_latest_release_info,
             // plugins
             plugins::plugin_list,
             plugins::plugin_install_from_path,
@@ -283,6 +297,9 @@ pub fn run() {
             engine::images::import_attachments,
             // history
             history::reader::list_sessions,
+            history::reader::list_archived_sessions,
+            history::reader::archive_session,
+            history::reader::restore_session,
             usage::usage_record,
             usage::usage_summary,
             usage::usage_clear,

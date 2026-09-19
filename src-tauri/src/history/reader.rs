@@ -59,6 +59,10 @@ pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Ses
          LEFT JOIN session_models m ON m.engine = s.engine AND m.session_id = s.session_id
          LEFT JOIN session_efforts e ON e.engine = s.engine AND e.session_id = s.session_id
          LEFT JOIN session_providers p ON p.engine = s.engine AND p.session_id = s.session_id
+         WHERE NOT EXISTS (
+             SELECT 1 FROM session_archives a
+             WHERE a.engine = s.engine AND a.session_id = s.session_id
+         )
          ORDER BY COALESCE(s.updated_at, 0) DESC",
         |r| {
             Ok(SessionMeta {
@@ -78,9 +82,102 @@ pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Ses
                 model: r.get(13)?,
                 effort: r.get(14)?,
                 provider: r.get(15)?,
+                remote: None,
+                remote_path: None,
             })
         },
     )
+}
+
+fn list_archived_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, String> {
+    let conn = db.0.lock();
+    let mut stmt = conn
+        .prepare("SELECT snapshot_json FROM session_archives ORDER BY archived_at DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            Ok(json) => match serde_json::from_str::<SessionMeta>(&json) {
+                Ok(session) => out.push(session),
+                Err(e) => eprintln!("[history] skipping corrupt archive snapshot: {e}"),
+            },
+            Err(e) => eprintln!("[history] skipping unreadable archive row: {e}"),
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn list_archived_sessions(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<SessionMeta>, String> {
+    list_archived_sessions_from(&state.db)
+}
+
+fn archive_session_in(db: &crate::db::Db, session: &SessionMeta) -> Result<(), String> {
+    if session.engine.trim().is_empty()
+        || session.session_id.trim().is_empty()
+        || session.workspace_path.trim().is_empty()
+    {
+        return Err("archive_session: engine, sessionId and workspacePath are required".into());
+    }
+    let snapshot = serde_json::to_string(session).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let conn = db.0.lock();
+    conn.execute(
+        "INSERT INTO session_archives(engine, session_id, workspace_path, snapshot_json, archived_at)
+         VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(engine, session_id) DO UPDATE SET
+           workspace_path=excluded.workspace_path,
+           snapshot_json=excluded.snapshot_json,
+           archived_at=excluded.archived_at",
+        rusqlite::params![
+            session.engine,
+            session.session_id,
+            session.workspace_path,
+            snapshot,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn archive_session(
+    state: tauri::State<'_, crate::AppState>,
+    session: SessionMeta,
+) -> Result<(), String> {
+    archive_session_in(&state.db, &session)?;
+    state.sink.emit_sessions_changed();
+    Ok(())
+}
+
+fn restore_session_in(db: &crate::db::Db, engine: &str, session_id: &str) -> Result<(), String> {
+    let conn = db.0.lock();
+    conn.execute(
+        "DELETE FROM session_archives WHERE engine=?1 AND session_id=?2",
+        rusqlite::params![engine, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_session(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    session_id: String,
+) -> Result<(), String> {
+    restore_session_in(&state.db, &engine, &session_id)?;
+    state.sink.emit_sessions_changed();
+    Ok(())
 }
 
 /// Remember the model id a session ran, spelled as the picker spells it
@@ -747,7 +844,14 @@ pub(super) fn delete_session_blocking(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     // Recorded frame identities become unreachable with their session and
     // must be reclaimed in the same transaction as its indexed metadata.
-    for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
+    for table in [
+        "accepted_internal_frames",
+        "sessions",
+        "session_models",
+        "session_efforts",
+        "session_providers",
+        "session_archives",
+    ] {
         tx.execute(
             &format!("DELETE FROM {table} WHERE engine=?1 AND session_id=?2"),
             rusqlite::params![engine, session_id],
@@ -1386,11 +1490,32 @@ mod tests {
             .unwrap();
         db.record_accepted_internal_frame_hash("omp", "kept", &"b".repeat(64), &workspace.to_string_lossy())
             .unwrap();
+        for session_id in ["sid-1", "kept"] {
+            db.remember_session_provider("omp", session_id, "provider", 1).unwrap();
+            let session = SessionMeta {
+                engine: "omp".into(),
+                session_id: session_id.into(),
+                workspace_path: workspace.to_string_lossy().into_owned(),
+                ..archived_fixture()
+            };
+            archive_session_in(&db, &session).unwrap();
+        }
 
         delete_session_blocking(&db, "omp", "sid-1").unwrap();
 
         assert!(db.accepted_internal_frames("omp", "sid-1").unwrap().0.is_empty());
         assert_eq!(db.accepted_internal_frames("omp", "kept").unwrap().0.len(), 1);
+        let archived = list_archived_sessions_from(&db).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id, "kept");
+        let providers: Vec<String> = db.0.lock()
+            .prepare("SELECT session_id FROM session_providers WHERE engine='omp'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(providers, ["kept"]);
 
         drop(db);
         std::fs::remove_dir_all(&home).ok();
@@ -1528,6 +1653,100 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn archived_fixture() -> SessionMeta {
+        SessionMeta {
+            engine: "codex".into(),
+            session_id: "archived-1".into(),
+            workspace_path: "/ws/demo".into(),
+            file_path: "/tmp/archived-1.jsonl".into(),
+            file_size: 12,
+            file_mtime_ms: 34,
+            title: "Archived title".into(),
+            preview: "preview".into(),
+            created_at: Some(1),
+            updated_at: Some(2),
+            message_count: 3,
+            pinned: false,
+            custom_title: None,
+            model: Some("provider/model".into()),
+            effort: Some("high".into()),
+            provider: Some("provider".into()),
+            remote: None,
+            remote_path: None,
+        }
+    }
+
+    fn visible_session_count(db: &crate::db::Db) -> i64 {
+        db.0.lock()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions s WHERE NOT EXISTS (
+                   SELECT 1 FROM session_archives a
+                   WHERE a.engine=s.engine AND a.session_id=s.session_id
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn archive_hides_across_scans_and_restore_reveals() {
+        let scratch = Scratch::new();
+        let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
+        let session = archived_fixture();
+        db.0.lock().execute(
+            "INSERT INTO sessions(engine,session_id,workspace_path,file_path,file_size,file_mtime_ms,title,preview,created_at,updated_at,message_count)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            rusqlite::params![
+                session.engine,
+                session.session_id,
+                session.workspace_path,
+                session.file_path,
+                session.file_size,
+                session.file_mtime_ms,
+                session.title,
+                session.preview,
+                session.created_at,
+                session.updated_at,
+                session.message_count,
+            ],
+        ).unwrap();
+
+        assert_eq!(visible_session_count(&db), 1);
+        archive_session_in(&db, &session).unwrap();
+        assert_eq!(visible_session_count(&db), 0);
+        assert_eq!(list_archived_sessions_from(&db).unwrap()[0].session_id, "archived-1");
+
+        // A scanner update never touches the independent archive marker.
+        db.0.lock().execute(
+            "UPDATE sessions SET updated_at=99 WHERE engine='codex' AND session_id='archived-1'",
+            [],
+        ).unwrap();
+        assert_eq!(visible_session_count(&db), 0);
+
+        restore_session_in(&db, "codex", "archived-1").unwrap();
+        assert_eq!(visible_session_count(&db), 1);
+        assert!(list_archived_sessions_from(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn archive_snapshot_preserves_remote_delete_route() {
+        let scratch = Scratch::new();
+        let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
+        let mut session = archived_fixture();
+        session.engine = "dsh".into();
+        session.file_path.clear();
+        session.remote = Some(true);
+        session.remote_path = Some(
+            "/home/dev/.dsh/sessions/-ws-demo/archived-1/session.jsonl.zstd".into(),
+        );
+
+        archive_session_in(&db, &session).unwrap();
+        let archived = list_archived_sessions_from(&db).unwrap();
+        assert_eq!(archived[0].remote, Some(true));
+        assert_eq!(archived[0].remote_path, session.remote_path);
     }
 
     #[test]
@@ -1685,13 +1904,21 @@ mod tests {
             ).unwrap();
             db.remember_session_model(engine, "failed", "model", 1).unwrap();
             db.remember_session_effort(engine, "failed", "high", 1).unwrap();
+            db.remember_session_provider(engine, "failed", "provider", 1).unwrap();
+            let session = SessionMeta {
+                engine: engine.into(),
+                session_id: "failed".into(),
+                workspace_path: "/ws".into(),
+                ..archived_fixture()
+            };
+            archive_session_in(&db, &session).unwrap();
             db.record_accepted_internal_frame_hash(engine, "failed", &"a".repeat(64), "/ws")
                 .unwrap();
 
             let error = delete_session_blocking(&db, engine, "failed").unwrap_err();
             assert!(error.contains("remove "), "{error}");
             assert!(path.is_dir());
-            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
+            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts", "session_providers", "session_archives"] {
                 let count: i64 = db.0.lock().query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id='failed'"),
                     [engine],

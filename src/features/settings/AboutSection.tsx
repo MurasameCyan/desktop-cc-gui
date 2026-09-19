@@ -108,11 +108,13 @@ function DouyinChip() {
 
 /** About page: app identity + version, community QR, and social links. */
 export function AboutSection() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [version, setVersion] = useState<string | null>(null);
   const updateStage = useUpdateStore((s) => s.stage);
   const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
   const updateError = useUpdateStore((s) => s.error);
+  const latestVersion = useUpdateStore((s) => s.latestVersion);
+  const latestPubDate = useUpdateStore((s) => s.latestPubDate);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +127,24 @@ export function AboutSection() {
       cancelled = true;
     };
   }, []);
+
+  let updateDescription: string | undefined;
+  if (updateStage === "checking") {
+    updateDescription = t("settings.updateChecking");
+  } else if (updateStage === "latest") {
+    const parsed = latestPubDate ? new Date(latestPubDate) : null;
+    const date =
+      parsed && !Number.isNaN(parsed.getTime())
+        ? parsed.toLocaleDateString(i18n.language)
+        : null;
+    updateDescription = !latestVersion
+      ? t("settings.updateLatest")
+      : date
+        ? t("settings.updateLatestDetail", { version: latestVersion, date })
+        : t("settings.updateLatestDetailNoDate", { version: latestVersion });
+  } else if (updateStage === "error") {
+    updateDescription = t("settings.updateError", { message: updateError });
+  }
 
   return (
     <div className="flex w-full flex-col gap-6">
@@ -139,15 +159,7 @@ export function AboutSection() {
           </SettingsRow>
           <SettingsRow
             label={t("settings.checkUpdates")}
-            description={
-              updateStage === "checking"
-                ? t("settings.updateChecking")
-                : updateStage === "latest"
-                  ? t("settings.updateLatest")
-                  : updateStage === "error"
-                    ? t("settings.updateError", { message: updateError })
-                    : undefined
-            }
+            description={updateDescription}
           >
             <Button
               size="small"

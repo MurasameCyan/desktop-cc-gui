@@ -2,6 +2,7 @@ import { useEffect, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import Archive from "lucide-react/dist/esm/icons/archive";
 import ArchiveRestore from "lucide-react/dist/esm/icons/archive-restore";
+import FolderPlus from "lucide-react/dist/esm/icons/folder-plus";
 import Pencil from "lucide-react/dist/esm/icons/pencil";
 import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import {
@@ -44,6 +45,11 @@ function renderWorkspaceMenuLabel(label: WorkspaceMenuLabelValue): ContextMenuEn
   );
 }
 
+
+export interface BlankMenuState {
+  x: number;
+  y: number;
+}
 
 /**
  * Right-click menu for sidebar workspace rows. Chrome (portal anchoring,
@@ -137,6 +143,42 @@ export function WorkspaceContextMenu({
       x={menu.x}
       y={menu.y}
       ariaLabel={menu.workspaceId}
+      entries={entries}
+      onClose={onClose}
+    />
+  );
+}
+/**
+ * Right-click menu for the workspace section's blank area: create a group
+ * without a trip to Settings → 工作区. Selecting the entry opens the
+ * sidebar's inline name composer (owned by the sidebar component).
+ */
+export function WorkspaceBlankContextMenu({
+  menu,
+  onClose,
+  onCreateGroup,
+}: {
+  menu: BlankMenuState;
+  onClose: () => void;
+  onCreateGroup?: () => void;
+}) {
+  const { t } = useTranslation();
+
+  const entries: ContextMenuEntry[] = [];
+  if (onCreateGroup) {
+    entries.push({
+      id: "create-group",
+      label: t("chat.newGroup"),
+      icon: <FolderPlus className="size-4" aria-hidden />,
+      onSelect: onCreateGroup,
+    });
+  }
+
+  return (
+    <ContextMenu
+      x={menu.x}
+      y={menu.y}
+      ariaLabel={t("chat.workspaces")}
       entries={entries}
       onClose={onClose}
     />

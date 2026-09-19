@@ -1,19 +1,22 @@
 "use client";
 
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ThreadMenuState } from "@/components/application/ai-chat/thread-context-menu";
-import type { WorkspaceMenuState } from "@/components/application/ai-chat/workspace-context-menu";
-import type { AiChatRepo, AiChatRepoSection } from "./ai-chat-sidebar";
+import type {
+  BlankMenuState,
+  WorkspaceMenuState,
+} from "@/components/application/ai-chat/workspace-context-menu";
+import type { AiChatRepo } from "./ai-chat-sidebar";
 import type { ThreadAction } from "./sidebar-types";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
 import { useRegistry, workspaceMenuRegistry } from "@ccgui/plugin-sdk";
 
 /**
- * AiChatSidebar state hooks: quick search (⌘L), persisted workspace
- * expansion / group collapse, the right-click workspace menu, and the
- * query-driven filtering of the workspace tree. The sidebar component keeps
- * only the layout; everything stateful lives here.
+ * AiChatSidebar state hooks: search palette (⌘L), persisted workspace
+ * expansion / group collapse, and the right-click workspace + blank-area
+ * menus. The sidebar component keeps only the layout; everything stateful
+ * lives here.
  */
 
 /** localStorage key for the collapsed workspace-group id set. */
@@ -181,6 +184,21 @@ export function useWorkspaceMenu(
   const closeWorkspaceMenu = useCallback(() => setWorkspaceMenu(null), []);
   return { workspaceMenu, closeWorkspaceMenu, openWorkspaceMenu, openArchivedMenu };
 }
+
+/** Blank-area right-click menu (the workspace section's empty space): one
+ *  open at a time. Row menus preventDefault on the same event, so a bubbling
+ *  contextmenu with defaultPrevented set already belongs to a row — the
+ *  blank menu stays closed for those. */
+export function useBlankMenu() {
+  const [blankMenu, setBlankMenu] = useState<BlankMenuState | null>(null);
+  const openBlankMenu = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    setBlankMenu({ x: event.clientX, y: event.clientY });
+  }, []);
+  const closeBlankMenu = useCallback(() => setBlankMenu(null), []);
+  return { blankMenu, openBlankMenu, closeBlankMenu };
+}
 /** Thread right-click menu: pointer-anchored, one open at a time. Opens only
  *  when at least one entry has a handler. */
 export function useThreadMenu(
@@ -200,95 +218,15 @@ export function useThreadMenu(
   return { threadMenu, openThreadMenu, closeThreadMenu };
 }
 
-/** Quick search: the nav row swaps for a field that filters workspaces and
- *  sessions by label; ⌘L focuses it from anywhere. */
-export function useSidebarSearch() {
-  const [searchActive, setSearchActive] = useState(false);
-  const [query, setQuery] = useState("");
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+/** Session search palette: ⌘L toggles it from anywhere. The binding lives
+ *  in the shortcut runtime (default ⌘L, configurable in Settings →
+ *  Shortcuts); the palette itself owns its query state. */
+export function useSearchPalette() {
+  const [searchOpen, setSearchOpen] = useState(false);
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+  const closeSearch = useCallback(() => setSearchOpen(false), []);
 
-  const activateSearch = useCallback(() => setSearchActive(true), []);
-  const deactivateSearch = useCallback(() => {
-    setQuery("");
-    setSearchActive(false);
-  }, []);
+  useEffect(() => registerShortcutHandler("sidebarSearch", () => setSearchOpen((v) => !v)), []);
 
-  useEffect(() => {
-    if (!searchActive) return;
-    const frame = window.requestAnimationFrame(() => searchInputRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [searchActive]);
-
-  // Activation key lives in the shortcut runtime (default ⌘L, configurable
-  // in Settings → Shortcuts).
-  useEffect(
-    () => registerShortcutHandler("sidebarSearch", activateSearch),
-    [activateSearch],
-  );
-
-  return {
-    searchActive,
-    query,
-    setQuery,
-    normalizedQuery,
-    searchInputRef,
-    activateSearch,
-    deactivateSearch,
-  };
-}
-
-/** Query filter for one repo: matches by label, otherwise keeps only the
- *  matching threads in a copy. */
-function matchRepo(repo: AiChatRepo, normalizedQuery: string): AiChatRepo | null {
-  if (!normalizedQuery || repo.label.toLocaleLowerCase().includes(normalizedQuery)) {
-    return repo;
-  }
-  const threads = repo.threads.filter((thread) =>
-    thread.label.toLocaleLowerCase().includes(normalizedQuery),
-  );
-  return threads.length ? { ...repo, threads } : null;
-}
-
-/** The query filter applied to the whole workspace tree: flat repos, grouped
- *  sections (groups with no matches drop out while searching; empty groups
- *  stay when not searching so they can render as mid-drag drop targets; the
- *  ungrouped section always stays), and the 已归档 labels (label match only
- *  — archived rows carry no threads). */
-export function useFilteredWorkspaces(
-  repos: AiChatRepo[],
-  sections: AiChatRepoSection[] | undefined,
-  archivedRepos: AiChatRepo[],
-  normalizedQuery: string,
-) {
-  const filteredRepos = useMemo(
-    () =>
-      repos.flatMap((repo) => {
-        const match = matchRepo(repo, normalizedQuery);
-        return match ? [match] : [];
-      }),
-    [repos, normalizedQuery],
-  );
-  const filteredSections = useMemo(() => {
-    if (!sections) return undefined;
-    return sections.reduce<AiChatRepoSection[]>((acc, section) => {
-      const repos = section.repos.flatMap((repo) => {
-        const match = matchRepo(repo, normalizedQuery);
-        return match ? [match] : [];
-      });
-      if (section.id === null || repos.length > 0 || !normalizedQuery) {
-        acc.push({ ...section, repos });
-      }
-      return acc;
-    }, []);
-  }, [sections, normalizedQuery]);
-  const filteredArchivedRepos = useMemo(
-    () =>
-      archivedRepos.filter(
-        (repo) =>
-          !normalizedQuery || repo.label.toLocaleLowerCase().includes(normalizedQuery),
-      ),
-    [archivedRepos, normalizedQuery],
-  );
-  return { filteredRepos, filteredSections, filteredArchivedRepos };
+  return { searchOpen, openSearch, closeSearch };
 }

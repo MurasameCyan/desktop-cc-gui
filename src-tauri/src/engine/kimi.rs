@@ -7,6 +7,32 @@ use std::collections::HashMap;
 
 pub struct KimiEngine;
 
+/// 提取并规范化上下文窗口字段
+fn attach_context_window(mut usage: Value) -> Value {
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .filter(|&w| w > 0);
+
+    if let Some(w) = window {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+        }
+    }
+
+    usage
+}
+
 pub(super) fn apply_channel(
     command: &mut tokio::process::Command,
     env: &HashMap<String, String>,
@@ -134,7 +160,7 @@ impl Engine for KimiEngine {
                     }
                 }
                 if let Some(usage) = value.get("usage") {
-                    out.push(EngineEvent::Usage(usage.clone()));
+                    out.push(EngineEvent::Usage(attach_context_window(usage.clone())));
                 }
             }
             "tool" => {

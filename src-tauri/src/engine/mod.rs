@@ -2048,6 +2048,13 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
         ctx.core.registry.remove_if_pid(&key, ctx.pid);
     }
     ctx.core.registry.remove_if_pid(&ctx.core.run_id, ctx.pid);
+    // Also clean up the preassigned session id alias if one was registered
+    // at spawn (grok/codex resume): a resumed session was keyed under
+    // ctx.preassigned_session_id, so we must remove that alias even if the
+    // native id differs or never arrived.
+    if let Some(key) = ctx.preassigned_session_id.as_deref() {
+        ctx.core.registry.remove_if_pid(key, ctx.pid);
+    }
     // omp writes some failures (upstream 403/5xx, quota exhaustion) to
     // stderr and then exits — sometimes cleanly, after a normal turn_end.
     // A non-empty stderr on a failed exit must reach the user even when a

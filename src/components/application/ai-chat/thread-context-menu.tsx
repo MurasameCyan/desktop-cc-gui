@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import Copy from "lucide-react/dist/esm/icons/copy";
+import Archive from "lucide-react/dist/esm/icons/archive";
 import Pencil from "lucide-react/dist/esm/icons/pencil";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
 import {
@@ -68,6 +69,14 @@ function buildHostSections({
       label: t("chat.copySessionId"),
       icon: <Copy className="size-4" aria-hidden />,
       onSelect: () => onCopyId(threadId),
+    });
+  }
+  if (onThreadAction && !isDraft) {
+    actions.push({
+      id: "archive",
+      label: t("chat.archiveSession"),
+      icon: <Archive className="size-4" aria-hidden />,
+      onSelect: () => onThreadAction(threadId, "archive"),
     });
   }
   const danger: MenuEntry[] = onThreadAction

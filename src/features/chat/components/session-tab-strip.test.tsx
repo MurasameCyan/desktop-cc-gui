@@ -1,0 +1,119 @@
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { SessionTabStrip, type SessionTabItem } from "./SessionTabStrip";
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+// jsdom gaps exercised by use-tab-strip-chrome's scroll-into-view effect.
+globalThis.CSS ??= {} as typeof CSS;
+CSS.escape ??= (value: string) => value;
+Element.prototype.scrollIntoView ??= () => {};
+
+const TABS: SessionTabItem[] = [
+  { key: "a", label: "Alpha", streaming: false },
+  { key: "b", label: "Beta", streaming: false },
+];
+
+let node: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  node = document.createElement("div");
+  document.body.append(node);
+  root = createRoot(node);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  node.remove();
+});
+
+function menuItems(): string[] {
+  return [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(
+    (el) => el.textContent ?? "",
+  );
+}
+
+async function render(extra: Partial<Parameters<typeof SessionTabStrip>[0]> = {}) {
+  await act(async () => {
+    root.render(
+      <SessionTabStrip
+        tabs={TABS}
+        activeKey="a"
+        onSelect={() => {}}
+        onClose={() => {}}
+        closeLabel="close"
+        onNew={() => {}}
+        onNewBrowser={() => {}}
+        {...extra}
+      />,
+    );
+  });
+}
+
+/** The scroll container owns the blank area right of the "+" button. */
+function scrollContainer(): HTMLElement {
+  const el = node.querySelector<HTMLElement>(".overflow-x-auto");
+  if (!el) throw new Error("scroll container not found");
+  return el;
+}
+
+it("opens the 新建会话/新建浏览器 menu on blank-area right-click", async () => {
+  await render();
+
+  await act(async () => {
+    scrollContainer().dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 12 }),
+    );
+  });
+
+  expect(menuItems()).toEqual(["chat.newSession", "chat.newBrowser"]);
+});
+
+it("blank-area menu entries invoke onNew / onNewBrowser", async () => {
+  const onNew = vi.fn();
+  const onNewBrowser = vi.fn();
+  await render({ onNew, onNewBrowser });
+
+  await act(async () => {
+    scrollContainer().dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 12 }),
+    );
+  });
+  const items = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  await act(async () => items[1].click());
+
+  expect(onNewBrowser).toHaveBeenCalledOnce();
+  expect(onNew).not.toHaveBeenCalled();
+  expect(menuItems()).toEqual([]);
+});
+
+it("keeps tab right-click on the tab menu, not the new-tab menu", async () => {
+  await render({ onCloseAll: () => {} });
+  const tab = node.querySelector<HTMLElement>('[data-tab-key="b"]');
+  if (!tab) throw new Error("tab not found");
+
+  await act(async () => {
+    tab.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 12 }),
+    );
+  });
+
+  expect(menuItems()).not.toContain("chat.newSession");
+  expect(menuItems()).not.toContain("chat.newBrowser");
+});
+
+it("offers no menu when onNewBrowser is omitted", async () => {
+  await render({ onNewBrowser: undefined });
+
+  await act(async () => {
+    scrollContainer().dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 12 }),
+    );
+  });
+
+  expect(menuItems()).toEqual([]);
+});

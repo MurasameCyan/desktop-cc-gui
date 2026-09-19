@@ -1,28 +1,11 @@
 //! Generic per-plugin document storage.
-//!
-//! Tests are written first; the implementation follows after the red run.
 
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock};
-
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-static FILE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static MUTATION_LOCKS: LazyLock<Mutex<HashMap<(PathBuf, String), Arc<Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-fn mutation_lock_for(state_path: &Path, id: &str) -> Arc<Mutex<()>> {
-    MUTATION_LOCKS
-        .lock()
-        .entry((state_path.to_path_buf(), id.to_string()))
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct StorageRoots {
@@ -177,6 +160,47 @@ fn selected_base(
 fn plugin_root(base: &Path, id: &str) -> PathBuf {
     base.join("plugin-data").join(id)
 }
+// A stable sibling of the document root survives document replacement,
+// location migration and uninstall. Different host state files still open
+// the same kernel lock when their selected physical root is shared.
+fn document_lock_path(base: &Path, id: &str) -> Result<PathBuf, String> {
+    let parent = base.join("plugin-data");
+    fs::create_dir_all(&parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    let parent = dunce::canonicalize(&parent)
+        .map_err(|e| format!("canonicalize {}: {e}", parent.display()))?;
+    Ok(parent.join(format!(".{id}.documents.lock")))
+}
+
+fn lock_document_root(base: &Path, id: &str) -> Result<super::file_lock::FileLock, String> {
+    super::file_lock::exclusive(&document_lock_path(base, id)?)
+}
+
+fn lock_migration_roots(
+    old: &Path,
+    new: &Path,
+    id: &str,
+) -> Result<(super::file_lock::FileLock, Option<super::file_lock::FileLock>), String> {
+    let mut first = document_lock_path(old, id)?;
+    let mut second = document_lock_path(new, id)?;
+    // Canonical parent paths collapse junction/symlink aliases; Windows
+    // ordering must also collapse case aliases to prevent AB/BA deadlocks.
+    let key = |path: &Path| {
+        let path = path.to_string_lossy().into_owned();
+        if cfg!(windows) { path.to_lowercase() } else { path }
+    };
+    let first_key = key(&first);
+    let second_key = key(&second);
+    if first_key == second_key {
+        return Ok((super::file_lock::exclusive(&first)?, None));
+    }
+    if first_key > second_key {
+        std::mem::swap(&mut first, &mut second);
+    }
+    let first = super::file_lock::exclusive(&first)?;
+    let second = super::file_lock::exclusive(&second)?;
+    Ok((first, Some(second)))
+}
+
 
 fn is_existing_base_writable(base: &Path) -> bool {
     if !base.is_dir() {
@@ -213,6 +237,7 @@ fn get_location_at(
     roots: &StorageRoots,
     id: &str,
 ) -> Result<ResolvedStorageLocation, String> {
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let (kind, base) = selected_base(state_path, roots, id)?;
     let root = plugin_root(&base, id);
@@ -240,13 +265,11 @@ fn select_location_at_with_writer(
     selection: StorageLocationSelection,
     write_state: impl FnOnce(&Path, &super::state::PluginsState) -> Result<(), String>,
 ) -> Result<ResolvedStorageLocation, String> {
-    let mutation_lock = mutation_lock_for(state_path, id);
-    let _mutation_guard = mutation_lock.lock();
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let new_base = resolve_selection_base(roots, &selection)?;
     probe_writable(&new_base)?;
 
-    let _state_guard = super::state::STATE_LOCK.lock();
     let mut state = super::state::read_state(state_path)?;
     let old_base = base_from_state(&state, roots, id)?;
     let old_root = plugin_root(&old_base, id);
@@ -257,6 +280,8 @@ fn select_location_at_with_writer(
         write_state(state_path, &state)?;
         return resolved_location(selection.kind, new_root);
     }
+    let _root_guards = lock_migration_roots(&old_base, &new_base, id)?;
+
 
     if old_root.exists() {
         scan_for_reparse_points(&old_root)?;
@@ -604,13 +629,6 @@ fn checked_target(root: &Path, relative: &str, create_parents: bool) -> Result<P
     Ok(target)
 }
 
-fn lock_for(path: &Path) -> std::sync::Arc<Mutex<()>> {
-    FILE_LOCKS
-        .lock()
-        .entry(path.to_path_buf())
-        .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
-        .clone()
-}
 
 fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
@@ -625,15 +643,16 @@ fn read_text_at(
     id: &str,
     relative: &str,
 ) -> Result<Option<StoredText>, String> {
-    let mutation_lock = mutation_lock_for(state_path, id);
-    let _mutation_guard = mutation_lock.lock();
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let (_, base) = selected_base(state_path, roots, id)?;
+    let _root_guard = lock_document_root(&base, id)?;
     let target = checked_target(&plugin_root(&base, id), relative, false)?;
     let Some(bytes) = read_bytes(&target)? else { return Ok(None) };
-    let content = String::from_utf8(bytes.clone())
+    let version = version_of(&bytes);
+    let content = String::from_utf8(bytes)
         .map_err(|e| format!("{} is not UTF-8: {e}", target.display()))?;
-    Ok(Some(StoredText { content, version: version_of(&bytes) }))
+    Ok(Some(StoredText { content, version }))
 }
 
 fn current_version(path: &Path) -> Result<Option<String>, String> {
@@ -647,25 +666,16 @@ pub(crate) fn write_text_at(
     relative: &str,
     content: &str,
     expected_version: Option<String>,
-) -> Result<StoredText, String> {
-    let mutation_lock = mutation_lock_for(state_path, id);
-    let _mutation_guard = mutation_lock.lock();
+) -> Result<WriteResult, String> {
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let (_, base) = selected_base(state_path, roots, id)?;
+    let _root_guard = lock_document_root(&base, id)?;
     let root = plugin_root(&base, id);
     let target = checked_target(&root, relative, true)?;
-    let file_lock = lock_for(&target);
-    let _guard = file_lock.lock();
     let current = current_version(&target)?;
-    if let Some(expected) = expected_version {
-        if current.as_deref() != Some(expected.as_str()) {
-            return Err(format!(
-                "version conflict: expected {expected}, current {}",
-                current.as_deref().unwrap_or("<missing>")
-            ));
-        }
-    } else if current.is_some() {
-        return Err(format!("version conflict: current {}", current.unwrap()));
+    if current != expected_version {
+        return Ok(WriteResult::Conflict { current_version: current });
     }
 
     let tmp = target.with_file_name(format!(
@@ -707,7 +717,7 @@ pub(crate) fn write_text_at(
             let _ = directory.sync_all();
         }
     }
-    Ok(StoredText { content: content.into(), version: version_of(content.as_bytes()) })
+    Ok(WriteResult::Written { version: version_of(content.as_bytes()) })
 }
 
 fn list_at(
@@ -716,10 +726,10 @@ fn list_at(
     id: &str,
     prefix: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mutation_lock = mutation_lock_for(state_path, id);
-    let _mutation_guard = mutation_lock.lock();
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let (_, base) = selected_base(state_path, roots, id)?;
+    let _root_guard = lock_document_root(&base, id)?;
     let root = plugin_root(&base, id);
     let prefix = safe_prefix(prefix)?;
     let start = prefix.as_ref().map_or_else(|| root.clone(), |prefix| root.join(prefix));
@@ -775,82 +785,79 @@ pub enum RemoveResult {
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_get_location(
+pub async fn plugin_document_storage_get_location(
     plugin_id: String,
 ) -> Result<ResolvedStorageLocation, String> {
-    get_location_at(&super::state::state_path(), &StorageRoots::system()?, &plugin_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        get_location_at(&super::state::state_path(), &StorageRoots::system()?, &plugin_id)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_select_location(
+pub async fn plugin_document_storage_select_location(
     plugin_id: String,
     kind: StorageLocationKind,
     custom_path: Option<String>,
 ) -> Result<ResolvedStorageLocation, String> {
-    select_location_at(
-        &super::state::state_path(),
-        &StorageRoots::system()?,
-        &plugin_id,
-        StorageLocationSelection { kind, path: custom_path },
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        select_location_at(
+            &super::state::state_path(),
+            &StorageRoots::system()?,
+            &plugin_id,
+            StorageLocationSelection { kind, path: custom_path },
+        )
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_read_text(
+pub async fn plugin_document_storage_read_text(
     plugin_id: String,
     relative_path: String,
 ) -> Result<Option<StoredText>, String> {
-    read_text_at(
-        &super::state::state_path(),
-        &StorageRoots::system()?,
-        &plugin_id,
-        &relative_path,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        read_text_at(
+            &super::state::state_path(),
+            &StorageRoots::system()?,
+            &plugin_id,
+            &relative_path,
+        )
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_write_text_atomic(
+pub async fn plugin_document_storage_write_text_atomic(
     plugin_id: String,
     relative_path: String,
     content: String,
     expected_version: Option<String>,
 ) -> Result<WriteResult, String> {
-    let state_path = super::state::state_path();
-    let roots = StorageRoots::system()?;
-    match write_text_at(
-        &state_path,
-        &roots,
-        &plugin_id,
-        &relative_path,
-        &content,
-        expected_version,
-    ) {
-        Ok(stored) => Ok(WriteResult::Written { version: stored.version }),
-        Err(error) if error.starts_with("version conflict") => {
-            authorize(&state_path, &plugin_id)?;
-            let (_, base) = selected_base(&state_path, &roots, &plugin_id)?;
-            let target = checked_target(&plugin_root(&base, &plugin_id), &relative_path, false)?;
-            Ok(WriteResult::Conflict { current_version: current_version(&target)? })
-        }
-        Err(error) => Err(error),
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        write_text_at(
+            &super::state::state_path(),
+            &StorageRoots::system()?,
+            &plugin_id,
+            &relative_path,
+            &content,
+            expected_version,
+        )
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_remove(
+pub async fn plugin_document_storage_remove(
     plugin_id: String,
     relative_path: String,
     expected_version: Option<String>,
 ) -> Result<RemoveResult, String> {
-    let state_path = super::state::state_path();
-    let roots = StorageRoots::system()?;
-    remove_with_version_at(
-        &state_path,
-        &roots,
-        &plugin_id,
-        &relative_path,
-        expected_version.as_deref(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        remove_with_version_at(
+            &super::state::state_path(),
+            &StorageRoots::system()?,
+            &plugin_id,
+            &relative_path,
+            expected_version.as_deref(),
+        )
+    }).await.map_err(|e| e.to_string())?
 }
 
 fn remove_with_version_at(
@@ -860,14 +867,12 @@ fn remove_with_version_at(
     relative_path: &str,
     expected_version: Option<&str>,
 ) -> Result<RemoveResult, String> {
-    let mutation_lock = mutation_lock_for(state_path, plugin_id);
-    let _mutation_guard = mutation_lock.lock();
+    let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, plugin_id)?;
     let (_, base) = selected_base(state_path, roots, plugin_id)?;
+    let _root_guard = lock_document_root(&base, plugin_id)?;
     let root = plugin_root(&base, plugin_id);
     let target = checked_target(&root, relative_path, false)?;
-    let file_lock = lock_for(&target);
-    let _guard = file_lock.lock();
     // Confine before reading through the path: a junction planted under the
     // root must fail here rather than be read or unlinked.
     if root.exists() {
@@ -901,24 +906,33 @@ fn remove_with_version_at(
 }
 
 #[tauri::command]
-pub fn plugin_document_storage_list(
+pub async fn plugin_document_storage_list(
     plugin_id: String,
     prefix: Option<String>,
 ) -> Result<Vec<String>, String> {
-    list_at(
-        &super::state::state_path(),
-        &StorageRoots::system()?,
-        &plugin_id,
-        prefix.as_deref(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        list_at(
+            &super::state::state_path(),
+            &StorageRoots::system()?,
+            &plugin_id,
+            prefix.as_deref(),
+        )
+    }).await.map_err(|e| e.to_string())?
 }
 
-/// Resolve the document root a plugin's uninstall would delete.
-fn document_root_at(
+/// Held by uninstall from its preflight through state persistence. The caller
+/// must acquire the state lock before this physical document-root lock.
+pub(crate) struct DocumentsGuard {
+    root: PathBuf,
+    _lock: super::file_lock::FileLock,
+}
+
+pub(crate) fn lock_documents_at(
     state_path: &Path,
     id: &str,
     roots: Option<&StorageRoots>,
-) -> Result<PathBuf, String> {
+) -> Result<DocumentsGuard, String> {
+    super::manifest::require_valid_id(id)?;
     let system_roots;
     let roots = match roots {
         Some(roots) => roots,
@@ -928,36 +942,20 @@ fn document_root_at(
         }
     };
     let (_, base) = selected_base(state_path, roots, id)?;
-    Ok(plugin_root(&base, id))
+    let lock = lock_document_root(&base, id)?;
+    Ok(DocumentsGuard { root: plugin_root(&base, id), _lock: lock })
 }
 
-/// Uninstall pre-flight: the caller runs this before touching the plugin
-/// directory so a refusal leaves the installation intact instead of
-/// half-removed.
-pub(crate) fn assert_documents_deletable_with_roots_at(
-    state_path: &Path,
-    id: &str,
-    roots: Option<&StorageRoots>,
-) -> Result<(), String> {
-    super::manifest::require_valid_id(id)?;
-    scan_for_reparse_points(&document_root_at(state_path, id, roots)?)
+pub(crate) fn assert_documents_deletable(guard: &DocumentsGuard) -> Result<(), String> {
+    scan_for_reparse_points(&guard.root)
 }
 
-pub(crate) fn delete_plugin_documents_with_roots_at(
-    state_path: &Path,
-    id: &str,
-    roots: Option<&StorageRoots>,
-) -> Result<(), String> {
-    let root = {
-        super::manifest::require_valid_id(id)?;
-        let root = document_root_at(state_path, id, roots)?;
-        scan_for_reparse_points(&root)?;
-        root
-    };
-    match fs::remove_dir_all(&root) {
+pub(crate) fn delete_plugin_documents(guard: &DocumentsGuard) -> Result<(), String> {
+    assert_documents_deletable(guard)?;
+    match fs::remove_dir_all(&guard.root) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", root.display())),
+        Err(error) => Err(format!("remove {}: {error}", guard.root.display())),
     }
 }
 
@@ -1319,15 +1317,15 @@ mod tests {
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
 
-        let first = write_text_at(&state_path, &roots, id, "state/doc.json", "one", None).unwrap();
+        let WriteResult::Written { version: first } = write_text_at(&state_path, &roots, id, "state/doc.json", "one", None).unwrap() else { panic!("initial write conflicted") };
         assert_eq!(read_text_at(&state_path, &roots, id, "state/doc.json").unwrap().unwrap().content, "one");
-        let second = write_text_at(&state_path, &roots, id, "state/doc.json", "two", Some(first.version.clone())).unwrap();
-        assert_ne!(first.version, second.version);
+        let WriteResult::Written { version: second } = write_text_at(&state_path, &roots, id, "state/doc.json", "two", Some(first.clone())).unwrap() else { panic!("fresh write conflicted") };
+        assert_ne!(first, second);
         let root = roots.data.join("plugin-data").join(id);
         assert_eq!(std::fs::read_to_string(root.join("state/doc.json.bak")).unwrap(), "one");
 
-        let conflict = write_text_at(&state_path, &roots, id, "state/doc.json", "stale", Some(first.version)).unwrap_err();
-        assert!(conflict.contains("version conflict"));
+        let conflict = write_text_at(&state_path, &roots, id, "state/doc.json", "stale", Some(first)).unwrap();
+        assert!(matches!(conflict, WriteResult::Conflict { current_version: Some(version) } if version == second));
         assert_eq!(std::fs::read_to_string(root.join("state/doc.json")).unwrap(), "two");
     }
 
@@ -1338,18 +1336,18 @@ mod tests {
         let id = "vendor.plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
-        let initial = write_text_at(&state_path, &roots, id, "doc", "zero", None).unwrap();
+        let WriteResult::Written { version: initial } = write_text_at(&state_path, &roots, id, "doc", "zero", None).unwrap() else { panic!("initial write conflicted") };
         let a_state = state_path.clone();
         let b_state = state_path.clone();
         let a_roots = roots.clone();
         let b_roots = roots.clone();
-        let version_a = initial.version.clone();
-        let version_b = initial.version;
+        let version_a = initial.clone();
+        let version_b = initial;
         let a = std::thread::spawn(move || write_text_at(&a_state, &a_roots, id, "doc", "a", Some(version_a)));
         let b = std::thread::spawn(move || write_text_at(&b_state, &b_roots, id, "doc", "b", Some(version_b)));
         let results = [a.join().unwrap(), b.join().unwrap()];
-        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-        assert_eq!(results.iter().filter(|r| r.as_ref().is_err_and(|e| e.contains("version conflict"))).count(), 1);
+        assert_eq!(results.iter().filter(|r| matches!(r, Ok(WriteResult::Written { .. }))).count(), 1);
+        assert_eq!(results.iter().filter(|r| matches!(r, Ok(WriteResult::Conflict { .. }))).count(), 1);
     }
 
     #[test]
@@ -1397,11 +1395,11 @@ mod tests {
         let id = "vendor.plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
-        let stored = write_text_at(&state_path, &roots, id, "doc", "one", None).unwrap();
+        let WriteResult::Written { version } = write_text_at(&state_path, &roots, id, "doc", "one", None).unwrap() else { panic!("initial write conflicted") };
         let conflict = remove_with_version_at(&state_path, &roots, id, "doc", Some("stale")).unwrap();
         assert!(matches!(conflict, RemoveResult::Conflict { current_version: Some(_) }));
         assert!(read_text_at(&state_path, &roots, id, "doc").unwrap().is_some());
-        let removed = remove_with_version_at(&state_path, &roots, id, "doc", Some(&stored.version)).unwrap();
+        let removed = remove_with_version_at(&state_path, &roots, id, "doc", Some(&version)).unwrap();
         assert!(matches!(removed, RemoveResult::Removed));
         assert!(read_text_at(&state_path, &roots, id, "doc").unwrap().is_none());
     }
@@ -1434,16 +1432,10 @@ mod tests {
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
-        let first = write_text_at(&state_path, &roots, id, "state/doc.json", "one", None).unwrap();
-        let second = write_text_at(
-            &state_path,
-            &roots,
-            id,
-            "state/doc.json",
-            "two",
-            Some(first.version),
-        )
-        .unwrap();
+        let WriteResult::Written { version: first } = write_text_at(&state_path, &roots, id, "state/doc.json", "one", None).unwrap() else { panic!("initial write conflicted") };
+        let WriteResult::Written { version: second } = write_text_at(
+            &state_path, &roots, id, "state/doc.json", "two", Some(first),
+        ).unwrap() else { panic!("fresh write conflicted") };
         assert!(root.join("state/doc.json.bak").exists());
 
         let conflict =
@@ -1453,7 +1445,7 @@ mod tests {
         assert!(root.join("state/doc.json.bak").exists());
 
         let removed =
-            remove_with_version_at(&state_path, &roots, id, "state/doc.json", Some(&second.version))
+            remove_with_version_at(&state_path, &roots, id, "state/doc.json", Some(&second))
                 .unwrap();
         assert!(matches!(removed, RemoveResult::Removed));
         assert!(!root.join("state/doc.json").exists());
@@ -1512,9 +1504,14 @@ mod tests {
         std::fs::write(outside.join("keep"), "keep").unwrap();
         assert!(create_dir_link(&root.join("escape"), &outside), "could not create a directory link");
 
-        let error = delete_plugin_documents_with_roots_at(&state_path, id, Some(&roots)).unwrap_err();
+        let guard = lock_documents_at(&state_path, id, Some(&roots)).unwrap();
+        let error = delete_plugin_documents(&guard).unwrap_err();
         assert!(error.contains("reparse point"), "unexpected: {error}");
         assert!(root.join("state/doc.json").exists(), "documents were removed anyway");
         assert!(outside.join("keep").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "storage_process_tests.rs"]
+mod process_tests;

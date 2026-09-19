@@ -17,7 +17,8 @@ import type { AiChatRepo, AiChatThread, ThreadAction } from "@/components/applic
 import { cx } from "@/utils/cx";
 
 /** Chat row under an open repo — indented 36px, relative-time chip on the
- *  right, hover action icons (pin / rename / delete). */
+ *  right, hover action icons (pin / rename / delete; archive lives in the
+ *  right-click menu only). */
 function ThreadItem({
   id,
   label,
@@ -352,7 +353,6 @@ function RepoThreadList({
   expanded,
   threads,
   threadLimit,
-  forceShowAll,
   activeThreadId,
   onThreadSelect,
   onThreadAction,
@@ -361,8 +361,6 @@ function RepoThreadList({
   expanded: boolean;
   threads: AiChatThread[];
   threadLimit?: number;
-  /** Query-driven filtering pins the list open and shows every thread. */
-  forceShowAll: boolean;
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
@@ -397,7 +395,6 @@ function RepoThreadList({
             expanded={expanded}
             threads={threads}
             threadLimit={threadLimit}
-            forceShowAll={forceShowAll}
             activeThreadId={activeThreadId}
             onThreadSelect={onThreadSelect}
             onThreadAction={onThreadAction}
@@ -416,7 +413,6 @@ function PagedThreadList({
   expanded,
   threads,
   threadLimit,
-  forceShowAll,
   activeThreadId,
   onThreadSelect,
   onThreadAction,
@@ -425,7 +421,6 @@ function PagedThreadList({
   expanded: boolean;
   threads: AiChatThread[];
   threadLimit?: number;
-  forceShowAll: boolean;
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
@@ -439,9 +434,7 @@ function PagedThreadList({
   useEffect(() => {
     if (!expanded) setPage(0);
   }, [expanded]);
-  const { visibleThreads, hiddenCount } = forceShowAll
-    ? { visibleThreads: threads, hiddenCount: 0 }
-    : paginateThreads(threads, threadLimit, page);
+  const { visibleThreads, hiddenCount } = paginateThreads(threads, threadLimit, page);
   const pageButtonClasses =
     "flex w-full cursor-pointer items-center rounded-2lg py-[5px] pr-2 pl-4 text-caption-1-medium text-text-tertiary transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-text-secondary";
   return (
@@ -486,7 +479,6 @@ export function RepoItem({
   repo,
   open,
   onToggleOpen,
-  forceOpen = false,
   activeThreadId,
   onThreadSelect,
   onThreadAction,
@@ -501,8 +493,6 @@ export function RepoItem({
   /** Expanded state, owned by the sidebar so it can persist across restarts. */
   open: boolean;
   onToggleOpen?: () => void;
-  /** Query-driven filtering pins the thread list open while searching. */
-  forceOpen?: boolean;
   activeThreadId?: string;
   onThreadSelect?: (id: string) => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
@@ -519,7 +509,7 @@ export function RepoItem({
   dragHandleProps?: DragHandleProps | null;
 }) {
   const dragDownPos = useRef<{ x: number; y: number } | null>(null);
-  const expanded = open || forceOpen;
+  const expanded = open;
   const toggleOpen = useCallback(() => onToggleOpen?.(), [onToggleOpen]);
   const hasHoverActions = Boolean(
     (repo.id && onNewSession) || dragHandleProps || (repo.id && onRemove),
@@ -544,7 +534,6 @@ export function RepoItem({
         expanded={expanded}
         threads={repo.threads}
         threadLimit={repo.threadLimit}
-        forceShowAll={forceOpen}
         activeThreadId={activeThreadId}
         onThreadSelect={onThreadSelect}
         onThreadAction={onThreadAction}

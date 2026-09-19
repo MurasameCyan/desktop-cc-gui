@@ -207,6 +207,35 @@ async function rightClick(row: HTMLElement) {
   });
 }
 
+it("keeps hover actions to pin / rename / delete (archive is context-menu only)", async () => {
+  const onThreadAction = vi.fn();
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[
+          {
+            id: "a",
+            label: "a",
+            defaultOpen: true,
+            threads: [{ id: "claude/hover-1", label: "悬浮操作", time: "刚刚" }],
+          },
+        ]}
+        onThreadAction={onThreadAction}
+      />,
+    );
+  });
+
+  const actionLabels = [...threadRow("悬浮操作").querySelectorAll("button[aria-label]")].map(
+    (button) => button.getAttribute("aria-label"),
+  );
+  expect(actionLabels).toEqual(["chat.pin", "chat.renameSession", "chat.deleteSession"]);
+
+  await rightClick(threadRow("悬浮操作"));
+  const menu = openMenu();
+  await act(async () => menuItem(menu, "chat.archiveSession").click());
+  expect(onThreadAction).toHaveBeenCalledWith("claude/hover-1", "archive");
+});
+
 it("opens the thread context menu on right-click and dispatches its entries", async () => {
   const onThreadAction = vi.fn();
   const onCopyThreadId = vi.fn();
@@ -231,6 +260,11 @@ it("opens the thread context menu on right-click and dispatches its entries", as
   menu = openMenu();
   await act(async () => menuItem(menu, "chat.copySessionId").click());
   expect(onCopyThreadId).toHaveBeenCalledWith("claude/abc-123");
+
+  await rightClick(threadRow("整理发布脚本"));
+  menu = openMenu();
+  await act(async () => menuItem(menu, "chat.archiveSession").click());
+  expect(onThreadAction).toHaveBeenCalledWith("claude/abc-123", "archive");
 
   await rightClick(threadRow("整理发布脚本"));
   menu = openMenu();
@@ -318,4 +352,95 @@ it("keeps right-click inert when no thread handler is wired", async () => {
   ]);
   await rightClick(threadRow("孤独会话"));
   expect(document.body.querySelector("[role='menu']")).toBeNull();
+});
+
+it("renders empty groups instead of hiding them", async () => {
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[]}
+        sections={[{ id: "g1", name: "开源项目", repos: [] }]}
+      />,
+    );
+  });
+  // A group with no members still renders its collapsible header — the
+  // sidebar is where groups are created, so a fresh group must be visible.
+  expect(rowFor("开源项目").getAttribute("aria-expanded")).toBe("true");
+});
+
+/** The scroll container carries the blank-area context-menu handler. */
+function workspaceScrollArea(): HTMLElement {
+  const el = node.querySelector<HTMLElement>(".overflow-y-auto");
+  if (!el) throw new Error("no scroll container");
+  return el;
+}
+
+function composerInput(): HTMLInputElement {
+  const input = node.querySelector<HTMLInputElement>(
+    "input[placeholder='settings.newGroupPlaceholder']",
+  );
+  if (!input) throw new Error("no group composer open");
+  return input;
+}
+
+async function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+it("creates a group from the blank-area right-click menu", async () => {
+  const onCreateGroup = vi.fn((name: string) =>
+    name.trim() ? null : "settings.groupNameRequired",
+  );
+  await act(async () => {
+    root.render(<AiChatSidebar repos={[repo("a")]} onCreateGroup={onCreateGroup} />);
+  });
+
+  await rightClick(workspaceScrollArea());
+  await act(async () => menuItem(openMenu(), "chat.newGroup").click());
+
+  // A validation error keeps the composer open with the hint inline.
+  await act(async () => {
+    composerInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  expect(onCreateGroup).toHaveBeenCalledWith("");
+  expect(composerInput()).toBeTruthy();
+
+  await typeInto(composerInput(), "中转站项目");
+  await act(async () => {
+    composerInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  expect(onCreateGroup).toHaveBeenLastCalledWith("中转站项目");
+  // Accepted (null) → the composer closes.
+  expect(node.querySelector("input[placeholder='settings.newGroupPlaceholder']")).toBeNull();
+});
+
+it("keeps the blank-area menu off rows that own a context menu", async () => {
+  const onWorkspaceAlias = vi.fn();
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[repo("a")]}
+        onWorkspaceAlias={onWorkspaceAlias}
+        onCreateGroup={() => null}
+      />,
+    );
+  });
+
+  // The workspace row's menu preventDefaults the event, so the container's
+  // blank-area handler must stay out of it.
+  await rightClick(rowFor("a"));
+  const menu = openMenu();
+  expect(menuItem(menu, "chat.setWorkspaceAlias")).toBeTruthy();
+  expect(
+    [...menu.querySelectorAll("[role='menuitem']")].some((el) =>
+      el.textContent?.includes("chat.newGroup"),
+    ),
+  ).toBe(false);
 });

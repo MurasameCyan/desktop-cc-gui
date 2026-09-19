@@ -32,8 +32,10 @@ export function ChatSidebarFrame({
   onSetWorkspaceArchived,
   onNewSessionInWorkspace,
   onNewSession,
+  onNewBrowser,
   onReorderWorkspaces,
   onDropWorkspaceToSection,
+  onCreateGroup,
   archivedRepos,
 }: {
   active: ActiveSession | null;
@@ -56,9 +58,13 @@ export function ChatSidebarFrame({
   onSetWorkspaceArchived: (workspaceId: string, archived: boolean) => void;
   onNewSessionInWorkspace: (workspaceId: string) => void;
   onNewSession: () => void;
+  /** 新建浏览器 nav entry (desktop only; omitted in web-access mode). */
+  onNewBrowser?: () => void;
   onReorderWorkspaces: (orderedIds: string[]) => void;
   /** Workspace row dropped onto a group / 已归档 / ungrouped container. */
   onDropWorkspaceToSection: (workspaceId: string, targetSectionId: string | null) => void;
+  /** Blank-area menu「新建分组」commit: localized validation error or null. */
+  onCreateGroup: (name: string) => string | null;
   /** Archived workspaces for the sidebar's bottom 已归档 section. */
   archivedRepos: AiChatRepo[];
 }) {
@@ -94,8 +100,10 @@ export function ChatSidebarFrame({
         archivedRepos={archivedRepos}
         onNewSessionInWorkspace={onNewSessionInWorkspace}
         onNewSession={onNewSession}
+        onNewBrowser={onNewBrowser}
         onReorderWorkspaces={onReorderWorkspaces}
         onDropWorkspaceToSection={onDropWorkspaceToSection}
+        onCreateGroup={onCreateGroup}
         onOpenSettings={() => navigate("/settings")}
         onClose={onClose}
       />

@@ -874,6 +874,11 @@ export const ipc = {
     ),
   // history
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
+  listArchivedSessions: () => invoke<SessionMeta[]>("list_archived_sessions"),
+  archiveSession: (session: SessionMeta) =>
+    invoke<void>("archive_session", { session }),
+  restoreSession: (engine: string, sessionId: string) =>
+    invoke<void>("restore_session", { engine, sessionId }),
   loadSessionPage: (
     engine: string,
     sessionId: string,

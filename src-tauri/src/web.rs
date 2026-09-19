@@ -1087,6 +1087,11 @@ struct RecordAcceptedFrameArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ArchiveSessionArgs {
+    session: crate::history::SessionMeta,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PinSessionArgs {
     engine: String,
     session_id: String,
@@ -1468,6 +1473,17 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         }
         // history
         "list_sessions" => ser(crate::history::reader::list_sessions(app.state())),
+        "list_archived_sessions" => {
+            ser(crate::history::reader::list_archived_sessions(app.state()))
+        }
+        "archive_session" => {
+            let a: ArchiveSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::archive_session(app.state(), a.session))
+        }
+        "restore_session" => {
+            let a: EngineSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::restore_session(app.state(), a.engine, a.session_id))
+        }
         // Usage ledger: the mobile/web client renders the same page, so the
         // bridge must route it like every other settings surface.
         "usage_summary" => {
@@ -1869,7 +1885,7 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         // plugins (plan §9 risk table ruling): read-only commands ride the
         // bridge so web clients render plugin UI; install/uninstall/enable/
         // storage writes stay desktop-only and fall through to unknown.
-        "plugin_list" => ser(crate::plugins::plugin_list(app.state())),
+        "plugin_list" => ser(crate::plugins::plugin_list(app.state()).await),
         "plugin_read_file" => {
             let a: PluginReadFileArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_read_file(a.id, a.name))

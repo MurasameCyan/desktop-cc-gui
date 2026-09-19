@@ -1,9 +1,13 @@
+import Globe from "lucide-react/dist/esm/icons/globe";
+import MessageSquarePlus from "lucide-react/dist/esm/icons/message-square-plus";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ReactNode } from "react";
 import { needsWindowControls, useTitlebarStyle } from "@/features/settings/titlebar";
+import { IS_MAC } from "@/lib/platform";
 import { WindowControls } from "@/components/application/window-controls";
+import { ContextMenu } from "@/components/context-menu";
 import { cx } from "@/utils/cx";
 import { SessionTab, type SessionTabItem } from "./SessionTab";
 import { useTabDragReorder } from "./use-tab-drag-reorder";
@@ -11,11 +15,6 @@ import { useTabStripChrome } from "./use-tab-strip-chrome";
 import { TabStripContextMenu } from "./TabStripContextMenu";
 
 export type { SessionTabItem };
-
-// Overlay titlebar leaves the native traffic lights floating over the
-// strip's left edge on macOS; other platforms keep their own titlebar.
-const IS_MAC =
-  typeof navigator !== "undefined" && /macintosh|mac os x/i.test(navigator.userAgent);
 
 interface SessionTabStripProps {
   tabs: SessionTabItem[];
@@ -31,6 +30,10 @@ interface SessionTabStripProps {
   onReorder?: (draggedKey: string, targetKey: string, before: boolean) => void;
   /** Invoked by the trailing "+" button; omit to hide it. */
   onNew?: () => void;
+  /** "+" button right-click menu entry: open a browser tab. When set, the
+   *  button's context menu offers 新建会话 and 新建浏览器; left-click stays
+   *  onNew. Right-clicking the strip's blank area opens the same menu. */
+  onNewBrowser?: () => void;
   /** Buttons pinned to the strip's right edge, outside the scrolling tabs. */
   actions?: ReactNode;
   /** Node pinned left of the tabs (e.g. a sidebar expand button). */
@@ -57,6 +60,7 @@ export function SessionTabStrip({
   onReorder,
   actions,
   onNew,
+  onNewBrowser,
   leading,
   trafficLightInset = true,
 }: SessionTabStripProps) {
@@ -69,6 +73,9 @@ export function SessionTabStrip({
   // 左侧红绿灯区：macOS 系统原生红绿灯 或 Windows 仿 mac 自绘按钮。
   const customControls = needsWindowControls(titlebarStyle);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // "+" button right-click menu (新建会话 / 新建浏览器), separate anchor
+  // state from the tab menu.
+  const [newMenu, setNewMenu] = useState<{ x: number; y: number } | null>(null);
   const { handleStripDoubleClick, handleTabListKeyDown } = useTabStripChrome({
     stripRef,
     scrollRef,
@@ -96,6 +103,18 @@ export function SessionTabStrip({
       <div
         ref={scrollRef}
         onKeyDown={handleTabListKeyDown}
+        onContextMenu={
+          onNew && onNewBrowser
+            ? (e) => {
+                // 空白区域右键：与“+”按钮同一菜单。落在标签或“+”上的
+                // contextmenu 由各自处理器接管（且标签菜单会
+                // preventDefault），这里只认直接命中容器本身的事件。
+                if (e.defaultPrevented || e.target !== e.currentTarget) return;
+                e.preventDefault();
+                setNewMenu({ x: e.clientX, y: e.clientY });
+              }
+            : undefined
+        }
         className="group scrollbar-none flex min-w-0 flex-1 items-center overflow-x-auto px-2"
       >
       <div role="tablist" aria-label="tabs" className="flex min-w-0 items-center gap-1">
@@ -121,6 +140,14 @@ export function SessionTabStrip({
           aria-label={t("chat.newChat")}
           title={t("chat.newChat")}
           onClick={onNew}
+          onContextMenu={
+            onNewBrowser
+              ? (e) => {
+                  e.preventDefault();
+                  setNewMenu({ x: e.clientX, y: e.clientY });
+                }
+              : undefined
+          }
           className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-foreground-icon-tertiary opacity-0 transition-opacity hover:bg-background-secondary-hover hover:text-foreground-icon-primary focus-visible:opacity-100 group-hover:opacity-100"
         >
           <Plus className="size-4" aria-hidden />
@@ -138,6 +165,28 @@ export function SessionTabStrip({
         onCloseInactive={onCloseInactive}
         onDismiss={() => setMenu(null)}
       />
+      {newMenu && onNewBrowser && onNew && (
+        <ContextMenu
+          x={newMenu.x}
+          y={newMenu.y}
+          ariaLabel={t("chat.newChat")}
+          entries={[
+            {
+              id: "new-session",
+              label: t("chat.newSession"),
+              icon: <MessageSquarePlus className="size-4" aria-hidden />,
+              onSelect: onNew,
+            },
+            {
+              id: "new-browser",
+              label: t("chat.newBrowser"),
+              icon: <Globe className="size-4" aria-hidden />,
+              onSelect: onNewBrowser,
+            },
+          ]}
+          onClose={() => setNewMenu(null)}
+        />
+      )}
     </div>
   );
 }

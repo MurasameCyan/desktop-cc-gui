@@ -14,6 +14,9 @@ import type { SessionState } from "./stream";
 export interface ChatStore {
   workspaces: Workspace[];
   sessions: SessionMeta[];
+  /** Persisted archive identities mirrored from the backend. Engine events
+   * consult this map so a late event cannot reinsert an archived row. */
+  archivedSessionKeys: Record<string, true>;
   engines: EngineInfo[];
   active: ActiveSession | null;
   /** Open conversation tabs, in display order. Persisted in localStorage. */
@@ -190,6 +193,7 @@ export interface ChatStore {
   /** Drop every queued message from the active session. */
   clearQueue: () => void;
   interrupt: () => Promise<void>;
+  archiveSession: (session: SessionMeta) => Promise<void>;
   deleteSession: (engine: string, sessionId: string) => Promise<void>;
   pinSession: (
     engine: string,

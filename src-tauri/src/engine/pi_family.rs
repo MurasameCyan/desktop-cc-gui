@@ -3,6 +3,32 @@ use super::{
 };
 use serde_json::Value;
 
+/// 提取并规范化上下文窗口字段
+fn attach_context_window(mut usage: Value) -> Value {
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .filter(|&w| w > 0);
+
+    if let Some(w) = window {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+        }
+    }
+
+    usage
+}
+
 /// pi and omp are the same CLI protocol (omp is a fork of pi): identical
 /// spawn args and NDJSON event stream, different binary + home dir.
 pub struct PiFamilyEngine {
@@ -238,7 +264,7 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
                 .and_then(|m| m.get("usage"))
                 .filter(|u| !u.is_null())
             {
-                out.push(EngineEvent::Usage(usage.clone()));
+                out.push(EngineEvent::Usage(attach_context_window(usage.clone())));
             }
             // A failed model call can still retry. Only a terminal agent_end
             // (or process EOF) decides the run's outcome.

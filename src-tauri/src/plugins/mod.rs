@@ -13,9 +13,10 @@
 //! back into place before proceeding.
 //!
 //! Layout: manifest.rs = manifest parse + permission whitelist; state.rs =
-//! plugins.json records + STATE_LOCK; fs.rs = source-tree walk, the install
+//! plugins.json records + state lock; fs.rs = source-tree walk, the install
 //! transaction, and the manifest/record merge.
 
+mod file_lock;
 mod fs;
 mod manifest;
 pub mod market;
@@ -32,8 +33,11 @@ use std::sync::Arc;
 const READABLE_FILES: &[&str] = &["main.js", "styles.css", "manifest.json"];
 
 #[tauri::command]
-pub fn plugin_list(db: tauri::State<'_, Arc<crate::db::Db>>) -> Result<Vec<PluginInfo>, String> {
-    state::list_plugins(&db, &state::plugins_dir(), &state::state_path())
+pub async fn plugin_list(db: tauri::State<'_, Arc<crate::db::Db>>) -> Result<Vec<PluginInfo>, String> {
+    let db = Arc::clone(db.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        state::list_plugins(&db, &state::plugins_dir(), &state::state_path())
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -81,22 +85,26 @@ fn uninstall_with_storage_at(
         // One locked read→mutate→write: the not-installed check, the record
         // removal, and the tombstone write-back must not interleave with a
         // concurrent install/enable of the same id.
-        let _guard = state::STATE_LOCK.lock();
+        let _guard = state::lock_state(state_path)?;
         let mut state = state::read_state(state_path)?;
         if !dir.exists() && !state.plugins.contains_key(id) {
             return Err(format!("{id}: plugin not installed"));
         }
-        if delete_data {
-            // Refuse a reparse-point-bearing document tree *before* shedding
-            // the plugin directory, so the refusal leaves the install intact.
-            storage::assert_documents_deletable_with_roots_at(state_path, id, storage_roots)?;
-        }
+        let document_guard = if delete_data {
+            let guard = storage::lock_documents_at(state_path, id, storage_roots)?;
+            // Keep the physical root locked through preflight, removal and
+            // state persistence, even against another host's storage selection.
+            storage::assert_documents_deletable(&guard)?;
+            Some(guard)
+        } else {
+            None
+        };
         fs::remove_dir_if_exists(&dir)?;
         state.plugins.remove(id);
-        if delete_data {
+        if let Some(guard) = &document_guard {
             // Preserve document files and their selected location unless the
             // user explicitly requests whole-plugin data deletion.
-            storage::delete_plugin_documents_with_roots_at(state_path, id, storage_roots)?;
+            storage::delete_plugin_documents(guard)?;
             state.document_storage.remove(id);
             db.plugin_kv_delete_all(id)?;
             state.kv_tombstones.remove(id);
@@ -112,12 +120,15 @@ fn uninstall_with_storage_at(
 }
 
 #[tauri::command]
-pub fn plugin_uninstall(
+pub async fn plugin_uninstall(
     db: tauri::State<'_, Arc<crate::db::Db>>,
     id: String,
     delete_data: bool,
 ) -> Result<(), String> {
-    uninstall_at(&db, &state::plugins_dir(), &state::state_path(), &id, delete_data)
+    let db = Arc::clone(db.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall_at(&db, &state::plugins_dir(), &state::state_path(), &id, delete_data)
+    }).await.map_err(|e| e.to_string())?
 }
 
 fn set_enabled_at(
@@ -145,21 +156,24 @@ fn set_enabled_at(
 }
 
 #[tauri::command]
-pub fn plugin_set_enabled(id: String, enabled: bool) -> Result<PluginInfo, String> {
-    set_enabled_at(&state::plugins_dir(), &state::state_path(), &id, enabled)
+pub async fn plugin_set_enabled(id: String, enabled: bool) -> Result<PluginInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_enabled_at(&state::plugins_dir(), &state::state_path(), &id, enabled)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, String> {
-    manifest::require_valid_id(&id)?;
-    let record = state::update_record(&state::state_path(), &id, |record| {
-        record.quarantined = true;
-        record.last_error = Some(error.clone());
-    })?;
-    // Quarantine takes effect immediately for lifecycle="plugin" children
-    // too — they belong to the quarantined plugin's runtime.
-    crate::plugin_caps::kill_tracked_children(&id);
-    Ok(fs::info_for(&state::plugins_dir(), &id, &record))
+pub async fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        manifest::require_valid_id(&id)?;
+        let record = state::update_record(&state::state_path(), &id, |record| {
+            record.quarantined = true;
+            record.last_error = Some(error.clone());
+        })?;
+        // Quarantine also stops this plugin's owned lifecycle processes.
+        crate::plugin_caps::kill_tracked_children(&id);
+        Ok(fs::info_for(&state::plugins_dir(), &id, &record))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

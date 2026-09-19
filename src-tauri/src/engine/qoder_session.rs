@@ -28,6 +28,32 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::{timeout, Instant};
 
+/// 提取并规范化上下文窗口字段
+fn attach_context_window(mut usage: Value) -> Value {
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .filter(|&w| w > 0);
+
+    if let Some(w) = window {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+        }
+    }
+
+    usage
+}
+
 use super::{EngineEvent, SendRequest, TurnCore, TurnState};
 
 const ACP_PROTOCOL_VERSION: u32 = 1;
@@ -867,6 +893,7 @@ pub(crate) async fn run_acp_turn(
 ) {
     let mut state = TurnState::new(req.session_id.clone());
     let mut view = TurnView::default();
+    let preassigned_session_id = req.session_id.clone();
     let result = turn_inner(&core, &mut state, &mut view, &req, &bin, &killed).await;
     if let Err(error) = result {
         if !killed.load(Ordering::SeqCst) {
@@ -883,7 +910,14 @@ pub(crate) async fn run_acp_turn(
         core.dispatch_event(&mut state, EngineEvent::Done { session_id, usage });
     }
     core.registry.remove_if_pid(&core.run_id, virtual_pid);
+    // Clean up both the native session id (if the engine reported one) and
+    // the preassigned session id (if we resumed an existing conversation).
+    // A resumed session was keyed at spawn under req.session_id, so we must
+    // remove that alias even if the native id differs or never arrived.
     if let Some(session_id) = state.native_session_id.clone() {
+        core.registry.remove_if_pid(&session_id, virtual_pid);
+    }
+    if let Some(session_id) = preassigned_session_id {
         core.registry.remove_if_pid(&session_id, virtual_pid);
     }
     core.sink.flush();
@@ -1014,8 +1048,8 @@ async fn handshake_and_prompt(
         )
         .await?;
     if let Some(usage) = result.get("usage").filter(|usage| !usage.is_null()) {
-        view.last_usage = Some(usage.clone());
-        core.dispatch_event(state, EngineEvent::Usage(usage.clone()));
+        view.last_usage = Some(attach_context_window(usage.clone()));
+        core.dispatch_event(state, EngineEvent::Usage(attach_context_window(usage.clone())));
     }
     Ok(())
 }

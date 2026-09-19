@@ -376,6 +376,7 @@ export const ChatConversation = memo(function ChatConversation({
     submit,
     handleDraftChange,
     handleAddAttachments,
+    handleDroppedPaths,
     handleStop,
     handlePickSkills,
   } = useComposerActions({
@@ -473,6 +474,8 @@ export const ChatConversation = memo(function ChatConversation({
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}
+        onDropPaths={active ? handleDroppedPaths : undefined}
+        onDropFiles={supportsImages ? pasteImages : undefined}
         sessionUsage={sessionUsage}
         contextMax={contextMax}
         branch={branch}

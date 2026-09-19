@@ -10,7 +10,7 @@ pub use extract::{
 };
 
 use crate::engine::TodosPayload;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -50,7 +50,7 @@ pub struct Message {
     pub images: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub engine: String,
@@ -80,6 +80,12 @@ pub struct SessionMeta {
     /// onto the child; native CLI files stay official. Absent until a send
     /// remembers one — the engine default `current` then applies.
     pub provider: Option<String>,
+    /// Plugin-fed remote sessions have no local transcript. Archive snapshots
+    /// preserve their route so Settings can restore or delete them too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path: Option<String>,
 }
 
 /// A native session file discovered on disk, matched to a workspace.

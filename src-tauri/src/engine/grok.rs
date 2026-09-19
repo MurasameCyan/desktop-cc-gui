@@ -411,6 +411,56 @@ mod channel_tests {
     }
 }
 
+/// 提取并规范化上下文窗口字段，确保前端可以识别
+fn attach_context_window(mut usage: Value) -> Value {
+    // 如果已经有标准字段，直接返回
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    // 尝试从多种可能的字段名中提取窗口大小
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| {
+            // 支持数字或字符串格式（如 "1M"）
+            match v {
+                Value::Number(n) => n.as_i64(),
+                Value::String(s) => {
+                    let s = s.trim();
+                    // 支持 "1M", "1000k" 等格式
+                    if let Some(captures) = regex::Regex::new(r"^(\d+(?:\.\d+)?)\s*([kKmM]?)$")
+                        .ok()
+                        .and_then(|re| re.captures(s))
+                    {
+                        let num: f64 = captures.get(1)?.as_str().parse().ok()?;
+                        let multiplier = match captures.get(2)?.as_str().to_lowercase().as_str() {
+                            "k" => 1000.0,
+                            "m" => 1_000_000.0,
+                            _ => 1.0,
+                        };
+                        Some((num * multiplier) as i64)
+                    } else {
+                        s.parse().ok()
+                    }
+                }
+                _ => None,
+            }
+        });
+
+    // 如果找到窗口大小，附加到标准字段名
+    if let Some(w) = window {
+        if w > 0 {
+            if let Some(obj) = usage.as_object_mut() {
+                obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+            }
+        }
+    }
+
+    usage
+}
+
 impl Engine for GrokEngine {
     fn id(&self) -> &'static str {
         "grok"
@@ -507,7 +557,7 @@ impl Engine for GrokEngine {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let usage = value.get("usage").cloned();
+                let usage = value.get("usage").cloned().map(|u| attach_context_window(u));
                 out.push(EngineEvent::Done { session_id, usage });
             }
             "error" => {

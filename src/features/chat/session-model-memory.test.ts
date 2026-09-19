@@ -12,6 +12,7 @@ vi.mock("@/lib/ipc", () => ({
     rememberSessionModel: vi.fn(async () => {}),
     rememberSessionEffort: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
+    listArchivedSessions: vi.fn(async () => []),
     rescanSessions: vi.fn(async () => {}),
     usageRecord: vi.fn(async () => {}),
   },

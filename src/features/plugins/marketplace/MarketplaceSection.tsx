@@ -182,18 +182,6 @@ function MarketRow({ entry }: { entry: MarketPlugin }) {
           {entry.description && (
             <span className="text-body-medium text-text-secondary">{entry.description}</span>
           )}
-          {entry.permissions.length > 0 && (
-            <span className="mt-1 flex flex-wrap items-center gap-1">
-              <span className="text-xs text-text-tertiary">
-                {t("plugins.market.permissions")}
-              </span>
-              {entry.permissions.map((permission) => (
-                <span key={permission} className={BADGE}>
-                  {permission}
-                </span>
-              ))}
-            </span>
-          )}
         </div>
         <button
           type="button"

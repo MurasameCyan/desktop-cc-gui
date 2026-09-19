@@ -2,10 +2,13 @@ import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-chat-composer";
+import { useBrowserStore } from "@/features/browser/store";
+import { useFilesStore } from "@/features/files/store";
 import type { AiChatRepo, AiChatRepoSection, ThreadAction } from "@/components/application/ai-chat/ai-chat-sidebar";
 import { ARCHIVED_SECTION_ID } from "@/components/application/ai-chat/use-sidebar-state";
 import type { SessionMeta } from "@/lib/ipc";
 import { isWeb, pickDirectory } from "@/lib/platform";
+import { recentPointerAnchor } from "@/lib/pointer-anchor";
 import { parseDraftSessionKey, sessionKey, useChatStore, sortedWorkspaceGroups } from "./store";
 import { relativeTime } from "./time";
 import { useWorkspaceUIHooks, workspaceLabelSuffix } from "./workspace-ui-bridge";
@@ -42,7 +45,7 @@ export function useChatSidebar({
     })),
   );
   // Store actions are stable references — one shallow subscription for all.
-  const { selectSession, startNewChat, addWorkspace, reorderWorkspaces, pinSession, setWorkspaceArchived, assignWorkspaceGroup, focusTab, closeTab } =
+  const { selectSession, startNewChat, addWorkspace, reorderWorkspaces, pinSession, archiveSession, setWorkspaceArchived, assignWorkspaceGroup, createWorkspaceGroup, focusTab, closeTab } =
     useChatStore(
       useShallow((s) => ({
         selectSession: s.selectSession,
@@ -50,8 +53,10 @@ export function useChatSidebar({
         addWorkspace: s.addWorkspace,
         reorderWorkspaces: s.reorderWorkspaces,
         pinSession: s.pinSession,
+        archiveSession: s.archiveSession,
         setWorkspaceArchived: s.setWorkspaceArchived,
         assignWorkspaceGroup: s.assignWorkspaceGroup,
+        createWorkspaceGroup: s.createWorkspaceGroup,
         focusTab: s.focusTab,
         closeTab: s.closeTab,
       })),
@@ -121,8 +126,8 @@ export function useChatSidebar({
   }, [visibleWorkspaces, workspaceAliases, sessions, openTabs, threadLimit, threadStreaming, unseen, i18n.language, uiHooks, t]);
   // 工作区二级分类: bucket repos by their workspace's group assignment.
   // Ungrouped repos come first (no header), then groups in settings order.
-  // Empty groups stay in the tree — the sidebar hides them at rest but
-  // reveals them as drop targets while a workspace is being dragged.
+  // Empty groups stay in the tree — the sidebar renders them like populated
+  // ones so a freshly created group is visible before it has members.
   const sections: AiChatRepoSection[] | undefined = useMemo(() => {
     const groups = sortedWorkspaceGroups(workspaceGroups);
     if (groups.length === 0) return undefined;
@@ -179,6 +184,9 @@ export function useChatSidebar({
 
   const handleThreadSelect = useCallback(
     (id: string) => {
+      // Selecting a conversation brings the chat surface back; a browser
+      // tab in view steps aside (it keeps its tab in the strip).
+      useBrowserStore.getState().deactivate();
       const session = sessionById.get(id);
       if (session) {
         void selectSession(session.engine, session.sessionId, session.workspacePath);
@@ -202,8 +210,10 @@ export function useChatSidebar({
           void pinSession(session.engine, session.sessionId, !session.pinned);
         } else if (action === "rename") {
           setDialog({ kind: "rename", session });
+        } else if (action === "archive") {
+          void archiveSession(session);
         } else if (action === "delete") {
-          setDialog({ kind: "delete", session });
+          setDialog({ kind: "delete", session, anchor: recentPointerAnchor() ?? undefined });
         }
         return;
       }
@@ -212,7 +222,7 @@ export function useChatSidebar({
         closeTab(draft.engine, null, draft.workspacePath);
       }
     },
-    [sessionById, pinSession, setDialog, closeTab],
+    [sessionById, pinSession, archiveSession, setDialog, closeTab],
   );
   // 右键菜单「复制 ID」:写入原生会话 uuid(CLI --resume 可用的那个),与
   // 文件树「复制路径」一致——静默写剪贴板,失败不打扰。
@@ -254,6 +264,7 @@ export function useChatSidebar({
       handleAddWorkspace();
       return;
     }
+    useBrowserStore.getState().deactivate();
     startNewChat(workspace.path);
     composerInputRef.current?.focus();
     collapseSidebarOnMobile();
@@ -265,12 +276,21 @@ export function useChatSidebar({
     (workspaceId: string) => {
       const workspace = workspaces.find((w) => w.id === workspaceId);
       if (!workspace) return;
+      useBrowserStore.getState().deactivate();
       startNewChat(workspace.path);
       composerInputRef.current?.focus();
       collapseSidebarOnMobile();
     },
     [workspaces, startNewChat, collapseSidebarOnMobile, composerInputRef],
   );
+  // Sidebar 新建浏览器 nav entry: open a fresh browser tab in the center
+  // strip. A file tab in view steps aside (same mutual exclusion as
+  // handleTabSelect).
+  const handleNewBrowser = useCallback(() => {
+    useFilesStore.getState().clearActiveFile();
+    useBrowserStore.getState().openTab();
+    collapseSidebarOnMobile();
+  }, [collapseSidebarOnMobile]);
   const handleReorderWorkspaces = useCallback(
     (orderedIds: string[]) => void reorderWorkspaces(orderedIds),
     [reorderWorkspaces],
@@ -289,6 +309,24 @@ export function useChatSidebar({
     [setWorkspaceArchived, assignWorkspaceGroup],
   );
 
+  // Sidebar blank-area menu「新建分组」: validate like the settings page
+  // (the store re-checks as the source of truth), then create. The composer
+  // stays open on a validation error via the returned message.
+  const handleCreateGroup = useCallback(
+    (name: string): string | null => {
+      const trimmed = name.trim();
+      if (!trimmed) return t("settings.groupNameRequired");
+      if (workspaceGroups.some((g) => g.name === trimmed)) {
+        return t("settings.groupNameDuplicate");
+      }
+      void createWorkspaceGroup(trimmed).catch((error: unknown) =>
+        console.error("[chat] createWorkspaceGroup failed", error),
+      );
+      return null;
+    },
+    [workspaceGroups, createWorkspaceGroup, t],
+  );
+
   return {
     active,
     workspaces,
@@ -305,7 +343,9 @@ export function useChatSidebar({
     handleSetWorkspaceArchived,
     handleNewSession,
     handleNewSessionInWorkspace,
+    handleNewBrowser,
     handleReorderWorkspaces,
     handleDropWorkspaceToSection,
+    handleCreateGroup,
   };
 }
