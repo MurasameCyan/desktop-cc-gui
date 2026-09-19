@@ -8,14 +8,17 @@ import { DisplayName } from "@/components/base/display-name";
 import { isWeb } from "@/lib/platform";
 import {
   SettingsCard,
+  SettingsRow,
   SettingsSectionLabel,
 } from "@/components/application/settings/settings-rows";
 import { cx } from "@/utils/cx";
 import { ConfirmDialog } from "@/components/dialogs";
 import type { PluginInfo } from "@/lib/ipc";
+import { SDK_VERSION } from "@ccgui/plugin-sdk";
 import { usePluginsStore, usePluginStates } from "./usePlugins";
 import { useMarketplaceStore } from "../marketplace/store";
-import type { PluginRuntimeState } from "../runtime/loader";
+import { reloadPlugin, type PluginRuntimeState } from "../runtime/loader";
+import { compatSdkEnabled, setCompatSdkEnabled } from "../runtime/sdk-compat";
 
 const BADGE =
   "rounded-md bg-background-secondary-default px-1.5 py-0.5 text-xs text-text-secondary";
@@ -117,6 +120,17 @@ function PluginRow({ plugin }: { plugin: PluginInfo }) {
                 {t(stateLabel)}
               </span>
             )}
+            {runtime?.compat && (
+              <span
+                className={cx(BADGE, "text-text-warning-primary")}
+                title={t("plugins.compatBadgeHint", {
+                  range: runtime.compat,
+                  host: SDK_VERSION,
+                })}
+              >
+                {t("plugins.stateCompat")}
+              </span>
+            )}
           </div>
           {plugin.description && (
             <span className="truncate text-body-medium text-text-secondary">
@@ -147,6 +161,8 @@ export default function PluginsSection() {
   const { t } = useTranslation();
   const { installed, loaded, error, installing, refresh, installFromDirectory } =
     usePluginsStore();
+  const states = usePluginStates();
+  const [compatSdk, setCompatSdk] = useState(compatSdkEnabled);
 
   useEffect(() => {
     void refresh();
@@ -155,6 +171,19 @@ export default function PluginsSection() {
     void useMarketplaceStore.getState().checkUpdates();
   }, [refresh]);
 
+  // Flipping the switch re-runs the handshake for exactly the plugins the
+  // policy decides on: the refused ones when enabling, the compat-loaded ones
+  // when disabling. Everything else keeps running untouched.
+  const toggleCompatSdk = (next: boolean) => {
+    setCompatSdk(next);
+    setCompatSdkEnabled(next);
+    for (const entry of states) {
+      const affected = next ? entry.state === "incompatible" : !!entry.compat;
+      const plugin = affected && installed.find((p) => p.id === entry.id);
+      if (plugin) void reloadPlugin({ info: plugin });
+    }
+  };
+
   return (
     <div className="flex w-full flex-col gap-6">
       {error && (
@@ -162,6 +191,19 @@ export default function PluginsSection() {
           {error}
         </div>
       )}
+      <div className="flex flex-col gap-2">
+        <SettingsSectionLabel>{t("plugins.compatLabel")}</SettingsSectionLabel>
+        <SettingsCard>
+          <SettingsRow label={t("plugins.compatTitle")} description={t("plugins.compatHint")}>
+            <Switch
+              size="sm"
+              aria-label={t("plugins.compatTitle")}
+              isSelected={compatSdk}
+              onChange={toggleCompatSdk}
+            />
+          </SettingsRow>
+        </SettingsCard>
+      </div>
       <div className="flex items-center justify-between">
         <SettingsSectionLabel>{t("plugins.installedLabel")}</SettingsSectionLabel>
         <button

@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   getPluginState,
+  getPluginStatesSnapshot,
   loadPlugin,
   reportPluginCrash,
   unloadPlugin,
   type LoaderBackend,
 } from "./loader";
+import { setCompatSdkEnabled } from "./sdk-compat";
 import { commandRegistry, settingsRegistry } from "@ccgui/plugin-sdk";
 import type { PluginInfo } from "@/lib/ipc";
 
@@ -101,6 +103,43 @@ describe("loader", () => {
     expect(ran).toBe(true);
     expect(getPluginState("lp-legacy")).toBe("active");
     unloadPlugin("lp-legacy");
+  });
+
+  it("loads a legacy ^0.x plugin in 兼容模式 when the opt-in is on", async () => {
+    const backend = fakeBackend();
+    let ran = false;
+    const load = (id: string, sdkVersion = "^0.1") =>
+      loadPlugin(
+        {
+          info: info(id, { source: "builtin" }),
+          manifest: { ...builtinManifest(id), sdkVersion },
+          builtinActivate: () => {
+            ran = true;
+          },
+        },
+        backend,
+      );
+    const compatMark = (id: string) =>
+      getPluginStatesSnapshot().find((entry) => entry.id === id)?.compat;
+
+    // Default: strict semver — the range predates the host's minor, so no.
+    await load("lp-compat");
+    expect(getPluginState("lp-compat")).toBe("incompatible");
+    expect(compatMark("lp-compat")).toBeUndefined();
+
+    setCompatSdkEnabled(true);
+    await load("lp-compat");
+    expect(ran).toBe(true);
+    expect(getPluginState("lp-compat")).toBe("active");
+    expect(compatMark("lp-compat")).toBe("^0.1");
+    unloadPlugin("lp-compat");
+    // The mark describes a load, not an installation.
+    expect(compatMark("lp-compat")).toBeUndefined();
+
+    // 兼容模式 never widens a range that asks for a newer line.
+    await load("lp-future", "^1.0");
+    expect(getPluginState("lp-future")).toBe("incompatible");
+    setCompatSdkEnabled(false);
   });
 
   it("activates a builtin plugin through the context pipeline and unloads cleanly", async () => {

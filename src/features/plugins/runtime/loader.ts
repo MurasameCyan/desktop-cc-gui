@@ -10,6 +10,7 @@ import {
 } from "./context";
 import { bridgeUsageEvents } from "./events";
 import { installHardening, runAsPlugin } from "./hardening";
+import { compatSdkEnabled, isLegacySdkRange } from "./sdk-compat";
 import { validateManifest } from "./permissions";
 import { applyDeclarativePlugin } from "../declarative/interpreter";
 import {
@@ -41,6 +42,10 @@ export interface PluginRuntimeEntry {
   id: string;
   state: PluginRuntimeState;
   error?: string;
+  /** Set when the plugin was loaded through 兼容模式: the sdkVersion range it
+   *  declared that the strict handshake rejected (e.g. "^0.3" on host 0.4.3).
+   *  The manager lists show a 兼容模式 badge with this as its tooltip. */
+  compat?: string;
 }
 
 /** Backend seam: IPC in the app, fakes in tests. */
@@ -113,9 +118,14 @@ const crashCounts: Record<string, number> = {};
 const states = new Map<string, PluginRuntimeEntry>();
 const stateListeners = new Set<() => void>();
 let statesSnapshot: readonly PluginRuntimeEntry[] = [];
+/** Ids loaded under 兼容模式, with the sdkVersion range that needed it. Kept
+ *  beside the state machine so later transitions (loading → active) keep the
+ *  mark; cleared when the plugin unloads or is pruned. */
+const compatRanges = new Map<string, string>();
 
 function setState(id: string, state: PluginRuntimeState, error?: string) {
-  states.set(id, { id, state, error });
+  const compat = compatRanges.get(id);
+  states.set(id, { id, state, error, ...(compat ? { compat } : {}) });
   statesSnapshot = [...states.values()];
   for (const l of stateListeners) l();
 }
@@ -211,10 +221,17 @@ export async function loadPlugin(
       if (problems.length > 0) throw new Error(`invalid manifest: ${problems.join("; ")}`);
       // SDK version handshake (plan §5.1 sdkVersion): a plugin built against an
       // incompatible contract range is disabled, never loaded — same treatment
-      // as minAppVersion, one layer down (contract vs app).
+      // as minAppVersion, one layer down (contract vs app). 兼容模式 (opt-in,
+      // see sdk-compat.ts) additionally loads plugins whose ^0.N / ~0.N range
+      // predates this 0.x host: the contract is additive, and without it every
+      // plugin written for an earlier 0.x line dies on a minor bump.
       if (!satisfiesSdkRange(manifest.sdkVersion, SDK_VERSION)) {
-        setState(id, "incompatible", `requires sdk ${manifest.sdkVersion} (host ${SDK_VERSION})`);
-        return;
+        if (compatSdkEnabled() && isLegacySdkRange(manifest.sdkVersion, SDK_VERSION)) {
+          compatRanges.set(id, manifest.sdkVersion ?? "*");
+        } else {
+          setState(id, "incompatible", `requires sdk ${manifest.sdkVersion} (host ${SDK_VERSION})`);
+          return;
+        }
       }
 
       const newHandle = createPluginContext(manifest, backend, { appVersion });
@@ -281,6 +298,8 @@ export function unloadPlugin(id: string): void {
     }
   }
   disposeHandle(entry.handle);
+  // The compat mark belongs to this load; a reload re-evaluates the range.
+  compatRanges.delete(id);
   setState(id, "installed");
 }
 
@@ -319,6 +338,7 @@ export function notePluginRenderOk(id: string) {
  *  a crash-looping plugin still quarantines across them. */
 export function prunePluginRuntimeState(id: string): void {
   delete crashCounts[id];
+  compatRanges.delete(id);
   if (states.delete(id)) {
     statesSnapshot = [...states.values()];
     for (const l of stateListeners) l();

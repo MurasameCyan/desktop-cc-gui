@@ -841,6 +841,12 @@ export const zh = {
     stateQuarantined: "已隔离",
     stateFailed: "加载失败",
     stateIncompatible: "版本不兼容",
+    stateCompat: "兼容模式",
+    compatLabel: "SDK 兼容",
+    compatTitle: "加载声明旧版 SDK 的插件",
+    compatHint:
+      "0.x 里次版本即破坏性位（^0.3 按 semver 不覆盖 0.4 宿主）；开启后，声明 ^0.N（N 低于宿主次版本）的插件照常加载并标注「兼容模式」。",
+    compatBadgeHint: "声明 sdk {{range}}，宿主 {{host}}：按兼容模式加载",
     marketTitle: "插件市场",
     market: {
       install: "安装",
