@@ -49,7 +49,10 @@ impl Worker {
         let deadline = Instant::now() + Duration::from_secs(30);
         let stream = loop {
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    break stream;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if let Some(status) = child.try_wait().unwrap() {
                         panic!("storage worker exited before connecting: {status}");
