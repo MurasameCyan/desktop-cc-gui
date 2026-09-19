@@ -9,6 +9,7 @@ import { openExternal } from "@/lib/platform";
 import { isWeb } from "@/lib/transport";
 import { cx } from "@/utils/cx";
 import { useBrowserStore, type BrowserTab } from "./store";
+import { useBrowserOccluded } from "./occlusion";
 import {
   browserCurrentUrl,
   browserGoBack,
@@ -75,15 +76,21 @@ export function useBrowserNavSync() {
 
 /** Owns the native child webview for one browser tab: created lazily on
  * first activation, bounds-synced to the placeholder via ResizeObserver,
- * hidden whenever the tab is not in view. */
+ * hidden whenever the tab is not in view. Overlays register in
+ * occlusion.ts and hide it the same way, since no z-index can lift HTML
+ * over a native webview. */
 function useWebviewSync(id: string, url: string, active: boolean, placeholderRef: React.RefObject<HTMLDivElement | null>) {
-  const activeRef = useRef(active);
-  activeRef.current = active;
+  // HTML overlays (modals, menus) can't paint over the native webview, so
+  // an open overlay hides it like a tab switch would.
+  const occluded = useBrowserOccluded();
+  const visible = active && !occluded;
+  const activeRef = useRef(visible);
+  activeRef.current = visible;
 
   useLayoutEffect(() => {
     if (isWeb) return;
     const el = placeholderRef.current;
-    if (!el || !active) return;
+    if (!el || !visible) return;
 
     let disposed = false;
     const rectOf = () => {
@@ -121,7 +128,7 @@ function useWebviewSync(id: string, url: string, active: boolean, placeholderRef
       // survives tab switches. Closing happens in the store's closeTab.
       void setBrowserWebviewVisible(id, false);
     };
-  }, [id, url, active, placeholderRef]);
+  }, [id, url, visible, placeholderRef]);
 
   // SPA pushState navigations never fire the native nav event; poll the
   // real URL while the tab is active so the address bar follows.

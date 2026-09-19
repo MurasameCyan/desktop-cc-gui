@@ -74,9 +74,9 @@ async function type(value: string) {
 it("lists sessions newest-first on open and jumps on click", async () => {
   const { onThreadSelect, onClose } = await render(true);
   expect(options().map((el) => el.textContent)).toEqual([
-    "修复登录闪退desktop-cc-gui",
-    "侧边栏搜索弹窗desktop-cc-gui",
-    "发布流水线vscode-cc-gui",
+    "修复登录闪退1hdesktop-cc-gui",
+    "侧边栏搜索弹窗2hdesktop-cc-gui",
+    "发布流水线3hvscode-cc-gui",
   ]);
 
   await act(async () => options()[1].click());
@@ -87,7 +87,7 @@ it("lists sessions newest-first on open and jumps on click", async () => {
 it("filters by session title, not by unrelated content", async () => {
   await render(true);
   await type("流水线");
-  expect(options().map((el) => el.textContent)).toEqual(["发布流水线vscode-cc-gui"]);
+  expect(options().map((el) => el.textContent)).toEqual(["发布流水线3hvscode-cc-gui"]);
 
   await type("不存在的会话");
   expect(options()).toEqual([]);
@@ -96,7 +96,7 @@ it("filters by session title, not by unrelated content", async () => {
 it("matches a workspace name by surfacing its sessions", async () => {
   await render(true);
   await type("vscode");
-  expect(options().map((el) => el.textContent)).toEqual(["发布流水线vscode-cc-gui"]);
+  expect(options().map((el) => el.textContent)).toEqual(["发布流水线3hvscode-cc-gui"]);
 });
 
 it("Enter selects the active row and Escape closes", async () => {

@@ -699,7 +699,7 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
 /// legacy/provider home),stale/损坏的 db 行也无法把 remove_dir_all
 /// 指向任意目录树。
 fn delete_dir_session_disk(engine: &str, path: &Path) -> Result<(), String> {
-    delete_dir_session_disk_anchored(engine, path, &super::scanner::dir_session_anchor_roots(engine))
+    delete_dir_session_disk_anchored(engine, path, &super::discovery::dir_session_anchor_roots(engine))
 }
 
 /// 根列表可注入:单测不依赖 HOME/DSH_HOME 等进程级环境变量。
@@ -743,7 +743,7 @@ fn delete_dir_session_disk_anchored(
                 && path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|name| super::scanner::dsh_log_generation(name).is_some())
+                    .is_some_and(|name| super::discovery::dsh_log_generation(name).is_some())
         }
     };
     if !anchored || !structure_ok {
@@ -842,9 +842,9 @@ pub(super) fn delete_session_blocking(
     // Model and effort can already exist even when no transcript was created.
     let mut conn = db.0.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Recorded frame identities become unreachable with their session and
+    // must be reclaimed in the same transaction as its indexed metadata.
     for table in [
-        // Recorded frame identities are scoped to this session and become
-        // unreachable with it; every scan reads and hashes the whole table.
         "accepted_internal_frames",
         "sessions",
         "session_models",
@@ -1490,11 +1490,32 @@ mod tests {
             .unwrap();
         db.record_accepted_internal_frame_hash("omp", "kept", &"b".repeat(64), &workspace.to_string_lossy())
             .unwrap();
+        for session_id in ["sid-1", "kept"] {
+            db.remember_session_provider("omp", session_id, "provider", 1).unwrap();
+            let session = SessionMeta {
+                engine: "omp".into(),
+                session_id: session_id.into(),
+                workspace_path: workspace.to_string_lossy().into_owned(),
+                ..archived_fixture()
+            };
+            archive_session_in(&db, &session).unwrap();
+        }
 
         delete_session_blocking(&db, "omp", "sid-1").unwrap();
 
         assert!(db.accepted_internal_frames("omp", "sid-1").unwrap().0.is_empty());
         assert_eq!(db.accepted_internal_frames("omp", "kept").unwrap().0.len(), 1);
+        let archived = list_archived_sessions_from(&db).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].session_id, "kept");
+        let providers: Vec<String> = db.0.lock()
+            .prepare("SELECT session_id FROM session_providers WHERE engine='omp'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(providers, ["kept"]);
 
         drop(db);
         std::fs::remove_dir_all(&home).ok();
@@ -1883,13 +1904,21 @@ mod tests {
             ).unwrap();
             db.remember_session_model(engine, "failed", "model", 1).unwrap();
             db.remember_session_effort(engine, "failed", "high", 1).unwrap();
+            db.remember_session_provider(engine, "failed", "provider", 1).unwrap();
+            let session = SessionMeta {
+                engine: engine.into(),
+                session_id: "failed".into(),
+                workspace_path: "/ws".into(),
+                ..archived_fixture()
+            };
+            archive_session_in(&db, &session).unwrap();
             db.record_accepted_internal_frame_hash(engine, "failed", &"a".repeat(64), "/ws")
                 .unwrap();
 
             let error = delete_session_blocking(&db, engine, "failed").unwrap_err();
             assert!(error.contains("remove "), "{error}");
             assert!(path.is_dir());
-            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
+            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts", "session_providers", "session_archives"] {
                 let count: i64 = db.0.lock().query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id='failed'"),
                     [engine],

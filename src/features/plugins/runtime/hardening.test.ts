@@ -15,6 +15,32 @@ describe("hardening", () => {
     else delete window.__TAURI_INTERNALS__;
   });
 
+  // Production WebView2 defines `invoke` as a non-writable own property, so
+  // the wrapper assignment throws. Bootstrap must survive it: a throw here
+  // failed plugin bootstrap and silently disabled the guard module.
+  it("installs without throwing where invoke cannot be wrapped", async () => {
+    vi.resetModules();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const frozenInvoke = vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => null);
+    const previous = window.__TAURI_INTERNALS__;
+    window.__TAURI_INTERNALS__ = Object.freeze({ invoke: frozenInvoke });
+    try {
+      // Dynamic import on purpose: the module's `installed` flag is
+      // per-instance, so exercising installHardening a second time (and from
+      // this window state) requires a fresh module load.
+      const fresh = await import("./hardening");
+      expect(() => fresh.installHardening()).not.toThrow();
+      expect(warn).toHaveBeenCalled();
+      // The host path still reaches the native invoke.
+      await window.__TAURI_INTERNALS__!.invoke!("host_cmd");
+      expect(frozenInvoke).toHaveBeenCalledWith("host_cmd");
+    } finally {
+      window.__TAURI_INTERNALS__ = previous;
+      warn.mockRestore();
+      vi.resetModules();
+    }
+  });
+
   it("blocks direct Tauri IPC while plugin code is on the stack, allows host calls", async () => {
     const invoke = window.__TAURI_INTERNALS__!.invoke!;
 

@@ -18,15 +18,13 @@ describe("filterEngineOptions", () => {
     expect(out.map((o) => o.id)).toEqual(["omp"]);
   });
 
-  it("keeps availability from the local binary probe when not a WSL workspace", () => {
+  it("drops engines the local binary probe marks uninstalled", () => {
     const out = filterEngineOptions(
       [engine("omp", { available: false }), engine("claude")],
       null,
       t,
     );
-    expect(out.find((o) => o.id === "omp")?.available).toBe(false);
-    expect(out.find((o) => o.id === "omp")?.disabled).toBe(true);
-    expect(out.find((o) => o.id === "claude")?.available).toBe(true);
+    expect(out.map((o) => o.id)).toEqual(["claude"]);
   });
 
   it("WSL 工作区:只列发行版内探到的引擎,可用态按探针而非本机", () => {

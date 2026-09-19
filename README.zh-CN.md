@@ -9,11 +9,11 @@
 <a href="https://trendshift.io/repositories/25546" target="_blank"><img src="https://trendshift.io/api/badge/repositories/25546" alt="zhukunpenglinyutong%2Fdesktop-cc-gui | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui" target="_blank"><img src="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui/star/new_badge.svg" alt="AtomGit G-Star" width="250" height="54"/></a>
 
-![][github-contributors-shield] ![][github-forks-shield] ![][github-stars-shield] ![][github-issues-shield]
+![][github-contributors-shield] ![][github-forks-shield] ![][github-stars-shield] ![][github-issues-shield] ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-c4f042?labelColor=black&style=flat-square)
 
 </div>
 
-**ccgui** 是一个开源的 **multi-engine AI 编程桌面客户端**。简单说：它把 **Claude Code**、**Codex CLI**、**Kimi CLI**、**Grok CLI**、**Pi CLI**、**OMP CLI**、**DeepSeek Harness（DSH）** 等命令行 AI 编程 runtime，放进一个统一的图形界面里。
+**ccgui** 是一个开源的 **multi-engine AI 编程桌面客户端**。简单说：它把 **Claude Code**、**Codex CLI**、**Kimi CLI**、**Grok CLI**、**Pi CLI**、**OMP CLI**、**DeepSeek Harness（DSH）**、**Antigravity**、**OpenCode**、**Qoder** 等命令行 AI 编程 runtime，放进一个统一的图形界面里。
 
 你不用再盯着黑乎乎的终端敲命令——打开 ccgui，选好项目，像聊天一样让 AI 帮你写代码、改 Bug、提交 Git。流式输出、思考过程和工具调用都会实时展示；token 用量在引擎上报时同步呈现。
 
@@ -21,11 +21,30 @@
 
 ---
 
+## 支持的引擎
+
+下面每个引擎都通过 Rust 后端里的**专属协议适配器**接入——流式事件、会话历史、供应商渠道都是原生处理的，而不是从终端屏幕上抓输出。
+
+<p>
+  <a href="https://code.claude.com/docs/en/cli-reference"><kbd><img src="https://www.google.com/s2/favicons?domain=anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
+  <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" alt="Codex CLI logo" width="16" valign="middle" /> Codex CLI</kbd></a> &nbsp;
+  <a href="https://www.kimi.com/code/docs/en/"><kbd><img src="https://www.google.com/s2/favicons?domain=moonshot.cn&sz=64" alt="Kimi CLI logo" width="16" valign="middle" /> Kimi CLI</kbd></a> &nbsp;
+  <a href="https://x.ai/cli"><kbd><img src="https://www.google.com/s2/favicons?domain=x.ai&sz=64" alt="Grok CLI logo" width="16" valign="middle" /> Grok CLI</kbd></a> &nbsp;
+  <a href="https://pi.dev"><kbd><img src="https://pi.dev/favicon.svg" alt="Pi CLI logo" width="16" valign="middle" /> Pi CLI</kbd></a> &nbsp;
+  <a href="https://omp.sh"><kbd><img src="https://omp.sh/favicon.svg" alt="oh-my-pi logo" width="16" valign="middle" /> OMP CLI</kbd></a> &nbsp;
+  <a href="https://github.com/deepseek-ai/dsh"><kbd><img src="https://www.google.com/s2/favicons?domain=deepseek.com&sz=64" alt="DeepSeek Harness logo" width="16" valign="middle" /> DeepSeek Harness</kbd></a> &nbsp;
+  <a href="https://www.antigravity.google/docs/cli/headless/"><kbd><img src="https://www.google.com/s2/favicons?domain=antigravity.google&sz=64" alt="Antigravity logo" width="16" valign="middle" /> Antigravity</kbd></a> &nbsp;
+  <a href="https://opencode.ai/docs/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" alt="OpenCode logo" width="16" valign="middle" /> OpenCode</kbd></a> &nbsp;
+  <a href="https://docs.qoder.com/zh/cli/using-cli"><kbd><img src="https://www.google.com/s2/favicons?domain=qoder.com&sz=64" alt="Qoder logo" width="16" valign="middle" /> Qoder</kbd></a>
+</p>
+
+---
+
 ## ccgui 能干什么
 
-### 一个客户端，装下七个 AI 引擎
+### 一个客户端，装下十个 AI 引擎
 
-- 注册了 **Claude Code**、**Codex CLI**、**Kimi CLI**、**Grok CLI**、**Pi CLI**、**OMP CLI**、**DeepSeek Harness** 的 runtime adapter——在输入框里按会话切换引擎。
+- 注册了 **Claude Code**、**Codex CLI**、**Kimi CLI**、**Grok CLI**、**Pi CLI**、**OMP CLI**、**DeepSeek Harness**、**Antigravity**、**OpenCode**、**Qoder**（全球版与国内版）的 runtime adapter——在输入框里按会话切换引擎。
 - **供应商渠道**直接写入各 CLI 自己的原生配置文件（不搞平行的凭证存储），内置 GLM、Kimi、DeepSeek、MiniMax、MiMo、百炼、LongCat、OpenCode Go、OpenRouter 等精选预设；Claude / Codex / Grok 的渠道还能从 [CC Switch](https://github.com/farion1231/cc-switch) 一键导入。
 - Pi 系引擎（Pi / OMP）支持在设置页内完成 API Key 与 OAuth 登录。
 - 支持**按标签页覆盖模型与 effort 档位**：同一个窗口里，不同标签页可以跑不同模型或思考强度。

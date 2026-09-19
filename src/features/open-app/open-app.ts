@@ -1,5 +1,5 @@
 import { ipc } from "@/lib/ipc";
-import { readStoredJson, writeStored } from "@/lib/storage";
+import { readStoredJson, readStoredBool, writeStored } from "@/lib/storage";
 import vscodeIcon from "@/assets/app-icons/vscode.png?url";
 import cursorIcon from "@/assets/app-icons/cursor.png?url";
 import ideaIcon from "@/assets/app-icons/idea.png?url";
@@ -117,21 +117,77 @@ export async function extractCustomAppIcon(app: CustomApp): Promise<string | nul
 const PINNED_IDS_KEY = "ccgui-next.headerPinnedActions";
 const SELECTED_APP_KEY = "ccgui-next.openWorkspaceApp";
 
+/** One-time migration marker: pin lists stored before the launch script became pinnable. */
+export const LAUNCH_SCRIPT_PIN_MIGRATION_KEY =
+  "ccgui-next.headerPinnedActions.launchScriptPin";
+
 /** "terminal" is a pinnable extra action, not an open target. */
 export const TERMINAL_ACTION_ID = "terminal";
+/** The launch-script cluster is a pinnable extra action, not an open target. */
+export const LAUNCH_SCRIPT_ACTION_ID = "launchScript";
 
-export const DEFAULT_PINNED_IDS: readonly string[] = [DEFAULT_OPEN_APP_ID, TERMINAL_ACTION_ID];
+export const DEFAULT_PINNED_IDS: readonly string[] = [
+  DEFAULT_OPEN_APP_ID,
+  TERMINAL_ACTION_ID,
+  LAUNCH_SCRIPT_ACTION_ID,
+];
+
+// useSyncExternalStore snapshot: cache by raw value so repeated reads return
+// a stable reference until a write (or external clear) changes the key.
+let pinnedSnapshot: { raw: string | null; ids: string[] } | null = null;
+const pinnedListeners = new Set<() => void>();
 
 export function readPinnedIds(): string[] {
-  return (
-    readStoredJson<string[]>(PINNED_IDS_KEY, (stored) =>
-      Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : null,
-    ) ?? [...DEFAULT_PINNED_IDS]
-  );
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(PINNED_IDS_KEY);
+  } catch {
+    raw = null;
+  }
+  if (pinnedSnapshot && pinnedSnapshot.raw === raw) return pinnedSnapshot.ids;
+  let ids: string[];
+  if (raw === null) {
+    // First ever read: persist the defaults and mark the migration done, so a
+    // later unpin of the launch script is not mistaken for a legacy list.
+    ids = [...DEFAULT_PINNED_IDS];
+    writeStored(PINNED_IDS_KEY, JSON.stringify(ids));
+    writeStored(LAUNCH_SCRIPT_PIN_MIGRATION_KEY, 1);
+    raw = JSON.stringify(ids);
+  } else {
+    ids =
+      readStoredJson<string[]>(PINNED_IDS_KEY, (stored) =>
+        Array.isArray(stored)
+          ? stored.filter((id): id is string => typeof id === "string")
+          : null,
+      ) ?? [...DEFAULT_PINNED_IDS];
+    // Lists stored before the launch script became pinnable predate its id;
+    // keep the previously always-visible button pinned for them exactly once,
+    // so an explicit unpin afterwards sticks.
+    if (
+      !ids.includes(LAUNCH_SCRIPT_ACTION_ID) &&
+      !readStoredBool(LAUNCH_SCRIPT_PIN_MIGRATION_KEY, false)
+    ) {
+      ids = [...ids, LAUNCH_SCRIPT_ACTION_ID];
+      writeStored(PINNED_IDS_KEY, JSON.stringify(ids));
+      writeStored(LAUNCH_SCRIPT_PIN_MIGRATION_KEY, 1);
+      raw = JSON.stringify(ids);
+    }
+  }
+  pinnedSnapshot = { raw, ids };
+  return ids;
+}
+
+/** Notifies subscribers (the launch-script cluster) after a pin change. */
+export function subscribePinnedIds(listener: () => void): () => void {
+  pinnedListeners.add(listener);
+  return () => {
+    pinnedListeners.delete(listener);
+  };
 }
 
 export function writePinnedIds(ids: string[]): void {
   writeStored(PINNED_IDS_KEY, JSON.stringify(ids));
+  pinnedListeners.forEach((listener) => listener());
 }
 
 export function readSelectedOpenAppId(): string {

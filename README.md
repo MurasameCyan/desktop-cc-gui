@@ -9,11 +9,11 @@
 <a href="https://trendshift.io/repositories/25546" target="_blank"><img src="https://trendshift.io/api/badge/repositories/25546" alt="zhukunpenglinyutong%2Fdesktop-cc-gui | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui" target="_blank"><img src="https://atomgit.com/zhukunpenglinyutong/desktop-cc-gui/star/new_badge.svg" alt="AtomGit G-Star" width="250" height="54"/></a>
 
-![][github-contributors-shield] ![][github-forks-shield] ![][github-stars-shield] ![][github-issues-shield]
+![][github-contributors-shield] ![][github-forks-shield] ![][github-stars-shield] ![][github-issues-shield] ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-c4f042?labelColor=black&style=flat-square)
 
 </div>
 
-**ccgui** is an open-source **multi-engine AI coding desktop client**. In plain words: it brings command-line AI coding runtimes — **Claude Code**, **Codex CLI**, **Kimi CLI**, **Grok CLI**, **Pi CLI**, **OMP CLI**, and **DeepSeek Harness (DSH)** — into one graphical interface.
+**ccgui** is an open-source **multi-engine AI coding desktop client**. In plain words: it brings command-line AI coding runtimes — **Claude Code**, **Codex CLI**, **Kimi CLI**, **Grok CLI**, **Pi CLI**, **OMP CLI**, **DeepSeek Harness (DSH)**, **Antigravity**, **OpenCode**, and **Qoder** — into one graphical interface.
 
 No more staring at a black terminal. Open ccgui, pick a project, and chat with AI to write code, fix bugs, and commit to Git. Streaming output, thinking traces, and tool calls are visible as they happen; token usage appears when the engine reports it.
 
@@ -21,11 +21,30 @@ The app is built with **Tauri 2 + React 18 + TypeScript + Rust** and runs on mac
 
 ---
 
+## Supported engines
+
+Every engine below is wired in through a **dedicated protocol adapter** in the Rust backend — streaming events, session history, and provider channels are handled natively, not scraped off a terminal screen.
+
+<p>
+  <a href="https://code.claude.com/docs/en/cli-reference"><kbd><img src="https://www.google.com/s2/favicons?domain=anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a> &nbsp;
+  <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" alt="Codex CLI logo" width="16" valign="middle" /> Codex CLI</kbd></a> &nbsp;
+  <a href="https://www.kimi.com/code/docs/en/"><kbd><img src="https://www.google.com/s2/favicons?domain=moonshot.cn&sz=64" alt="Kimi CLI logo" width="16" valign="middle" /> Kimi CLI</kbd></a> &nbsp;
+  <a href="https://x.ai/cli"><kbd><img src="https://www.google.com/s2/favicons?domain=x.ai&sz=64" alt="Grok CLI logo" width="16" valign="middle" /> Grok CLI</kbd></a> &nbsp;
+  <a href="https://pi.dev"><kbd><img src="https://pi.dev/favicon.svg" alt="Pi CLI logo" width="16" valign="middle" /> Pi CLI</kbd></a> &nbsp;
+  <a href="https://omp.sh"><kbd><img src="https://omp.sh/favicon.svg" alt="oh-my-pi logo" width="16" valign="middle" /> OMP CLI</kbd></a> &nbsp;
+  <a href="https://github.com/deepseek-ai/dsh"><kbd><img src="https://www.google.com/s2/favicons?domain=deepseek.com&sz=64" alt="DeepSeek Harness logo" width="16" valign="middle" /> DeepSeek Harness</kbd></a> &nbsp;
+  <a href="https://www.antigravity.google/docs/cli/headless/"><kbd><img src="https://www.google.com/s2/favicons?domain=antigravity.google&sz=64" alt="Antigravity logo" width="16" valign="middle" /> Antigravity</kbd></a> &nbsp;
+  <a href="https://opencode.ai/docs/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" alt="OpenCode logo" width="16" valign="middle" /> OpenCode</kbd></a> &nbsp;
+  <a href="https://docs.qoder.com/en/cli/using-cli"><kbd><img src="https://www.google.com/s2/favicons?domain=qoder.com&sz=64" alt="Qoder logo" width="16" valign="middle" /> Qoder</kbd></a>
+</p>
+
+---
+
 ## What can ccgui do?
 
-### One client, seven AI engines
+### One client, ten AI engines
 
-- Registers runtime adapters for **Claude Code**, **Codex CLI**, **Kimi CLI**, **Grok CLI**, **Pi CLI**, **OMP CLI**, and **DeepSeek Harness** — pick the engine per session from the composer.
+- Registers runtime adapters for **Claude Code**, **Codex CLI**, **Kimi CLI**, **Grok CLI**, **Pi CLI**, **OMP CLI**, **DeepSeek Harness**, **Antigravity**, **OpenCode**, and **Qoder** (global and CN distributions) — pick the engine per session from the composer.
 - **Provider channels** are written to each CLI's own native config files (no parallel credential store), with curated presets for GLM, Kimi, DeepSeek, MiniMax, MiMo, Bailian, LongCat, OpenCode Go, OpenRouter, and more. Claude / Codex / Grok channels can be imported from [CC Switch](https://github.com/farion1231/cc-switch).
 - Pi-family engines (Pi / OMP) support API-key and OAuth sign-in flows from inside Settings.
 - Per-tab **model and effort overrides**: different tabs in the same window can run different models or thinking levels.

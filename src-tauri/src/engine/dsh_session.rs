@@ -100,9 +100,10 @@ pub(crate) async fn run_host_turn(
     let mut view = TurnView::default();
     let preassigned_session_id = req.session_id.clone();
     // Abort-safe backstop: the by-name removals below only run when the task
-    // finishes normally. An aborted task would leave its keys in the
-    // concurrency budget forever.
-    let _registry_guard = VirtualRunGuard::new(Arc::clone(&core.registry), virtual_pid);
+    // finishes normally. An abort or a panic would otherwise leave this run's
+    // keys pinning a concurrency slot until app exit.
+    let _registry_guard =
+        VirtualRunGuard::new(Arc::clone(&core.registry), core.run_id.clone(), virtual_pid);
     let result = turn_inner(&core, &mut state, &mut view, &req, &host, &killed).await;
     if let Err(error) = result {
         core.dispatch_event(&mut state, EngineEvent::Error(error));

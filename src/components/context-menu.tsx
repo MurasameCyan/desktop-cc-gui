@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cx } from "@/utils/cx";
+import { useBrowserOcclusion } from "@/features/browser/occlusion";
 
 export interface ContextMenuEntry {
   id: string;
@@ -34,6 +35,9 @@ export function ContextMenu({
   entries: (ContextMenuEntry | "separator")[];
   onClose: () => void;
 }) {
+  // Only mounted while open; hides the native browser webview so menu rows
+  // dropping over the browser pane stay visible.
+  useBrowserOcclusion(true);
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
   // Latest-handler ref so the global dismissal listeners below subscribe

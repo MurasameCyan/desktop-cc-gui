@@ -17,6 +17,7 @@ vi.mock("@/lib/ipc", () => ({
     interruptSession: vi.fn(async () => true),
     rememberSessionModel: vi.fn(async () => {}),
     rememberSessionEffort: vi.fn(async () => {}),
+    rememberSessionProvider: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     listArchivedSessions: vi.fn(async () => []),
     archiveSession: vi.fn(async () => {}),
@@ -59,6 +60,7 @@ function resetStore() {
     activeEngine: "claude",
     models: { omp: "kimi-k3" },
     efforts: {},
+    providers: {},
     archivedSessionKeys: {},
     bySession: {},
     streamingByKey: {},
@@ -275,6 +277,34 @@ describe("stop during an in-flight send", () => {
     } finally {
       oldLaunch.resolve({ runId: "run-overlap-a", sessionId: tab.sessionId });
       await oldSending;
+      dispose();
+    }
+  });
+
+  it("settles the plugin turn once when Stop precedes the launch acknowledgement", async () => {
+    const afterTurn = vi.fn();
+    const dispose = registerTurnHooks("test.stop-before-ack", { afterTurn });
+    const launch = Promise.withResolvers<{ runId: string; sessionId: null }>();
+    useChatStore.setState({ workspaces: [REGISTERED_WORKSPACE], activeEngine: "claude" });
+    useChatStore.getState().startNewChat(WS);
+    vi.mocked(ipc.sendMessage).mockReturnValueOnce(launch.promise);
+    const sending = useChatStore.getState().send("hello", []);
+    let runId = "";
+    try {
+      await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
+      runId = vi.mocked(ipc.sendMessage).mock.calls[0][0].runId!;
+      await useChatStore.getState().interrupt();
+      expect(afterTurn).not.toHaveBeenCalled();
+      launch.resolve({ runId, sessionId: null });
+      await sending;
+      await vi.waitFor(() => expect(afterTurn).toHaveBeenCalledTimes(1));
+      expect(afterTurn).toHaveBeenCalledWith(expect.objectContaining({
+        runId,
+        status: "cancelled",
+      }));
+    } finally {
+      launch.resolve({ runId, sessionId: null });
+      await sending;
       dispose();
     }
   });
@@ -812,6 +842,47 @@ describe("refreshSessions and the not-yet-scanned session", () => {
     expect(useChatStore.getState().openTabs).toEqual([]);
     expect(useChatStore.getState().active).toBeNull();
     expect(useChatStore.getState().bySession["omp/s-archived"]).toBeUndefined();
+  });
+
+  it.each(["local", "external"])("%s archiving closes plugin state without replaying its old session contribution", async (source) => {
+    const session = meta(`archive-${source}`);
+    const tab = { engine: session.engine, sessionId: session.sessionId, workspacePath: WS };
+    const closed = vi.fn();
+    const disposeSession = registerSessionHooks(`test.archive-${source}`, { onClosed: closed });
+    let turn = 0;
+    const disposeTurn = registerTurnHooks(`test.archive-${source}`, {
+      beforeTurn: () => ++turn === 1 ? { promptContributions: [{
+        id: "session-memory",
+        content: "private archived instructions",
+        placement: "request-tail",
+        visibility: "internal",
+        persistence: "session",
+      }] } : undefined,
+    });
+    useChatStore.setState({ sessions: [session], active: tab, openTabs: [tab], bySession: { [`omp/${session.sessionId}`]: { ...EMPTY_SESSION } } });
+    try {
+      const runId = `run-archive-${source}`;
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId, sessionId: session.sessionId });
+      await useChatStore.getState().send("first", []);
+      handleEngineEvents([{ runId, sessionId: session.sessionId, engine: "omp", seq: 1, kind: "done", data: { usage: null } }], engineDeps());
+      if (source === "local") {
+        await useChatStore.getState().archiveSession(session);
+      } else {
+        vi.mocked(ipc.listArchivedSessions).mockResolvedValue([session]);
+        await useChatStore.getState().refreshSessions();
+      }
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
+      expect(closed).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session.sessionId }));
+      await useChatStore.getState().selectSession("omp", session.sessionId, WS);
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: `run-reopened-${source}`, sessionId: session.sessionId });
+      await useChatStore.getState().send("reopened", []);
+      handleEngineEvents([{ runId: `run-reopened-${source}`, sessionId: session.sessionId, engine: "omp", seq: 1, kind: "done", data: { usage: null } }], engineDeps());
+      const request = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0];
+      expect(request.promptContributions.some((item) => item.content === "private archived instructions")).toBe(false);
+    } finally {
+      disposeTurn();
+      disposeSession();
+    }
   });
 });
 

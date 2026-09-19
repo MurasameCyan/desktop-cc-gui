@@ -117,6 +117,10 @@ export const en: Messages = {
     grantGranted: "Granted {{dir}}. The grant applies on the next message —",
     grantResend: "Resend last message",
     grantDeclined: "Access request declined.",
+    grantTitleAction: "Permission required",
+    grantUnavailable:
+      "This operation (e.g. a shell command) is not a directory-access request, so it cannot be allowed here. Switch the permission mode to “Bypass” and resend, or ask the agent to work within the workspace.",
+    grantDismiss: "Got it",
     questionTitle: "Your input is needed",
     questionSubmit: "Submit",
     questionSkip: "Ignore",
@@ -657,6 +661,7 @@ export const en: Messages = {
     cliAuthJsonError: "auth.json is not valid JSON",
     cliDrag: "Drag to reorder",
     cliDisabledGroup: "Disabled",
+    cliNotInstalledGroup: "Not installed",
     cliEdit: "Edit",
     cliDelete: "Delete",
     piAuthOauthTitle: "Subscription Authorization",

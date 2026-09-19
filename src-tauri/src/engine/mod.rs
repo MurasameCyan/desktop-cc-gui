@@ -19,17 +19,38 @@ pub mod pi_family_auth;
 pub mod qoder;
 mod qoder_session;
 pub mod resolve;
+mod events;
+mod reader;
+mod registry;
 
 pub(crate) use resolve::command_for_binary;
 
+// Event types and tool-call/todo payload helpers (events.rs).
+pub use events::{EngineEvent, TodoItem, TodosPayload};
+pub(crate) use events::{
+    assistant_message, parse_todo_args, parse_tool_args_value, push_session_id, safe_prompt_arg,
+    tool_call_message, tool_call_message_with_id, tool_call_patch, tool_call_patch_with_id,
+    tool_path_arg, tool_result_patch, tool_result_patch_with_id,
+};
+// Live child-process registry (registry.rs).
+pub use registry::{ChildEntry, ProcessRegistry};
+pub(crate) use registry::{kill_process_group, next_virtual_pid};
+// Stdout reader / per-turn streaming plumbing (reader.rs).
+pub use reader::sweep_staging_dirs;
+pub(crate) use reader::{
+    LineRead, MAX_LINE_BYTES, RunContext, TurnCore, TurnState, VirtualRunGuard,
+    cleanup_staged_files, read_line_capped, run_reader, spawn_stderr_capture,
+    spawn_stdin_writer,
+};
+
+#[cfg(test)]
 use crate::event_sink;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::process::Command;
 use tokio::sync::Mutex as TokioMutex;
 
 /// Windows pops a visible console window for every console-subsystem child a
@@ -110,7 +131,6 @@ pub struct SendRequest {
     /// falls back to the engine's `current` when this is None.
     pub provider_id: Option<String>,
 }
-
 pub struct BuiltCommand {
     pub command: Command,
     /// Written to stdin after spawn; stdin is then closed.
@@ -124,456 +144,6 @@ pub struct BuiltCommand {
     /// Session id assigned before spawn (grok `-s <uuid>`).
     pub preassigned_session_id: Option<String>,
 }
-
-#[derive(Debug)]
-pub enum EngineEvent {
-    /// Streaming text delta (append).
-    Delta(String),
-    /// Reasoning/thinking delta (append).
-    Thinking(String),
-    /// A completed message block (role, text). `path` carries the target
-    /// file of a tool call (read/edit/write/...) so the UI can render a
-    /// file chip; None for everything else. `args` is the tool-call payload
-    /// (pretty-printed in the timeline). `patch` updates the oldest
-    /// still-incomplete tool row of the same name (claude streams args
-    /// after the name-only start).
-    Message {
-        role: String,
-        text: String,
-        path: Option<String>,
-        /// Todo-list snapshot/patch from a todo tool call (claude TodoWrite,
-        /// omp todo op); feeds the run-status strip's task pill.
-        todos: Option<TodosPayload>,
-        args: Option<Value>,
-        result: Option<Value>,
-        /// Opaque adapter identity shared by the call and its result.
-        tool_call_id: Option<String>,
-        patch: bool,
-    },
-    /// Native session id became known.
-    SessionId(String),
-    /// Token usage snapshot from the engine.
-    Usage(Value),
-    /// Engine-reported error.
-    Error(String),
-    /// Non-terminal engine notice (e.g. an upstream 429 the CLI is
-    /// retrying): surfaced to the UI, but the turn is still running.
-    Warn(String),
-    /// One model attempt ended, but the CLI may retry or compact next.
-    /// Keep its outcome for EOF; unlike Error/Done, this never ends the run.
-    AttemptEnd { error: Option<String> },
-    /// The CLI is backing off before re-issuing a request (claude
-    /// `system/api_retry`, omp `auto_retry_start`). Distinct from `Warn`
-    /// because the UI shows it as live progress ("重试中 2/5") in the run
-    /// status line rather than as an error banner; cleared by the next
-    /// content event or by the turn settling.
-    Retry {
-        attempt: u64,
-        /// The CLI's own retry budget; 0 when it does not report one.
-        max: u64,
-        /// Human-readable reason (HTTP status / provider message).
-        message: String,
-    },
-    /// A tool call was denied by the CLI's permission system (headless mode
-    /// cannot prompt). `path` is the denied absolute path when the denial
-    /// text or tool input carries one — the UI offers a directory grant for
-    /// it; `tool` is the denied tool name when known.
-    PermissionDenied {
-        tool: Option<String>,
-        path: Option<String>,
-        message: String,
-    },
-    /// The CLI is asking the user to choose (control protocol: `can_use_tool`
-    /// for AskUserQuestion). `input` is the full tool input; the answer
-    /// command sends it back with the user's choices merged in.
-    Question {
-        request_id: String,
-        tool_use_id: Option<String>,
-        input: Value,
-    },
-    /// A parked question no longer needs an answer (the CLI cancelled it or
-    /// the run settled): the UI resolves the card without a choice.
-    QuestionSettled { request_id: String },
-    /// A control-protocol permission ask for any other tool. This client has
-    /// no approval UI, so the runner denies it in place — the same net
-    /// behavior as before the control protocol (headless cannot prompt).
-    ControlPermissionDeny {
-        request_id: String,
-        tool_name: String,
-    },
-    /// Turn finished successfully.
-    Done {
-        session_id: Option<String>,
-        usage: Option<Value>,
-    },
-    /// Actual model ID emitted by the engine or resolved at launch.
-    Model(String),
-}
-
-/// One todo entry carried to the frontend.
-#[derive(Debug, Clone, Serialize)]
-pub struct TodoItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    pub content: String,
-    pub status: String,
-}
-
-/// `replace: true` is a full snapshot of the todo list; `false` is a patch
-/// the frontend applies by matching on `content`.
-#[derive(Debug, Clone, Serialize)]
-pub struct TodosPayload {
-    pub items: Vec<TodoItem>,
-    pub replace: bool,
-}
-
-/// Normalize a CLI's todo status onto the four the UI renders. Every CLI
-/// spells these differently (claude `in_progress`, omp `running`/`active`,
-/// `abandoned` for a dropped task), and a status the UI does not know reads
-/// as "pending" - showing finished or abandoned work as still to do.
-fn todo_status(raw: Option<&str>) -> &'static str {
-    match raw.unwrap_or("") {
-        "in_progress" | "running" | "active" => "active",
-        "completed" | "complete" | "done" => "complete",
-        "blocked" => "blocked",
-        "dropped" | "cancelled" | "abandoned" | "deleted" => "dropped",
-        _ => "pending",
-    }
-}
-
-/// Drop empty / null payloads so the UI does not render a blank args panel.
-/// JSON-encoded strings (OpenAI-style `function.arguments`) are parsed first.
-pub(crate) fn parse_tool_args_value(value: &Value) -> Option<Value> {
-    match value {
-        Value::Null => None,
-        Value::Object(map) if map.is_empty() => None,
-        Value::Array(items) if items.is_empty() => None,
-        Value::String(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            match serde_json::from_str::<Value>(trimmed) {
-                Ok(parsed) => parse_tool_args_value(&parsed).or_else(|| Some(Value::String(trimmed.to_string()))),
-                Err(_) => Some(Value::String(trimmed.to_string())),
-            }
-        }
-        other => Some(other.clone()),
-    }
-}
-
-/// Tool-call start: name plus parsed args (path / todos derived from args).
-pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
-    tool_call_message_with_id(name, args, None)
-}
-
-pub(crate) fn tool_call_message_with_id(
-    name: impl Into<String>,
-    args: Option<&Value>,
-    tool_call_id: Option<&str>,
-) -> EngineEvent {
-    let name = name.into();
-    let args = args.and_then(parse_tool_args_value);
-    let todos = args.as_ref().and_then(parse_todo_args);
-    EngineEvent::Message {
-        role: "tool".to_string(),
-        text: name,
-        path: args.as_ref().and_then(tool_path_arg),
-        todos,
-        args,
-        result: None,
-        tool_call_id: tool_call_id.map(str::to_string),
-        patch: false,
-    }
-}
-
-/// Same as [`tool_call_message`] but patches the matching in-flight tool row.
-pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
-    tool_call_patch_with_id(name, args, None)
-}
-
-pub(crate) fn tool_call_patch_with_id(
-    name: impl Into<String>,
-    args: Option<&Value>,
-    tool_call_id: Option<&str>,
-) -> EngineEvent {
-    match tool_call_message_with_id(name, args, tool_call_id) {
-        EngineEvent::Message {
-            role,
-            text,
-            path,
-            todos,
-            args,
-            tool_call_id,
-            ..
-        } => EngineEvent::Message {
-            role,
-            text,
-            path,
-            todos,
-            args,
-            result: None,
-            tool_call_id,
-            patch: true,
-        },
-        other => other,
-    }
-}
-
-/// Todo state echoed by the todo tool's own result (`details.phases`).
-///
-/// This is the authoritative snapshot: omp answers every todo call (init,
-/// start, done, block, append, view) with the complete post-op list, where
-/// each phase carries its tasks and their current status. Reading it avoids
-/// two live-path gaps at once — the start event carries no `args` for this
-/// tool, and `done`/`block` may name a PHASE instead of one task, which a
-/// task-keyed patch could never apply. `replace: true` because the payload
-/// is a full list, not a delta.
-pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
-    let phases = result
-        .get("details")
-        .and_then(|d| d.get("phases"))
-        .and_then(Value::as_array)?;
-    let mut items = Vec::new();
-    for phase in phases {
-        let Some(tasks) = phase.get("tasks").and_then(Value::as_array) else {
-            continue;
-        };
-        for task in tasks {
-            let Some(content) = task
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            else {
-                continue;
-            };
-            let status = todo_status(task.get("status").and_then(Value::as_str));
-            items.push(TodoItem {
-                id: None,
-                content: content.to_string(),
-                status: status.to_string(),
-            });
-        }
-    }
-    if items.is_empty() {
-        return None;
-    }
-    Some(TodosPayload {
-        items,
-        replace: true,
-    })
-}
-
-/// Patches execution result onto the matching in-flight tool row. A todo
-/// tool's result carries the full list (`details.phases`), so it doubles as
-/// an authoritative todo snapshot — the live path's only reliable source for
-/// this tool (see [`parse_todo_result`]).
-pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>) -> EngineEvent {
-    tool_result_patch_with_id(name, result, None)
-}
-
-pub(crate) fn tool_result_patch_with_id(
-    name: impl Into<String>,
-    result: Option<&Value>,
-    tool_call_id: Option<&str>,
-) -> EngineEvent {
-    let todos = result.and_then(parse_todo_result);
-    EngineEvent::Message {
-        role: "tool".to_string(),
-        text: name.into(),
-        path: None,
-        todos,
-        args: None,
-        result: result.cloned(),
-        tool_call_id: tool_call_id.map(str::to_string),
-        patch: true,
-    }
-}
-
-/// Assistant snapshot with no tool metadata.
-pub(crate) fn assistant_message(text: String) -> EngineEvent {
-    EngineEvent::Message {
-        role: "assistant".to_string(),
-        text,
-        path: None,
-        todos: None,
-        args: None,
-        result: None,
-        tool_call_id: None,
-        patch: false,
-    }
-}
-
-/// First path-like argument of a tool call (`read`/`edit`/`write` use
-/// `path`, claude's tools use `file_path`). Returns None for tools whose
-/// args carry no file target (e.g. bash `command`). Glob patterns are kept
-/// as-is; the UI decides whether the string is chip-worthy.
-pub(crate) fn tool_path_arg(args: &Value) -> Option<String> {
-    ["path", "file_path", "filePath"]
-        .iter()
-        .filter_map(|key| args.get(key).and_then(Value::as_str))
-        .map(|s| s.trim())
-        .find(|s| !s.is_empty())
-        .map(|s| s.to_string())
-}
-
-/// Parse a tool call's args into a todo-list payload. Two shapes: claude's
-/// TodoWrite (`todos` array, a full snapshot) and the omp harness todo
-/// protocol (`op` + task/list, mostly patches). None when the args carry
-/// no todo data.
-pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
-    // Normal tools (e.g. Bash, Edit, Read, Write) carry command or file_path;
-    // their description must NEVER be mistaken for a Todo item.
-    if args.get("command").is_some()
-        || args.get("file_path").is_some()
-        || args.get("filePath").is_some()
-        || args.get("pattern").is_some()
-    {
-        return None;
-    }
-
-    let pending_item = |content: &str| TodoItem {
-        id: None,
-        content: content.to_string(),
-        status: "pending".to_string(),
-    };
-    // `list` phases, each with an `items` string array, flattened.
-    let phase_items = |args: &Value| -> Vec<TodoItem> {
-        args.get("list")
-            .and_then(Value::as_array)
-            .map(|phases| {
-                phases
-                    .iter()
-                    .filter_map(|phase| phase.get("items").and_then(Value::as_array))
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(pending_item)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    if let Some(todos) = args.get("todos").and_then(Value::as_array) {
-        let items = todos
-            .iter()
-            .filter_map(|entry| {
-                let content = ["content", "text", "title", "task", "subject"]
-                    .iter()
-                    .filter_map(|key| entry.get(key).and_then(Value::as_str))
-                    .map(|s| s.trim())
-                    .find(|s| !s.is_empty())?;
-                let status = todo_status(entry.get("status").and_then(Value::as_str));
-                let id = entry
-                    .get("id")
-                    .or_else(|| entry.get("taskId"))
-                    .and_then(Value::as_str)
-                    .map(|s| s.to_string());
-                Some(TodoItem {
-                    id,
-                    content: content.to_string(),
-                    status: status.to_string(),
-                })
-            })
-            .collect();
-        return Some(TodosPayload {
-            items,
-            replace: true,
-        });
-    }
-
-    // TaskCreate tool call support: MUST have explicit `subject` (never fallback to tool description)
-    if let Some(subject) = args
-        .get("subject")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if args.get("taskId").is_none() && args.get("op").is_none() {
-            let status = todo_status(args.get("status").and_then(Value::as_str));
-            return Some(TodosPayload {
-                items: vec![TodoItem {
-                    id: None,
-                    content: subject.to_string(),
-                    status: status.to_string(),
-                }],
-                replace: false,
-            });
-        }
-    }
-
-    // TaskUpdate tool call support: MUST have `taskId`
-    if let Some(task_id) = args
-        .get("taskId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let content = args
-            .get("subject")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
-        let status = todo_status(args.get("status").and_then(Value::as_str));
-        return Some(TodosPayload {
-            items: vec![TodoItem {
-                id: Some(task_id.to_string()),
-                content: content.to_string(),
-                status: status.to_string(),
-            }],
-            replace: false,
-        });
-    }
-
-    let op = args.get("op").and_then(Value::as_str)?;
-    match op {
-        "init" => Some(TodosPayload {
-            items: phase_items(args),
-            replace: true,
-        }),
-        "append" => {
-            let items = match args.get("items").and_then(Value::as_array) {
-                Some(items) => items.iter().filter_map(Value::as_str).map(pending_item).collect(),
-                None => phase_items(args),
-            };
-            Some(TodosPayload {
-                items,
-                replace: false,
-            })
-        }
-        "start" | "done" | "block" | "unblock" | "drop" => {
-            // `task` names ONE item. A phase-wide op names a `phase` instead
-            // (the CLI pairs it with an empty `items` array) and must NOT be
-            // emitted here: the frontend matches patches by `content`, so a
-            // phase name would find no item and get APPENDED as a phantom
-            // row. Phase-wide moves travel via the tool's own result
-            // snapshot (`parse_todo_result`), which always carries the
-            // complete post-op list.
-            let task = args.get("task").and_then(Value::as_str)?;
-            let status = match op {
-                "start" => "active",
-                "done" => "complete",
-                "block" => "blocked",
-                "unblock" => "pending",
-                _ => "dropped",
-            };
-            Some(TodosPayload {
-                items: vec![TodoItem {
-                    id: None,
-                    content: task.to_string(),
-                    status: status.to_string(),
-                }],
-                replace: false,
-            })
-        }
-        "rm" | "clear" => Some(TodosPayload {
-            items: Vec::new(),
-            replace: true,
-        }),
-        _ => None,
-    }
-}
-
 pub trait Engine: Send + Sync {
     fn id(&self) -> &'static str;
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String>;
@@ -604,7 +174,6 @@ pub trait Engine: Send + Sync {
             .unwrap_or(supported[0])
     }
 }
-
 pub fn engine_by_id(id: &str) -> Option<Box<dyn Engine>> {
     match id {
         "claude" => Some(Box::new(claude::ClaudeEngine::new())),
@@ -625,7 +194,6 @@ pub fn engine_by_id(id: &str) -> Option<Box<dyn Engine>> {
         _ => None,
     }
 }
-
 /// Engine home dir: `$ENV_KEY` (with `~` expansion, as the CLIs resolve it)
 /// when set and non-empty, else `~/<default_dir>`.
 pub(crate) fn engine_home(env_key: Option<&str>, default_dir: &str) -> PathBuf {
@@ -640,7 +208,6 @@ pub(crate) fn engine_home(env_key: Option<&str>, default_dir: &str) -> PathBuf {
     }
     fallback_home().join(default_dir)
 }
-
 /// Codex config/session home. Settings override wins in production so CLI
 /// 管理's directory is what history, official config, and `codex exec` all
 /// read — not a leftover `~/.codex` default. Tests keep using `CODEX_HOME`
@@ -652,7 +219,6 @@ pub(crate) fn codex_home() -> PathBuf {
     }
     engine_home(Some("CODEX_HOME"), ".codex")
 }
-
 #[cfg(not(test))]
 fn settings_codex_home() -> Option<PathBuf> {
     let custom = crate::settings::read_settings().ok()?.codex_home?;
@@ -662,7 +228,6 @@ fn settings_codex_home() -> Option<PathBuf> {
     }
     crate::open_app::expand_user_path(trimmed).ok()
 }
-
 /// Home dir for the default engine path. Production uses `dirs` (Known
 /// Folder API on Windows); tests steer the fallback through HOME /
 /// USERPROFILE env instead, because `dirs` ignores env on Windows and would
@@ -680,472 +245,6 @@ fn fallback_home() -> PathBuf {
     }
     dirs::home_dir().unwrap_or_default()
 }
-
-/// A leading '-' would parse as a flag (pi also treats '@' as a file
-/// reference): prefix a space so the prompt stays positional text.
-pub(crate) fn safe_prompt_arg(prompt: &str) -> String {
-    if prompt.starts_with('-') || prompt.starts_with('@') {
-        format!(" {prompt}")
-    } else {
-        prompt.to_string()
-    }
-}
-
-/// Push a `SessionId` event from a JSON string field; blank values are ignored.
-/// Engines disagree on the key (`session_id` / `thread_id` / `id`).
-pub(crate) fn push_session_id(value: &Value, key: &str, out: &mut Vec<EngineEvent>) {
-    if let Some(id) = value.get(key).and_then(Value::as_str) {
-        if !id.trim().is_empty() {
-            out.push(EngineEvent::SessionId(id.trim().to_string()));
-        }
-    }
-}
-
-// ==================== Process registry ====================
-
-/// Live engine child processes keyed by session key (native session id once
-/// known, otherwise the run id). Drop kills everything synchronously. Clone
-/// is a refcount bump: the registry keys the same child under BOTH keys —
-/// its run id and its session id (preassigned at spawn, or adopted via
-/// `rekey`) — so either route can interrupt it.
-#[derive(Clone)]
-pub struct ChildEntry {
-    /// The child process. `None` for virtual runs (host-stream engines): the
-    /// entry then only routes interrupt to the transport task via `killed` /
-    /// `reader_abort`, and `pid` is a synthetic identity token (see
-    /// `next_virtual_pid`), never a real process id.
-    pub child: Option<Arc<TokioMutex<Child>>>,
-    pub pid: u32,
-    /// The run id this entry started under; after a rekey the map key is the
-    /// native session id, but the frontend may still cancel by run id.
-    pub run_id: String,
-    /// Set by `kill()`: a user-initiated stop is not an error — at EOF the
-    /// runner commits the partial turn as done instead of pushing a bogus
-    /// "exited with status …" error.
-    pub killed: Arc<std::sync::atomic::AtomicBool>,
-    /// Abort handle for this run's detached stdout-reader task, set by
-    /// send_message right after spawn (a OnceLock so registry insertion
-    /// still happens before the task starts). A child that closed stdout
-    /// but refuses to die would park the reader on `wait()` forever,
-    /// pinning the registry/EventSink/engine Arcs it owns: kill() aborts
-    /// the reader after a settle grace, kill_all() aborts immediately.
-    pub reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
-    /// Interactive stdin kept open past the payload (`keep_stdin_open`):
-    /// control responses (question answers) are written on it. Shared by the
-    /// run-id and session-id entries; `None` for one-shot runs.
-    pub stdin: Option<Arc<TokioMutex<Option<tokio::process::ChildStdin>>>>,
-    /// Pending question requests (request_id -> full tool input) awaiting the
-    /// user's answer; shared by both registry keys of the run.
-    pub questions: Arc<Mutex<HashMap<String, Value>>>,
-}
-
-#[derive(Default)]
-pub struct ProcessRegistry(pub Mutex<HashMap<String, ChildEntry>>);
-
-/// Two concurrent runs of one session must never evict each other's entries:
-/// an evicted child leaks (no key routes an interrupt to it).
-impl ProcessRegistry {
-    /// Clone the entry registered under `key` (run id or session id).
-    fn get(&self, key: &str) -> Option<ChildEntry> {
-        self.0.lock().ok().and_then(|map| map.get(key).cloned())
-    }
-
-    /// Write one NDJSON control line to a live run's interactive stdin.
-    /// Err when the run is unknown, its stdin is already closed, or the
-    /// pipe refuses the write — a swallowed failure would leave the CLI
-    /// parked while the caller believes the answer landed.
-    async fn write_line(&self, key: &str, line: String) -> Result<(), String> {
-        let stdin = self
-            .get(key)
-            .and_then(|entry| entry.stdin)
-            .ok_or_else(|| "the session is no longer accepting input".to_string())?;
-        let mut guard = stdin.lock().await;
-        let handle = guard
-            .as_mut()
-            .ok_or_else(|| "the session's stdin is already closed".to_string())?;
-        handle
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| format!("write to the session's stdin: {e}"))?;
-        handle
-            .write_all(b"\n")
-            .await
-            .map_err(|e| format!("write to the session's stdin: {e}"))
-    }
-
-    /// Close a run's interactive stdin: the CLI treats EOF as the end of the
-    /// session and exits once the current turn is done.
-    fn close_stdin(&self, key: &str) {
-        let Some(stdin) = self.get(key).and_then(|entry| entry.stdin) else {
-            return;
-        };
-        tokio::spawn(async move {
-            *stdin.lock().await = None;
-        });
-    }
-
-    /// Drain and return the request ids of a run's pending questions.
-    fn take_questions(&self, key: &str) -> Vec<String> {
-        let Some(entry) = self.get(key) else {
-            return Vec::new();
-        };
-        let Ok(mut questions) = entry.questions.lock() else {
-            return Vec::new();
-        };
-        let ids: Vec<String> = questions.keys().cloned().collect();
-        questions.clear();
-        ids
-    }
-
-    fn insert(&self, key: String, entry: ChildEntry) {
-        if let Ok(mut map) = self.0.lock() {
-            map.insert(key, entry);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.0.lock().map(|map| map.len()).unwrap_or(0)
-    }
-
-    /// Register a second lookup key for the same live child without
-    /// replacing an unrelated concurrent run. A resumed session is keyed
-    /// here at spawn: its id is preassigned, so the engine's own session
-    /// announcement equals it and never triggers a rekey.
-    fn insert_alias(&self, key: String, entry: ChildEntry) {
-        if let Ok(mut map) = self.0.lock() {
-            if !map.contains_key(&key) {
-                map.insert(key, entry);
-            }
-        }
-    }
-
-    /// Copy the entry to the native-session key once known. The run_id key
-    /// STAYS: the frontend interrupts by session id and by run id (a resume
-    /// whose session-id announcement never arrives leaves run id as the only
-    /// route), and a moving rekey closed exactly that path — the user hit
-    /// Stop, the by-run-id lookup found nothing, and the CLI kept streaming.
-    /// `kill` de-duplicates by pid: hitting both keys kills the tree once.
-    /// A colliding target key belongs to another live run — never overwrite.
-    fn rekey(&self, from: &str, to: String) {
-        if from == to {
-            return;
-        }
-        if let Ok(mut map) = self.0.lock() {
-            if map.contains_key(&to) {
-                return;
-            }
-            if let Some(entry) = map.get(from).cloned() {
-                map.insert(to, entry);
-            }
-        }
-    }
-
-    /// Drop a pre-spawn run-id reservation after a failed launch. Only the
-    /// placeholder (no child, pid 0) is removed — a registered run, real or
-    /// virtual, is never touched.
-    fn remove_reservation(&self, key: &str) {
-        if let Ok(mut map) = self.0.lock() {
-            let reserved = map
-                .get(key)
-                .map(|entry| entry.child.is_none() && entry.pid == 0)
-                .unwrap_or(false);
-            if reserved {
-                map.remove(key);
-            }
-        }
-    }
-
-    /// Remove only if the entry is still the same child (pid match): a run
-    /// that lost its session key to nothing must not evict another run's
-    /// entry that now lives under that key.
-    fn remove_if_pid(&self, key: &str, pid: u32) {
-        if let Ok(mut map) = self.0.lock() {
-            if map.get(key).map(|entry| entry.pid) == Some(pid) {
-                map.remove(key);
-            }
-        }
-    }
-
-    /// Drop every key of the run identified by `pid`. The settle path removes
-    /// keys by name, but an aborted reader never reaches it — and the session
-    /// id adopted mid-run is not known to the abort path, so removal has to be
-    /// pid-keyed. pid 0 is never matched: it identifies the pre-spawn
-    /// reservations of OTHER runs.
-    fn remove_by_pid(&self, pid: u32) {
-        if pid == 0 {
-            return;
-        }
-        if let Ok(mut map) = self.0.lock() {
-            map.retain(|_, entry| entry.pid != pid);
-        }
-    }
-
-    /// Prune runs whose reader/transport task is already finished, then
-    /// reserve `run_id` for a new run.
-    ///
-    /// Both halves fix the same class of wedge. The registry keys one run
-    /// under BOTH its run id and its session id, so the old `map.len()` gate
-    /// refused the 9th concurrent run while claiming a limit of 16 — count
-    /// distinct run ids instead. And cleanup lives at the end of the
-    /// reader/transport task: an aborted task (Stop's force-abort grace, a
-    /// killed child that never EOF'd, a panicking reader) leaves its keys
-    /// behind forever, so the budget fills with ghosts whose processes are
-    /// long gone and sending becomes permanently impossible until restart.
-    /// A set abort handle that reports finished is exactly that ghost;
-    /// in-flight launches (handle not yet set) are never pruned.
-    fn reserve(
-        &self,
-        run_id: &str,
-        killed: Arc<std::sync::atomic::AtomicBool>,
-        reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
-    ) -> Result<(), String> {
-        let mut map = self.0.lock().map_err(|e| e.to_string())?;
-        map.retain(|_, entry| match entry.reader_abort.get() {
-            Some(handle) => !handle.is_finished(),
-            None => true,
-        });
-        if map.contains_key(run_id) {
-            return Err("run id already active".into());
-        }
-        let runs: std::collections::HashSet<&str> =
-            map.values().map(|entry| entry.run_id.as_str()).collect();
-        if runs.len() >= MAX_CONCURRENT_RUNS {
-            return Err(format!(
-                "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
-            ));
-        }
-        map.insert(
-            run_id.to_string(),
-            ChildEntry {
-                child: None,
-                pid: 0,
-                run_id: run_id.to_string(),
-                killed,
-                reader_abort,
-                stdin: None,
-                questions: Arc::new(Mutex::new(HashMap::new())),
-            },
-        );
-        Ok(())
-    }
-
-    /// Kill one entry (pid-reuse guarded). Returns false when the child was
-    /// already reaped — nothing left to signal. Virtual runs (no child) only
-    /// raise the killed flag: the transport task observes it on its next
-    /// loop tick, cancels the host-side turn, and settles the turn itself.
-    fn kill_entry(child: Option<&Arc<TokioMutex<tokio::process::Child>>>, pid: u32, killed: &Arc<std::sync::atomic::AtomicBool>) -> bool {
-        killed.store(true, std::sync::atomic::Ordering::SeqCst);
-        let Some(child) = child else {
-            return true;
-        };
-        if let Ok(mut guard) = child.try_lock() {
-            // Pid-reuse guard: a reaped child's pid may already belong to
-            // someone else — never signal a group we no longer own.
-            match guard.try_wait() {
-                Ok(Some(_)) => false,
-                _ => {
-                    kill_process_group(pid);
-                    let _ = guard.start_kill();
-                    true
-                }
-            }
-        } else {
-            // The runner holds the lock only while reaping post-EOF; that
-            // window is tiny and the kill flag already settles the turn.
-            kill_process_group(pid);
-            true
-        }
-    }
-
-    /// Kill **every** entry matching `key`: the map key (native session id or
-    /// run id) and the recorded run id both match. One session resumed into
-    /// several parallel runs must all die on a single stop, or the survivors
-    /// keep streaming and fight the next run over the session file.
-    pub fn kill(&self, key: &str) -> bool {
-        let mut entries: Vec<(
-            u32,
-            Option<Arc<TokioMutex<tokio::process::Child>>>,
-            Arc<std::sync::atomic::AtomicBool>,
-            Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
-        )> = match self.0.lock() {
-            Ok(map) => {
-                let mut seen_pids = std::collections::HashSet::new();
-                map.iter()
-                    .filter(|(k, e)| *k == key || e.run_id == key)
-                    .filter(|(_, e)| seen_pids.insert(e.pid))
-                    .map(|(_, e)| {
-                        (
-                            e.pid,
-                            e.child.clone(),
-                            Arc::clone(&e.killed),
-                            Arc::clone(&e.reader_abort),
-                        )
-                    })
-                    .collect()
-            }
-            Err(_) => Vec::new(),
-        };
-        // The registry keys one child under BOTH its session id and run id
-        // (rekey copies): de-duplicate by pid so one stop fires one
-        // taskkill, not one per key.
-        entries.sort_by_key(|(pid, _, _, _)| *pid);
-        entries.dedup_by_key(|(pid, _, _, _)| *pid);
-        // No Iterator::any here: it short-circuits on the first true, which
-        // would leave every later parallel run alive — the exact bug this
-        // aggregate kill exists to fix.
-        let mut killed_any = false;
-        for (pid, child, killed, _) in &entries {
-            killed_any |= Self::kill_entry(child.as_ref(), *pid, killed);
-        }
-        // Backstop for a child that ignores SIGKILL (uninterruptible
-        // sleep): its reader parks on wait() after EOF, pinning the Arcs it
-        // owns. Abort it after a grace long enough for a healthy settle
-        // (kill → EOF → wait → terminal event, milliseconds in practice) —
-        // on an already-finished task abort is a no-op, so normal stop
-        // semantics are unchanged. kill() only runs inside a runtime
-        // (spawn_blocking callers), so tokio::spawn is safe here.
-        for (_, _, _, reader_abort) in &entries {
-            if let Some(handle) = reader_abort.get() {
-                let handle = handle.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(READER_SETTLE_GRACE).await;
-                    handle.abort();
-                });
-            }
-        }
-        killed_any
-    }
-
-    pub fn kill_all(&self) {
-        // Blocking lock on the teardown path: skipping children because the
-        // lock was briefly contended would leak engine processes.
-        let mut entries: Vec<ChildEntry> = match self.0.lock() {
-            Ok(mut map) => map.drain().map(|(_, e)| e).collect(),
-            Err(poisoned) => poisoned.into_inner().drain().map(|(_, e)| e).collect(),
-        };
-        // rekey keys one child under BOTH its session id and run id:
-        // de-duplicate by pid or the sweep signals the same process group
-        // twice (a second, doomed taskkill on Windows).
-        entries.sort_by_key(|e| e.pid);
-        entries.dedup_by_key(|e| e.pid);
-        for entry in entries {
-            // Virtual runs own no process group; their task aborts below/via
-            // the abort handle.
-            if let Some(child) = entry.child.as_ref() {
-                kill_process_group(entry.pid);
-                if let Ok(mut guard) = child.try_lock() {
-                    let _ = guard.start_kill();
-                }
-            }
-            // Teardown: abort the reader outright so it drops its
-            // registry/sink Arcs now instead of parking on wait() past
-            // exit. Settle events would go nowhere anyway (the window is
-            // being destroyed).
-            if let Some(handle) = entry.reader_abort.get() {
-                handle.abort();
-            }
-        }
-    }
-}
-
-impl Drop for ProcessRegistry {
-    fn drop(&mut self) {
-        // &mut self makes locking unnecessary; poisoning must not skip the
-        // kill sweep either (a panicked run leaves live children).
-        let map = self.0.get_mut().unwrap_or_else(|e| e.into_inner());
-        let mut entries: Vec<ChildEntry> = map.drain().map(|(_, e)| e).collect();
-        // Same double-keying as kill_all: signal each process group once.
-        entries.sort_by_key(|e| e.pid);
-        entries.dedup_by_key(|e| e.pid);
-        for entry in entries {
-            // Virtual runs own no process group; their task aborts below/via
-            // the abort handle.
-            if let Some(child) = entry.child.as_ref() {
-                kill_process_group(entry.pid);
-                if let Ok(mut guard) = child.try_lock() {
-                    let _ = guard.start_kill();
-                }
-            }
-        }
-    }
-}
-/// SIGKILL the child's whole process group (spawn used `process_group(0)`,
-/// so pgid == pid). Grandchildren holding the stdout pipe die too, which is
-/// what lets the reader task observe EOF and drain the registry.
-#[cfg(unix)]
-pub(crate) fn kill_process_group(pid: u32) {
-    // SAFETY: kill with a negated pgid signals the group; no memory touched.
-    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-}
-
-/// Windows has no process groups; npm CLIs spawn as `cmd /c x.cmd`, so the
-/// real CLI (node/bun) is a grandchild. `taskkill /T /F` walks the tree from
-/// the wrapper down.
-///
-/// This MUST complete before the caller terminates the direct child. It used
-/// to be fire-and-forget, and `kill_entry`'s `start_kill()` killed the
-/// wrapper first: by the time taskkill ran, its target pid was gone, the
-/// tree walk found nothing, and the real CLI kept streaming as an orphan
-/// (dangling ppid) long after the user pressed Stop. Waiting here is what
-/// makes the stop button actually stop the engine.
-#[cfg(not(unix))]
-pub(crate) fn kill_process_group(pid: u32) {
-    let mut command = std::process::Command::new("taskkill");
-    command
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let Ok(mut killer) = command.spawn() else {
-        return;
-    };
-    // Bounded: app teardown sweeps every child, and a wedged taskkill must
-    // not hang the exit path. Normal completion is tens of milliseconds.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        match killer.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-    }
-}
-
-// ==================== stderr redaction ====================
-
-/// Engine stderr can echo the channel credentials from the CLI's own config files; redact credential
-/// shapes before the tail is shown to the user in an error banner.
-fn redact_secrets(text: &str) -> String {
-    use std::sync::LazyLock;
-    static PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
-        [
-            r"(?i)sk-[A-Za-z0-9_-]+",
-            r"(?i)bearer\s+\S+",
-            r"(?i)api[_-]?key\s*[=:]\s*\S+",
-            r"(?i)token\s*[=:]\s*\S+",
-        ]
-        .iter()
-        .filter_map(|p| regex::Regex::new(p).ok())
-        .collect()
-    });
-    let mut out = text.to_string();
-    for pattern in PATTERNS.iter() {
-        out = pattern.replace_all(&out, "***").into_owned();
-    }
-    out
-}
-
 // ==================== Commands ====================
 
 #[derive(Serialize)]
@@ -1154,7 +253,6 @@ pub struct SendResult {
     pub run_id: String,
     pub session_id: Option<String>,
 }
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineInfo {
@@ -1168,7 +266,6 @@ pub struct EngineInfo {
     /// picker's disabled options.
     pub permissions: Vec<String>,
 }
-
 fn codex_bin_from_home(settings: &crate::settings::AppSettings) -> Option<String> {
     let home = settings.codex_home.as_deref()?.trim();
     if home.is_empty() {
@@ -1180,7 +277,6 @@ fn codex_bin_from_home(settings: &crate::settings::AppSettings) -> Option<String
         .exists()
         .then(|| resolve::resolve_launchable_cli_binary(&candidate.to_string_lossy()))
 }
-
 /// CLI binary name behind an engine id, when they differ: qoder's engine ids
 /// name the product/distribution, but only the `qodercli*` binaries speak
 /// ACP (the `qoder` binary is the IDE launcher and is rejected at spawn).
@@ -1191,7 +287,6 @@ pub(crate) fn cli_binary_name(engine_id: &str) -> &str {
         _ => engine_id,
     }
 }
-
 pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &str) -> String {
     // An explicit bin override always wins: it predates the codex-home row
     // (hidden for codex in the UI), and a stale codexBin in an upgraded
@@ -1216,7 +311,6 @@ pub(crate) fn engine_bin(settings: &crate::settings::AppSettings, engine_id: &st
     }
     resolve::resolve_launchable_cli_binary(cli_binary_name(engine_id))
 }
-
 #[tauri::command]
 pub fn list_engines() -> Vec<EngineInfo> {
     let settings = crate::settings::read_settings().unwrap_or_default();
@@ -1247,21 +341,12 @@ pub fn list_engines() -> Vec<EngineInfo> {
         })
         .collect()
 }
-
 /// Concurrent engine runs; past this the machine thrashes and the registry
 /// fan-out makes interrupts unreliable anyway.
-const MAX_CONCURRENT_RUNS: usize = 16;
-/// Grace between a Stop kill and force-aborting the reader task. A healthy
-/// settle (kill → EOF → wait → terminal event) finishes in milliseconds;
-/// the abort only fires when a killed child still won't die and the reader
-/// would otherwise park on `wait()` forever.
-const READER_SETTLE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Hard cap on one NDJSON line from an engine. Real events are kilobytes;
-/// `BufReader::lines` has no limit, so a runaway engine writing without
-/// newlines would buffer the line whole and OOM the host.
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-
+/// Counted as distinct runs (run ids), not map entries: one run is keyed
+/// under both its run id and its session alias, so an entry count would
+/// halve the real ceiling.
+const MAX_CONCURRENT_RUNS: usize = 64;
 /// Resolved launch parameters for one send: request, binary, built command.
 struct Launch {
     req: SendRequest,
@@ -1269,7 +354,6 @@ struct Launch {
     built: BuiltCommand,
     engine_impl: Box<dyn Engine>,
 }
-
 fn prepare_launch(
     engine: &str,
     workspace_path: &str,
@@ -1371,859 +455,6 @@ fn prepare_launch(
     })
 }
 
-/// Stdin payload writer: engines consuming stream-json stdin get the payload,
-/// then EOF (drop closes the pipe) — unless `keep_open`, where the handle is
-/// returned instead so control responses can follow on the same pipe.
-fn spawn_stdin_writer(
-    child: &mut Child,
-    payload: Option<String>,
-    keep_open: bool,
-) -> Option<Arc<TokioMutex<Option<tokio::process::ChildStdin>>>> {
-    if !keep_open {
-        let Some(payload) = payload else {
-            return None;
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            tokio::spawn(async move {
-                let _ = stdin.write_all(payload.as_bytes()).await;
-                let _ = stdin.write_all(b"\n").await;
-                // drop closes stdin -> EOF
-            });
-        }
-        return None;
-    }
-    let keep = Arc::new(TokioMutex::new(child.stdin.take()));
-    if let Some(payload) = payload {
-        let handle = Arc::clone(&keep);
-        tokio::spawn(async move {
-            let mut guard = handle.lock().await;
-            if let Some(stdin) = guard.as_mut() {
-                let _ = stdin.write_all(payload.as_bytes()).await;
-                let _ = stdin.write_all(b"\n").await;
-            }
-        });
-    }
-    Some(keep)
-}
-
-/// Diagnostics ring: keeps the last 4KB for the error banner.
-fn ring_push(buf: &Arc<Mutex<String>>, text: &str) {
-    const CAP: usize = 4096;
-    let mut guard = match buf.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    guard.push_str(text);
-    if guard.len() > CAP {
-        // drain panics on a non-char-boundary start — snap forward. The old
-        // stderr ring could panic mid-CJK here, silently killing the
-        // capture task and starving the error banner of the failure text.
-        let mut keep = guard.len() - CAP;
-        while !guard.is_char_boundary(keep) {
-            keep += 1;
-        }
-        guard.drain(..keep);
-    }
-}
-
-/// Stderr capture ring: keeps the last 4KB for the error banner.
-fn spawn_stderr_capture(stderr: ChildStderr) -> Arc<Mutex<String>> {
-    let buf = Arc::new(Mutex::new(String::new()));
-    let target = Arc::clone(&buf);
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => ring_push(&target, &line),
-            }
-        }
-    });
-    buf
-}
-
-/// Mutable per-run streaming state shared by the reader loop's dispatch.
-struct TurnState {
-    seq: u64,
-    native_session_id: Option<String>,
-    saw_done: bool,
-    saw_error: bool,
-    attempt_error: Option<String>,
-    // NOTE: TurnState lives for the whole process (one run_reader per
-    // spawn), so once saw_error is set every later event in this process
-    // is suppressed. That is correct for the current one-process-per-turn
-    // engines (omp --print, codex exec); a future multi-turn-per-process
-    // engine must reset this per turn instead.
-    saw_any_output: bool,
-}
-
-impl TurnState {
-    fn new(preassigned: Option<String>) -> Self {
-        Self {
-            seq: 0,
-            native_session_id: preassigned,
-            saw_done: false,
-            saw_error: false,
-            attempt_error: None,
-            saw_any_output: false,
-        }
-    }
-
-    fn push(
-        &mut self,
-        sink: &Arc<event_sink::EventSink>,
-        run_id: &str,
-        engine_id: &str,
-        kind: &str,
-        data: Value,
-    ) {
-        self.seq += 1;
-        sink.push(serde_json::json!({
-            "runId": run_id,
-            "sessionId": self.native_session_id,
-            "engine": engine_id,
-            "seq": self.seq,
-            "kind": kind,
-            "data": data,
-            // Emit-side timestamp (Unix ms): plugins compute throughput from
-            // consecutive reports; arrival time would add IPC batching jitter.
-            "ts": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0),
-        }));
-    }
-}
-
-/// Everything the stdout reader task needs (moved in at spawn).
-struct RunContext {
-    core: TurnCore,
-    engine_impl: Box<dyn Engine>,
-    pid: u32,
-    /// Session id fixed before spawn (grok `-s`); seeds TurnState.
-    preassigned_session_id: Option<String>,
-    initial_model: Option<String>,
-    child: Arc<TokioMutex<Child>>,
-    killed: Arc<std::sync::atomic::AtomicBool>,
-    cleanup_files: Vec<PathBuf>,
-    stderr_buf: Arc<Mutex<String>>,
-    /// Off-protocol stdout lines (plain text from CLI startup failures,
-    /// wrapper errors, node crashes): parse_line drops non-JSON lines, so
-    /// without this ring a failed run with empty stderr surfaces as a bare
-    /// "exited with status" banner.
-    stdout_plain_buf: Arc<Mutex<String>>,
-    /// Kill-on-close job guard: drops with this context at settle, sweeping
-    /// any grandchild the CLI orphaned (Windows pwsh.exe/conhost.exe).
-    #[cfg(windows)]
-    _tree_guard: Option<Arc<job::KillOnCloseJob>>,
-}
-
-impl Drop for RunContext {
-    fn drop(&mut self) {
-        // Also runs when the reader is aborted during interrupt or shutdown.
-        cleanup_staged_files(&self.cleanup_files);
-        // Backstop for the settle path's by-name removals: an aborted reader
-        // (Stop's force-abort grace, a child that never EOF'd) never reaches
-        // them, and its keys would then occupy the concurrency budget
-        // forever. Drop runs on every exit path, normal settle included,
-        // where the by-name removals already ran and this finds nothing.
-        self.core.registry.remove_by_pid(self.pid);
-    }
-}
-
-/// Abort-safe registry cleanup for virtual (host-stream) runs, which own no
-/// `RunContext`: their settle code sits at the end of the transport task, so
-/// an abort (Stop's force-abort, shutdown) would strand their keys in the
-/// concurrency budget. Held by the task for its whole life.
-pub(crate) struct VirtualRunGuard {
-    registry: Arc<ProcessRegistry>,
-    virtual_pid: u32,
-}
-
-impl VirtualRunGuard {
-    pub(crate) fn new(registry: Arc<ProcessRegistry>, virtual_pid: u32) -> Self {
-        Self { registry, virtual_pid }
-    }
-}
-
-impl Drop for VirtualRunGuard {
-    fn drop(&mut self) {
-        self.registry.remove_by_pid(self.virtual_pid);
-    }
-}
-
-/// Remove leftover channel staging dirs (`claude-staging`/`grok-staging`
-/// under app_home) from a crashed run: they hold per-send credentials and
-/// must not linger on disk. Live runs recreate them per send, so sweeping
-/// at startup is safe. Only these two known names are touched.
-pub fn sweep_staging_dirs() {
-    let home = crate::paths::app_home();
-    for name in ["claude-staging", "grok-staging"] {
-        let dir = home.join(name);
-        if dir.exists() {
-            if let Err(error) = std::fs::remove_dir_all(&dir) {
-                eprintln!(
-                    "[engine] failed to sweep staging dir {}: {error}",
-                    dir.display()
-                );
-            }
-        }
-    }
-}
-
-fn cleanup_staged_files(paths: &[PathBuf]) {
-    for path in paths {
-        let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
-        if let Err(error) = result {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("[engine] failed to remove staging path {}: {error}", path.display());
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod staging_tests {
-    use super::*;
-
-    struct Noop;
-    impl event_sink::Emit for Noop {
-        fn emit_json(&self, _: &str, _: &str) {}
-    }
-
-    #[tokio::test]
-    async fn reader_context_cleans_private_configs_on_completion_and_abort() {
-        for abort in [false, true] {
-            let directory = std::env::temp_dir().join(format!("ccgui-reader-cleanup-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&directory).unwrap();
-            std::fs::write(directory.join("config.toml"), "temporary credential").unwrap();
-            let mut command = Command::new(if cfg!(windows) {"cmd.exe"} else {"sh"});
-            command.args(if cfg!(windows) {["/c", "exit 0"]} else {["-c", "exit 0"]});
-            let mut child = command.spawn().unwrap();
-            child.wait().await.unwrap();
-            let ctx = RunContext {
-                core: TurnCore {sink: event_sink::EventSink::new(Arc::new(Noop)), registry: Arc::new(ProcessRegistry::default()), engine_id: "grok".into(), run_id: "test".into()},
-                engine_impl: Box::new(grok::GrokEngine), pid: 0,
-                preassigned_session_id: None, initial_model: None,
-                child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
-                stdout_plain_buf: Arc::new(Mutex::new(String::new())),
-                #[cfg(windows)]
-                _tree_guard: None,
-            };
-            let task = tokio::spawn(async move {
-                if abort { std::future::pending::<()>().await; }
-                drop(ctx);
-            });
-            if abort { task.abort(); }
-            let result = task.await;
-            assert_eq!(result.is_err(), abort);
-            assert!(!directory.exists());
-        }
-    }
-}
-
-#[cfg(test)]
-mod terminal_event_tests {
-    use super::*;
-
-    #[derive(Default)]
-    struct Collector(Mutex<Vec<Value>>);
-    impl event_sink::Emit for Collector {
-        fn emit_json(&self, _: &str, raw: &str) {
-            self.0.lock().unwrap().extend(serde_json::from_str::<Vec<Value>>(raw).unwrap());
-        }
-    }
-
-    #[tokio::test]
-    async fn terminal_runs_do_not_emit_late_usage_text_or_duplicate_completion() {
-        for fail in [false, true] {
-            let collector = Arc::new(Collector::default());
-            let core = TurnCore {
-                sink: event_sink::EventSink::new(collector.clone()),
-                registry: Arc::new(ProcessRegistry::default()),
-                engine_id: "codex".into(), run_id: "terminal-test".into(),
-            };
-            let mut state = TurnState::new(Some("session".into()));
-            core.dispatch_event(&mut state, EngineEvent::Delta("完成中文与 emoji 🐎".into()));
-            core.dispatch_event(&mut state, EngineEvent::Usage(serde_json::json!({"input_tokens": 90000, "model_context_window":1000000})));
-            core.dispatch_event(&mut state, if fail { EngineEvent::Error("failed".into()) }
-                else { EngineEvent::Done { session_id: None, usage: None } });
-            core.dispatch_event(&mut state, EngineEvent::Usage(serde_json::json!({"input_tokens":90000})));
-            core.dispatch_event(&mut state, EngineEvent::Delta("late".into()));
-            core.dispatch_event(&mut state, EngineEvent::Done { session_id: None, usage: None });
-            core.sink.flush();
-            let events = collector.0.lock().unwrap();
-            let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
-            assert_eq!(kinds, ["delta", "usage", if fail {"error"} else {"done"}]);
-            assert_eq!(events[0]["data"], "完成中文与 emoji 🐎");
-        }
-    }
-}
-
-/// Event-routing core shared by process runs ([`RunContext`]) and virtual
-/// host-stream runs ([`dsh_session::run_host_turn`]): the fields
-/// `dispatch_event` needs to route engine events to the UI sink and keep the
-/// registry's session aliasing in step.
-pub(crate) struct TurnCore {
-    pub(crate) sink: Arc<event_sink::EventSink>,
-    pub(crate) registry: Arc<ProcessRegistry>,
-    pub(crate) engine_id: String,
-    pub(crate) run_id: String,
-}
-
-impl TurnCore {
-    /// Adopt a native session id: rekey the registry entry (no overwrite) and
-    /// remember it for subsequent event payloads.
-    fn adopt_session_id(&self, state: &mut TurnState, id: &str, announce: bool) {
-        if state.native_session_id.as_deref() == Some(id) {
-            return;
-        }
-        state.native_session_id = Some(id.to_string());
-        self.registry.rekey(&self.run_id, id.to_string());
-        if announce {
-            state.push(
-                &self.sink,
-                &self.run_id,
-                &self.engine_id,
-                "session",
-                Value::String(id.to_string()),
-            );
-        }
-    }
-
-    fn dispatch_event(&self, state: &mut TurnState, event: EngineEvent) {
-        // Terminal state is monotonic, even if a CLI or its usage tail emits
-        // more data before exiting: no late retry/content/warn event may
-        // revive a settled run. The one exception is SessionId — a done that
-        // raced the CLI's session announcement must still rekey/announce, or
-        // the conversation strands under its provisional key.
-        if (state.saw_done || state.saw_error) && !matches!(event, EngineEvent::SessionId(_)) {
-            return;
-        }
-        match event {
-            EngineEvent::Delta(text) => state.push(
-                &self.sink,
-                &self.run_id,
-                &self.engine_id,
-                "delta",
-                Value::String(text),
-            ),
-            EngineEvent::Thinking(text) => state.push(
-                &self.sink,
-                &self.run_id,
-                &self.engine_id,
-                "thinking",
-                Value::String(text),
-            ),
-            EngineEvent::Message {
-                role,
-                text,
-                path,
-                todos,
-                args,
-                result,
-                tool_call_id,
-                patch,
-            } => {
-                let mut payload = serde_json::json!({ "role": role, "text": text });
-                if let Some(path) = path {
-                    payload["path"] = Value::String(path);
-                }
-                if let Some(todos) = todos {
-                    if let Ok(value) = serde_json::to_value(todos) {
-                        payload["todos"] = value;
-                    }
-                }
-                if let Some(args) = args {
-                    payload["args"] = args;
-                }
-                if let Some(result) = result {
-                    payload["result"] = result;
-                }
-                if let Some(tool_call_id) = tool_call_id {
-                    payload["toolCallId"] = Value::String(tool_call_id);
-                }
-                if patch {
-                    payload["patch"] = Value::Bool(true);
-                }
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "message",
-                    payload,
-                )
-            }
-            EngineEvent::AttemptEnd { error } => state.attempt_error = error,
-            EngineEvent::SessionId(id) => self.adopt_session_id(state, &id, true),
-            EngineEvent::Usage(usage) => {
-                state.push(&self.sink, &self.run_id, &self.engine_id, "usage", usage)
-            }
-            EngineEvent::Error(error) => {
-                state.saw_error = true;
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "error",
-                    Value::String(error),
-                );
-                // The turn failed terminally: the frontend settles (send
-                // button back to idle) on this event, so a still-running
-                // CLI process would keep burning tokens invisibly while the
-                // UI claims the session ended. Kill the process tree now —
-                // the killed flag makes the runner's EOF path a no-op
-                // (saw_error already settled the turn) and the registry
-                // entry drains as usual.
-                //
-                // Off the reader thread: the kill blocks on the Windows tree
-                // walk, and stalling this task would also stall the stdout
-                // drain it owns. saw_error already settled the turn, so
-                // nothing here depends on the kill completing first.
-                let registry = Arc::clone(&self.registry);
-                let run_id = self.run_id.clone();
-                tokio::task::spawn_blocking(move || registry.kill(&run_id));
-            }
-            EngineEvent::Warn(error) => {
-                // Not terminal: no saw_error — EOF settle still decides the
-                // turn's fate if the CLI gives up after this notice.
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "warn",
-                    Value::String(error),
-                );
-            }
-            EngineEvent::Retry {
-                attempt,
-                max,
-                message,
-            } => {
-                // Not terminal: the CLI is backing off and will re-issue the
-                // request. The frontend renders it as live progress in the
-                // run status line (not as an error banner) and clears it on
-                // the next content event.
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "retry",
-                    serde_json::json!({ "attempt": attempt, "max": max, "message": message }),
-                );
-            }
-            EngineEvent::PermissionDenied {
-                tool,
-                path,
-                message,
-            } => {
-                // Not terminal either: the CLI works around the denial and
-                // the turn continues — the UI offers the grant alongside.
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "permission_denied",
-                    serde_json::json!({ "tool": tool, "path": path, "message": message }),
-                );
-            }
-            EngineEvent::Question {
-                request_id,
-                tool_use_id,
-                input,
-            } => {
-                // Park the ask: the answer command rebuilds updatedInput from
-                // this exact input (the control protocol wants the full tool
-                // input back, with the answers merged in).
-                if let Some(entry) = self.registry.get(&self.run_id) {
-                    if let Ok(mut questions) = entry.questions.lock() {
-                        questions.insert(request_id.clone(), input.clone());
-                    }
-                }
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "question",
-                    serde_json::json!({
-                        "requestId": request_id,
-                        "toolUseId": tool_use_id,
-                        "input": input,
-                    }),
-                );
-            }
-            EngineEvent::QuestionSettled { request_id } => {
-                if let Some(entry) = self.registry.get(&self.run_id) {
-                    if let Ok(mut questions) = entry.questions.lock() {
-                        questions.remove(&request_id);
-                    }
-                }
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "question_settled",
-                    serde_json::json!({ "requestId": request_id }),
-                );
-            }
-            EngineEvent::ControlPermissionDeny {
-                request_id,
-                tool_name,
-            } => {
-                // No approval UI in this client: deny in place so the CLI is
-                // not left parked until its deadline. Net behavior matches
-                // the pre-control-protocol headless run (ask -> denial, the
-                // model works around it). Best effort: if the pipe is gone
-                // the CLI is already dead and its own deadline settles.
-                let registry = Arc::clone(&self.registry);
-                let run_id = self.run_id.clone();
-                let line = serde_json::json!({
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        "response": {
-                            "behavior": "deny",
-                            "message": format!(
-                                "This client cannot show tool-permission prompts; the {tool_name} call was denied. Work around it, or tell the user what you would have run so they can approve it another way."
-                            ),
-                        },
-                    },
-                })
-                .to_string();
-                tokio::spawn(async move {
-                    let _ = registry.write_line(&run_id, line).await;
-                });
-            }
-            EngineEvent::Model(model) => {
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "model",
-                    Value::String(model),
-                );
-            }
-            EngineEvent::Done { session_id, usage } => {
-                state.saw_done = true;
-                if let Some(id) = session_id {
-                    self.adopt_session_id(state, &id, false);
-                }
-                // The turn is over: EOF the interactive stdin so the CLI
-                // exits instead of waiting for a next message forever.
-                self.registry.close_stdin(&self.run_id);
-                state.push(
-                    &self.sink,
-                    &self.run_id,
-                    &self.engine_id,
-                    "done",
-                    serde_json::json!({ "usage": usage }),
-                );
-            }
-        }
-    }
-}
-
-impl RunContext {
-    fn dispatch_event(&self, state: &mut TurnState, event: EngineEvent) {
-        self.core.dispatch_event(state, event);
-    }
-}
-
-/// One line read from the engine's stdout, size-capped.
-enum LineRead {
-    /// A complete line, newline terminator stripped (may be empty).
-    Line(Vec<u8>),
-    /// Clean EOF.
-    Eof,
-    /// No newline within MAX_LINE_BYTES: the run must be torn down.
-    TooLong,
-}
-
-/// Cancellation-safe replacement for `BufReader::lines().next_line()` with a
-/// hard byte cap: partial bytes live in the caller-owned `line`, and the
-/// only await is `fill_buf`, so a `tokio::select!` tick landing mid-line
-/// consumes and drops nothing — the property the old code relied on
-/// `next_line` for (a cancelled `read_line` would lose the partial bytes).
-/// Resuming the buffer is the whole point: a `line.clear()` here wiped the
-/// bytes a cancelled call had already consumed from the reader, so a tick
-/// landing mid-line truncated that line (a long `item.completed` parsed as
-/// broken JSON and was dropped). The caller hands back the same buffer every
-/// call, and `mem::take` empties it on a complete line while Eof/TooLong end
-/// the run, so this only ever appends.
-async fn read_line_capped(
-    reader: &mut BufReader<ChildStdout>,
-    line: &mut Vec<u8>,
-) -> std::io::Result<LineRead> {
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            return Ok(if line.is_empty() {
-                LineRead::Eof
-            } else {
-                // EOF mid-line: deliver the partial line, like next_line.
-                LineRead::Line(std::mem::take(line))
-            });
-        }
-        let end = available
-            .iter()
-            .position(|b| *b == b'\n')
-            .unwrap_or(available.len());
-        if line.len() + end > MAX_LINE_BYTES {
-            return Ok(LineRead::TooLong);
-        }
-        line.extend_from_slice(&available[..end]);
-        let has_newline = end < available.len();
-        // Consume the newline too when present. No await between extend and
-        // consume, so cancellation cannot split the pair.
-        reader.consume(end + usize::from(has_newline));
-        if has_newline {
-            return Ok(LineRead::Line(std::mem::take(line)));
-        }
-    }
-}
-
-/// Read NDJSON stdout until EOF, dispatch events, then settle the turn:
-/// registry cleanup, temp-file cleanup, and the terminal done/error event.
-async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
-    let mut state = TurnState::new(ctx.preassigned_session_id.clone());
-    if let Some(model) = ctx.initial_model.clone() {
-        ctx.dispatch_event(&mut state, EngineEvent::Model(model));
-    }
-    // codex reports usage into its own session log instead of the stdout
-    // stream (the stream only carries it with `turn.completed`), so a long
-    // turn would otherwise show nothing until it ended. Poll that log
-    // alongside the stream once the thread id is known. `read_line_capped`
-    // is what makes the select safe: partial bytes stay in the caller-owned
-    // buffer across polls, so a tick landing mid-line consumes and drops
-    // nothing, and one runaway line can't grow without bound.
-    let mut reader = BufReader::new(stdout);
-    let mut line_buf = Vec::new();
-    let is_codex = ctx.core.engine_id == "codex";
-    let mut usage_tail: Option<codex_usage::UsageTail> = None;
-    // Only the stream's own thread id (thread.started) may open the log: a
-    // resumed run's preassigned id can name a thread the CLI is no longer
-    // writing to, and tailing that file would miss this run's reports.
-    let mut stream_session_id = false;
-    // The CLI writes the rollout at thread start, so the open normally
-    // succeeds on the first tick. Bound the retries anyway: each one walks
-    // the whole `sessions/**` tree, and a run whose home is not the one being
-    // written would walk it every tick for the length of the turn.
-    let mut tail_attempts = 0u32;
-    let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
-    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        let read = if is_codex && !state.saw_done && !state.saw_error {
-            tokio::select! {
-                line = read_line_capped(&mut reader, &mut line_buf) => line,
-                _ = poll.tick() => {
-                    if let Some(tail) = usage_tail.as_mut() {
-                        for usage in tail.poll() {
-                            ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
-                        }
-                    } else if stream_session_id && tail_attempts < 20 {
-                        // The CLI creates the log a moment after the thread
-                        // id arrives. Attempt every tick rather than backing
-                        // off: the tail starts at the file's end, so any wait
-                        // here is a window in which a record lands unread.
-                        tail_attempts += 1;
-                        usage_tail = state
-                            .native_session_id
-                            .as_deref()
-                            .and_then(codex_usage::UsageTail::open);
-                    }
-                    continue;
-                }
-            }
-        } else {
-            read_line_capped(&mut reader, &mut line_buf).await
-        };
-        let line = match read {
-            Ok(LineRead::Line(bytes)) => bytes,
-            Ok(LineRead::Eof) => break,
-            Ok(LineRead::TooLong) => {
-                // A line this large is never a real event — the engine is
-                // stuck writing garbage. Settle the turn as a terminal
-                // error; dispatch also kills the process tree off-thread.
-                ctx.dispatch_event(
-                    &mut state,
-                    EngineEvent::Error(format!(
-                        "{} emitted a line over {} MiB without a newline; run terminated",
-                        ctx.core.engine_id,
-                        MAX_LINE_BYTES / (1024 * 1024),
-                    )),
-                );
-                break;
-            }
-            Err(_) => break,
-        };
-        let text = String::from_utf8_lossy(&line);
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        state.saw_any_output = true;
-        if serde_json::from_str::<Value>(trimmed).is_err() {
-            // Every engine protocol here is NDJSON: a non-JSON line is
-            // off-protocol diagnostics (clap usage errors, shell wrapper
-            // complaints, node crashes) that no parse_line would keep.
-            ring_push(&ctx.stdout_plain_buf, &format!("{trimmed}\n"));
-        }
-        let mut events = Vec::new();
-        ctx.engine_impl.parse_line(trimmed, &mut events);
-        stream_session_id |= events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::SessionId(_)));
-        for mut event in events {
-            // Flush the final rollout records BEFORE done/error. Sending them
-            // afterwards made observers adopt the already-finished run again.
-            if matches!(event, EngineEvent::Done { .. } | EngineEvent::Error(_))
-                && !state.saw_done && !state.saw_error
-            {
-                if let Some(tail) = usage_tail.as_mut() {
-                    for usage in tail.poll() {
-                        ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
-                    }
-                    if let EngineEvent::Done { usage: Some(usage), .. } = &mut event {
-                        *usage = tail.with_window(usage);
-                    }
-                }
-            }
-            ctx.dispatch_event(&mut state, event);
-        }
-    }
-
-    // Last look at the session log: the final response's record may have
-    // landed after the last poll tick.
-    if let Some(tail) = usage_tail.as_mut() {
-        for usage in tail.poll() {
-            ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
-        }
-    }
-
-    // Wait for exit
-    let status = {
-        let mut guard = ctx.child.lock().await;
-        guard.wait().await.ok()
-    };
-    // Unix mirror of the Windows kill-on-close job guard: grandchildren the
-    // CLI orphaned (background shells that outlived the turn) are still in
-    // the run's process group — sweep them so a settled turn leaks nothing.
-    // Clean exit → empty group → ESRCH no-op; a pid-reuse hit would need a
-    // fresh process to take the just-reaped pid AND lead a new group within
-    // microseconds. pid 0 is never signalled: kill(0, …) targets OUR group.
-    #[cfg(unix)]
-    if ctx.pid != 0 {
-        kill_process_group(ctx.pid);
-    }
-    for path in &ctx.cleanup_files {
-        let _ = std::fs::remove_file(path);
-    }
-    // Pending questions die with the run: settle their cards so the UI never
-    // leaves an answerable question pointing at a dead process.
-    for key in [state.native_session_id.clone(), Some(ctx.core.run_id.clone())]
-        .into_iter()
-        .flatten()
-    {
-        for request_id in ctx.core.registry.take_questions(&key) {
-            ctx.dispatch_event(&mut state, EngineEvent::QuestionSettled { request_id });
-        }
-    }
-    // Drain this run's registry entries: under the native session id after
-    // rekey, and under the run id when the session id never arrived.
-    if let Some(key) = state.native_session_id.clone() {
-        ctx.core.registry.remove_if_pid(&key, ctx.pid);
-    }
-    ctx.core.registry.remove_if_pid(&ctx.core.run_id, ctx.pid);
-    // Also clean up the preassigned session id alias if one was registered
-    // at spawn (grok/codex resume): a resumed session was keyed under
-    // ctx.preassigned_session_id, so we must remove that alias even if the
-    // native id differs or never arrived.
-    if let Some(key) = ctx.preassigned_session_id.as_deref() {
-        ctx.core.registry.remove_if_pid(key, ctx.pid);
-    }
-    // omp writes some failures (upstream 403/5xx, quota exhaustion) to
-    // stderr and then exits — sometimes cleanly, after a normal turn_end.
-    // A non-empty stderr on a failed exit must reach the user even when a
-    // done/error event already settled the turn; dropping it hides exactly
-    // the errors the user cannot otherwise see.
-    let stderr_tail = ctx
-        .stderr_buf
-        .lock()
-        .map(|g| redact_secrets(g.trim()))
-        .unwrap_or_default();
-    let failed = status.map(|s| !s.success()).unwrap_or(true);
-    if failed && !state.saw_error && !stderr_tail.is_empty() {
-        state.push(
-            &ctx.core.sink,
-            &ctx.core.run_id,
-            &ctx.core.engine_id,
-            "warn",
-            Value::String(format!("engine stderr: {stderr_tail}")),
-        );
-    }
-
-    if !state.saw_done && !state.saw_error {
-        let killed = ctx.killed.load(std::sync::atomic::Ordering::SeqCst);
-        if killed {
-            // User-initiated stop: commit whatever streamed so far as a
-            // normal turn end — a SIGKILL'd child is not a failure.
-            state.push(
-                &ctx.core.sink,
-                &ctx.core.run_id,
-                &ctx.core.engine_id,
-                "done",
-                serde_json::json!({ "usage": null }),
-            );
-        } else if failed || !state.saw_any_output || state.attempt_error.is_some() {
-            let mut message = state.attempt_error.take().unwrap_or_else(|| {
-                format!(
-                    "{} exited with status {}",
-                    ctx.core.engine_id,
-                    status
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "unknown".to_string())
-                )
-            });
-            if !stderr_tail.is_empty() {
-                message.push_str(&format!(": {stderr_tail}"));
-            } else {
-                // Startup failures of old/odd CLIs often land on stdout as
-                // plain text instead of stderr; without this fallback the
-                // banner is a bare exit code.
-                let stdout_tail = ctx
-                    .stdout_plain_buf
-                    .lock()
-                    .map(|g| redact_secrets(g.trim()))
-                    .unwrap_or_default();
-                if !stdout_tail.is_empty() {
-                    message.push_str(&format!(": {stdout_tail}"));
-                }
-            }
-            state.push(
-                &ctx.core.sink,
-                &ctx.core.run_id,
-                &ctx.core.engine_id,
-                "error",
-                Value::String(message),
-            );
-        } else {
-            // Clean EOF without an explicit done line (kimi).
-            state.push(
-                &ctx.core.sink,
-                &ctx.core.run_id,
-                &ctx.core.engine_id,
-                "done",
-                serde_json::json!({ "usage": null }),
-            );
-        }
-    }
-    ctx.core.sink.flush();
-}
-
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, crate::AppState>,
@@ -2255,7 +486,6 @@ pub async fn send_message(
     )
     .await
 }
-
 /// Body of the `send_message` command, taking the state directly: integration
 /// tests drive the real spawn/read pipeline without a Tauri app (the mock
 /// runtime links the GUI crates into the test exe, which then cannot load
@@ -2288,13 +518,31 @@ pub async fn send_message_inner(
     // The placeholder owns the run's killed/reader_abort handles, so a Stop
     // landing inside the launch window still settles the turn; every error
     // path before the real registration drops the reservation.
-    // `reserve` also prunes ghost entries and counts distinct runs, not keys
-    // (a run occupies two keys once its session id is known).
     let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_abort = Arc::new(std::sync::OnceLock::new());
-    state
-        .processes
-        .reserve(&run_id, Arc::clone(&killed), Arc::clone(&reader_abort))?;
+    {
+        let mut map = state.processes.0.lock().map_err(|e| e.to_string())?;
+        if map.contains_key(&run_id) {
+            return Err("run id already active".into());
+        }
+        if registry::active_run_count(&map) >= MAX_CONCURRENT_RUNS {
+            return Err(format!(
+                "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
+            ));
+        }
+        map.insert(
+            run_id.clone(),
+            ChildEntry {
+                child: None,
+                pid: 0,
+                run_id: run_id.clone(),
+                killed: Arc::clone(&killed),
+                reader_abort: Arc::clone(&reader_abort),
+                stdin: None,
+                questions: Arc::new(Mutex::new(HashMap::new())),
+            },
+        );
+    }
     let reserved = run_id.clone();
     let result = send_reserved(
         state,
@@ -2318,7 +566,6 @@ pub async fn send_message_inner(
     }
     result
 }
-
 /// Body of [`send_message_inner`] once the run id is reserved: the caller id
 /// is used as-is (never regenerated — the frontend pre-routes events by it),
 /// and the placeholder's killed/reader_abort handles carry into the real
@@ -2442,7 +689,9 @@ async fn send_reserved(
     );
     let questions: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let run_id = uuid::Uuid::new_v4().to_string();
+    // The reserved caller id keys the real entry too: inserting under the
+    // same run_id replaces the placeholder, and the shared killed/reader_abort
+    // Arcs keep interrupts from the launch window routed to this child.
     // Join a kill-on-close job before the run can settle: an orphaned
     // grandchild (claude's pwsh.exe/conhost.exe) must die with the run's
     // context, not accumulate outside every tree taskkill can still walk.
@@ -2531,15 +780,6 @@ async fn send_reserved(
         session_id: launch.built.preassigned_session_id,
     })
 }
-
-/// Synthetic registry identity for virtual (host-stream) runs: they own no
-/// process, but the registry's dedup/remove paths are pid-keyed, so each run
-/// gets a unique token well above any real pid. Never passed to an OS call.
-fn next_virtual_pid() -> u32 {
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX / 2);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Virtual run path for engines that drive their own transport
 /// ([`Engine::drives_own_transport`]): register a child-less entry whose
 /// `killed` flag and abort handle route interrupts into the transport task,
@@ -2596,7 +836,6 @@ async fn send_host_stream(
         session_id: resume_session_id,
     })
 }
-
 /// Async + spawn_blocking: the kill waits for the Windows tree walk to
 /// finish (see `kill_process_group`), and a synchronous command would hold
 /// that wait on the UI thread — the app would visibly hitch on every Stop.
@@ -2610,7 +849,6 @@ pub async fn interrupt_session(
         .await
         .map_err(|e| e.to_string())
 }
-
 /// Answer a pending AskUserQuestion (claude control protocol). `answers` maps
 /// each question's text to the chosen option label — an array of labels for
 /// multiSelect questions. `None` means the user skipped: the CLI records
@@ -2667,7 +905,6 @@ pub async fn answer_question(
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod prompt_contribution_tests {
     use super::*;
@@ -3027,7 +1264,6 @@ mod permission_tests {
         }
     }
 }
-
 #[cfg(test)]
 mod retry_lifecycle_tests {
     use super::*;
@@ -3156,19 +1392,6 @@ mod retry_lifecycle_tests {
         assert!(data.contains("unrecognized arguments"), "{data}");
     }
 
-    /// The ring truncates by byte count: a naive drain start can land
-    /// mid-CJK and panic (killing the stderr capture task silently).
-    #[test]
-    fn ring_push_snaps_truncation_to_char_boundary() {
-        let buf = Arc::new(Mutex::new(String::new()));
-        ring_push(&buf, &"引擎错误".repeat(1000));
-        // std Mutex stays: ring buffers are deliberately poison-tolerant
-        // (a panicked capture task must not take down error reporting).
-        let kept = buf.lock().unwrap_or_else(|p| p.into_inner());
-        assert!(kept.len() <= 4096);
-        assert!(kept.ends_with("引擎错误"));
-    }
-
     #[tokio::test]
     async fn legacy_agent_end_can_retry_and_recover_before_eof() {
         let events = replay_cli_output(&[
@@ -3197,313 +1420,88 @@ mod retry_lifecycle_tests {
             assert!(!events.iter().any(|event| event["kind"] == "done"));
         }
     }
-}
-
-#[cfg(test)]
-mod registry_tests {
-    use super::*;
-
-    /// rekey must COPY (not move) so both the session-id and run-id keys
-    /// route an interrupt to the same process. A resume whose
-    /// thread.started never arrives leaves run id as the only route — a
-    /// moving rekey leaked the child (user pressed Stop, nothing died).
+    /// A background grandchild inheriting stdout keeps the pipe open after
+    /// the CLI exits, so EOF never comes. The child-exit watch must settle
+    /// the run anyway — drain the buffered lines, emit done, drain the
+    /// registry — instead of parking the reader (and the run's concurrency
+    /// slots) on the held pipe forever.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn rekey_keeps_both_keys_and_kill_routes_by_either() {
-        let child = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-            .args(if cfg!(windows) {
-                ["/c", "ping -n 30 127.0.0.1"]
-            } else {
-                ["-c", "sleep 30"]
-            })
+    async fn child_exit_settles_run_despite_pipe_holding_grandchild() {
+        let done_lines = [
+            serde_json::json!({"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}),
+            serde_json::json!({"type":"agent_end","messages":[{"role":"assistant","stopReason":"stop"}]}),
+        ];
+        let script = format!(
+            "printf '%s\\n' {}; sleep 600 & exit 0",
+            done_lines
+                .iter()
+                .map(|line| format!("'{line}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sleep child");
-        let pid = child.id().unwrap_or(0);
-        let entry = ChildEntry {
-            child: Some(Arc::new(TokioMutex::new(child))),
-            pid,
-            run_id: "run-1".to_string(),
-            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            reader_abort: Arc::new(std::sync::OnceLock::new()),
-            stdin: None,
-            questions: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let registry = ProcessRegistry::default();
-        registry.insert("run-1".to_string(), entry);
-
-        // Simulate the engine adopting the native session id mid-run.
-        registry.rekey("run-1", "session-9".to_string());
-
-        // Both keys route to the same pid; killing by the RUN id (the
-        // fallback route when the session announcement never arrived) must
-        // still find it, and the session key must survive the by-run-id
-        // kill so a second stop also lands (idempotent, pid-deduped).
-        assert!(registry.kill("run-1"));
-        // kill does not drain: both keys still map to the (now dying)
-        // child, so a second stop via the session id still lands on the
-        // same entry. Its boolean result is racy (the child may already be
-        // reaped, in which case kill_entry reports false on a SUCCESSFUL
-        // interrupt), so assert the routing — not the return value.
-        assert_eq!(registry.len(), 2);
-        let _ = registry.kill("session-9");
-
-        // The registry drains the entry from both keys on exit.
-        registry.remove_if_pid("session-9", pid);
-        registry.remove_if_pid("run-1", pid);
-        assert_eq!(registry.len(), 0);
-    }
-
-    /// Child-less registry entry: enough for the registry's own bookkeeping
-    /// (budget accounting, key removal), which never touches the process.
-    fn virtual_entry(run_id: &str, pid: u32) -> ChildEntry {
-        ChildEntry {
-            child: None,
-            pid,
-            run_id: run_id.to_string(),
-            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            reader_abort: Arc::new(std::sync::OnceLock::new()),
-            stdin: None,
-            questions: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// The wedge users hit: every live run occupies TWO keys (run id +
-    /// session id), so a key-counting gate refused the 9th run while
-    /// reporting a limit of 16.
-    #[tokio::test]
-    async fn concurrency_budget_counts_runs_not_registry_keys() {
-        let registry = ProcessRegistry::default();
-        for i in 0..MAX_CONCURRENT_RUNS - 1 {
-            let run_id = format!("run-{i}");
-            let entry = virtual_entry(&run_id, 1000 + i as u32);
-            registry.insert(run_id.clone(), entry.clone());
-            registry.insert_alias(format!("session-{i}"), entry);
-        }
-        assert_eq!(registry.len(), (MAX_CONCURRENT_RUNS - 1) * 2);
-
-        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let abort = Arc::new(std::sync::OnceLock::new());
-        registry
-            .reserve("run-last", Arc::clone(&killed), Arc::clone(&abort))
-            .expect("15 double-keyed runs are 15 runs, not 30: the 16th must be admitted");
-        let error = registry
-            .reserve("run-over", killed, abort)
-            .expect_err("the 17th run exceeds the budget");
-        assert!(error.contains("too many concurrent runs"), "{error}");
-    }
-
-    /// Cleanup lives at the end of the reader/transport task, so an aborted
-    /// task (Stop's force-abort grace, a child that never EOF'd) used to
-    /// strand its keys forever — the budget filled with ghosts and sending
-    /// became impossible until restart.
-    #[tokio::test]
-    async fn reserve_prunes_runs_whose_reader_task_is_already_finished() {
-        let registry = ProcessRegistry::default();
-        let task = tokio::spawn(async {});
-        let abort = Arc::new(std::sync::OnceLock::new());
-        let _ = abort.set(task.abort_handle());
-        task.await.expect("task completes");
-
-        let mut ghost = virtual_entry("run-ghost", 4242);
-        ghost.reader_abort = Arc::clone(&abort);
-        registry.insert("run-ghost".to_string(), ghost.clone());
-        registry.insert_alias("session-ghost".to_string(), ghost);
-        // A run still inside its launch window has no abort handle yet and
-        // must never be pruned.
-        registry.insert("run-live".to_string(), virtual_entry("run-live", 4343));
-
-        registry
-            .reserve(
-                "run-new",
-                Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                Arc::new(std::sync::OnceLock::new()),
-            )
-            .expect("reserve succeeds");
-
-        assert!(registry.get("run-ghost").is_none(), "finished run keeps its run-id key");
-        assert!(registry.get("session-ghost").is_none(), "finished run keeps its alias");
-        assert!(registry.get("run-live").is_some(), "in-flight launch was pruned");
-        assert!(registry.get("run-new").is_some());
-    }
-
-    /// Virtual (host-stream) runs settle at the end of their transport task;
-    /// the guard is what frees their keys when that task is aborted instead.
-    #[tokio::test]
-    async fn dropping_a_virtual_run_guard_frees_every_key_of_that_run() {
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        // Match production: own process group, so the settle path's group
+        // sweep also reaps the pipe-holding grandchild.
+        command.process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let child = Arc::new(TokioMutex::new(child));
+        let emitter = Arc::new(CollectingEmitter::default());
         let registry = Arc::new(ProcessRegistry::default());
-        let entry = virtual_entry("run-v", 5150);
-        registry.insert("run-v".to_string(), entry.clone());
-        registry.insert_alias("session-v".to_string(), entry);
-        // Another run's pre-spawn reservation shares pid 0 with every other
-        // reservation: removal is pid-keyed, so it must be left alone.
-        registry.insert("run-other".to_string(), virtual_entry("run-other", 0));
-
-        {
-            let _guard = VirtualRunGuard::new(Arc::clone(&registry), 5150);
-            assert_eq!(registry.len(), 3);
-        }
-
-        assert!(registry.get("run-v").is_none());
-        assert!(registry.get("session-v").is_none());
-        assert!(registry.get("run-other").is_some(), "pid 0 reservations are not swept");
-    }
-
-    /// A resumed session is registered under its preassigned id at spawn:
-    /// the engine's own announcement of that same id equals it, so
-    /// adopt_session_id early-returns and never rekeys. Without the alias a
-    /// by-session-id Stop found nothing.
-    #[tokio::test]
-    async fn preassigned_session_alias_routes_stop_before_session_event() {
-        let child = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-            .args(if cfg!(windows) { ["/c", "ping -n 30 127.0.0.1"] } else { ["-c", "sleep 30"] })
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sleep child");
-        let pid = child.id().unwrap_or(0);
-        let entry = ChildEntry {
-            child: Some(Arc::new(TokioMutex::new(child))),
-            pid,
-            run_id: "run-preassigned".to_string(),
-            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            reader_abort: Arc::new(std::sync::OnceLock::new()),
-            stdin: None,
-            questions: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let registry = ProcessRegistry::default();
-        registry.insert("run-preassigned".to_string(), entry.clone());
-        registry.insert_alias("session-preassigned".to_string(), entry);
-
-        assert!(registry.kill("session-preassigned"));
-        registry.remove_if_pid("session-preassigned", pid);
-        registry.remove_if_pid("run-preassigned", pid);
-        assert_eq!(registry.len(), 0);
-    }
-
-    /// The real Windows stop bug: engine CLIs run as `cmd /c shim.cmd` and
-    /// the model process is a grandchild. Killing must take the WHOLE tree
-    /// down synchronously — a fire-and-forget taskkill that raced the direct
-    /// child's start_kill orphaned the grandchild (it kept streaming and
-    /// burning tokens after the user pressed Stop). This spawns a cmd whose
-    /// grandchild outlives it and asserts the grandchild is gone after kill.
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn kill_reaps_windows_grandchild_process_tree() {
-        use std::collections::HashSet;
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-        let child = tokio::process::Command::new("cmd")
-            .args(["/c", "ping -n 60 127.0.0.1 > NUL"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn cmd child");
-        let cmd_pid = child.id().unwrap_or(0);
-
-        // Let cmd spawn its ping grandchild.
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        let grandchildren: Vec<Pid> = sys
-            .processes()
-            .iter()
-            .filter(|(_, p)| p.parent() == Some(Pid::from_u32(cmd_pid)))
-            .map(|(pid, _)| *pid)
-            .collect();
-        assert!(
-            !grandchildren.is_empty(),
-            "expected cmd to have spawned a ping grandchild"
-        );
-
-        let entry = ChildEntry {
-            child: Some(Arc::new(TokioMutex::new(child))),
-            pid: cmd_pid,
-            run_id: "run-tree".to_string(),
-            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            reader_abort: Arc::new(std::sync::OnceLock::new()),
-            stdin: None,
-            questions: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let registry = ProcessRegistry::default();
-        registry.insert("run-tree".to_string(), entry);
-        assert!(registry.kill("run-tree"));
-
-        // Poll: process teardown is observable only after the kernel reaps.
-        let targets: HashSet<Pid> = grandchildren
-            .iter()
-            .copied()
-            .chain(std::iter::once(Pid::from_u32(cmd_pid)))
-            .collect();
-        let mut alive = targets.clone();
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            sys.refresh_processes_specifics(
-                ProcessesToUpdate::All,
-                true,
-                ProcessRefreshKind::nothing(),
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for key in ["pipe-held-run", "session-held"] {
+            registry.insert(
+                key.to_string(),
+                ChildEntry {
+                    child: Some(Arc::clone(&child)),
+                    pid,
+                    run_id: "pipe-held-run".to_string(),
+                    killed: Arc::clone(&killed),
+                    reader_abort: Arc::new(std::sync::OnceLock::new()),
+                    stdin: None,
+                    questions: Arc::new(Mutex::new(HashMap::new())),
+                },
             );
-            alive.retain(|pid| sys.process(*pid).is_some());
-            if alive.is_empty() {
-                break;
-            }
         }
-        assert!(
-            alive.is_empty(),
-            "stop left process-tree survivors alive: {alive:?}"
-        );
+        let ctx = RunContext {
+            core: TurnCore {
+                sink: event_sink::EventSink::new(emitter.clone()),
+                registry: Arc::clone(&registry),
+                engine_id: "omp".to_string(),
+                run_id: "pipe-held-run".to_string(),
+            },
+            engine_impl: Box::new(pi_family::omp()),
+            pid,
+            preassigned_session_id: Some("session-held".to_string()),
+            initial_model: None,
+            child,
+            killed,
+            cleanup_files: Vec::new(),
+            stderr_buf: Arc::new(Mutex::new(String::new())),
+            stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+            // See the pipe-retry constructor above.
+            #[cfg(windows)]
+            _tree_guard: None,
+        };
+        // Unbounded on the old EOF-only reader: the sleep holds the pipe
+        // for 600s. POST_EXIT_DRAIN settles this in well under a second.
+        tokio::time::timeout(std::time::Duration::from_secs(5), run_reader(stdout, ctx))
+            .await
+            .expect("reader must settle after child exit, not park on the held pipe");
+        let events = std::mem::take(&mut *emitter.0.lock().unwrap());
+        let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["done"], "buffered turn events must survive the drain");
+        assert_eq!(registry.0.lock().unwrap().len(), 0, "settled run must drain its registry entries");
     }
 }
-#[cfg(test)]
-mod tool_args_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn parse_tool_args_value_drops_empty_and_parses_strings() {
-        assert_eq!(parse_tool_args_value(&Value::Null), None);
-        assert_eq!(parse_tool_args_value(&json!({})), None);
-        assert_eq!(parse_tool_args_value(&json!([])), None);
-        assert_eq!(
-            parse_tool_args_value(&json!("{\"path\":\"a.ts\"}")),
-            Some(json!({"path": "a.ts"}))
-        );
-        assert_eq!(
-            parse_tool_args_value(&json!({"file_path": "a.ts"})),
-            Some(json!({"file_path": "a.ts"}))
-        );
-        assert_eq!(
-            parse_tool_args_value(&json!("plain command")),
-            Some(json!("plain command"))
-        );
-    }
-
-    #[test]
-    fn tool_call_message_extracts_path_and_marks_patch() {
-        match tool_call_message("Read", Some(&json!({"file_path": "src/a.ts"}))) {
-            EngineEvent::Message {
-                path, args, patch, ..
-            } => {
-                assert_eq!(path.as_deref(), Some("src/a.ts"));
-                assert_eq!(args, Some(json!({"file_path": "src/a.ts"})));
-                assert!(!patch);
-            }
-            _ => panic!("expected tool message"),
-        }
-        match tool_call_patch("Read", Some(&json!({"file_path": "src/a.ts"}))) {
-            EngineEvent::Message { patch, .. } => assert!(patch),
-            _ => panic!("expected patch"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod codex_home_bin_tests {
     use super::*;

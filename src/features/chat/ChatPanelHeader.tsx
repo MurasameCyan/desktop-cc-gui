@@ -6,6 +6,7 @@ import PanelRightOpen from "lucide-react/dist/esm/icons/panel-right-open";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import { PillTab, PillTabList } from "@/components/base/tabs/pill-tab";
 import { HeaderOpenActions } from "@/features/open-app/HeaderOpenActions";
+import { LaunchScriptActions } from "@/features/launch-script/LaunchScriptActions";
 import { useFilesStore } from "@/features/files/store";
 import { cx } from "@/utils/cx";
 import { PANEL_TOGGLE_CLASSES } from "./panel-toggle-classes";
@@ -61,6 +62,7 @@ export function ChatPanelHeader({
   );
   return (
     <div className="flex h-full items-center">
+      <LaunchScriptActions workspacePath={workspacePath} />
       <HeaderOpenActions workspacePath={workspacePath} />
       {
         // Deliberately outside the xl-gated chrome below: that wrapper is

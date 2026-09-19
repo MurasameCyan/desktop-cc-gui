@@ -141,6 +141,11 @@ export default function SettingsPage() {
     const enabledEngines = new Set(
       engines.flatMap((engine) => (engine.enabled ? [engine.id] : [])),
     );
+    /** Installed engine ids; empty while the probe is out, in which case
+     *  every CLI stays in the main rail. */
+    const availableEngines = new Set(
+      engines.flatMap((engine) => (engine.available ? [engine.id] : [])),
+    );
     // Re-render the rail on language flips: labels are functions of i18n.
     return [...byGroup.entries()]
       .flatMap(([group, items], index) => {
@@ -150,14 +155,30 @@ export default function SettingsPage() {
           return [{ label: meta ? t(meta.labelKey) : group, order, items }];
         }
         const ordered = orderByStoredKeys(items, orderedCliKeys);
-        // CLIs the user turned off leave the main rail for a collapsed
-        // 未启用 bucket with grayed icons; the bucket only exists when the
-        // engine states are known and at least one CLI is disabled.
-        const disabledItems =
+        // CLIs whose binary isn't installed drop into a collapsed 未安装
+        // bucket with grayed icons, CLIs the user turned off into the
+        // collapsed 未启用 bucket. Both buckets only exist once the engine
+        // probe has landed and at least one CLI qualifies.
+        // Plugin sections in this rail have no `cli:` key — no engine state,
+        // they always stay in the main group.
+        const uninstalledItems =
           engines.length > 0
             ? ordered.flatMap((item) =>
-                // Plugin sections in this rail have no engine state and
-                // always stay in the main group.
+                item.key.startsWith("cli:") &&
+                !availableEngines.has(item.key.slice("cli:".length))
+                  ? [{ ...item, disabled: true }]
+                  : [],
+              )
+            : [];
+        const installedItems =
+          uninstalledItems.length > 0
+            ? ordered.filter(
+                (item) => !uninstalledItems.some((u) => u.key === item.key),
+              )
+            : ordered;
+        const disabledItems =
+          engines.length > 0
+            ? installedItems.flatMap((item) =>
                 item.key.startsWith("cli:") &&
                 !enabledEngines.has(item.key.slice("cli:".length))
                   ? [{ ...item, disabled: true }]
@@ -166,10 +187,10 @@ export default function SettingsPage() {
             : [];
         const enabledItems =
           disabledItems.length > 0
-            ? ordered.filter(
+            ? installedItems.filter(
                 (item) => !disabledItems.some((d) => d.key === item.key),
               )
-            : ordered;
+            : installedItems;
         const rail: RailGroup[] = [
           {
             label: meta ? t(meta.labelKey) : group,
@@ -178,11 +199,12 @@ export default function SettingsPage() {
             // The CLI 管理 rail is drag-sortable; the order persists across
             // sessions (localStorage) and new engines append at the end. A
             // reorder only covers the enabled rows — the stored list keeps
-            // the disabled keys trailing in their current relative order.
+            // the bucketed keys trailing in their current relative order.
             onReorderItems: (orderedKeys: string[]) => {
               const next = [
                 ...orderedKeys,
                 ...disabledItems.map((item) => item.key),
+                ...uninstalledItems.map((item) => item.key),
               ];
               setCliNavOrder(next);
               writeStored(CLI_NAV_ORDER_KEY, JSON.stringify(next));
@@ -196,6 +218,14 @@ export default function SettingsPage() {
             order: order + 0.5,
             collapsible: true,
             items: disabledItems,
+          });
+        }
+        if (uninstalledItems.length > 0) {
+          rail.push({
+            label: t("settings.cliNotInstalledGroup"),
+            order: order + 0.6,
+            collapsible: true,
+            items: uninstalledItems,
           });
         }
         return rail;
