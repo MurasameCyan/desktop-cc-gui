@@ -809,6 +809,9 @@ mod tests {
         fs::write(custom_home.join("prompts/c.md"), "custom home body").unwrap();
 
         let workspaces_json = root.join("workspaces.json");
+        // Serialized, not string-formatted: a raw Windows path is invalid JSON
+        // (backslashes are escape introducers), so the fixture must be written
+        // the way a real settings writer writes it.
         fs::write(
             &workspaces_json,
             serde_json::to_vec(&serde_json::json!([
