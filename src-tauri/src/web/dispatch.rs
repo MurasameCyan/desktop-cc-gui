@@ -111,6 +111,8 @@ struct SendMessageArgs {
     workspace_path: String,
     session_id: Option<String>,
     prompt: String,
+    #[serde(default)]
+    prompt_contributions: Vec<crate::engine::PromptContribution>,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
@@ -168,6 +170,7 @@ struct LoadRemoteSessionPageArgs {
 struct DeleteRemoteSessionArgs {
     workspace_path: String,
     engine: String,
+    session_id: String,
     remote_path: String,
 }
 #[derive(Deserialize)]
@@ -186,6 +189,14 @@ struct UsageRecordArgs {
 struct EngineSessionArgs {
     engine: String,
     session_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordAcceptedFrameArgs {
+    engine: String,
+    session_id: String,
+    frame: String,
+    workspace_path: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -536,6 +547,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
                 a.workspace_path,
                 a.session_id,
                 a.prompt,
+                a.prompt_contributions,
                 a.image_paths,
                 a.model,
                 a.effort,
@@ -636,7 +648,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "delete_remote_session" => {
             let a: DeleteRemoteSessionArgs = parse_args(&raw)?;
-            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.remote_path).await)
+            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.session_id, a.remote_path).await)
         }
         "pin_session" => {
             let a: PinSessionArgs = parse_args(&raw)?;
@@ -702,6 +714,17 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         "rescan_sessions" => {
             crate::history::reader::rescan_sessions(app.state());
             Ok(Value::Null)
+        }
+        "record_accepted_internal_frame" => {
+            let a: RecordAcceptedFrameArgs = parse_args(&raw)?;
+            ser(crate::history::reader::record_accepted_internal_frame(
+                app.state(),
+                a.engine,
+                a.session_id,
+                a.frame,
+                a.workspace_path,
+            )
+            .await)
         }
         "list_workspaces" => ser(crate::history::reader::list_workspaces(app.state())),
         "reorder_workspaces" => {
@@ -975,7 +998,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         // plugins (plan §9 risk table ruling): read-only commands ride the
         // bridge so web clients render plugin UI; install/uninstall/enable/
         // storage writes stay desktop-only and fall through to unknown.
-        "plugin_list" => ser(crate::plugins::plugin_list(app.state())),
+        "plugin_list" => ser(crate::plugins::plugin_list(app.state()).await),
         "plugin_read_file" => {
             let a: PluginReadFileArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_read_file(a.id, a.name))

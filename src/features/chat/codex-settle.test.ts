@@ -124,6 +124,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: null }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     const runId = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].runId!;
     await useChatStore.getState().interrupt();
     handleEngineEvents([{ ...ev("session", 1, "tid-1"), runId }], deps());
@@ -139,6 +140,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: string }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     const runId = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].runId!;
     await useChatStore.getState().interrupt();
     response.resolve({ runId, sessionId: "tid-1" });
@@ -171,12 +173,17 @@ describe("codex turn settling", () => {
 
   it("keeps the pending turn visible when events beat the send response", async () => {
     useChatStore.getState().startNewChat(WS);
-    let resolveSend: (value: { runId: string; sessionId: null }) => void = () => {};
-    vi.mocked(ipc.sendMessage).mockImplementation(
-      () => new Promise((resolve) => { resolveSend = resolve; }),
-    );
+    const send = Promise.withResolvers<{ runId: string; sessionId: null }>();
+    const started = Promise.withResolvers<void>();
+    vi.mocked(ipc.sendMessage).mockImplementation(() => {
+      started.resolve();
+      return send.promise;
+    });
 
     const inflight = useChatStore.getState().send("hello", []);
+    // The send awaits its before-turn hook collection before invoking, so the
+    // events below only race the response once the invoke is actually in flight.
+    await started.promise;
 
     // The engine can start streaming before the invoke promise resolves.
     handleEngineEvents(
@@ -187,7 +194,7 @@ describe("codex turn settling", () => {
       deps(),
     );
 
-    resolveSend({ runId, sessionId: null });
+    send.resolve({ runId, sessionId: null });
     await inflight;
     handleEngineEvents([ev("done", 3, { usage: null })], deps());
 

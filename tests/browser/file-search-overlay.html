@@ -7,7 +7,7 @@
 <body style="margin:0;background:#0b0b0b">
 <div id="fixture"></div>
 <script>
-// Stands in for the Tauri IPC surface. The index rows below are the shape the
+// Stands in for the Tauri IPC surface. The index rows below are the entries
 // backend returns from `list_file_index`: workspace-relative paths with "/"
 // separators, dirs flagged. `src-extra/` exists specifically because the
 // folder scope must NOT sweep it in when the user searches `src/`.
@@ -38,7 +38,7 @@ window.__TAURI_INTERNALS__ = {
     state.invokes.push({ cmd, args });
     switch (cmd) {
       case "list_file_index":
-        return structuredClone(INDEX);
+        return { entries: structuredClone(INDEX), truncated: false };
       case "read_file":
         return { content: "// fixture", language: "ts", truncated: false };
       default:

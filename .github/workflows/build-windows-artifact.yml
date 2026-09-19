@@ -19,13 +19,18 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22+: the frontend (and its tests) use Promise.withResolvers, which
+          # Node 20 does not have.
+          node-version: 22
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Frontend tests
+        run: pnpm exec vitest run src
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib

@@ -45,6 +45,7 @@ pub struct AppState {
     pub dsh_host: std::sync::Arc<dsh_host::DshHostState>,
 }
 
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     paths::ensure_dirs().expect("failed to create app home");
@@ -269,6 +270,14 @@ pub fn run() {
             plugins::plugin_storage_get,
             plugins::plugin_storage_set,
             plugins::plugin_storage_delete,
+            plugins::storage::plugin_document_storage_get_location,
+            plugins::storage::plugin_document_storage_select_location,
+            plugins::storage::plugin_document_storage_read_text,
+            plugins::storage::plugin_document_storage_write_text_atomic,
+            plugins::storage::plugin_document_storage_remove,
+            plugins::storage::plugin_document_storage_list,
+            db::workspace_metadata,
+            db::plugin_list_workspaces,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,
@@ -304,6 +313,7 @@ pub fn run() {
             history::reader::remember_session_effort,
             history::reader::remember_session_provider,
             history::reader::rescan_sessions,
+            history::reader::record_accepted_internal_frame,
             history::reader::list_workspaces,
             history::reader::add_workspace,
             history::reader::reorder_workspaces,

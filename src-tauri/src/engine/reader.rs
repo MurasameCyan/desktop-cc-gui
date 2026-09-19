@@ -241,6 +241,7 @@ impl TurnCore {
                 todos,
                 args,
                 result,
+                tool_call_id,
                 patch,
             } => {
                 let mut payload = serde_json::json!({ "role": role, "text": text });
@@ -257,6 +258,9 @@ impl TurnCore {
                 }
                 if let Some(result) = result {
                     payload["result"] = result;
+                }
+                if let Some(tool_call_id) = tool_call_id {
+                    payload["toolCallId"] = Value::String(tool_call_id);
                 }
                 if patch {
                     payload["patch"] = Value::Bool(true);

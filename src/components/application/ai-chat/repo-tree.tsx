@@ -186,6 +186,7 @@ interface DragHandleProps {
   onPointerDown: (event: ReactPointerEvent) => void;
 }
 
+
 /** The repo row itself: merged folder/reorder-grip button, label, hover
  *  actions (new session / remove) and the thread count chip. Right-click
  *  bubbles to the workspace context menu via `onContextMenu`. */
@@ -513,6 +514,7 @@ export function RepoItem({
   const hasHoverActions = Boolean(
     (repo.id && onNewSession) || dragHandleProps || (repo.id && onRemove),
   );
+
 
   return (
     <div className="flex w-full flex-col">

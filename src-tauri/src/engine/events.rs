@@ -25,6 +25,8 @@ pub enum EngineEvent {
         todos: Option<TodosPayload>,
         args: Option<Value>,
         result: Option<Value>,
+        /// Opaque adapter identity shared by the call and its result.
+        tool_call_id: Option<String>,
         patch: bool,
     },
     /// Native session id became known.
@@ -136,6 +138,14 @@ pub(crate) fn parse_tool_args_value(value: &Value) -> Option<Value> {
 }
 /// Tool-call start: name plus parsed args (path / todos derived from args).
 pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
+    tool_call_message_with_id(name, args, None)
+}
+
+pub(crate) fn tool_call_message_with_id(
+    name: impl Into<String>,
+    args: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
     let name = name.into();
     let args = args.and_then(parse_tool_args_value);
     let todos = args.as_ref().and_then(parse_todo_args);
@@ -146,18 +156,28 @@ pub(crate) fn tool_call_message(name: impl Into<String>, args: Option<&Value>) -
         todos,
         args,
         result: None,
+        tool_call_id: tool_call_id.map(str::to_string),
         patch: false,
     }
 }
 /// Same as [`tool_call_message`] but patches the matching in-flight tool row.
 pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
-    match tool_call_message(name, args) {
+    tool_call_patch_with_id(name, args, None)
+}
+
+pub(crate) fn tool_call_patch_with_id(
+    name: impl Into<String>,
+    args: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
+    match tool_call_message_with_id(name, args, tool_call_id) {
         EngineEvent::Message {
             role,
             text,
             path,
             todos,
             args,
+            tool_call_id,
             ..
         } => EngineEvent::Message {
             role,
@@ -166,6 +186,7 @@ pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> 
             todos,
             args,
             result: None,
+            tool_call_id,
             patch: true,
         },
         other => other,
@@ -220,6 +241,14 @@ pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
 /// an authoritative todo snapshot — the live path's only reliable source for
 /// this tool (see [`parse_todo_result`]).
 pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>) -> EngineEvent {
+    tool_result_patch_with_id(name, result, None)
+}
+
+pub(crate) fn tool_result_patch_with_id(
+    name: impl Into<String>,
+    result: Option<&Value>,
+    tool_call_id: Option<&str>,
+) -> EngineEvent {
     let todos = result.and_then(parse_todo_result);
     EngineEvent::Message {
         role: "tool".to_string(),
@@ -228,6 +257,7 @@ pub(crate) fn tool_result_patch(name: impl Into<String>, result: Option<&Value>)
         todos,
         args: None,
         result: result.cloned(),
+        tool_call_id: tool_call_id.map(str::to_string),
         patch: true,
     }
 }
@@ -240,6 +270,7 @@ pub(crate) fn assistant_message(text: String) -> EngineEvent {
         todos: None,
         args: None,
         result: None,
+        tool_call_id: None,
         patch: false,
     }
 }

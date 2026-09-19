@@ -895,6 +895,7 @@ fn read_scoped_file(path: &Path) -> Option<(Vec<u8>, &'static str)> {
     Some((bytes, mime))
 }
 
+
 // ==================== Misc ====================
 
 /// Best-effort LAN address for the QR/URL. Interface enumeration prefers

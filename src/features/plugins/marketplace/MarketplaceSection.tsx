@@ -12,6 +12,7 @@ import {
   SettingsSectionLabel,
 } from "@/components/application/settings/settings-rows";
 import { Input } from "@/components/base/input/input";
+import { DisplayName } from "@/components/base/display-name";
 import { ModalShell } from "@/components/dialogs";
 import { cx } from "@/utils/cx";
 import { isWeb, openExternal } from "@/lib/platform";
@@ -158,7 +159,9 @@ function MarketRow({ entry }: { entry: MarketPlugin }) {
       <div className="flex items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center gap-2">
-            <span className="truncate text-body-medium text-text-primary">{entry.name}</span>
+            <span className="truncate text-body-medium text-text-primary">
+              <DisplayName name={entry.name} />
+            </span>
             <span className={BADGE}>v{entry.version}</span>
             <span className={BADGE}>{entry.tier === "declarative" ? "Tier-0" : "JS"}</span>
             {entry.downloads != null && (

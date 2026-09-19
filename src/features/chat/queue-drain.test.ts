@@ -41,8 +41,10 @@ const TAB = { engine: "claude", sessionId: "s-1", workspacePath: WS };
 let runCounter = 0;
 let runId: string;
 
-/** Settle the turn and let the synchronous drain run: sendPrompt reaches
- *  `ipc.sendMessage` before its first await, so one microtask turn is enough. */
+/** Settle the turn and let the drain run. sendPrompt awaits its before-turn
+ *  hook collection (microtask-only when no plugin registered a hook) before
+ *  reaching `ipc.sendMessage`, so drain the microtask queue instead of taking
+ *  a single tick — no wall-clock wait is involved. */
 async function settle(kind: "done" | "error", interrupted = false) {
   useChatStore.setState((s) => ({
     bySession: {
@@ -60,8 +62,15 @@ async function settle(kind: "done" | "error", interrupted = false) {
       data: kind === "done" ? { usage: null } : "400 upstream rejected the request",
     },
   ]);
-  await Promise.resolve();
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
+/** Let a fire-and-forget drain reach `ipc.sendMessage`: `sendQueuedNow`
+ *  starts the drain without awaiting it, and sendPrompt awaits its
+ *  before-turn hook collection first. Microtasks only — no wall-clock wait. */
+async function flushDrain() {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
 
 function queueOf(key = KEY) {
   return useChatStore.getState().bySession[key]?.queue ?? [];
@@ -140,6 +149,7 @@ describe("queued messages after a turn settles", () => {
     }));
 
     await useChatStore.getState().sendQueuedNow("q-2");
+    await flushDrain();
 
     expect(ipc.interruptSession).toHaveBeenCalled();
     expect(ipc.sendMessage).toHaveBeenCalledWith(
@@ -154,6 +164,7 @@ describe("queued messages after a turn settles", () => {
     }));
 
     await useChatStore.getState().sendQueuedNow("q-1");
+    await flushDrain();
 
     expect(ipc.interruptSession).not.toHaveBeenCalled();
     expect(ipc.sendMessage).toHaveBeenCalledWith(

@@ -686,9 +686,16 @@ mod tests {
     #[test]
     fn prompt_resolution_checks_hash() {
         let catalog = load_catalog_from_root(default_catalog_root()).expect("catalog");
-        let (agent, prompt) = resolve_prompt(&catalog, &catalog.agents[0].id.clone()).expect("prompt");
-        assert!(!prompt.trim().is_empty());
-        assert_eq!(agent.prompt_hash.len(), 64);
+        for agent in &catalog.agents {
+            let (_, prompt) = resolve_prompt(&catalog, &agent.id)
+                .unwrap_or_else(|error| panic!("{}: {error}", agent.id));
+            assert_eq!(
+                format!("{:x}", Sha256::digest(prompt.as_bytes())),
+                agent.prompt_hash,
+                "{}",
+                agent.id
+            );
+        }
     }
 
     #[test]
@@ -703,8 +710,12 @@ mod tests {
             .contains("empty"));
         fs::remove_dir_all(empty_root).expect("remove empty fixture");
 
-        let (mismatch_catalog, mismatch_root) = prompt_fixture("prompt", &"0".repeat(64));
+        let original = "trusted prompt\n";
+        let (mismatch_catalog, mismatch_root) =
+            prompt_fixture(original, &format!("{:x}", Sha256::digest(original.as_bytes())));
         let mismatch_id = mismatch_catalog.agents[0].id.clone();
+        assert_eq!(resolve_prompt(&mismatch_catalog, &mismatch_id).unwrap().1, original);
+        fs::write(mismatch_root.join("prompt.md"), "tampered prompt\n").unwrap();
         assert!(resolve_prompt(&mismatch_catalog, &mismatch_id)
             .expect_err("hash mismatch must fail")
             .contains("hash mismatch"));

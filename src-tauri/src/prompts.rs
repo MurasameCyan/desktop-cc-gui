@@ -811,13 +811,11 @@ mod tests {
         let workspaces_json = root.join("workspaces.json");
         fs::write(
             &workspaces_json,
-            format!(
-                r#"[{{"id":"w1","path":"{}","settings":{{"codexHome":"{}"}}}},
-                   {{"id":"gone","path":"{}"}}]"#,
-                project.display(),
-                custom_home.display(),
-                root.join("missing").display(),
-            ),
+            serde_json::to_vec(&serde_json::json!([
+                {"id": "w1", "path": project, "settings": {"codexHome": custom_home}},
+                {"id": "gone", "path": root.join("missing")}
+            ]))
+            .unwrap(),
         )
         .unwrap();
 

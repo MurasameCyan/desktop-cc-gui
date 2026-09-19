@@ -1,9 +1,20 @@
+import { useEffect, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import Archive from "lucide-react/dist/esm/icons/archive";
 import ArchiveRestore from "lucide-react/dist/esm/icons/archive-restore";
 import FolderPlus from "lucide-react/dist/esm/icons/folder-plus";
 import Pencil from "lucide-react/dist/esm/icons/pencil";
+import Puzzle from "lucide-react/dist/esm/icons/puzzle";
+import {
+  compareByOrder,
+  pluginIdFromRegistryKey,
+  useRegistry,
+  workspaceMenuRegistry,
+  type WorkspaceMenuLabelValue,
+  type WorkspaceMenuStatusTone,
+} from "@ccgui/plugin-sdk";
 import { ContextMenu, type ContextMenuEntry } from "@/components/context-menu";
+import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
 
 export interface WorkspaceMenuState {
   x: number;
@@ -12,6 +23,28 @@ export interface WorkspaceMenuState {
   /** Row lives in the 已归档 section: the archive entry flips to 取消归档. */
   archived: boolean;
 }
+const workspaceMenuStatusClassNames: Record<WorkspaceMenuStatusTone, string> = {
+  success: "text-notification-success-foreground",
+  muted: "text-text-tertiary",
+};
+
+function renderWorkspaceMenuLabel(label: WorkspaceMenuLabelValue): ContextMenuEntry["label"] {
+  if (typeof label === "string") return label;
+  if (!label.status) return label.text;
+
+  return (
+    <>
+      {label.text}{" "}
+      <span
+        className={workspaceMenuStatusClassNames[label.status.tone]}
+        data-workspace-menu-status
+      >
+        ({label.status.text})
+      </span>
+    </>
+  );
+}
+
 
 export interface BlankMenuState {
   x: number;
@@ -21,7 +54,8 @@ export interface BlankMenuState {
 /**
  * Right-click menu for sidebar workspace rows. Chrome (portal anchoring,
  * viewport clamping, Escape/outside dismissal) comes from the shared
- * ContextMenu; this component only owns the workspace action entries.
+ * ContextMenu; this component owns the builtin workspace action entries and
+ * appends the registered workspace-menu extension entries after them.
  */
 export function WorkspaceContextMenu({
   menu,
@@ -35,10 +69,15 @@ export function WorkspaceContextMenu({
   onSetArchived?: (workspaceId: string, archived: boolean) => void;
 }) {
   const { t } = useTranslation();
+  // Extension entries: label/visible are resolved during this render, so a
+  // language flip or an owner's state change re-labels an open menu. The
+  // target is the row the user right-clicked, never the active workspace.
+  const extensionDefs = useRegistry(workspaceMenuRegistry);
+  const target = { workspaceId: menu.workspaceId, archived: menu.archived };
 
-  const entries: ContextMenuEntry[] = [];
+  const builtins: ContextMenuEntry[] = [];
   if (onSetAlias) {
-    entries.push({
+    builtins.push({
       id: "set-alias",
       label: t("chat.setWorkspaceAlias"),
       icon: <Pencil className="size-4" aria-hidden />,
@@ -46,7 +85,7 @@ export function WorkspaceContextMenu({
     });
   }
   if (onSetArchived) {
-    entries.push({
+    builtins.push({
       id: "toggle-archive",
       label: menu.archived ? t("chat.unarchiveWorkspace") : t("chat.archiveWorkspace"),
       icon: menu.archived ? (
@@ -57,6 +96,47 @@ export function WorkspaceContextMenu({
       onSelect: () => onSetArchived(menu.workspaceId, !menu.archived),
     });
   }
+
+  // Extension callbacks are foreign code. A throwing label/visible must not
+  // take the sidebar down with it, so that entry is dropped; a failing
+  // onSelect (sync throw or rejected async) is reported and swallowed.
+  const extensionEntries: ContextMenuEntry[] = [];
+  // compareByOrder: undefined order sorts last, ties break by id.
+  for (const def of [...extensionDefs].sort(compareByOrder)) {
+    const Icon: ComponentType<{ className?: string }> = def.icon ?? Puzzle;
+    try {
+      if (def.visible?.(target) === false) continue;
+      extensionEntries.push({
+        id: def.id,
+        label: renderWorkspaceMenuLabel(def.label(target)),
+        icon: def.icon ? (
+          <PluginBoundary pluginId={pluginIdFromRegistryKey(def.id)} fallback={<Puzzle className="size-4" aria-hidden />}>
+            <Icon className="size-4" aria-hidden />
+          </PluginBoundary>
+        ) : <Icon className="size-4" aria-hidden />,
+        onSelect: () => {
+          try {
+            void Promise.resolve(def.onSelect(target)).catch((error: unknown) =>
+              console.error(`[plugins] workspace menu ${def.id} onSelect failed`, error),
+            );
+          } catch (error) {
+            console.error(`[plugins] workspace menu ${def.id} onSelect failed`, error);
+          }
+        },
+      });
+    } catch (error) {
+      console.error(`[plugins] workspace menu ${def.id} failed to resolve`, error);
+    }
+  }
+
+  const entries: (ContextMenuEntry | "separator")[] =
+    builtins.length > 0 && extensionEntries.length > 0
+      ? [...builtins, "separator", ...extensionEntries]
+      : [...builtins, ...extensionEntries];
+  useEffect(() => {
+    if (entries.length === 0) onClose();
+  }, [entries.length, onClose]);
+  if (entries.length === 0) return null;
 
   return (
     <ContextMenu

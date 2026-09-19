@@ -53,8 +53,8 @@ describe("satisfiesSdkRange", () => {
     expect(satisfiesSdkRange("0.2", "0.2.0")).toBe(false);
   });
 
-  it("the shipped SDK_VERSION satisfies the template's declared range", () => {
-    expect(satisfiesSdkRange("^0.3", SDK_VERSION)).toBe(true);
+  it("the shipped SDK_VERSION satisfies the range plugins now declare (>=0.4.0)", () => {
+    expect(satisfiesSdkRange(">=0.4.0", SDK_VERSION)).toBe(true);
   });
 
   it("plugin.d.ts header version stamp matches SDK_VERSION", () => {

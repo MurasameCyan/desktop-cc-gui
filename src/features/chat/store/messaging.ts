@@ -26,10 +26,14 @@ import {
 } from "./stream";
 import { mergeUsage, parseUsage } from "../usage";
 import {
+  bindRunLifecycle,
+  finishRunLifecycle,
   dropRunUsage,
   firstLineTitle,
   optimisticMeta,
   patchGrantBySeq,
+  registerPendingRunLifecycle,
+  replayBufferedEngineEvents,
   rememberModelForRun,
   rememberEffortForRun,
   patchQuestionByRequestId,
@@ -48,6 +52,24 @@ import {
   migrateSelectedAgent,
 } from "@/features/agents/selected-agent";
 import { appendCommittedRows } from "./session-utils";
+import {
+  prepareSessionContributions,
+  sessionContributionScope,
+} from "./session-contributions";
+import {
+  adoptNativeContributions,
+  sessionLifecycleBase,
+  workspaceMetadata,
+} from "./lifecycle";
+import {
+  collectBeforeTurnContributions,
+  confirmPromptContributions,
+  dispatchAfterSwitch,
+  dispatchSessionCreated,
+  isInternalMessageCaptureActive,
+  runBeforeSwitch,
+} from "@/features/plugins/runtime/hooks";
+import type { RuntimeSwitchEvent } from "@ccgui/plugin-sdk";
 import type { ChatStore } from "./types";
 import type {
   LoadHistoryPage,
@@ -192,6 +214,10 @@ export function createMessagingActions(
       }
     }
     // Optimistic user message.
+    const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
+    const hookRunId = newId();
+    // Optimistic user message, right away: the hooks below can take up to
+    // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
       streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
     }));
@@ -218,9 +244,59 @@ export function createMessagingActions(
         turnUsage: null,
       },
     );
+    // A pending switch prepares its handoff in beforeSwitch, which must run
+    // before the turn's contributions are collected so the first target turn
+    // carries the handoff (and not the second one).
+    const pendingSwitch = get().pendingRuntimeSwitch;
+    let switchEvent: RuntimeSwitchEvent | null = null;
+    if (
+      pendingSwitch &&
+      pendingSwitch.targetEngine === engine &&
+      pendingSwitch.workspacePath === tab.workspacePath
+    ) {
+      switchEvent = {
+        switchId: hookRunId,
+        sourceEngine: pendingSwitch.sourceEngine,
+        targetEngine: pendingSwitch.targetEngine,
+        sourceSessionId: pendingSwitch.sourceSessionId,
+        targetSessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      };
+      await runBeforeSwitch(switchEvent);
+    }
+    const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
+    const beforeTurn = await collectBeforeTurnContributions({
+      runId: hookRunId,
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      occurredAt: new Date().toISOString(),
+    });
+    // Retire old owners and withdraw their native-history instructions once.
+    const prepared = prepareSessionContributions(
+      get().sessionContributions,
+      scope,
+      beforeTurn.promptContributions,
+      tab.sessionId !== null,
+    );
+    if (prepared.next) set({ sessionContributions: prepared.next });
+    const promptContributions = prepared.promptContributions;
+    // Register the run lifecycle BEFORE the send: a fast engine's
+    // session/delta/done events may outrun the send result, and unregistered
+    // events would lose their runtime and afterTurn delivery.
+    const settleLaunch = registerPendingRunLifecycle(hookRunId, {
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
+    });
     // Refresh independently: a slow history read must not delay sending or Stop.
     void get().refreshSessionUsage(key);
-    const requestedRunId = `run-${newId()}`;
+    // Stop and early events must address the same lifecycle registered above.
+    const requestedRunId = hookRunId;
     settleOrphanedRuns(set, routeRun(requestedRunId, key));
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
@@ -232,6 +308,7 @@ export function createMessagingActions(
         workspacePath: tab.workspacePath,
         sessionId: tab.sessionId,
         prompt,
+        promptContributions,
         imagePaths: images.length ? images : null,
         model,
         effort,
@@ -242,6 +319,18 @@ export function createMessagingActions(
         ),
         providerId: provider,
       });
+      confirmPromptContributions(promptContributions);
+      if (switchEvent) {
+        set((s) => ({
+          pendingRuntimeSwitch:
+            s.pendingRuntimeSwitch === pendingSwitch ? null : s.pendingRuntimeSwitch,
+        }));
+        dispatchAfterSwitch({ ...switchEvent, occurredAt: new Date().toISOString() });
+      }
+      // Rekey the pre-registered lifecycle to the real run id (a no-op when an
+      // early event already bound it) and adopt the native session id.
+      bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
+      settleLaunch(result.sessionId ?? tab.sessionId);
       // Older backends choose their own id. Retire the provisional route.
       if (result.runId !== requestedRunId) {
         runRouting.delete(requestedRunId);
@@ -268,6 +357,7 @@ export function createMessagingActions(
           result.sessionId,
           tab.workspacePath,
         );
+        adoptNativeContributions(set, engine, tab.workspacePath, result.sessionId);
         if (model) {
           void ipc
             .rememberSessionModel?.(engine, result.sessionId, model)
@@ -335,6 +425,14 @@ export function createMessagingActions(
             firstLineTitle(prompt),
           ),
         );
+        const createdTab = { ...tab, sessionId: result.sessionId };
+        const createdKey = sessionKey(engine, result.sessionId, tab.workspacePath);
+        if (!get().createdSessionKeys[createdKey]) {
+          set((s) => ({
+            createdSessionKeys: { ...s.createdSessionKeys, [createdKey]: true },
+          }));
+          dispatchSessionCreated(sessionLifecycleBase(get, createdTab));
+        }
       } else if (!runRouting.has(result.runId) && !settled && get().bySession[key]) {
         // The engine can announce its session id while the invoke is in
         // flight; onSession rekeys the run to the native key then, and
@@ -344,9 +442,20 @@ export function createMessagingActions(
         // the id back would resurrect a dead pending key on the next event.
         settleOrphanedRuns(set, routeRun(result.runId, key));
       }
-      // Stop can precede native spawn while invoke is still in flight.
-      // Retry the interrupt now that the backend has registered the child.
-      // A native id adopted
+      replayBufferedEngineEvents(result.runId, {
+        set,
+        get,
+        drainQueue,
+        markUnseenIfBackground,
+        upsertSessionMeta: (meta) => upsertSessionMetaInto(set, meta),
+        refreshSessionUsage: (sessionKey) => get().refreshSessionUsage(sessionKey),
+      });
+      // Stop pressed while this send was still in flight: interrupt() ran
+      // before runRouting had this run (it is written above, after the
+      // await), so it settled the UI and killed nothing — the CLI kept
+      // streaming. Now that the ids exist, kill it. A native id adopted
+      // Stop can precede native spawn while invoke is still in flight; retry
+      // the interrupt now that the backend has registered the child.
       // just above moved the state to a new key, so read the key the turn
       // actually lives under.
       const liveKey = runRouting.get(result.runId) ?? knownKey ?? (
@@ -366,6 +475,8 @@ export function createMessagingActions(
         ]);
       }
     } catch (error) {
+      finishRunLifecycle(hookRunId, "failed", String(error));
+      settleLaunch();
       const failedKey = runRouting.get(requestedRunId) ?? key;
       runRouting.delete(requestedRunId);
       untrackRun(requestedRunId);
@@ -638,6 +749,7 @@ export function createMessagingActions(
       // The runs are dead: drop their routing and usage entries so the maps
       // cannot grow forever. (A late done event would also remove them.)
       for (const runId of deadRunIds) {
+        finishRunLifecycle(runId, "cancelled");
         patchSession(set, key, { settledRunIds: rememberSettledRun(get().bySession[key], runId) });
         runRouting.delete(runId);
         untrackRun(runId);

@@ -17,6 +17,7 @@
  */
 
 let pluginDepth = 0;
+let authorizedInvokeDepth: number | null = null;
 
 /** Run `fn` marked as plugin code: direct Tauri IPC inside throws. */
 export function runAsPlugin<T>(fn: () => T): T {
@@ -25,6 +26,22 @@ export function runAsPlugin<T>(fn: () => T): T {
     return fn();
   } finally {
     pluginDepth -= 1;
+  }
+}
+
+/** Authorize one synchronous IPC hop from a permission-checked host SDK path.
+ * Keep pluginDepth intact: nested runAsPlugin calls must not inherit the grant.
+ * The callback must only call the trusted transport; evaluate plugin arguments
+ * (including spreads/getters) before entering. The invoke wrapper consumes the
+ * grant before native serialization can execute plugin getters or toJSON.
+ * This does not wrap/await the return value or authorize async continuations. */
+export function withAuthorizedHostInvoke<T>(fn: () => T): T {
+  const previous = authorizedInvokeDepth;
+  authorizedInvokeDepth = pluginDepth;
+  try {
+    return fn();
+  } finally {
+    authorizedInvokeDepth = previous;
   }
 }
 
@@ -48,13 +65,14 @@ export function installHardening(): void {
   const original = internals?.invoke;
   if (!internals || !original) return;
   internals.invoke = (cmd, args) => {
-    if (pluginDepth > 0) {
+    if (pluginDepth > 0 && authorizedInvokeDepth !== pluginDepth) {
       return Promise.reject(
         new Error(
           `[plugins] direct Tauri invoke("${cmd}") is blocked inside plugin code; use the PluginContext APIs`,
         ),
       );
     }
+    authorizedInvokeDepth = null;
     return original(cmd, args);
   };
 }

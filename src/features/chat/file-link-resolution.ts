@@ -47,24 +47,19 @@ function matchBySuffix(entries: FileIndexEntry[], key: string): FileIndexEntry |
 }
 
 async function findByIndex(root: string, rel: string): Promise<string | null> {
-  const segments = rel.split("/").filter(Boolean);
-  if (segments.length === 0) return null;
-  // Longest suffix first; a bare basename only as the last resort, and only
-  // when it is unambiguous (matchBySuffix enforces that).
-  const keys = segments.length > 1 ? [rel, segments[segments.length - 1]] : [rel];
+  if (!rel) return null;
   let entries: FileIndexEntry[];
   try {
     // Build outputs (`release/`, `dist/`) are gitignored in most repos — the
     // normal index cannot see them, so ask for the ignored files too.
-    entries = await ipc.listFileIndex(root, true);
+    const index = await ipc.listFileIndex(root, true);
+    if (index.truncated) return null;
+    entries = index.entries;
   } catch {
     return null;
   }
-  for (const key of keys) {
-    const match = matchBySuffix(entries, key);
-    if (match) return joinPath(root, match.rel);
-  }
-  return null;
+  const match = matchBySuffix(entries, rel);
+  return match ? joinPath(root, match.rel) : null;
 }
 
 /**
@@ -83,7 +78,7 @@ async function findByIndex(root: string, rel: string): Promise<string | null> {
  *  1. list the candidate's parent and keep the candidate when its name shows
  *     up (the branch normal links always take);
  *  2. otherwise suffix-match the link against the workspace file index (the
- *     @-mention index), longest unambiguous suffix first.
+ *     @-mention index), preserving every directory qualifier supplied.
  *
  * Returns the sync candidate when nothing better is found, so the caller's
  * existing not-found UX is unchanged. Null means “not a file path at all”

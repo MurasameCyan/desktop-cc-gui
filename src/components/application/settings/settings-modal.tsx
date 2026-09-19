@@ -11,6 +11,7 @@ import {
 import X from "lucide-react/dist/esm/icons/x";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { DisplayName } from "@/components/base/display-name";
 import {
   WorkspaceSortableList,
   type RepoDragChrome,
@@ -131,7 +132,7 @@ function NavButton({
               : "text-text-secondary",
         )}
       >
-        {item.label}
+        <DisplayName name={item.label} />
       </span>
     </button>
   );
@@ -213,7 +214,7 @@ function SortableNavItems({
                   selected ? "text-text-primary" : "text-text-secondary",
                 )}
               >
-                {item.label}
+                <DisplayName name={item.label} />
               </span>
             </button>
           </div>
@@ -389,7 +390,7 @@ export function SettingsModal({
             <div className="flex shrink-0 items-center justify-between px-4 pt-4 pb-3 md:px-8 md:pt-8">
               <div className="flex min-w-0 items-center gap-3">
                 <h2 className="shrink-0 text-title-3-medium text-text-primary">
-                  {titles[page] ?? page}
+                  <DisplayName name={titles[page] ?? page} />
                 </h2>
                 {renderHeaderActions?.(page)}
               </div>

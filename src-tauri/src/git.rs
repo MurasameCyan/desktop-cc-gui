@@ -230,6 +230,36 @@ fn open_repo(path: &str) -> Result<Repository, String> {
     Repository::discover(path).map_err(|_| "NOT_A_REPO".to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceVcsMetadata {
+    pub git_branch: Option<String>,
+    pub git_head: Option<String>,
+    pub dirty: bool,
+}
+
+/// Read-only repository facts for the workspace metadata plugin API. Plugins
+/// receive these values but never gain access to Git operations themselves.
+pub(crate) fn workspace_vcs_metadata(path: &str) -> Option<WorkspaceVcsMetadata> {
+    let repo = Repository::discover(path).ok()?;
+    let head = repo.head().ok();
+    let git_branch = head
+        .as_ref()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.shorthand().map(str::to_string));
+    let git_head = head.as_ref().and_then(|head| head.target()).map(|oid| oid.to_string());
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    let dirty = repo
+        .statuses(Some(&mut options))
+        .ok()
+        .is_some_and(|statuses| !statuses.is_empty());
+    Some(WorkspaceVcsMetadata {
+        git_branch,
+        git_head,
+        dirty,
+    })
+}
+
 fn status_label(status: git2::Status) -> &'static str {
     if status.contains(git2::Status::WT_DELETED) || status.contains(git2::Status::INDEX_DELETED) {
         "deleted"
@@ -856,16 +886,28 @@ mod tests {
             .unwrap();
     }
 
+    fn clone_without_crlf_conversion(origin: &Path, local: &Path) -> Repository {
+        git2::build::RepoBuilder::new()
+            .remote_create(|repo, name, url| {
+                // Set this before clone's first checkout; changing it afterward
+                // makes inherited CRLF worktree files differ from the LF index.
+                repo.config()?.set_bool("core.autocrlf", false)?;
+                repo.remote(name, url)
+            })
+            .clone(origin.to_str().unwrap(), local)
+            .unwrap()
+    }
+
     #[test]
     fn pull_conflict_preserves_head_index_and_worktree() {
         for staged in [false, true] {
             let scratch = Scratch::new();
             let origin_path = scratch.0.join("origin");
             let origin = Repository::init(&origin_path).unwrap();
+            origin.config().unwrap().set_bool("core.autocrlf", false).unwrap();
             commit_file(&origin, "shared.txt", "base\n");
             let local_path = scratch.0.join("local");
-            let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-            local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+            let local = clone_without_crlf_conversion(&origin_path, &local_path);
             let old_head = local.head().unwrap().target().unwrap();
             std::fs::write(local_path.join("shared.txt"), "local\n").unwrap();
             if staged {
@@ -888,11 +930,11 @@ mod tests {
         let scratch = Scratch::new();
         let origin_path = scratch.0.join("origin");
         let origin = Repository::init(&origin_path).unwrap();
+        origin.config().unwrap().set_bool("core.autocrlf", false).unwrap();
         commit_file(&origin, "shared.txt", "base\n");
         commit_file(&origin, "local.txt", "base\n");
         let local_path = scratch.0.join("local");
-        let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-        local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+        let local = clone_without_crlf_conversion(&origin_path, &local_path);
         std::fs::write(local_path.join("local.txt"), "staged\n").unwrap();
         let mut index = local.index().unwrap();
         index.add_path(Path::new("local.txt")).unwrap();
