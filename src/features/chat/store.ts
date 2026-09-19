@@ -698,16 +698,10 @@ export const useChatStore = create<ChatStore>((set, get) => {
         runRouting.delete(result.runId);
         untrackRun(result.runId);
         dropRunUsage(result.runId);
-        // A replacement may already own the same native session: the
-        // session-keyed retry is only safe when THIS send adopted the id (a
-        // fresh chat's first turn). An established session's late
-        // acknowledgement may only target the immutable run id.
-        await Promise.all([
-          ipc.interruptSession(result.runId).catch(() => false),
-          ...(result.sessionId && !tab.sessionId
-            ? [ipc.interruptSession(result.sessionId).catch(() => false)]
-            : []),
-        ]);
+        // A replacement may already own the same native session. Only the
+        // immutable run id belongs to this late acknowledgement (the registry
+        // aliases it to the child the run was spawned for).
+        await ipc.interruptSession(result.runId).catch(() => false);
       }
     } catch (error) {
       const failedKey = runRouting.get(requestedRunId) ?? key;

@@ -424,8 +424,6 @@ function dispatchNormalized(event: EngineEventPayload, terminal?: EngineTerminal
   if (normalized) dispatchRuntimeEvent(normalized);
 }
 
-import { migrateSelectedAgent } from "@/features/agents/selected-agent";
-
 /**
  * Engine-event handling: the main loop resolves each event's session key and
  * dispatches to one handler per event kind. Store-agnostic apart from the
