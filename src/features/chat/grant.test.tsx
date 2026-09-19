@@ -180,4 +180,20 @@ describe("GrantCard", () => {
     expect(container.textContent).toContain(i18n.t("chat.grantResend"));
     expect(container.textContent).not.toContain(i18n.t("chat.grantAllow"));
   });
+
+  it("pathless denial explains instead of offering a dead allow button", () => {
+    render({
+      seq: 9,
+      role: "grant",
+      text: "Claude requested permissions to use Bash, but you haven't granted it yet.",
+      path: null,
+      ts: null,
+      grant: { status: "pending" },
+    });
+    expect(container.textContent).toContain(i18n.t("chat.grantTitleAction"));
+    expect(container.textContent).toContain(i18n.t("chat.grantUnavailable"));
+    expect(container.textContent).toContain(i18n.t("chat.grantDismiss"));
+    expect(container.textContent).not.toContain(i18n.t("chat.grantAllow"));
+    expect(container.textContent).not.toContain(i18n.t("chat.grantDecline"));
+  });
 });

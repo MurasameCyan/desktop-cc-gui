@@ -34,6 +34,10 @@ const FLYOUT_CLASSES = cx(
 /* ------------------------------------------------------------------ flyout */
 
 /** One checkmark channel row. Shown only when the engine has in-app channels. */
+// Channel rows hidden for now: the section is still wired (data + handlers
+// flow through), it just doesn't render. Flip to true to restore.
+const SHOW_CHANNEL_LIST = false;
+
 function ChannelRow({
   option,
   selected,
@@ -483,7 +487,7 @@ export function EngineModelPanel({
         </span>
         <PanelActions onRefresh={onRefresh} onClose={onClose} />
       </div>
-      {channels && onPickChannel && (
+      {SHOW_CHANNEL_LIST && channels && onPickChannel && (
         <ChannelList
           channels={channels}
           selectedChannelId={selectedChannelId ?? ""}

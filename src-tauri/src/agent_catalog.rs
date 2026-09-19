@@ -561,8 +561,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // HOME is process-global and paths::home_dir reads it under cfg(test);
-    // serialize the one test that steers it (same pattern agents.rs uses).
-    static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    // serialize through the crate-wide lock shared with every such test.
 
     struct ScratchHome {
         dir: PathBuf,
@@ -572,7 +571,7 @@ mod tests {
 
     impl ScratchHome {
         fn new(name: &str) -> Self {
-            let guard = ENV_LOCK.lock();
+            let guard = crate::paths::HOME_ENV_LOCK.lock();
             let dir = std::env::temp_dir().join(format!(
                 "ccgui-agent-catalog-{name}-{}",
                 std::process::id()

@@ -20,6 +20,39 @@ pub const TITLE_EVENT: &str = "browser-tab-title";
 fn label(id: &str) -> String {
     format!("{LABEL_PREFIX}{id}")
 }
+/// The embedded browser has no window to open into, so links that ask for
+/// one (target=_blank anchors, _blank forms, window.open) are rerouted to
+/// navigate the current tab instead of dying silently. Injected at document
+/// start of every navigation; the click listener runs in the capture phase
+/// so a page's own click handlers (e.g. Google rewriting result hrefs on
+/// mousedown) have already settled, and its preventDefault keeps the
+/// new-window request from ever reaching WKWebView.
+const LINK_ROUTING_SCRIPT: &str = r#"
+(() => {
+  document.addEventListener('click', (event) => {
+    const anchor = event.target instanceof Element ? event.target.closest('a[target]') : null;
+    if (!anchor) return;
+    const target = anchor.getAttribute('target').toLowerCase();
+    if (target !== '_blank' && target !== '_new') return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.location.href = anchor.href;
+  }, true);
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    const target = (form.getAttribute('target') || '').toLowerCase();
+    if (target === '_blank' || target === '_new') form.setAttribute('target', '_self');
+  }, true);
+  const open = window.open.bind(window);
+  window.open = (url, target) => {
+    if (url && (!target || target === '_blank' || target === '_new')) {
+      window.location.href = url;
+      return null;
+    }
+    return open(url, target);
+  };
+})();
+"#;
 
 /// Webview labels are global per app; keep ids to a safe alphabet so a
 /// malformed id can never collide with another webview's label.
@@ -66,9 +99,12 @@ pub fn browser_create(
     let app = window.app_handle().clone();
     let nav_id = id.clone();
     let title_id = id.clone();
+    let new_window_app = window.app_handle().clone();
+    let new_window_label = label.clone();
     let builder = tauri::WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .focused(true)
         .zoom_hotkeys_enabled(true)
+        .initialization_script(LINK_ROUTING_SCRIPT)
         .on_navigation(move |url| {
             let _ = app.emit(
                 NAV_EVENT,
@@ -83,11 +119,15 @@ pub fn browser_create(
                 serde_json::json!({ "id": title_id, "title": title }),
             );
         })
-        // target=_blank / window.open: keep the in-app page intact and hand
-        // the link to the system browser instead of letting it hijack the
-        // tab (or silently dying).
-        .on_new_window(|url, _features| {
-            let _ = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
+        // Fallback for whatever LINK_ROUTING_SCRIPT misses (named targets,
+        // pages that bypass window.open): a denied new-window request
+        // silently dies, so follow the link in this same webview instead —
+        // history and the back button keep working. The handler gets no
+        // source webview handle; look it up by label.
+        .on_new_window(move |url, _features| {
+            if let Some(webview) = new_window_app.get_webview(&new_window_label) {
+                let _ = webview.navigate(url);
+            }
             tauri::webview::NewWindowResponse::Deny
         });
     window

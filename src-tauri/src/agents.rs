@@ -338,8 +338,7 @@ mod tests {
     use std::fs;
 
     // Tests steer paths::home_dir through HOME (its cfg(test) branch), which
-    // is process-global — serialize every test that touches it.
-    static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    // is process-global — every HOME-mutating test shares the crate-wide lock.
 
     struct ScratchHome {
         dir: PathBuf,
@@ -349,7 +348,7 @@ mod tests {
 
     impl ScratchHome {
         fn new(name: &str) -> Self {
-            let guard = ENV_LOCK.lock();
+            let guard = crate::paths::HOME_ENV_LOCK.lock();
             let dir = std::env::temp_dir().join(format!("ccgui-agents-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();

@@ -699,7 +699,7 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
 /// legacy/provider home),stale/损坏的 db 行也无法把 remove_dir_all
 /// 指向任意目录树。
 fn delete_dir_session_disk(engine: &str, path: &Path) -> Result<(), String> {
-    delete_dir_session_disk_anchored(engine, path, &super::scanner::dir_session_anchor_roots(engine))
+    delete_dir_session_disk_anchored(engine, path, &super::discovery::dir_session_anchor_roots(engine))
 }
 
 /// 根列表可注入:单测不依赖 HOME/DSH_HOME 等进程级环境变量。
@@ -743,7 +743,7 @@ fn delete_dir_session_disk_anchored(
                 && path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|name| super::scanner::dsh_log_generation(name).is_some())
+                    .is_some_and(|name| super::discovery::dsh_log_generation(name).is_some())
         }
     };
     if !anchored || !structure_ok {

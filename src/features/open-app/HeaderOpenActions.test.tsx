@@ -23,10 +23,13 @@ vi.mock("@/lib/platform", () => ({
 }));
 
 import "@/lib/i18n";
+import { onLaunchScriptEditorRequest } from "@/features/launch-script/launch-script";
 import { HeaderOpenActions } from "./HeaderOpenActions";
 import {
   CUSTOM_APPS_KEY,
+  LAUNCH_SCRIPT_ACTION_ID,
   readCustomApps,
+  readPinnedIds,
   writeCustomApps,
   writePinnedIds,
 } from "./open-app";
@@ -148,6 +151,44 @@ describe("HeaderOpenActions add-program", () => {
       apps[0].path,
       expect.stringMatching(/workspace/),
     );
+  });
+
+  it("lists the launch script as a pinnable row; clicking it requests the editor", async () => {
+    const editorRequests = vi.fn();
+    const unsubscribe = onLaunchScriptEditorRequest(editorRequests);
+    try {
+      await openMenu();
+
+      const row = buttonByText("启动脚本");
+      expect(row).toBeTruthy();
+      // Pinned by default; the pin checkbox lives in the same row.
+      const checkbox = row!
+        .closest("div")!
+        .querySelector<HTMLInputElement>('input[type="checkbox"]');
+      expect(checkbox?.checked).toBe(true);
+
+      // Clicking the row asks the launch-script cluster to open its editor.
+      await act(async () => {
+        row!.click();
+      });
+      expect(editorRequests).toHaveBeenCalledTimes(1);
+
+      // The click closed the menu; reopen and unpin via the row's checkbox.
+      await act(async () => {
+        const buttons = document.querySelectorAll<HTMLButtonElement>("button");
+        buttons.item(buttons.length - 1).click();
+      });
+      const rowAgain = buttonByText("启动脚本")!;
+      const checkboxAgain = rowAgain
+        .closest("div")!
+        .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+      await act(async () => {
+        checkboxAgain.click();
+      });
+      expect(readPinnedIds()).not.toContain(LAUNCH_SCRIPT_ACTION_ID);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("removing a custom program drops it from the menu and unpins it", async () => {

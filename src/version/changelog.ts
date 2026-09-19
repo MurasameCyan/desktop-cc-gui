@@ -18,6 +18,66 @@ export interface ChangelogEntry {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.0.5",
+    date: "2026-09-19",
+    content: {
+      zh: `✨ 新功能
+- **内置浏览器标签页**：应用内打开网页，原生子 webview 渲染；地址栏与页签标题跟随真实导航，target=_blank 链接改为当前页签内打开，页签关闭即销毁 webview
+- **会话归档**：侧栏右键菜单归档会话，设置页新增「归档会话」管理面板，可查看与恢复
+- **会话搜索弹窗**：侧栏顶栏搜索框退役，改用搜索图标或 ⌘L 打开会话标题搜索弹窗
+- **启动脚本**：按工作区配置启动脚本，可从会话工具区快速运行
+- **图片预览增强**：图片灯箱查看器，支持消息与附件图片放大浏览
+- **工作区右键新建**：文件树与工作区支持右键新建文件 / 文件夹
+- **Markdown GitHub 风格 alert**：支持 > [!NOTE] / [!WARNING] 等提示框，极简左边线样式
+- **输入框拖拽文件回归**：图片拖入转为附件，其他文件插入 @引用
+- **删除确认气泡**：删除会话等危险操作改为就地气泡确认
+- **检查更新反馈**：已是最新时明确展示版本号与发布日期，结果不再 2 秒消失
+- 侧栏新增置灰的「自动化」入口，悬停 / 点击提示「即将开放」
+- 插件 SDK 0.3.11：修复 registerComposerSlot 权限漂移——自 0.3.9 改名后仍校验旧字符串 ui:composer 导致任何声明都被拒绝，改为校验 ui:composer-status
+
+🐛 修复
+- 折叠长消息改为裁剪高度，不再残留淡出残影
+- 失败会话的历史索引与删除：失败会话可被正确索引并彻底删除
+- 长用户消息气泡不再向左溢出
+- 上下文用量表盘分子卡在整轮累加值，恢复实时按 token 更新
+- 引擎进程注册表泄漏：中断 / 退出路径正确注销进程句柄
+- 移动端网页模式移除「添加工作区」入口
+- 「关于」页移除重复的版本记录入口
+
+🧹 内部优化
+- 后端模块化拆分：引擎拆出 reader / registry / events，历史发现与扫描分离，Web 后端拆出 dispatch 层
+- 聊天 store 拆分为 composer / sessions / tabs / workspaces / messaging 等模块
+- 插件市场页面精简`,
+      en: `✨ Features
+- **Built-in browser tabs**: open web pages inside the app via native child webviews; the address bar and tab title follow real navigations, target=_blank links navigate the current tab, and closing a tab destroys its webview
+- **Session archive**: archive sessions from the sidebar context menu, with a new "Archived sessions" pane in Settings to browse and restore them
+- **Session search palette**: the sidebar top-bar search field is retired — open session title search via the search icon or ⌘L
+- **Launch scripts**: per-workspace startup scripts, runnable from the session toolbar area
+- **Image preview upgrade**: lightbox viewer for message and attachment images
+- **Workspace right-click create**: create files/folders from the file tree and workspace context menus
+- **GitHub-style Markdown alerts**: > [!NOTE] / [!WARNING] and friends, rendered with a minimal left-border style
+- **Composer file drag-and-drop returns**: dropped images become attachments, other files insert @ references
+- **Delete confirmation popover**: destructive actions like session deletion now confirm in place
+- **Update check feedback**: "already up to date" now shows the version and release date and no longer vanishes after 2 seconds
+- Sidebar gains a greyed-out "Automation" entry with a "coming soon" hint
+- Plugin SDK 0.3.11: fixes registerComposerSlot permission drift — it still validated the old ui:composer string after the 0.3.9 rename, rejecting every manifest; it now checks ui:composer-status
+
+🐛 Fixes
+- Collapsed long messages clip their height instead of leaving a fading ghost
+- Failed sessions are correctly indexed in history and can be fully deleted
+- Long user message bubbles no longer overflow to the left
+- Context-usage gauge numerator no longer sticks at the whole-turn cumulative value; it updates per token again
+- Engine process registry leak: interrupt/exit paths now deregister process handles
+- Mobile web mode no longer shows the "add workspace" entry
+- Removed the duplicate version-history entry on the About page
+
+🧹 Internal
+- Backend modularization: engine split into reader / registry / events, history discovery separated from scanning, Web backend gains a dispatch layer
+- Chat store split into composer / sessions / tabs / workspaces / messaging modules
+- Plugin marketplace page simplified`,
+    },
+  },
+  {
     version: "1.0.4",
     date: "2026-09-18",
     content: {

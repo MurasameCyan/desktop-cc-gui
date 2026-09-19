@@ -17,6 +17,7 @@ import {
   type RepoDragChrome,
 } from "@/components/application/ai-chat/workspace-sortable-list";
 import { cx } from "@/utils/cx";
+import { useBrowserOcclusion } from "@/features/browser/occlusion";
 
 /**
  * Figma sources: Board UI → "Settings/Profile" (node 4081:13943) and
@@ -234,6 +235,9 @@ export function SettingsModal({
   renderHeaderActions,
 }: SettingsModalProps) {
   const firstKey = groups[0]?.items[0]?.key ?? "general";
+  // The modal renders above any surface, including the native browser
+  // webview — which must hide for HTML to paint over it.
+  useBrowserOcclusion(isOpen);
   /** Page the modal resets to on open. */
   const openPage = defaultPage ?? firstKey;
   const [page, setPage] = useState<string>(openPage);

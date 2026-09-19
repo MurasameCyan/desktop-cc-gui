@@ -112,6 +112,10 @@ export const zh = {
     grantGranted: "已授权 {{dir}}。权限在下一条消息生效——",
     grantResend: "重新发送上一条",
     grantDeclined: "已拒绝该访问请求。",
+    grantTitleAction: "需要权限",
+    grantUnavailable:
+      "该操作（如终端命令）不涉及目录授权，无法在此一键允许。可将权限模式切换为「全部跳过」后重新发送，或让 Agent 改用工作区内的方式。",
+    grantDismiss: "知道了",
     questionTitle: "需要你的选择",
     questionSubmit: "提交",
     questionSkip: "忽略",
@@ -631,6 +635,7 @@ export const zh = {
     cliAuthJsonError: "auth.json JSON 格式错误",
     cliDrag: "拖拽排序",
     cliDisabledGroup: "未启用CLI",
+    cliNotInstalledGroup: "未安装CLI",
     cliEdit: "编辑",
     cliDelete: "删除",
     piAuthOauthTitle: "订阅授权",

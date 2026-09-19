@@ -24,6 +24,12 @@ pub(crate) fn home_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// Serialize tests that steer process-global HOME / USERPROFILE (read by the
+/// cfg(test) branch above): module-private locks would not exclude each other,
+/// so every HOME-mutating test across the crate holds this one lock.
+#[cfg(test)]
+pub(crate) static HOME_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Application home directory: ~/.ccgui-next/
 pub fn app_home() -> PathBuf {
     home_dir().join(".ccgui-next")

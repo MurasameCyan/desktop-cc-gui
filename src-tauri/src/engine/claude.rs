@@ -13,6 +13,11 @@ pub struct ClaudeEngine {
     /// tool_use id -> tool name, recorded at `content_block_start` so a
     /// later `tool_result` (user message) can be attributed to its call.
     tool_names: Mutex<HashMap<String, String>>,
+    /// tool_use id -> structured path argument, recorded at
+    /// `content_block_stop` once the input JSON is complete. Permission
+    /// denials resolve the real denied path from here instead of scraping
+    /// the free-text error.
+    tool_paths: Mutex<HashMap<String, String>>,
     /// Post-compaction remaining context tokens from `compact_boundary` event,
     /// used to report accurate post-compaction usage instead of the turn's billing usage.
     compact_post_tokens: Mutex<Option<i64>>,
@@ -20,6 +25,7 @@ pub struct ClaudeEngine {
 
 struct PendingTool {
     name: String,
+    id: Option<String>,
     json: String,
     tool_call_id: Option<String>,
 }
@@ -29,6 +35,7 @@ impl ClaudeEngine {
         Self {
             pending_tool_json: Mutex::new(HashMap::new()),
             tool_names: Mutex::new(HashMap::new()),
+            tool_paths: Mutex::new(HashMap::new()),
             compact_post_tokens: Mutex::new(None),
         }
     }
@@ -175,7 +182,13 @@ impl Engine for ClaudeEngine {
                 }
             }
             "stream_event" => {
-                parse_stream_event(&self.pending_tool_json, &self.tool_names, &value, out)
+                parse_stream_event(
+                    &self.pending_tool_json,
+                    &self.tool_names,
+                    &self.tool_paths,
+                    &value,
+                    out,
+                )
             }
             "assistant" => {
                 // Full message snapshot; used as session-id and actual model source.
@@ -196,14 +209,27 @@ impl Engine for ClaudeEngine {
                 // text (headless cannot prompt). Surface them so the UI can
                 // offer a directory grant instead of letting the model
                 // narrate a terminal prompt that does not exist.
-                for text in tool_result_error_texts(&value) {
-                    if looks_like_permission_denial(&text) {
-                        out.push(EngineEvent::PermissionDenied {
-                            tool: None,
-                            path: extract_absolute_path(&text),
-                            message: text,
-                        });
+                for (id, text) in tool_result_error_blocks(&value) {
+                    if !looks_like_permission_denial(&text) {
+                        continue;
                     }
+                    // The denied call's structured input is authoritative:
+                    // resolve the real path argument by tool_use id and only
+                    // fall back to scraping the free-text error when the call
+                    // was never seen (e.g. resumed transcript) or carries no
+                    // path argument (e.g. Bash).
+                    let tool = id.as_ref().and_then(|id| {
+                        self.tool_names.lock().ok()?.get(id).cloned()
+                    });
+                    let path = id
+                        .as_ref()
+                        .and_then(|id| self.tool_paths.lock().ok()?.get(id).cloned())
+                        .or_else(|| extract_absolute_path(&text));
+                    out.push(EngineEvent::PermissionDenied {
+                        tool,
+                        path,
+                        message: text,
+                    });
                 }
                 // Tool result output emitted in response to tool_use. The
                 // tool name is resolved from the tool_use_id recorded at
@@ -476,9 +502,9 @@ fn tool_result_block_text(block: &Value) -> String {
     }
 }
 
-/// Error texts of tool_result blocks in a "user" stream line. Content may be
-/// a plain string or an array of text blocks.
-fn tool_result_error_texts(value: &Value) -> Vec<String> {
+/// (tool_use id, error text) pairs of tool_result blocks in a "user" stream
+/// line. Content may be a plain string or an array of text blocks.
+fn tool_result_error_blocks(value: &Value) -> Vec<(Option<String>, String)> {
     let mut out = Vec::new();
     let Some(content) = value
         .get("message")
@@ -497,7 +523,11 @@ fn tool_result_error_texts(value: &Value) -> Vec<String> {
         let text = tool_result_block_text(block);
         let text = text.trim().chars().take(500).collect::<String>();
         if !text.is_empty() {
-            out.push(text);
+            let id = block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            out.push((id, text));
         }
     }
     out
@@ -531,6 +561,7 @@ fn format_api_retry(value: &Value) -> String {
 fn parse_stream_event(
     pending: &Mutex<HashMap<u64, PendingTool>>,
     tool_names: &Mutex<HashMap<String, String>>,
+    tool_paths: &Mutex<HashMap<String, String>>,
     value: &Value,
     out: &mut Vec<EngineEvent>,
 ) {
@@ -541,8 +572,10 @@ fn parse_stream_event(
         Some("content_block_delta") => parse_content_block_delta(pending, event, out),
         // Tool calls surface at block start with `input: {}`; the real
         // arguments stream in as `input_json_delta` and flush on stop.
-        Some("content_block_start") => parse_content_block_start(pending, tool_names, event, out),
-        Some("content_block_stop") => parse_content_block_stop(pending, event, out),
+        Some("content_block_start") => {
+            parse_content_block_start(pending, tool_names, tool_paths, event, out)
+        }
+        Some("content_block_stop") => parse_content_block_stop(pending, tool_paths, event, out),
         _ => {}
     }
 }
@@ -594,6 +627,7 @@ fn parse_content_block_delta(
 fn parse_content_block_start(
     pending: &Mutex<HashMap<u64, PendingTool>>,
     tool_names: &Mutex<HashMap<String, String>>,
+    tool_paths: &Mutex<HashMap<String, String>>,
     event: &Value,
     out: &mut Vec<EngineEvent>,
 ) {
@@ -613,6 +647,13 @@ fn parse_content_block_start(
         if let Ok(mut map) = tool_names.lock() {
             map.insert(id.to_string(), name.clone());
         }
+        // Non-streaming lines carry the full input at block start; record
+        // its path argument immediately (partial streams patch it at stop).
+        if let Some(path) = input.and_then(super::tool_path_arg) {
+            if let Ok(mut map) = tool_paths.lock() {
+                map.insert(id.to_string(), path);
+            }
+        }
     }
     let tool_call_id = block.get("id").and_then(Value::as_str).map(str::to_string);
     if let Some(index) = event.get("index").and_then(Value::as_u64) {
@@ -621,6 +662,7 @@ fn parse_content_block_start(
                 index,
                 PendingTool {
                     name: name.clone(),
+                    id: block.get("id").and_then(Value::as_str).map(str::to_string),
                     json: String::new(),
                     tool_call_id: tool_call_id.clone(),
                 },
@@ -634,6 +676,7 @@ fn parse_content_block_start(
 
 fn parse_content_block_stop(
     pending: &Mutex<HashMap<u64, PendingTool>>,
+    tool_paths: &Mutex<HashMap<String, String>>,
     event: &Value,
     out: &mut Vec<EngineEvent>,
 ) {
@@ -650,6 +693,11 @@ fn parse_content_block_stop(
     let Ok(args) = serde_json::from_str::<Value>(trimmed) else {
         return;
     };
+    if let (Some(id), Some(path)) = (tool.id.as_ref(), super::tool_path_arg(&args)) {
+        if let Ok(mut map) = tool_paths.lock() {
+            map.insert(id.clone(), path);
+        }
+    }
     out.push(tool_call_patch_with_id(
         tool.name,
         Some(&args),
@@ -968,6 +1016,63 @@ mod tests {
                 assert!(message.contains("requested permissions"));
             }
             _ => panic!("expected permission denial"),
+        }
+    }
+
+    #[test]
+    fn tool_result_denial_resolves_path_from_tool_input() {
+        let engine = ClaudeEngine::new();
+        let start = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "tool_use", "id": "toolu_9", "name": "Read", "input": {} }
+            }
+        })
+        .to_string();
+        let delta = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "input_json_delta", "partial_json": "{\"file_path\":\"/etc/hosts\"}" }
+            }
+        })
+        .to_string();
+        let stop = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_stop", "index": 0 }
+        })
+        .to_string();
+        // Pathless denial text: nothing for extract_absolute_path to find.
+        let denial = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_9",
+                    "is_error": true,
+                    "content": "Claude requested permissions to read this file, but you haven't granted it yet."
+                }]
+            }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        for line in [&start, &delta, &stop, &denial] {
+            engine.parse_line(line, &mut out);
+        }
+        let denial = out
+            .iter()
+            .find(|e| matches!(e, EngineEvent::PermissionDenied { .. }))
+            .expect("expected permission denial");
+        match denial {
+            EngineEvent::PermissionDenied { tool, path, .. } => {
+                assert_eq!(tool.as_deref(), Some("Read"));
+                assert_eq!(path.as_deref(), Some("/etc/hosts"));
+            }
+            _ => unreachable!(),
         }
     }
 

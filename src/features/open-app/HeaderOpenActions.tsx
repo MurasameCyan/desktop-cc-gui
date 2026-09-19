@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Button as AriaButton,
@@ -7,6 +7,7 @@ import {
   Popover as AriaPopover,
 } from "react-aria-components";
 import Ellipsis from "lucide-react/dist/esm/icons/ellipsis";
+import Play from "lucide-react/dist/esm/icons/play";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import SquareTerminal from "lucide-react/dist/esm/icons/square-terminal";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
@@ -16,11 +17,13 @@ import { menuPopoverSurface } from "@/components/base/dropdown/menu-styles";
 import { Input } from "@/components/base/input/input";
 import { ModalShell } from "@/components/dialogs";
 import { useFilesStore } from "@/features/files/store";
+import { requestLaunchScriptEditor } from "@/features/launch-script/launch-script";
 import { useTerminalStore } from "@/features/terminal/store";
 import { pickFile } from "@/lib/platform";
 import { cx } from "@/utils/cx";
 import { usePopoverState } from "@/utils/use-dismiss-on-outside-press";
 import {
+  LAUNCH_SCRIPT_ACTION_ID,
   OPEN_APP_ICONS,
   OPEN_APP_TARGETS,
   TERMINAL_ACTION_ID,
@@ -31,6 +34,7 @@ import {
   readPinnedIds,
   readSelectedOpenAppId,
   resolveOpenAppPath,
+  subscribePinnedIds,
   writeCustomApps,
   writePinnedIds,
   writeSelectedOpenAppId,
@@ -160,7 +164,7 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
   const activeFilePath = useFilesStore((s) => s.activeFilePath);
   const terminalOpen = useTerminalStore((s) => s.open);
   const toggleTerminal = useTerminalStore((s) => s.toggle);
-  const [pinnedIds, setPinnedIds] = useState(readPinnedIds);
+  const pinnedIds = useSyncExternalStore(subscribePinnedIds, readPinnedIds);
   const [selectedId, setSelectedId] = useState(readSelectedOpenAppId);
   const [customApps, setCustomApps] = useState<CustomApp[]>(readCustomApps);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -199,13 +203,14 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
     [closeMenu, openTarget],
   );
 
-  const togglePinned = useCallback((id: string) => {
-    setPinnedIds((prev) => {
-      const next = prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id];
-      writePinnedIds(next);
-      return next;
-    });
-  }, []);
+  const togglePinned = useCallback(
+    (id: string) => {
+      writePinnedIds(
+        pinnedIds.includes(id) ? pinnedIds.filter((p) => p !== id) : [...pinnedIds, id],
+      );
+    },
+    [pinnedIds],
+  );
 
   const addCustomApp = useCallback(
     (app: CustomApp) => {
@@ -216,14 +221,10 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
       });
       // New programs appear in the header right away, like the presets do by
       // default.
-      setPinnedIds((prev) => {
-        const next = prev.includes(app.id) ? prev : [...prev, app.id];
-        writePinnedIds(next);
-        return next;
-      });
+      if (!pinnedIds.includes(app.id)) writePinnedIds([...pinnedIds, app.id]);
       setAddDialogOpen(false);
     },
-    [],
+    [pinnedIds],
   );
 
   const removeCustomApp = useCallback((id: string) => {
@@ -233,12 +234,8 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
       return next;
     });
     // Drop the pin so the header stops referencing a program that is gone.
-    setPinnedIds((prev) => {
-      const next = prev.filter((p) => p !== id);
-      writePinnedIds(next);
-      return next;
-    });
-  }, []);
+    writePinnedIds(pinnedIds.filter((p) => p !== id));
+  }, [pinnedIds]);
 
   // Extract OS icons for programs that don't have one yet (once per entry;
   // a failed extraction persists `null` so it is not retried every mount).
@@ -402,6 +399,28 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
                   size="sm"
                   isSelected={terminalPinned}
                   onChange={() => togglePinned(TERMINAL_ACTION_ID)}
+                  aria-label={showInHeaderLabel}
+                />
+              </div>
+
+              <div className="flex items-center gap-1 rounded-2lg pr-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    requestLaunchScriptEditor();
+                    closeMenu();
+                  }}
+                  className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-2lg p-2 text-left outline-none transition-colors hover:bg-background-primary-hover focus-visible:bg-background-primary-hover"
+                >
+                  <Play className="size-4 shrink-0 text-foreground-icon-secondary" aria-hidden />
+                  <span className="truncate text-body-medium text-text-primary">
+                    {t("launchScript.title")}
+                  </span>
+                </button>
+                <Checkbox
+                  size="sm"
+                  isSelected={pinnedIdSet.has(LAUNCH_SCRIPT_ACTION_ID)}
+                  onChange={() => togglePinned(LAUNCH_SCRIPT_ACTION_ID)}
                   aria-label={showInHeaderLabel}
                 />
               </div>

@@ -4,6 +4,7 @@ import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import { createPortal } from "react-dom";
 import { cx } from "@/utils/cx";
 import { Button } from "@/components/base/buttons/button";
+import { useBrowserOcclusion } from "@/features/browser/occlusion";
 import { Input } from "@/components/base/input/input";
 import {
   answerGrantRequest,
@@ -44,6 +45,9 @@ export function ModalShell({
    * bounded flex column so children can scroll instead of being clipped. */
   dialogClassName?: string;
 }) {
+  // ModalShell only renders while open; the browser webview hides so the
+  // dialog is not painted under it.
+  useBrowserOcclusion(true);
   return (
     <ModalOverlay
       isOpen
@@ -174,6 +178,7 @@ interface ConfirmPopoverProps extends ConfirmDialogProps {
  * ContextMenu contract. */
 export function ConfirmPopover({ message, danger = false, anchor, onConfirm, onCancel }: ConfirmPopoverProps) {
   const { t } = useTranslation();
+  useBrowserOcclusion(true);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState(anchor);
   // Latest-handler ref so the global dismissal listeners below subscribe

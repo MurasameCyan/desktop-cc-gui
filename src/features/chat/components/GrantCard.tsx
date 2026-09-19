@@ -46,7 +46,7 @@ export function GrantCard({ message }: { message: Message }) {
     <div className="flex max-w-[85%] flex-col gap-2 rounded-xl border border-border-secondary bg-background-secondary-default px-3.5 py-2.5 text-left">
       <div className="flex items-center gap-1.5 text-caption-1-medium text-text-primary">
         <FolderLock className="size-3.5 shrink-0 text-foreground-icon-secondary" aria-hidden />
-        {t("chat.grantTitle")}
+        {t(path ? "chat.grantTitle" : "chat.grantTitleAction")}
       </div>
       {message.text && (
         <div className="break-words text-caption-1-regular text-text-secondary">
@@ -58,34 +58,52 @@ export function GrantCard({ message }: { message: Message }) {
           {path}
         </div>
       )}
-      {grant.status === "pending" && (
-        <>
-          {grant.dir && (
-            <div className="text-caption-1-regular text-text-tertiary">
-              {t("chat.grantScopeNote", { dir: grant.dir })}
+      {grant.status === "pending" &&
+        (path ? (
+          <>
+            {grant.dir && (
+              <div className="text-caption-1-regular text-text-tertiary">
+                {t("chat.grantScopeNote", { dir: grant.dir })}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => answer(true)}
+                className={`${btn} bg-button-primary text-text-white`}
+              >
+                <Check className="size-3.5" aria-hidden />
+                {t("chat.grantAllow")}
+              </button>
+              <button
+                type="button"
+                onClick={() => answer(false)}
+                className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
+              >
+                <X className="size-3.5" aria-hidden />
+                {t("chat.grantDecline")}
+              </button>
             </div>
-          )}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={!path}
-              onClick={() => answer(true)}
-              className={`${btn} bg-button-primary text-text-white disabled:cursor-not-allowed disabled:text-button-primary-disabled-foreground`}
-            >
-              <Check className="size-3.5" aria-hidden />
-              {t("chat.grantAllow")}
-            </button>
-            <button
-              type="button"
-              onClick={() => answer(false)}
-              className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
-            >
-              <X className="size-3.5" aria-hidden />
-              {t("chat.grantDecline")}
-            </button>
-          </div>
-        </>
-      )}
+          </>
+        ) : (
+          // No path was recoverable (e.g. a denied shell command): a
+          // directory grant cannot apply. Explain instead of rendering a
+          // dead disabled button; dismissing settles the card as declined.
+          <>
+            <div className="text-caption-1-regular text-text-tertiary">
+              {t("chat.grantUnavailable")}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => answer(false)}
+                className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
+              >
+                {t("chat.grantDismiss")}
+              </button>
+            </div>
+          </>
+        ))}
       {grant.status === "granted" && (
         <div className="flex flex-wrap items-center gap-2 text-caption-1-regular text-text-secondary">
           <span className="break-all">

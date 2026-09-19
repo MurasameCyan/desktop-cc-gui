@@ -4,6 +4,7 @@ import ZoomIn from "lucide-react/dist/esm/icons/zoom-in";
 import ZoomOut from "lucide-react/dist/esm/icons/zoom-out";
 import X from "lucide-react/dist/esm/icons/x";
 import { dataUrlBytes, imageMetaText } from "@/utils/image-meta";
+import { useBrowserOcclusion } from "@/features/browser/occlusion";
 
 /** Zoom bounds and button step; zoom 1 = fit the viewport. */
 const MIN_ZOOM = 0.25;
@@ -24,6 +25,9 @@ export function ImageLightbox({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  // Only mounted while open; hides the native browser webview so the
+  // lightbox is not painted under it.
+  useBrowserOcclusion(true);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [zoom, setZoom] = useState(1);

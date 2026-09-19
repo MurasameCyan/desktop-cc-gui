@@ -6,6 +6,7 @@ import Search from "lucide-react/dist/esm/icons/search";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import type { AiChatRepo } from "@/components/application/ai-chat/sidebar-types";
 import { cx } from "@/utils/cx";
+import { useBrowserOcclusion } from "@/features/browser/occlusion";
 
 /** Hard cap on listed rows: the palette is a jumper, not a browser. */
 const MAX_RESULTS = 50;
@@ -14,6 +15,8 @@ interface SessionMatch {
   id: string;
   label: string;
   engine?: string;
+  /** Relative-time chip (e.g. "34m"), same string the sidebar shows. */
+  time: string;
   workspace: string;
 }
 
@@ -40,6 +43,7 @@ export function SessionSearchPalette({
   onThreadSelect?: (id: string) => void;
 }) {
   const { t } = useTranslation();
+  useBrowserOcclusion(open);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -66,6 +70,7 @@ export function SessionSearchPalette({
           id: thread.id,
           label: thread.label,
           engine: thread.engine,
+          time: thread.time,
           workspace: repo.label,
         });
         if (out.length >= MAX_RESULTS) return out;
@@ -197,6 +202,11 @@ export function SessionSearchPalette({
                 <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
                   {match.label}
                 </span>
+                {match.time && (
+                  <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                    {match.time}
+                  </span>
+                )}
                 <span className="shrink-0 text-caption-1-medium text-text-tertiary">
                   {match.workspace}
                 </span>

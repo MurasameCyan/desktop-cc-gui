@@ -131,6 +131,15 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
                 EngineEvent::PermissionDenied { tool, path, .. } => {
                     println!("  permission denied: tool={tool:?} path={path:?}")
                 }
+                EngineEvent::Question { request_id, .. } => {
+                    println!("  question: request_id={request_id}")
+                }
+                EngineEvent::QuestionSettled { request_id } => {
+                    println!("  question settled: request_id={request_id}")
+                }
+                EngineEvent::ControlPermissionDeny { request_id, tool_name } => {
+                    println!("  control permission denied: tool={tool_name} request_id={request_id}")
+                }
                 EngineEvent::Done { usage, .. } => {
                     println!("  done (usage: {})", usage.is_some());
                     done = true;
