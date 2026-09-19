@@ -13,7 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{state, storage};
 
+/// Remote proxy cap: mirrors `plugin_http_request` (documented in the SDK
+/// guide as the network-request limit).
 pub(super) const MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
+/// Local (bundle/document/granted-directory) reads stream from disk, so the
+/// cap only guards against absurd files. Live2D texture sets routinely exceed
+/// the network limit (a 10 MB `texture_00.png` is normal), and rejecting them
+/// surfaced as an unloadable model rather than a size complaint.
+const MAX_LOCAL_ASSET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DIRECTORIES: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -356,7 +363,7 @@ fn read_local_at(
     if !metadata.is_file() {
         return Err(AssetError::NotFound);
     }
-    if metadata.len() > MAX_ASSET_BYTES as u64 {
+    if metadata.len() > MAX_LOCAL_ASSET_BYTES as u64 {
         return Err(AssetError::TooLarge);
     }
     storage::confine_to_root(&root, &target).map_err(|_| AssetError::Forbidden)?;
@@ -365,10 +372,10 @@ fn read_local_at(
         return Err(AssetError::NotFound);
     }
     let mut body = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_ASSET_BYTES as u64 + 1)
+    file.take(MAX_LOCAL_ASSET_BYTES as u64 + 1)
         .read_to_end(&mut body)
         .map_err(file_error)?;
-    if body.len() > MAX_ASSET_BYTES {
+    if body.len() > MAX_LOCAL_ASSET_BYTES {
         return Err(AssetError::TooLarge);
     }
     // A disable/revoke/storage-root switch during the read must not publish
@@ -790,7 +797,7 @@ mod tests {
         let plugins = scratch.path("plugins");
         fs::create_dir_all(plugins.join("vendor.one")).unwrap();
         let file = fs::File::create(plugins.join("vendor.one/large.bin")).unwrap();
-        file.set_len(MAX_ASSET_BYTES as u64 + 1).unwrap();
+        file.set_len(MAX_LOCAL_ASSET_BYTES as u64 + 1).unwrap();
         assert_eq!(
             read_local_at(
                 &path,
@@ -803,6 +810,27 @@ mod tests {
             .status(),
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    #[test]
+    fn local_reads_serve_textures_above_the_remote_limit() {
+        // Live2D texture atlases routinely exceed the 8 MB network cap
+        // (a 10 MB texture_00.png is normal); local reads must serve them.
+        let scratch = Scratch::new();
+        let path = fixture(&scratch);
+        let plugins = scratch.path("plugins");
+        fs::create_dir_all(plugins.join("vendor.one")).unwrap();
+        let file = fs::File::create(plugins.join("vendor.one/texture.bin")).unwrap();
+        file.set_len(MAX_ASSET_BYTES as u64 + 2).unwrap();
+        let bytes = read_local_at(
+            &path,
+            &plugins,
+            None,
+            "vendor.one",
+            &AssetSource::Bundle("texture.bin".into()),
+        )
+        .unwrap();
+        assert_eq!(bytes.body.len(), MAX_ASSET_BYTES + 2);
     }
 
     fn network_permission(path: &Path, grants: &[String]) {
