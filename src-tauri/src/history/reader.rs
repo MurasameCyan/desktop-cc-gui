@@ -1883,11 +1883,13 @@ mod tests {
             ).unwrap();
             db.remember_session_model(engine, "failed", "model", 1).unwrap();
             db.remember_session_effort(engine, "failed", "high", 1).unwrap();
+            db.record_accepted_internal_frame_hash(engine, "failed", &"a".repeat(64), "/ws")
+                .unwrap();
 
             let error = delete_session_blocking(&db, engine, "failed").unwrap_err();
             assert!(error.contains("remove "), "{error}");
             assert!(path.is_dir());
-            for table in ["sessions", "session_models", "session_efforts"] {
+            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
                 let count: i64 = db.0.lock().query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id='failed'"),
                     [engine],

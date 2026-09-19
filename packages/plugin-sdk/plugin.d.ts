@@ -79,6 +79,13 @@ export interface PluginManifest {
 }
 
 export type ComposerSlotId = "addMenu" | "cliMenu" | "permissionMenu";
+export type WorkspaceMenuStatusTone = "success" | "muted";
+export interface WorkspaceMenuLabel {
+  text: string;
+  status?: { text: string; tone: WorkspaceMenuStatusTone };
+}
+export type WorkspaceMenuLabelValue = string | WorkspaceMenuLabel;
+
 
 /** 侧栏会话右键菜单被打开时所在的会话行。 */
 export interface SessionMenuTarget {
@@ -93,6 +100,12 @@ export interface WorkspaceMetadata {
   gitBranch?: string;
   gitHead?: string;
   dirty?: boolean;
+}
+
+export interface RegisteredWorkspace {
+  id: string;
+  name: string;
+  path: string;
 }
 
 export interface PromptContribution {
@@ -434,7 +447,7 @@ export interface PluginContext {
     /** 侧边栏工作区行右键菜单条目（权限 ui:workspace-menu）。 */
     registerWorkspaceMenuItem(def: {
       key?: string;
-      label: (ctx: { workspaceId: string; archived: boolean }) => string;
+      label: (ctx: { workspaceId: string; archived: boolean }) => WorkspaceMenuLabelValue;
       icon?: ComponentLike<{ className?: string }>;
       visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
       onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
@@ -488,6 +501,8 @@ export interface PluginContext {
    *  TOFU 而非严格 pinning。 */
   workspaces: {
     add(path: string, meta?: Record<string, unknown>): Promise<void>;
+    /** List registered workspaces without exposing UI-only metadata. */
+    list(): Promise<RegisteredWorkspace[]>;
   };
   /** 会话打开 + 外部会话源(权限 host:session;selectSession 0.3.3 起,
    *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话

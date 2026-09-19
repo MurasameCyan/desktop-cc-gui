@@ -147,12 +147,14 @@ describe("codex turn settling", () => {
     await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     const runId = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].runId!;
     await useChatStore.getState().interrupt();
+    vi.mocked(ipc.interruptSession).mockClear();
     response.resolve({ runId, sessionId: "tid-1" });
     await sending;
     expect(useChatStore.getState().active?.sessionId).toBe("tid-1");
     expect(useChatStore.getState().bySession[NATIVE]?.streaming).toBe(false);
     expect(useChatStore.getState().streamingByKey).toEqual({});
-    expect(ipc.interruptSession).toHaveBeenCalledWith("tid-1");
+    expect(ipc.interruptSession).toHaveBeenCalledTimes(1);
+    expect(ipc.interruptSession).toHaveBeenCalledWith(runId);
     expect(runRouting.size).toBe(0);
   });
 

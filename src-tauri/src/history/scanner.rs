@@ -2274,6 +2274,9 @@ mod tests {
             std::fs::write(path, text).map_err(|e| e.to_string())?;
             db.remember_session_model(engine, session_id, "model", 1)?;
             db.remember_session_effort(engine, session_id, "high", 1)?;
+            db.record_accepted_internal_frame_hash(
+                engine, session_id, &"a".repeat(64), &workspace.to_string_lossy(),
+            )?;
             let count: i64 = db.0.lock().query_row(
                 "SELECT COUNT(*) FROM sessions WHERE engine=?1 AND session_id=?2",
                 rusqlite::params![engine, session_id], |r| r.get(0),
@@ -2283,7 +2286,7 @@ mod tests {
             super::super::reader::delete_session_blocking(&db, engine, session_id)?;
             assert!(!path.exists(), "{engine}: first delete must remove the transcript");
             scan_with(&db, || {})?;
-            for table in ["sessions", "session_models", "session_efforts"] {
+            for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
                 let count: i64 = db.0.lock().query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id=?2"),
                     rusqlite::params![engine, session_id], |r| r.get(0),

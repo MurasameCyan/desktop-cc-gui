@@ -39,7 +39,11 @@ import type {
   TurnCancelledEvent,
   TurnFailedEvent,
   TurnHooks,
+  WorkspaceMenuLabel,
+  WorkspaceMenuLabelValue,
+  WorkspaceMenuStatusTone,
   WorkspaceMetadata,
+  RegisteredWorkspace,
 } from "./index";
 
 /**
@@ -78,6 +82,11 @@ export type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
 export type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
 export type _PluginIdValidator = Assert<Mutual<typeof isValidPluginId, typeof Pub.isValidPluginId>>;
 export type _WorkspaceMetadata = Assert<Mutual<WorkspaceMetadata, Pub.WorkspaceMetadata>>;
+export type _RegisteredWorkspace = Assert<Mutual<RegisteredWorkspace, Pub.RegisteredWorkspace>>;
+export type _WorkspaceMenuStatusTone = Assert<Mutual<WorkspaceMenuStatusTone, Pub.WorkspaceMenuStatusTone>>;
+export type _WorkspaceMenuLabel = Assert<Mutual<WorkspaceMenuLabel, Pub.WorkspaceMenuLabel>>;
+export type _WorkspaceMenuLabelValue = Assert<Mutual<WorkspaceMenuLabelValue, Pub.WorkspaceMenuLabelValue>>;
+
 export type _PromptContribution = Assert<Mutual<PromptContribution, Pub.PromptContribution>>;
 export type _InternalMessageCapture = Assert<Mutual<InternalMessageCapture, Pub.InternalMessageCapture>>;
 export type _BeforeTurnResult = Assert<Mutual<BeforeTurnResult, Pub.BeforeTurnResult>>;

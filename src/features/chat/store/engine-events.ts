@@ -38,6 +38,7 @@ import {
 } from "@/features/plugins/runtime/hooks";
 import { normalizeEngineEvent, type EngineTerminalFact } from "../normalized-runtime-events";
 import type { AfterTurnEvent, InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
+import { migrateSelectedAgent } from "@/features/agents/selected-agent";
 interface RunLifecycle {
   turnId: string;
   engine: string;
