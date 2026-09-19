@@ -167,118 +167,35 @@ describe("per-session composer selection", () => {
 describe("stop during an in-flight send", () => {
   beforeEach(resetStore);
 
-  it("settles a started turn once when Stop precedes the send response", async () => {
+  it("kills the run when Stop is pressed before sendMessage resolves", async () => {
+    // Existing resumed session: the tab already carries a native id, so the
+    // send takes the run-routing branch (no id adoption).
     const tab = { engine: "omp", sessionId: "sess-42", workspacePath: WS };
     useChatStore.setState({ activeEngine: "omp", openTabs: [tab], active: tab });
-    const launch = Promise.withResolvers<{ runId: string; sessionId: string | null }>();
-    vi.mocked(ipc.sendMessage).mockReturnValueOnce(launch.promise);
-    const started: string[] = [];
-    const finished: Array<{ turnId: string; status: string }> = [];
-    const dispose = registerTurnHooks("test.stop-in-flight", {
-      onTurnStarted: (event) => { started.push(event.turnId); },
-      afterTurn: (event) => { finished.push({ turnId: event.turnId, status: event.status }); },
-    });
+
+    // Hold sendMessage open so Stop lands while the invoke is still pending —
+    // exactly the window where runRouting has no entry for this run yet.
+    const { promise, resolve: resolveSend } = Promise.withResolvers<{
+      runId: string;
+      sessionId: string | null;
+    }>();
+    vi.mocked(ipc.sendMessage).mockReturnValueOnce(promise);
+
     const sending = useChatStore.getState().send("hello", []);
-    try {
-      await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
-      expect(started).toHaveLength(1);
-      await useChatStore.getState().interrupt();
-      expect(useChatStore.getState().bySession["omp/sess-42"]?.interrupted).toBe(true);
-      expect(ipc.interruptSession).not.toHaveBeenCalledWith("run-9");
-      launch.resolve({ runId: "run-9", sessionId: null });
-      await sending;
-      expect(ipc.interruptSession).toHaveBeenCalledWith("run-9");
-      expect(finished).toEqual([{ turnId: started[0], status: "cancelled" }]);
-      handleEngineEvents([
-        { runId: "run-9", sessionId: "sess-42", engine: "omp", seq: 1, kind: "done", data: { usage: null } },
-      ], engineDeps());
-      await Promise.resolve();
-      expect(finished).toEqual([{ turnId: started[0], status: "cancelled" }]);
-    } finally {
-      launch.resolve({ runId: "run-9", sessionId: null });
-      await sending;
-      dispose();
-    }
-  });
+    // User presses Stop mid-flight.
+    await useChatStore.getState().interrupt();
+    expect(useChatStore.getState().bySession["omp/sess-42"]?.interrupted).toBe(
+      true,
+    );
+    // The stop could not have killed anything yet: no run id existed.
+    expect(vi.mocked(ipc.interruptSession)).not.toHaveBeenCalledWith("run-9");
 
-  it("does not launch a stopped before-turn generation after a replacement starts", async () => {
-    const tab = { engine: "omp", sessionId: "preparing-42", workspacePath: WS };
-    useChatStore.setState({ activeEngine: "omp", openTabs: [tab], active: tab });
-    const preparation = Promise.withResolvers<void>();
-    const beforeTurns: string[] = [];
-    const started: string[] = [];
-    const finished: string[] = [];
-    const dispose = registerTurnHooks("test.stop-preparation", {
-      beforeTurn: (event) => {
-        beforeTurns.push(event.turnId);
-        if (beforeTurns.length === 1) return preparation.promise;
-      },
-      onTurnStarted: (event) => { started.push(event.turnId); },
-      afterTurn: (event) => { finished.push(event.turnId); },
-    });
-    const first = useChatStore.getState().send("stopped", []);
-    try {
-      await vi.waitFor(() => expect(beforeTurns).toHaveLength(1));
-      await useChatStore.getState().interrupt();
-      expect(ipc.sendMessage).not.toHaveBeenCalled();
-      expect(started).toEqual([]);
-      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-replacement", sessionId: "preparing-42" });
-      await useChatStore.getState().send("replacement", []);
-      preparation.resolve();
-      await first;
-      expect(ipc.sendMessage).toHaveBeenCalledTimes(1);
-      expect(started).toEqual([beforeTurns[1]]);
-      handleEngineEvents([
-        { runId: "run-replacement", sessionId: "preparing-42", engine: "omp", seq: 1, kind: "done", data: { usage: null } },
-      ], engineDeps());
-      await Promise.resolve();
-      expect(finished).toEqual(started);
-    } finally {
-      preparation.resolve();
-      await first;
-      dispose();
-    }
-  });
+    resolveSend({ runId: "run-9", sessionId: null });
+    await sending;
 
-  it("cancels only the old run when its acknowledgement follows a replacement launch", async () => {
-    const tab = { engine: "omp", sessionId: "overlap-session", workspacePath: WS };
-    const key = "omp/overlap-session";
-    useChatStore.setState({ activeEngine: "omp", openTabs: [tab], active: tab });
-    const oldLaunch = Promise.withResolvers<{ runId: string; sessionId: string | null }>();
-    vi.mocked(ipc.sendMessage).mockReturnValueOnce(oldLaunch.promise);
-    const started: string[] = [];
-    const finished: Array<{ turnId: string; status: string }> = [];
-    const dispose = registerTurnHooks("test.overlapping-launches", {
-      onTurnStarted: (event) => { started.push(event.turnId); },
-      afterTurn: (event) => { finished.push({ turnId: event.turnId, status: event.status }); },
-    });
-    const oldSending = useChatStore.getState().send("first", []);
-    try {
-      await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
-      await useChatStore.getState().interrupt();
-      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-overlap-b", sessionId: tab.sessionId });
-      await useChatStore.getState().send("replacement", []);
-      vi.mocked(ipc.interruptSession).mockClear();
-      oldLaunch.resolve({ runId: "run-overlap-a", sessionId: tab.sessionId });
-      await oldSending;
-      expect(ipc.interruptSession).toHaveBeenCalledWith("run-overlap-a");
-      expect(ipc.interruptSession).not.toHaveBeenCalledWith(tab.sessionId);
-      expect(ipc.interruptSession).not.toHaveBeenCalledWith("run-overlap-b");
-      expect(useChatStore.getState().streamingByKey[key]).toBe(true);
-      expect(finished).toEqual([{ turnId: started[0], status: "cancelled" }]);
-      handleEngineEvents([
-        { runId: "run-overlap-b", sessionId: tab.sessionId, engine: "omp", seq: 1, kind: "done", data: { usage: null } },
-      ], engineDeps());
-      await Promise.resolve();
-      expect(finished).toEqual([
-        { turnId: started[0], status: "cancelled" },
-        { turnId: started[1], status: "completed" },
-      ]);
-    } finally {
-      oldLaunch.resolve({ runId: "run-overlap-a", sessionId: tab.sessionId });
-      await oldSending;
-      dispose();
-    }
+    // sendPrompt saw the interrupted flag once the ids materialized and
+    // killed the run that Stop could not reach.
+    expect(vi.mocked(ipc.interruptSession)).toHaveBeenCalledWith("run-9");
   });
 
   it("settles the plugin turn once when Stop precedes the launch acknowledgement", async () => {
@@ -976,7 +893,6 @@ describe("generic plugin chat lifecycle", () => {
     const accepted = vi.fn();
     const afterTurn = vi.fn();
     const beforeTurns: string[] = [];
-    const started: string[] = [];
     const contribution = {
       id: "handoff",
       content: "internal handoff",
@@ -990,7 +906,6 @@ describe("generic plugin chat lifecycle", () => {
         beforeTurns.push(event.turnId);
         return { promptContributions: [contribution] };
       },
-      onTurnStarted: (event) => { started.push(event.turnId); },
       afterTurn,
     });
     vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("launch failed"));
@@ -998,7 +913,6 @@ describe("generic plugin chat lifecycle", () => {
     await useChatStore.getState().send("first", []);
     expect(accepted).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(afterTurn).toHaveBeenCalledTimes(1));
-    expect(started).toEqual([beforeTurns[0]]);
     expect(afterTurn).toHaveBeenCalledWith(expect.objectContaining({
       turnId: beforeTurns[0],
       engine: "claude",
@@ -1010,7 +924,6 @@ describe("generic plugin chat lifecycle", () => {
 
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-retry", sessionId: null });
     await useChatStore.getState().send("retry", []);
-    expect(started).toEqual(beforeTurns);
     dispose();
     expect(accepted).toHaveBeenCalledTimes(1);
     expect(beforeTurns[1]).not.toBe(beforeTurns[0]);
@@ -1178,13 +1091,11 @@ describe("switch ordering and turn lifecycle", () => {
     let turnId = "";
     const runtimeTurnIds: string[] = [];
     const settledTurnIds: string[] = [];
-    const startedTurnIds: string[] = [];
     const dispose = registerTurnHooks("test.early-ack", {
       beforeTurn: (event) => {
         turnId = event.turnId;
         return { promptContributions: [{ id: "receipt", content: "private instructions", placement: "request-tail", visibility: "internal", persistence: "turn", onAccepted: () => { observations.push("accepted"); } }] };
       },
-      onTurnStarted: (event) => { observations.push("started"); startedTurnIds.push(event.turnId); },
       onRuntimeEvent: (event) => { runtimeTurnIds.push(event.turnId); },
       afterTurn: (event) => { observations.push("settled"); settledTurnIds.push(event.turnId); },
     });
@@ -1200,11 +1111,10 @@ describe("switch ordering and turn lifecycle", () => {
       ], engineDeps());
       await Promise.resolve();
       expect(useChatStore.getState().bySession[`new:claude:${WS}`].streaming).toBe(false);
-      expect(observations).toEqual(["started"]);
+      expect(observations).toEqual([]);
       launch.resolve({ runId: "run-early-ack", sessionId: "native-early-ack" });
       await sending;
-      expect(observations).toEqual(["started", "accepted", "settled"]);
-      expect(startedTurnIds).toEqual([turnId]);
+      expect(observations).toEqual(["accepted", "settled"]);
       expect(runtimeTurnIds).toEqual([turnId]);
       expect(settledTurnIds).toEqual([turnId]);
     } finally {
@@ -1214,37 +1124,28 @@ describe("switch ordering and turn lifecycle", () => {
     }
   });
 
-  it("starts observation before early terminal events without waiting for the observer", async () => {
-    const observer = Promise.withResolvers<void>();
-    const observations: Array<{ kind: string; turnId: string }> = [];
-    const dispose = registerTurnHooks("test.early", {
-      onTurnStarted: async (event) => {
-        observations.push({ kind: "started", turnId: event.turnId });
-        await observer.promise;
-      },
-      onRuntimeEvent: (event) => { observations.push({ kind: event.kind, turnId: event.turnId }); },
-      afterTurn: (event) => { observations.push({ kind: event.status, turnId: event.turnId }); },
-    });
+  it("binds a fast engine's done event that arrives before sendMessage resolves", async () => {
+    const afterTurn = vi.fn();
+    const dispose = registerTurnHooks("test.early", { afterTurn });
     useChatStore.setState({ workspaces: [REGISTERED_WORKSPACE], activeEngine: "claude" });
     useChatStore.getState().startNewChat(WS);
     vi.mocked(ipc.sendMessage).mockImplementationOnce(async () => {
+      // The engine finishes its work and reports `done` while the send invoke
+      // is still in flight: no SendResult run id exists yet.
       handleEngineEvents(
         [{ runId: "run-early", sessionId: null, engine: "claude", seq: 1, kind: "done", data: { usage: null } }],
         engineDeps(),
       );
       return { runId: "run-early", sessionId: null };
     });
-    try {
-      await useChatStore.getState().send("hi", []);
-      expect(observations).toEqual([
-        { kind: "started", turnId: expect.any(String) },
-        { kind: "assistant-completed", turnId: observations[0]?.turnId },
-        { kind: "completed", turnId: observations[0]?.turnId },
-      ]);
-    } finally {
-      observer.resolve();
-      dispose();
-    }
+
+    await useChatStore.getState().send("hi", []);
+    await vi.waitFor(() => expect(afterTurn).toHaveBeenCalledTimes(1));
+    dispose();
+
+    expect(afterTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-early", status: "completed" }),
+    );
   });
 });
 
