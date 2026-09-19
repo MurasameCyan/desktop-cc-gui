@@ -2,7 +2,9 @@ import Settings from "lucide-react/dist/esm/icons/settings";
 import Keyboard from "lucide-react/dist/esm/icons/keyboard";
 import Globe from "lucide-react/dist/esm/icons/globe";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
+import Archive from "lucide-react/dist/esm/icons/archive";
 import Info from "lucide-react/dist/esm/icons/info";
+import Bot from "lucide-react/dist/esm/icons/bot";
 import Smartphone from "lucide-react/dist/esm/icons/smartphone";
 import ChartColumn from "lucide-react/dist/esm/icons/chart-column";
 import i18n from "@/lib/i18n";
@@ -14,6 +16,8 @@ import { cx } from "@/utils/cx";
 import { GeneralSection } from "./GeneralSection";
 import { ProxySection } from "./ProxySection";
 import { WorkspacesSection } from "./WorkspacesSection";
+import { ArchivedSessionsSection } from "./ArchivedSessionsSection";
+import { AgentsPromptsSection } from "./agents-prompts/AgentsPromptsSection";
 import { CliConfigSection } from "./CliConfigSection";
 import { AboutSection } from "./AboutSection";
 import { WebAccessSection } from "./WebAccessSection";
@@ -70,6 +74,15 @@ settingsRegistry.register({
   component: WorkspacesSection,
 });
 settingsRegistry.register({
+  id: "archivedSessions",
+  key: "archivedSessions",
+  label: () => i18n.t("settings.archivedSessions"),
+  icon: Archive,
+  group: "settings",
+  order: 3,
+  component: ArchivedSessionsSection,
+});
+settingsRegistry.register({
   id: "shortcuts",
   key: "shortcuts",
   label: () => i18n.t("shortcuts.sectionTitle"),
@@ -77,6 +90,15 @@ settingsRegistry.register({
   group: "settings",
   order: 3,
   component: ShortcutsSection,
+});
+settingsRegistry.register({
+  id: "agentsPrompts",
+  key: "agentsPrompts",
+  label: () => i18n.t("settings.agentsPrompts"),
+  icon: Bot,
+  group: "settings",
+  order: 3,
+  component: AgentsPromptsSection,
 });
 settingsRegistry.register({
   id: "webAccess",

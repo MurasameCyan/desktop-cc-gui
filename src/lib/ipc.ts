@@ -29,6 +29,9 @@ export interface SessionMeta {
   remote?: boolean;
   /** Absolute path of the transcript inside the distro (remote rows only). */
   remotePath?: string;
+  /** In-app channel this session last ran. Spawn injects that channel's env;
+   * native CLI files stay official. Absent until a send remembers one. */
+  provider?: string | null;
 }
 
 export type TodoStatus = "pending" | "active" | "complete" | "blocked" | "dropped";
@@ -44,6 +47,14 @@ export interface TodoItem {
 export interface TodosPayload {
   items: TodoItem[];
   replace: boolean;
+}
+
+/** One AskUserQuestion question as the CLI emits it (control protocol). */
+export interface QuestionSpec {
+  question: string;
+  header: string;
+  multiSelect?: boolean;
+  options: { label: string; description?: string; preview?: string }[];
 }
 
 export interface Message {
@@ -73,6 +84,18 @@ export interface Message {
   grant?: {
     status: "pending" | "granted" | "declined";
     dir?: string | null;
+  };
+  /** AskUserQuestion card state (role "question"): the CLI parked the ask on
+   * the control protocol; `pending` until the user picks or skips. `runId`
+   * routes the answer to the process, `requestId` to the ask itself. These
+   * rows are ephemeral UI — not part of the CLI's session history. */
+  question?: {
+    requestId: string;
+    runId: string;
+    toolUseId?: string | null;
+    questions: QuestionSpec[];
+    status: "pending" | "answered" | "dismissed" | "cancelled";
+    answers?: Record<string, string | string[]>;
   };
   /** Image attachments: data URLs render directly, absolute paths load via readFile. */
   images?: string[];
@@ -308,12 +331,6 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
-export interface FileIndexResult {
-  entries: FileIndexEntry[];
-  /** True when additional admissible entries exceeded the index cap. */
-  truncated: boolean;
-}
-
 /** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
  *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
  *  distinct: the menu keys icons/badges/section grouping off this field,
@@ -331,6 +348,96 @@ export interface SlashCommandEntry {
   /** "workspace" (project `.claude/`) or "global" (CLI home). */
   source: string;
   kind: SlashEntryKind;
+}
+/** A user-defined agent persona (`agent_list`): picked in the composer `#`
+ *  menu, its prompt appended to the outgoing message. Stored in
+ *  `~/.ccgui-next/agents.json`. */
+export interface AgentConfig {
+  id: string;
+  name: string;
+  prompt?: string;
+  icon?: string;
+  /** Frontend-only pick origin: built-in catalog picks carry no prompt —
+   *  sendPrompt resolves the current catalog prompt at send time. Absent
+   *  (older persisted selections) means "custom". */
+  source?: "custom" | "builtIn";
+  createdAt?: number;
+}
+/** Provider block of the built-in agent catalog (`list_built_in_agents`). */
+export interface BuiltInAgentProviderView {
+  id: string;
+  displayName: string;
+  sourceUrl: string;
+  sourceRevision: string;
+  license: string;
+}
+
+/** One division (section) of the built-in catalog. `icon` is a lucide
+ *  name, `color` a hex swatch used for badges. */
+export interface BuiltInAgentDivisionView {
+  id: string;
+  order: number;
+  icon: string;
+  color: string;
+  label: string;
+  count: number;
+  enabledCount: number;
+}
+
+/** One built-in catalog agent. `icon` is an emoji (null → fallback glyph). */
+export interface BuiltInAgentView {
+  id: string;
+  divisionId: string;
+  name: string;
+  description: string;
+  icon: string | null;
+  enabled: boolean;
+}
+
+/** The full built-in catalog view (`list_built_in_agents`). */
+export interface BuiltInAgentCatalogView {
+  provider: BuiltInAgentProviderView;
+  divisions: BuiltInAgentDivisionView[];
+  agents: BuiltInAgentView[];
+}
+
+/** Full prompt of a built-in agent (`get_built_in_agent_prompt`). */
+export interface BuiltInAgentPrompt {
+  id: string;
+  prompt: string;
+  promptHash: string;
+}
+
+/** Send-time resolution of an enabled built-in agent
+ *  (`resolve_enabled_built_in_agent`); fails when the agent is disabled. */
+export interface ResolvedBuiltInAgent {
+  id: string;
+  name: string;
+  icon: string | null;
+  prompt: string;
+  promptHash: string;
+}
+
+/** Where a custom prompt file lives: `<root>/.ccgui/prompts/` or the
+ *  app-home `~/.ccgui-next/prompts/`. */
+export type PromptScope = "workspace" | "global";
+
+/** A custom prompt (`prompts_list`): one markdown file with `---`
+ *  frontmatter (`description`, `argument-hint`); `name` is the filename
+ *  stem, `path` the absolute file path. */
+export interface CustomPromptEntry {
+  name: string;
+  path: string;
+  description?: string;
+  argumentHint?: string;
+  content: string;
+  scope: PromptScope;
+}
+
+/** Prompt directories for a workspace root (`prompts_dirs`). */
+export interface PromptDirs {
+  workspace: string;
+  global: string;
 }
 
 export interface GitFileEntry {
@@ -642,8 +749,8 @@ export const ipc = {
     invoke<void>("delete_provider", { engine, id }),
   setCurrentProvider: (engine: string, id: string) =>
     invoke<void>("set_current_provider", { engine, id }),
-  /** Native config files a channel switch would overwrite (shown in the
-   *  switch confirmation); empty for display-only engines. */
+  /** Native config files of this engine (官方配置 editor). Empty for
+   *  engines whose official state lives in auth stores. */
   providerFilePaths: (engine: string) =>
     invoke<string[]>("provider_file_paths", { engine }),
   /** Editable files of the engine's 官方配置 (pane order); empty for
@@ -702,6 +809,8 @@ export const ipc = {
   restartApp: () => invoke<void>("restart_app"),
   // engine
   sendMessage: (args: {
+    /** Route events before the send invocation resolves (older callers may omit). */
+    runId?: string;
     engine: string;
     workspacePath: string;
     sessionId: string | null;
@@ -717,6 +826,7 @@ export const ipc = {
     model: string | null;
     effort: string | null;
     permission: string | null;
+    providerId: string | null;
   }) => invoke<SendResult>("send_message", args),
   interruptSession: (sessionId: string) =>
     invoke<boolean>("interrupt_session", { sessionId }),
@@ -751,6 +861,11 @@ export const ipc = {
     ),
   // history
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
+  listArchivedSessions: () => invoke<SessionMeta[]>("list_archived_sessions"),
+  archiveSession: (session: SessionMeta) =>
+    invoke<void>("archive_session", { session }),
+  restoreSession: (engine: string, sessionId: string) =>
+    invoke<void>("restore_session", { engine, sessionId }),
   loadSessionPage: (
     engine: string,
     sessionId: string,
@@ -795,6 +910,10 @@ export const ipc = {
    *  another window, or on the phone — keeps that level. */
   rememberSessionEffort: (engine: string, sessionId: string, effort: string) =>
     invoke<void>("remember_session_effort", { engine, sessionId, effort }),
+  /** Remember the in-app channel a session ran, so reopening it keeps that
+   *  channel without rewriting the CLI's own config file. */
+  rememberSessionProvider: (engine: string, sessionId: string, providerId: string) =>
+    invoke<void>("remember_session_provider", { engine, sessionId, providerId }),
   rescanSessions: () => invoke<void>("rescan_sessions"),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   addWorkspace: (path: string, meta?: Record<string, unknown>) =>
@@ -837,11 +956,11 @@ export const ipc = {
     withGrantRetry(() => invoke<FileOpResult>("paste_item", { source, targetDir })),
   searchText: (path: string, query: string) =>
     withGrantRetry(() => invoke<SearchHit[]>("search_text", { path, query })),
-  /** Bounded file index for the composer @-mention picker (relative paths;
-   * backend caps at 20k entries and reports whether more were omitted). */
+  /** Whole-tree file index for the composer @-mention picker (relative
+   * paths; backend caps at 20k entries). */
   listFileIndex: (path: string, includeIgnored = false) =>
     withGrantRetry(() =>
-      invoke<FileIndexResult>("list_file_index", { path, includeIgnored }),
+      invoke<FileIndexEntry[]>("list_file_index", { path, includeIgnored }),
     ),
   /** Catalog for the composer `/` picker (workspace `.claude/commands` +
    *  `.claude/skills`, plus the global skill roots of the CLIs the app
@@ -850,6 +969,60 @@ export const ipc = {
    *  distinguished by `entry.kind`. */
   listSlashCommands: (path: string) =>
     withGrantRetry(() => invoke<SlashCommandEntry[]>("list_slash_commands", { path })),
+  // agents — user personas stored in ~/.ccgui-next/agents.json (app home,
+  // so no grant flow); picked via the composer `#` menu, managed in
+  // settings. agent_update takes a partial; absent fields stay unchanged.
+  listAgents: () => invoke<AgentConfig[]>("agent_list"),
+  addAgent: (input: { name: string; prompt?: string; icon?: string }) =>
+    invoke<AgentConfig>("agent_add", input),
+  updateAgent: (id: string, updates: { name?: string; prompt?: string; icon?: string }) =>
+    invoke<boolean>("agent_update", { id, ...updates }),
+  deleteAgent: (id: string) => invoke<boolean>("agent_delete", { id }),
+  // built-in agent catalog — bundled read-only personas (resources/
+  // agent-catalogs); enabled ids live in app settings. The composer `#`
+  // menu merges enabled ones; sendPrompt resolves the current prompt via
+  // resolveEnabledBuiltInAgent at send time.
+  listBuiltInAgents: (locale: string) =>
+    invoke<BuiltInAgentCatalogView>("list_built_in_agents", { locale }),
+  setBuiltInAgentEnabled: (agentId: string, enabled: boolean) =>
+    invoke<null>("set_built_in_agent_enabled", { agentId, enabled }),
+  setBuiltInAgentDivisionEnabled: (divisionId: string, enabled: boolean) =>
+    invoke<null>("set_built_in_agent_division_enabled", { divisionId, enabled }),
+  getBuiltInAgentPrompt: (agentId: string) =>
+    invoke<BuiltInAgentPrompt>("get_built_in_agent_prompt", { agentId }),
+  resolveEnabledBuiltInAgent: (agentId: string) =>
+    invoke<ResolvedBuiltInAgent>("resolve_enabled_built_in_agent", { agentId }),
+  // custom prompts — markdown + frontmatter files under
+  // <root>/.ccgui/prompts (workspace scope) or ~/.ccgui-next/prompts
+  // (global scope); picked via the composer `!` menu, managed in settings.
+  listPrompts: (path: string) =>
+    withGrantRetry(() => invoke<CustomPromptEntry[]>("prompts_list", { path })),
+  createPrompt: (
+    path: string,
+    scope: PromptScope,
+    input: { name: string; description?: string; argumentHint?: string; content: string },
+  ) =>
+    withGrantRetry(() =>
+      invoke<CustomPromptEntry>("prompts_create", { path, scope, ...input }),
+    ),
+  /** Partial update keyed by the entry's current file path. */
+  updatePrompt: (
+    path: string,
+    promptPath: string,
+    updates: { name?: string; description?: string; argumentHint?: string; content?: string },
+  ) =>
+    withGrantRetry(() =>
+      invoke<CustomPromptEntry>("prompts_update", { path, promptPath, updates }),
+    ),
+  deletePrompt: (path: string, promptPath: string) =>
+    withGrantRetry(() => invoke<boolean>("prompts_delete", { path, promptPath })),
+  /** Move a prompt file between the workspace and global directories. */
+  movePrompt: (path: string, promptPath: string, scope: PromptScope) =>
+    withGrantRetry(() =>
+      invoke<CustomPromptEntry>("prompts_move", { path, promptPath, scope }),
+    ),
+  /** Absolute prompts directories for a workspace root (settings display). */
+  promptsDirs: (path: string) => invoke<PromptDirs>("prompts_dirs", { path }),
   // granted directories (desktop-only commands; the settings list hides on web)
   listGrantedRoots: () => invoke<string[]>("list_granted_roots"),
   /** Directory a grant for `path` would cover (path itself when a dir, else
@@ -858,6 +1031,14 @@ export const ipc = {
   /** Persist a user-approved directory grant; subsequent claude launches
    * receive it as --add-dir. */
   grantRoot: (path: string) => invoke<void>("grant_root", { path }),
+  /** Answer a pending AskUserQuestion card (claude control protocol).
+   * `answers` maps each question's text to the chosen label(s); null = the
+   * user skipped the question. Routed by run id (falls back to session id). */
+  answerQuestion: (
+    sessionId: string,
+    requestId: string,
+    answers: Record<string, string | string[]> | null,
+  ) => invoke<void>("answer_question", { sessionId, requestId, answers }),
   revokeGrantedRoot: (path: string) => invoke<void>("revoke_granted_root", { path }),
   // git
   gitStatus: (path: string) => invoke<GitStatus>("git_status", { path }),

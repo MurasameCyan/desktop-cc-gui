@@ -12,6 +12,7 @@ vi.mock("@/lib/ipc", () => ({
   ipc: {
     listWorkspaces: vi.fn(async () => []),
     listSessions: vi.fn(async () => []),
+    listArchivedSessions: vi.fn(async () => []),
     listEngines: vi.fn(async () => []),
     sendMessage: vi.fn(async () => ({ runId: `queued-run-${++runCounter}`, sessionId: null })),
     interruptSession: vi.fn(async () => true),
@@ -20,6 +21,7 @@ vi.mock("@/lib/ipc", () => ({
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
+    getCliConfig: vi.fn(async () => ({})),
   },
 }));
 

@@ -44,14 +44,6 @@ pub struct FileIndexEntry {
     pub is_dir: bool,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileIndexResult {
-    pub entries: Vec<FileIndexEntry>,
-    /// True only when the walk finds an admissible entry beyond the cap.
-    pub truncated: bool,
-}
-
 fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
@@ -564,10 +556,9 @@ fn list_file_index_blocking(
     db: &crate::db::Db,
     path: &str,
     include_ignored: bool,
-) -> Result<FileIndexResult, String> {
+) -> Result<Vec<FileIndexEntry>, String> {
     let root = ensure_allowed(path, db)?;
     let mut out: Vec<FileIndexEntry> = Vec::new();
-    let mut truncated = false;
     let walker = ignore::WalkBuilder::new(&root)
         .hidden(true)
         .ignore(!include_ignored)
@@ -592,12 +583,6 @@ fn list_file_index_blocking(
         if p == root {
             continue;
         }
-        // Reaching the cap alone does not make the index incomplete: only
-        // another admissible entry does. Stop before allocating its path.
-        if out.len() == MAX_INDEX_ENTRIES {
-            truncated = true;
-            break;
-        }
         let rel = p
             .strip_prefix(&root)
             .unwrap_or(p)
@@ -607,11 +592,11 @@ fn list_file_index_blocking(
             rel,
             is_dir: entry.file_type().is_some_and(|t| t.is_dir()),
         });
+        if out.len() >= MAX_INDEX_ENTRIES {
+            break;
+        }
     }
-    Ok(FileIndexResult {
-        entries: out,
-        truncated,
-    })
+    Ok(out)
 }
 
 #[tauri::command]
@@ -619,7 +604,7 @@ pub async fn list_file_index(
     db: tauri::State<'_, Arc<crate::db::Db>>,
     path: String,
     include_ignored: Option<bool>,
-) -> Result<FileIndexResult, String> {
+) -> Result<Vec<FileIndexEntry>, String> {
     let db = Arc::clone(db.inner());
     tauri::async_runtime::spawn_blocking(move || {
         list_file_index_blocking(&db, &path, include_ignored.unwrap_or(false))
@@ -684,19 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_workspace_index_is_complete() {
-        let scratch = Scratch::new();
-        let db = crate::db::Db::open_at(&scratch.0.join("test.db")).unwrap();
-        let workspace = Scratch::new();
-        let root = workspace.0.to_string_lossy().to_string();
-        db.add_granted_root(&root).unwrap();
-
-        let index = list_file_index_blocking(&db, &root, false).unwrap();
-        assert!(index.entries.is_empty());
-        assert!(!index.truncated);
-    }
-
-    #[test]
     fn index_sees_gitignored_build_output_only_when_asked() {
         let scratch = Scratch::new();
         let db = crate::db::Db::open_at(&scratch.0.join("test.db")).unwrap();
@@ -707,10 +679,8 @@ mod tests {
         db.add_granted_root(&root).unwrap();
 
         let filtered = list_file_index_blocking(&db, &root, false).unwrap();
-        assert!(!filtered.entries.iter().any(|e| e.rel == "release/app.exe"));
-        assert!(!filtered.truncated);
+        assert!(!filtered.iter().any(|e| e.rel == "release/app.exe"));
         let all = list_file_index_blocking(&db, &root, true).unwrap();
-        assert!(all.entries.iter().any(|e| e.rel == "release/app.exe"));
-        assert!(!all.truncated);
+        assert!(all.iter().any(|e| e.rel == "release/app.exe"));
     }
 }

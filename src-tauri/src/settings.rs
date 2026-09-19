@@ -41,6 +41,11 @@ pub struct AppSettings {
     /// 已归档 section; the record and its sessions stay intact.
     #[serde(default)]
     pub archived_workspaces: Vec<String>,
+    /// Enabled built-in catalog agents (设置 → 智能体 内置目录 tab + composer
+    /// `#` picker). Normalized by agent_catalog (sorted, deduped,
+    /// `agency-agents:`-prefixed); unknown ids are inert.
+    #[serde(default)]
+    pub enabled_builtin_agent_ids: Vec<String>,
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default)]
@@ -218,6 +223,7 @@ impl Default for AppSettings {
             workspace_groups: Vec::new(),
             workspace_aliases: HashMap::new(),
             archived_workspaces: Vec::new(),
+            enabled_builtin_agent_ids: Vec::new(),
             web_auth_enabled: false,
             web_auth_key: None,
             web_relay_url: None,

@@ -31,6 +31,32 @@ use tokio_tungstenite::tungstenite::Message;
 use super::{EngineEvent, SendRequest, TurnCore, TurnState};
 use crate::dsh_host::host_call;
 
+/// 提取并规范化上下文窗口字段
+fn attach_context_window(mut usage: Value) -> Value {
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .filter(|&w| w > 0);
+
+    if let Some(w) = window {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+        }
+    }
+
+    usage
+}
+
 const STREAM_EVENTS: &str = "events";
 const STREAM_FOLLOW: &str = "follow";
 /// Follow history replay is useless here (codemoss renders its own stored
@@ -72,6 +98,7 @@ pub(crate) async fn run_host_turn(
 ) {
     let mut state = TurnState::new(req.session_id.clone());
     let mut view = TurnView::default();
+    let preassigned_session_id = req.session_id.clone();
     let result = turn_inner(&core, &mut state, &mut view, &req, &host, &killed).await;
     if let Err(error) = result {
         core.dispatch_event(&mut state, EngineEvent::Error(error));
@@ -91,7 +118,14 @@ pub(crate) async fn run_host_turn(
         );
     }
     core.registry.remove_if_pid(&core.run_id, virtual_pid);
+    // Clean up both the native session id (if the engine reported one) and
+    // the preassigned session id (if we resumed an existing conversation).
+    // A resumed session was keyed at spawn under req.session_id, so we must
+    // remove that alias even if the native id differs or never arrived.
     if let Some(session_id) = state.native_session_id.clone() {
+        core.registry.remove_if_pid(&session_id, virtual_pid);
+    }
+    if let Some(session_id) = preassigned_session_id {
         core.registry.remove_if_pid(&session_id, virtual_pid);
     }
     core.sink.flush();
@@ -371,8 +405,8 @@ fn handle_assistant_stream(
                 }
                 Some("usage") => {
                     if let Some(usage) = chunk.get("usage") {
-                        view.last_usage = Some(usage.clone());
-                        core.dispatch_event(state, EngineEvent::Usage(usage.clone()));
+                        view.last_usage = Some(attach_context_window(usage.clone()));
+                        core.dispatch_event(state, EngineEvent::Usage(attach_context_window(usage.clone())));
                     }
                 }
                 _ => {} // block-start / block-end / tool-call-delta / finish
@@ -642,6 +676,7 @@ mod tests {
             service_tier: None,
             permission: None,
             additional_dirs: Vec::new(),
+            provider_id: None,
         };
         run_host_turn(
             core,
@@ -718,6 +753,7 @@ mod tests {
                     service_tier: None,
                     permission: None,
                     additional_dirs: Vec::new(),
+                    provider_id: None,
                 };
                 run_host_turn(
                     core,

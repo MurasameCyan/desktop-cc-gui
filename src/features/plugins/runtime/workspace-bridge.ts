@@ -1,4 +1,5 @@
 import { ipc } from "@/lib/ipc";
+import { useBrowserStore } from "@/features/browser/store";
 import { useChatStore } from "@/features/chat/store";
 import { withAuthorizedHostInvoke } from "./hardening";
 
@@ -58,5 +59,7 @@ export function openPluginSession(
       `[plugins] "${pluginId}" sessions.selectSession: unknown session ${engine}/${sessionId}`,
     );
   }
+  // The chat surface comes forward; a browser tab in view steps aside.
+  useBrowserStore.getState().deactivate();
   store.selectSession(engine, sessionId, workspacePath);
 }

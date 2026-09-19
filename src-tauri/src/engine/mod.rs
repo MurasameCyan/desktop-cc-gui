@@ -1,5 +1,6 @@
 pub mod agy;
 pub mod claude;
+mod claude_channel;
 pub mod codex;
 mod codex_provider_env;
 mod codex_usage;
@@ -105,13 +106,20 @@ pub struct SendRequest {
     /// headless permission denials. Engines without an equivalent flag
     /// ignore them.
     pub additional_dirs: Vec<String>,
+    /// Session-scoped channel id. Official / empty injects nothing; spawn
+    /// falls back to the engine's `current` when this is None.
+    pub provider_id: Option<String>,
 }
 
 pub struct BuiltCommand {
     pub command: Command,
     /// Written to stdin after spawn; stdin is then closed.
     pub stdin_payload: Option<String>,
-    /// Temp files to remove once the process exits.
+    /// Keep the child's stdin open after the payload instead of closing it:
+    /// claude answers control-protocol requests (permission asks, the
+    /// AskUserQuestion dialog) on the same pipe via `control_response` lines.
+    pub keep_stdin_open: bool,
+    /// Private staging files/directories to remove once the process exits.
     pub cleanup_files: Vec<PathBuf>,
     /// Session id assigned before spawn (grok `-s <uuid>`).
     pub preassigned_session_id: Option<String>,
@@ -174,6 +182,24 @@ pub enum EngineEvent {
         tool: Option<String>,
         path: Option<String>,
         message: String,
+    },
+    /// The CLI is asking the user to choose (control protocol: `can_use_tool`
+    /// for AskUserQuestion). `input` is the full tool input; the answer
+    /// command sends it back with the user's choices merged in.
+    Question {
+        request_id: String,
+        tool_use_id: Option<String>,
+        input: Value,
+    },
+    /// A parked question no longer needs an answer (the CLI cancelled it or
+    /// the run settled): the UI resolves the card without a choice.
+    QuestionSettled { request_id: String },
+    /// A control-protocol permission ask for any other tool. This client has
+    /// no approval UI, so the runner denies it in place — the same net
+    /// behavior as before the control protocol (headless cannot prompt).
+    ControlPermissionDeny {
+        request_id: String,
+        tool_name: String,
     },
     /// Turn finished successfully.
     Done {
@@ -704,6 +730,13 @@ pub struct ChildEntry {
     /// pinning the registry/EventSink/engine Arcs it owns: kill() aborts
     /// the reader after a settle grace, kill_all() aborts immediately.
     pub reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
+    /// Interactive stdin kept open past the payload (`keep_stdin_open`):
+    /// control responses (question answers) are written on it. Shared by the
+    /// run-id and session-id entries; `None` for one-shot runs.
+    pub stdin: Option<Arc<TokioMutex<Option<tokio::process::ChildStdin>>>>,
+    /// Pending question requests (request_id -> full tool input) awaiting the
+    /// user's answer; shared by both registry keys of the run.
+    pub questions: Arc<Mutex<HashMap<String, Value>>>,
 }
 
 #[derive(Default)]
@@ -712,12 +745,65 @@ pub struct ProcessRegistry(pub Mutex<HashMap<String, ChildEntry>>);
 /// Two concurrent runs of one session must never evict each other's entries:
 /// an evicted child leaks (no key routes an interrupt to it).
 impl ProcessRegistry {
+    /// Clone the entry registered under `key` (run id or session id).
+    fn get(&self, key: &str) -> Option<ChildEntry> {
+        self.0.lock().ok().and_then(|map| map.get(key).cloned())
+    }
+
+    /// Write one NDJSON control line to a live run's interactive stdin.
+    /// Err when the run is unknown, its stdin is already closed, or the
+    /// pipe refuses the write — a swallowed failure would leave the CLI
+    /// parked while the caller believes the answer landed.
+    async fn write_line(&self, key: &str, line: String) -> Result<(), String> {
+        let stdin = self
+            .get(key)
+            .and_then(|entry| entry.stdin)
+            .ok_or_else(|| "the session is no longer accepting input".to_string())?;
+        let mut guard = stdin.lock().await;
+        let handle = guard
+            .as_mut()
+            .ok_or_else(|| "the session's stdin is already closed".to_string())?;
+        handle
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("write to the session's stdin: {e}"))?;
+        handle
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("write to the session's stdin: {e}"))
+    }
+
+    /// Close a run's interactive stdin: the CLI treats EOF as the end of the
+    /// session and exits once the current turn is done.
+    fn close_stdin(&self, key: &str) {
+        let Some(stdin) = self.get(key).and_then(|entry| entry.stdin) else {
+            return;
+        };
+        tokio::spawn(async move {
+            *stdin.lock().await = None;
+        });
+    }
+
+    /// Drain and return the request ids of a run's pending questions.
+    fn take_questions(&self, key: &str) -> Vec<String> {
+        let Some(entry) = self.get(key) else {
+            return Vec::new();
+        };
+        let Ok(mut questions) = entry.questions.lock() else {
+            return Vec::new();
+        };
+        let ids: Vec<String> = questions.keys().cloned().collect();
+        questions.clear();
+        ids
+    }
+
     fn insert(&self, key: String, entry: ChildEntry) {
         if let Ok(mut map) = self.0.lock() {
             map.insert(key, entry);
         }
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.0.lock().map(|map| map.len()).unwrap_or(0)
     }
@@ -751,6 +837,21 @@ impl ProcessRegistry {
             }
             if let Some(entry) = map.get(from).cloned() {
                 map.insert(to, entry);
+            }
+        }
+    }
+
+    /// Drop a pre-spawn run-id reservation after a failed launch. Only the
+    /// placeholder (no child, pid 0) is removed — a registered run, real or
+    /// virtual, is never touched.
+    fn remove_reservation(&self, key: &str) {
+        if let Ok(mut map) = self.0.lock() {
+            let reserved = map
+                .get(key)
+                .map(|entry| entry.child.is_none() && entry.pid == 0)
+                .unwrap_or(false);
+            if reserved {
+                map.remove(key);
             }
         }
     }
@@ -799,18 +900,29 @@ impl ProcessRegistry {
     /// several parallel runs must all die on a single stop, or the survivors
     /// keep streaming and fight the next run over the session file.
     pub fn kill(&self, key: &str) -> bool {
-        let mut entries: Vec<(u32, Option<Arc<TokioMutex<tokio::process::Child>>>, Arc<std::sync::atomic::AtomicBool>, Arc<std::sync::OnceLock<tokio::task::AbortHandle>>)> =
-            match self.0.lock() {
-                Ok(map) => {
-                    let mut seen_pids = std::collections::HashSet::new();
-                    map.iter()
-                        .filter(|(k, e)| *k == key || e.run_id == key)
-                        .filter(|(_, e)| seen_pids.insert(e.pid))
-                        .map(|(_, e)| (e.pid, e.child.clone(), Arc::clone(&e.killed), Arc::clone(&e.reader_abort)))
-                        .collect()
-                }
-                Err(_) => Vec::new(),
-            };
+        let mut entries: Vec<(
+            u32,
+            Option<Arc<TokioMutex<tokio::process::Child>>>,
+            Arc<std::sync::atomic::AtomicBool>,
+            Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
+        )> = match self.0.lock() {
+            Ok(map) => {
+                let mut seen_pids = std::collections::HashSet::new();
+                map.iter()
+                    .filter(|(k, e)| *k == key || e.run_id == key)
+                    .filter(|(_, e)| seen_pids.insert(e.pid))
+                    .map(|(_, e)| {
+                        (
+                            e.pid,
+                            e.child.clone(),
+                            Arc::clone(&e.killed),
+                            Arc::clone(&e.reader_abort),
+                        )
+                    })
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        };
         // The registry keys one child under BOTH its session id and run id
         // (rekey copies): de-duplicate by pid so one stop fires one
         // taskkill, not one per key.
@@ -1001,7 +1113,9 @@ fn codex_bin_from_home(settings: &crate::settings::AppSettings) -> Option<String
     }
     let expanded = crate::open_app::expand_user_path(home).ok()?;
     let candidate = expanded.join("bin").join("codex");
-    candidate.exists().then(|| resolve::resolve_launchable_cli_binary(&candidate.to_string_lossy()))
+    candidate
+        .exists()
+        .then(|| resolve::resolve_launchable_cli_binary(&candidate.to_string_lossy()))
 }
 
 /// CLI binary name behind an engine id, when they differ: qoder's engine ids
@@ -1104,16 +1218,29 @@ fn prepare_launch(
     effort: Option<String>,
     permission: Option<String>,
     additional_dirs: Vec<String>,
+    provider_id: Option<String>,
 ) -> Result<Launch, String> {
     let engine_impl = engine_by_id(engine).ok_or_else(|| format!("unknown engine: {engine}"))?;
-    // Channels live in each CLI's native config file (provider_files); the
-    // only launch-time gate left is the 停用 pseudo-provider.
+    // 停用 still gates sending. Channel settings apply to this child below;
+    // native CLI files remain the official configuration.
     crate::config::ensure_engine_enabled(engine)?;
+    let provider_id = provider_id.filter(|s| !s.trim().is_empty());
+    let provider = crate::config::resolve_provider(engine, provider_id.as_deref())?;
+    let channel_env = provider
+        .as_ref()
+        .map(|p| crate::provider_files::channel_env(engine, p))
+        .transpose()?
+        .unwrap_or_default();
     let settings = crate::settings::read_settings().unwrap_or_default();
     let model = model
         .filter(|m| !m.trim().is_empty())
         .or_else(|| settings.default_models.get(engine).cloned())
         .filter(|m| !m.trim().is_empty());
+    let model = if engine == "claude" {
+        claude_channel::resolve_model(model.as_deref(), provider.as_ref(), &channel_env)
+    } else {
+        model
+    };
     let effort = effort
         .filter(|e| !e.trim().is_empty())
         .or_else(|| settings.default_efforts.get(engine).cloned())
@@ -1140,21 +1267,39 @@ fn prepare_launch(
             .filter(|d| !d.is_empty() && Path::new(d).is_absolute())
             .take(32)
             .collect(),
+        provider_id,
     };
     let bin = engine_bin(&settings, engine);
     // Host-stream engines never spawn: hand back a placeholder command so
     // prepare_launch stays shape-compatible; send_message branches to the
     // virtual path before anything would touch it.
-    let built = if engine_impl.drives_own_transport() {
+    let mut built = if engine_impl.drives_own_transport() {
         BuiltCommand {
             command: Command::new("unused-virtual-engine"),
             stdin_payload: None,
+            keep_stdin_open: false,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         }
+    } else if engine == "kimi" && provider.is_some() {
+        kimi::build_channel_command(&req, &bin)?
     } else {
         engine_impl.build_command(&req, &bin)?
     };
+    for (key, value) in &channel_env {
+        built.command.env(key, value);
+    }
+    let configured = match (engine, provider.as_ref()) {
+        ("claude", Some(provider)) => claude_channel::apply(&mut built, provider, &channel_env, &req),
+        ("kimi", Some(_)) => kimi::apply_channel(&mut built.command, &channel_env, &req),
+        ("codex", Some(provider)) => codex::apply_channel(&mut built.command, provider, &channel_env, &req),
+        ("grok", Some(provider)) => grok::isolate_channel(&mut built, provider, &req),
+        _ => Ok(()),
+    };
+    if let Err(error) = configured {
+        cleanup_staged_files(&built.cleanup_files);
+        return Err(error);
+    }
     Ok(Launch {
         req,
         bin,
@@ -1163,19 +1308,39 @@ fn prepare_launch(
     })
 }
 
-/// Stdin payload writer: engines consuming stream-json stdin get the payload
-/// then EOF (drop closes the pipe).
-fn spawn_stdin_writer(child: &mut Child, payload: Option<String>) {
-    let Some(payload) = payload else {
-        return;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
+/// Stdin payload writer: engines consuming stream-json stdin get the payload,
+/// then EOF (drop closes the pipe) — unless `keep_open`, where the handle is
+/// returned instead so control responses can follow on the same pipe.
+fn spawn_stdin_writer(
+    child: &mut Child,
+    payload: Option<String>,
+    keep_open: bool,
+) -> Option<Arc<TokioMutex<Option<tokio::process::ChildStdin>>>> {
+    if !keep_open {
+        let Some(payload) = payload else {
+            return None;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            tokio::spawn(async move {
+                let _ = stdin.write_all(payload.as_bytes()).await;
+                let _ = stdin.write_all(b"\n").await;
+                // drop closes stdin -> EOF
+            });
+        }
+        return None;
+    }
+    let keep = Arc::new(TokioMutex::new(child.stdin.take()));
+    if let Some(payload) = payload {
+        let handle = Arc::clone(&keep);
         tokio::spawn(async move {
-            let _ = stdin.write_all(payload.as_bytes()).await;
-            let _ = stdin.write_all(b"\n").await;
-            // drop closes stdin -> EOF
+            let mut guard = handle.lock().await;
+            if let Some(stdin) = guard.as_mut() {
+                let _ = stdin.write_all(payload.as_bytes()).await;
+                let _ = stdin.write_all(b"\n").await;
+            }
         });
     }
+    Some(keep)
 }
 
 /// Diagnostics ring: keeps the last 4KB for the error banner.
@@ -1259,6 +1424,12 @@ impl TurnState {
             "seq": self.seq,
             "kind": kind,
             "data": data,
+            // Emit-side timestamp (Unix ms): plugins compute throughput from
+            // consecutive reports; arrival time would add IPC batching jitter.
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
         }));
     }
 }
@@ -1284,6 +1455,122 @@ struct RunContext {
     /// any grandchild the CLI orphaned (Windows pwsh.exe/conhost.exe).
     #[cfg(windows)]
     _tree_guard: Option<Arc<job::KillOnCloseJob>>,
+}
+
+impl Drop for RunContext {
+    fn drop(&mut self) {
+        // Also runs when the reader is aborted during interrupt or shutdown.
+        cleanup_staged_files(&self.cleanup_files);
+    }
+}
+
+/// Remove leftover channel staging dirs (`claude-staging`/`grok-staging`
+/// under app_home) from a crashed run: they hold per-send credentials and
+/// must not linger on disk. Live runs recreate them per send, so sweeping
+/// at startup is safe. Only these two known names are touched.
+pub fn sweep_staging_dirs() {
+    let home = crate::paths::app_home();
+    for name in ["claude-staging", "grok-staging"] {
+        let dir = home.join(name);
+        if dir.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&dir) {
+                eprintln!(
+                    "[engine] failed to sweep staging dir {}: {error}",
+                    dir.display()
+                );
+            }
+        }
+    }
+}
+
+fn cleanup_staged_files(paths: &[PathBuf]) {
+    for path in paths {
+        let result = if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+        if let Err(error) = result {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[engine] failed to remove staging path {}: {error}", path.display());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    struct Noop;
+    impl event_sink::Emit for Noop {
+        fn emit_json(&self, _: &str, _: &str) {}
+    }
+
+    #[tokio::test]
+    async fn reader_context_cleans_private_configs_on_completion_and_abort() {
+        for abort in [false, true] {
+            let directory = std::env::temp_dir().join(format!("ccgui-reader-cleanup-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("config.toml"), "temporary credential").unwrap();
+            let mut command = Command::new(if cfg!(windows) {"cmd.exe"} else {"sh"});
+            command.args(if cfg!(windows) {["/c", "exit 0"]} else {["-c", "exit 0"]});
+            let mut child = command.spawn().unwrap();
+            child.wait().await.unwrap();
+            let ctx = RunContext {
+                core: TurnCore {sink: event_sink::EventSink::new(Arc::new(Noop)), registry: Arc::new(ProcessRegistry::default()), engine_id: "grok".into(), run_id: "test".into()},
+                engine_impl: Box::new(grok::GrokEngine), pid: 0,
+                preassigned_session_id: None, initial_model: None,
+                child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
+                stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+                #[cfg(windows)]
+                _tree_guard: None,
+            };
+            let task = tokio::spawn(async move {
+                if abort { std::future::pending::<()>().await; }
+                drop(ctx);
+            });
+            if abort { task.abort(); }
+            let result = task.await;
+            assert_eq!(result.is_err(), abort);
+            assert!(!directory.exists());
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_event_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Collector(Mutex<Vec<Value>>);
+    impl event_sink::Emit for Collector {
+        fn emit_json(&self, _: &str, raw: &str) {
+            self.0.lock().unwrap().extend(serde_json::from_str::<Vec<Value>>(raw).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_runs_do_not_emit_late_usage_text_or_duplicate_completion() {
+        for fail in [false, true] {
+            let collector = Arc::new(Collector::default());
+            let core = TurnCore {
+                sink: event_sink::EventSink::new(collector.clone()),
+                registry: Arc::new(ProcessRegistry::default()),
+                engine_id: "codex".into(), run_id: "terminal-test".into(),
+            };
+            let mut state = TurnState::new(Some("session".into()));
+            core.dispatch_event(&mut state, EngineEvent::Delta("完成中文与 emoji 🐎".into()));
+            core.dispatch_event(&mut state, EngineEvent::Usage(serde_json::json!({"input_tokens": 90000, "model_context_window":1000000})));
+            core.dispatch_event(&mut state, if fail { EngineEvent::Error("failed".into()) }
+                else { EngineEvent::Done { session_id: None, usage: None } });
+            core.dispatch_event(&mut state, EngineEvent::Usage(serde_json::json!({"input_tokens":90000})));
+            core.dispatch_event(&mut state, EngineEvent::Delta("late".into()));
+            core.dispatch_event(&mut state, EngineEvent::Done { session_id: None, usage: None });
+            core.sink.flush();
+            let events = collector.0.lock().unwrap();
+            let kinds: Vec<_> = events.iter().map(|event| event["kind"].as_str().unwrap()).collect();
+            assert_eq!(kinds, ["delta", "usage", if fail {"error"} else {"done"}]);
+            assert_eq!(events[0]["data"], "完成中文与 emoji 🐎");
+        }
+    }
 }
 
 /// Event-routing core shared by process runs ([`RunContext`]) and virtual
@@ -1318,9 +1605,12 @@ impl TurnCore {
     }
 
     fn dispatch_event(&self, state: &mut TurnState, event: EngineEvent) {
-        // Killing the child after an Error races with already-buffered stdout.
-        // No late retry/content event may revive that terminal run.
-        if state.saw_error {
+        // Terminal state is monotonic, even if a CLI or its usage tail emits
+        // more data before exiting: no late retry/content/warn event may
+        // revive a settled run. The one exception is SessionId — a done that
+        // raced the CLI's session announcement must still rekey/announce, or
+        // the conversation strands under its provisional key.
+        if (state.saw_done || state.saw_error) && !matches!(event, EngineEvent::SessionId(_)) {
             return;
         }
         match event {
@@ -1450,6 +1740,74 @@ impl TurnCore {
                     serde_json::json!({ "tool": tool, "path": path, "message": message }),
                 );
             }
+            EngineEvent::Question {
+                request_id,
+                tool_use_id,
+                input,
+            } => {
+                // Park the ask: the answer command rebuilds updatedInput from
+                // this exact input (the control protocol wants the full tool
+                // input back, with the answers merged in).
+                if let Some(entry) = self.registry.get(&self.run_id) {
+                    if let Ok(mut questions) = entry.questions.lock() {
+                        questions.insert(request_id.clone(), input.clone());
+                    }
+                }
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "question",
+                    serde_json::json!({
+                        "requestId": request_id,
+                        "toolUseId": tool_use_id,
+                        "input": input,
+                    }),
+                );
+            }
+            EngineEvent::QuestionSettled { request_id } => {
+                if let Some(entry) = self.registry.get(&self.run_id) {
+                    if let Ok(mut questions) = entry.questions.lock() {
+                        questions.remove(&request_id);
+                    }
+                }
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "question_settled",
+                    serde_json::json!({ "requestId": request_id }),
+                );
+            }
+            EngineEvent::ControlPermissionDeny {
+                request_id,
+                tool_name,
+            } => {
+                // No approval UI in this client: deny in place so the CLI is
+                // not left parked until its deadline. Net behavior matches
+                // the pre-control-protocol headless run (ask -> denial, the
+                // model works around it). Best effort: if the pipe is gone
+                // the CLI is already dead and its own deadline settles.
+                let registry = Arc::clone(&self.registry);
+                let run_id = self.run_id.clone();
+                let line = serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {
+                            "behavior": "deny",
+                            "message": format!(
+                                "This client cannot show tool-permission prompts; the {tool_name} call was denied. Work around it, or tell the user what you would have run so they can approve it another way."
+                            ),
+                        },
+                    },
+                })
+                .to_string();
+                tokio::spawn(async move {
+                    let _ = registry.write_line(&run_id, line).await;
+                });
+            }
             EngineEvent::Model(model) => {
                 state.push(
                     &self.sink,
@@ -1464,6 +1822,9 @@ impl TurnCore {
                 if let Some(id) = session_id {
                     self.adopt_session_id(state, &id, false);
                 }
+                // The turn is over: EOF the interactive stdin so the CLI
+                // exits instead of waiting for a next message forever.
+                self.registry.close_stdin(&self.run_id);
                 state.push(
                     &self.sink,
                     &self.run_id,
@@ -1565,7 +1926,7 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(500));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let read = if is_codex {
+        let read = if is_codex && !state.saw_done && !state.saw_error {
             tokio::select! {
                 line = read_line_capped(&mut reader, &mut line_buf) => line,
                 _ = poll.tick() => {
@@ -1626,7 +1987,21 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
         stream_session_id |= events
             .iter()
             .any(|event| matches!(event, EngineEvent::SessionId(_)));
-        for event in events {
+        for mut event in events {
+            // Flush the final rollout records BEFORE done/error. Sending them
+            // afterwards made observers adopt the already-finished run again.
+            if matches!(event, EngineEvent::Done { .. } | EngineEvent::Error(_))
+                && !state.saw_done && !state.saw_error
+            {
+                if let Some(tail) = usage_tail.as_mut() {
+                    for usage in tail.poll() {
+                        ctx.dispatch_event(&mut state, EngineEvent::Usage(usage));
+                    }
+                    if let EngineEvent::Done { usage: Some(usage), .. } = &mut event {
+                        *usage = tail.with_window(usage);
+                    }
+                }
+            }
             ctx.dispatch_event(&mut state, event);
         }
     }
@@ -1657,12 +2032,29 @@ async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     for path in &ctx.cleanup_files {
         let _ = std::fs::remove_file(path);
     }
+    // Pending questions die with the run: settle their cards so the UI never
+    // leaves an answerable question pointing at a dead process.
+    for key in [state.native_session_id.clone(), Some(ctx.core.run_id.clone())]
+        .into_iter()
+        .flatten()
+    {
+        for request_id in ctx.core.registry.take_questions(&key) {
+            ctx.dispatch_event(&mut state, EngineEvent::QuestionSettled { request_id });
+        }
+    }
     // Drain this run's registry entries: under the native session id after
     // rekey, and under the run id when the session id never arrived.
     if let Some(key) = state.native_session_id.clone() {
         ctx.core.registry.remove_if_pid(&key, ctx.pid);
     }
     ctx.core.registry.remove_if_pid(&ctx.core.run_id, ctx.pid);
+    // Also clean up the preassigned session id alias if one was registered
+    // at spawn (grok/codex resume): a resumed session was keyed under
+    // ctx.preassigned_session_id, so we must remove that alias even if the
+    // native id differs or never arrived.
+    if let Some(key) = ctx.preassigned_session_id.as_deref() {
+        ctx.core.registry.remove_if_pid(key, ctx.pid);
+    }
     // omp writes some failures (upstream 403/5xx, quota exhaustion) to
     // stderr and then exits — sometimes cleanly, after a normal turn_end.
     // A non-empty stderr on a failed exit must reach the user even when a
@@ -1754,6 +2146,8 @@ pub async fn send_message(
     model: Option<String>,
     effort: Option<String>,
     permission: Option<String>,
+    provider_id: Option<String>,
+    run_id: Option<String>,
 ) -> Result<SendResult, String> {
     send_message_inner(
         &state,
@@ -1766,6 +2160,8 @@ pub async fn send_message(
         model,
         effort,
         permission,
+        provider_id,
+        run_id,
     )
     .await
 }
@@ -1785,12 +2181,93 @@ pub async fn send_message_inner(
     model: Option<String>,
     effort: Option<String>,
     permission: Option<String>,
+    provider_id: Option<String>,
+    run_id: Option<String>,
 ) -> Result<SendResult, String> {
-    if state.processes.len() >= MAX_CONCURRENT_RUNS {
-        return Err(format!(
-            "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
-        ));
+    let run_id = run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if run_id.is_empty() || run_id.len() > 128
+        || !run_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err("invalid run id".into());
     }
+    // Reserve the run id atomically, before the first await: a contains_key
+    // check here with the registry insert after spawn would let two
+    // concurrent sends carrying the same client id both pass, and the second
+    // insert would overwrite the first entry — orphaning its child (no key
+    // routes an interrupt to it) and streaming two runs under one runId.
+    // The placeholder owns the run's killed/reader_abort handles, so a Stop
+    // landing inside the launch window still settles the turn; every error
+    // path before the real registration drops the reservation.
+    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_abort = Arc::new(std::sync::OnceLock::new());
+    {
+        let mut map = state.processes.0.lock().map_err(|e| e.to_string())?;
+        if map.contains_key(&run_id) {
+            return Err("run id already active".into());
+        }
+        if map.len() >= MAX_CONCURRENT_RUNS {
+            return Err(format!(
+                "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
+            ));
+        }
+        map.insert(
+            run_id.clone(),
+            ChildEntry {
+                child: None,
+                pid: 0,
+                run_id: run_id.clone(),
+                killed: Arc::clone(&killed),
+                reader_abort: Arc::clone(&reader_abort),
+                stdin: None,
+                questions: Arc::new(Mutex::new(HashMap::new())),
+            },
+        );
+    }
+    let reserved = run_id.clone();
+    let result = send_reserved(
+        state,
+        engine,
+        workspace_path,
+        session_id,
+        prompt,
+        prompt_contributions,
+        image_paths,
+        model,
+        effort,
+        permission,
+        provider_id,
+        run_id,
+        killed,
+        reader_abort,
+    )
+    .await;
+    if result.is_err() {
+        state.processes.remove_reservation(&reserved);
+    }
+    result
+}
+
+/// Body of [`send_message_inner`] once the run id is reserved: the caller id
+/// is used as-is (never regenerated — the frontend pre-routes events by it),
+/// and the placeholder's killed/reader_abort handles carry into the real
+/// registry entry so an interrupt from the launch window is honored.
+#[allow(clippy::too_many_arguments)]
+async fn send_reserved(
+    state: &crate::AppState,
+    engine: String,
+    workspace_path: String,
+    session_id: Option<String>,
+    prompt: String,
+    prompt_contributions: Vec<PromptContribution>,
+    image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
+    permission: Option<String>,
+    provider_id: Option<String>,
+    run_id: String,
+    killed: Arc<std::sync::atomic::AtomicBool>,
+    reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
+) -> Result<SendResult, String> {
     let launch = prepare_launch(
         &engine,
         &workspace_path,
@@ -1805,6 +2282,7 @@ pub async fn send_message_inner(
         // a grant approved mid-conversation takes effect on the next send
         // (each send is a fresh process).
         state.db.granted_roots().unwrap_or_default(),
+        provider_id,
     )?;
 
     // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
@@ -1816,7 +2294,7 @@ pub async fn send_message_inner(
         if wsl_tp.is_some() {
             return Err(format!("引擎 {engine} 不支持远程工作区(WSL)"));
         }
-        return send_host_stream(state, launch, engine).await;
+        return send_host_stream(state, launch, engine, run_id, killed, reader_abort).await;
     }
     let (mut command, extra_cleanup, skip_local_cwd) = match &wsl_tp {
         Some(tp) => {
@@ -1856,7 +2334,7 @@ pub async fn send_message_inner(
         codex_provider_env::apply(&mut command).await;
     }
     command
-        .stdin(if launch.built.stdin_payload.is_some() {
+        .stdin(if launch.built.stdin_payload.is_some() || launch.built.keep_stdin_open {
             std::process::Stdio::piped()
         } else {
             std::process::Stdio::null()
@@ -1879,16 +2357,18 @@ pub async fn send_message_inner(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            // Never strand the staging files build_command wrote (grok) or
-            // the remote-run script marker (wsl transport).
-            for path in &cleanup_files {
-                let _ = std::fs::remove_file(path);
-            }
+            // Never strand the staging files build_command wrote (grok).
+            cleanup_staged_files(&cleanup_files);
             return Err(format!("failed to spawn {}: {error}", launch.bin));
         }
     };
 
-    spawn_stdin_writer(&mut child, launch.built.stdin_payload);
+    let kept_stdin = spawn_stdin_writer(
+        &mut child,
+        launch.built.stdin_payload,
+        launch.built.keep_stdin_open,
+    );
+    let questions: Arc<Mutex<HashMap<String, Value>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let run_id = uuid::Uuid::new_v4().to_string();
     // Join a kill-on-close job before the run can settle: an orphaned
@@ -1906,16 +2386,12 @@ pub async fn send_message_inner(
             Some(pair) => pair,
             None => {
                 let _ = child.start_kill();
-                for path in &cleanup_files {
-                    let _ = std::fs::remove_file(path);
-                }
+                cleanup_staged_files(&cleanup_files);
                 return Err("missing stdout/stderr pipe after spawn".to_string());
             }
         }
     };
     let child = Arc::new(TokioMutex::new(child));
-    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reader_abort = Arc::new(std::sync::OnceLock::new());
     state.processes.insert(
         run_id.clone(),
         ChildEntry {
@@ -1924,6 +2400,8 @@ pub async fn send_message_inner(
             run_id: run_id.clone(),
             killed: Arc::clone(&killed),
             reader_abort: Arc::clone(&reader_abort),
+            stdin: kept_stdin.clone(),
+            questions: Arc::clone(&questions),
         },
     );
     if let Some(session_id) = launch.built.preassigned_session_id.as_deref() {
@@ -1935,6 +2413,8 @@ pub async fn send_message_inner(
                 run_id: run_id.clone(),
                 killed: Arc::clone(&killed),
                 reader_abort: Arc::clone(&reader_abort),
+                stdin: kept_stdin.clone(),
+                questions: Arc::clone(&questions),
             },
         );
     }
@@ -1944,8 +2424,7 @@ pub async fn send_message_inner(
         launch
             .req
             .model
-            .as_deref()
-            .map(models::resolve_claude_launch_model)
+            .clone()
             .or_else(|| Some(models::resolve_claude_launch_model("default")))
             .filter(|m| !m.is_empty())
     } else {
@@ -1998,17 +2477,19 @@ async fn send_host_stream(
     state: &crate::AppState,
     launch: Launch,
     engine: String,
+    run_id: String,
+    killed: Arc<std::sync::atomic::AtomicBool>,
+    reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
 ) -> Result<SendResult, String> {
-    let run_id = uuid::Uuid::new_v4().to_string();
     let pid = next_virtual_pid();
-    let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reader_abort = Arc::new(std::sync::OnceLock::new());
     let entry = ChildEntry {
         child: None,
         pid,
         run_id: run_id.clone(),
         killed: Arc::clone(&killed),
         reader_abort: Arc::clone(&reader_abort),
+        stdin: None,
+        questions: Arc::new(Mutex::new(HashMap::new())),
     };
     state.processes.insert(run_id.clone(), entry.clone());
     if let Some(session_id) = launch.req.session_id.as_deref() {
@@ -2056,6 +2537,63 @@ pub async fn interrupt_session(
     tauri::async_runtime::spawn_blocking(move || registry.kill(&session_id))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Answer a pending AskUserQuestion (claude control protocol). `answers` maps
+/// each question's text to the chosen option label — an array of labels for
+/// multiSelect questions. `None` means the user skipped: the CLI records
+/// "did not answer" and the model continues without a choice. Accepts either
+/// the run id or the conversation session id, like `interrupt_session`.
+#[tauri::command]
+pub async fn answer_question(
+    state: tauri::State<'_, crate::AppState>,
+    session_id: String,
+    request_id: String,
+    answers: Option<Value>,
+) -> Result<(), String> {
+    let entry = state
+        .processes
+        .get(&session_id)
+        .ok_or_else(|| "no running session for this answer".to_string())?;
+    // Peek, don't remove: a failed write leaves the question parked so the
+    // user can retry (or the EOF drain settles the card honestly).
+    let input = entry
+        .questions
+        .lock()
+        .map_err(|_| "question state is poisoned".to_string())?
+        .get(&request_id)
+        .cloned()
+        .ok_or_else(|| "question is no longer pending".to_string())?;
+    let mut updated = match input {
+        Value::Object(map) => map,
+        // Defensive: a non-object input cannot merge answers; rebuild the
+        // minimal shape the question reader expects.
+        questions => {
+            let mut map = serde_json::Map::new();
+            map.insert("questions".to_string(), questions);
+            map
+        }
+    };
+    if let Some(answers) = answers {
+        updated.insert("answers".to_string(), answers);
+    }
+    let line = serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": { "behavior": "allow", "updatedInput": Value::Object(updated) },
+        },
+    })
+    .to_string();
+    // A failed write must surface: the frontend keeps the card pending on
+    // Err instead of falsely marking the question answered.
+    state.processes.write_line(&session_id, line).await?;
+    // Delivered: drop the parked copy so the EOF drain skips it.
+    if let Ok(mut questions) = entry.questions.lock() {
+        questions.remove(&request_id);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2114,6 +2652,7 @@ mod permission_tests {
             service_tier: None,
             permission: permission.map(str::to_string),
             additional_dirs: Vec::new(),
+            provider_id: None,
         }
     }
 
@@ -2598,17 +3137,17 @@ mod registry_tests {
     /// moving rekey leaked the child (user pressed Stop, nothing died).
     #[tokio::test]
     async fn rekey_keeps_both_keys_and_kill_routes_by_either() {
-        let mut child = tokio::process::Command::new(if cfg!(windows) {
-            "cmd"
-        } else {
-            "sh"
-        })
-        .args(if cfg!(windows) { ["/c", "ping -n 30 127.0.0.1"] } else { ["-c", "sleep 30"] })
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn sleep child");
+        let child = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args(if cfg!(windows) {
+                ["/c", "ping -n 30 127.0.0.1"]
+            } else {
+                ["-c", "sleep 30"]
+            })
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep child");
         let pid = child.id().unwrap_or(0);
         let entry = ChildEntry {
             child: Some(Arc::new(TokioMutex::new(child))),
@@ -2616,6 +3155,8 @@ mod registry_tests {
             run_id: "run-1".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reader_abort: Arc::new(std::sync::OnceLock::new()),
+            stdin: None,
+            questions: Arc::new(Mutex::new(HashMap::new())),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-1".to_string(), entry);
@@ -2662,6 +3203,8 @@ mod registry_tests {
             run_id: "run-preassigned".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reader_abort: Arc::new(std::sync::OnceLock::new()),
+            stdin: None,
+            questions: Arc::new(Mutex::new(HashMap::new())),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-preassigned".to_string(), entry.clone());
@@ -2719,6 +3262,8 @@ mod registry_tests {
             run_id: "run-tree".to_string(),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reader_abort: Arc::new(std::sync::OnceLock::new()),
+            stdin: None,
+            questions: Arc::new(Mutex::new(HashMap::new())),
         };
         let registry = ProcessRegistry::default();
         registry.insert("run-tree".to_string(), entry);

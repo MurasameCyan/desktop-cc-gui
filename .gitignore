@@ -40,3 +40,4 @@ CLAUDE.md
 # Neither belongs in a commit, let alone a PR.
 artifacts/
 bun.lock
+.workflow

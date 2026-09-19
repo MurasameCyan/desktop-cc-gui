@@ -41,6 +41,16 @@ export const pluginBus = {
 /** Topic plugins subscribe to for live token-usage snapshots (plan §5.2). */
 export const USAGE_UPDATED_TOPIC = "usage://updated";
 
+/** Engine `done` events (SDK 0.3.8): `data.usage` carries the turn's final
+ *  usage — the only usage channel for engines like claude/grok that never
+ *  emit a standalone usage event, and the precise turn-end signal for all
+ *  others. */
+export const USAGE_DONE_TOPIC = "usage://done";
+
+/** Active-session switches (SDK 0.3.8): `{ engine, sessionId }`; a pending
+ *  tab reports sessionId null, clearing all tabs reports both null. */
+export const SESSION_ACTIVATED_TOPIC = "session://activated";
+
 /** Host→plugin topic carrying the composer's in-progress draft (plan §5.2). */
 export const COMPOSER_DRAFT_TOPIC = "composer://draft";
 
@@ -71,6 +81,14 @@ export function bridgeUsageEvents(): void {
   void listenEngineEvents((batch) => {
     for (const event of batch) {
       if (event.kind === "usage") pluginBus.emit(USAGE_UPDATED_TOPIC, event);
+      else if (event.kind === "done") pluginBus.emit(USAGE_DONE_TOPIC, event);
     }
   });
+}
+
+/** Emit an active-session switch onto the plugin bus (chat store calls this
+ *  from activateTab/selectSession). Not part of bridgeUsageEvents — the
+ *  source is the store, not the engine stream. */
+export function emitSessionActivated(engine: string | null, sessionId: string | null): void {
+  pluginBus.emit(SESSION_ACTIVATED_TOPIC, { engine, sessionId });
 }

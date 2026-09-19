@@ -95,6 +95,22 @@ describe("user bubble copy affordance", () => {
     expect(button.className).toContain("focus-visible:opacity-100");
   });
 
+  it("keeps long unbroken user content inside the conversation width", async () => {
+    await act(async () => {
+      root.render(
+        <MessageRow message={userMessage("x".repeat(2_000))} workspacePath="/ws" turnFinal />,
+      );
+    });
+    const bubble = container.querySelector<HTMLDivElement>(".bg-bubble-user")!;
+    expect(bubble.className).toContain("w-fit");
+    expect(bubble.className).toContain("max-w-[72%]");
+    expect(bubble.className).toContain("max-md:max-w-[85%]");
+    expect(bubble.className).toContain("[overflow-wrap:anywhere]");
+    expect(bubble.parentElement?.className).toContain("min-w-0");
+    expect(bubble.parentElement?.className).toContain("w-full");
+    expect(bubble.firstElementChild?.className).toContain("max-w-full");
+  });
+
   it("omits the button for a whitespace-only message", async () => {
     await act(async () => {
       root.render(

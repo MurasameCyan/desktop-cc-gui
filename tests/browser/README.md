@@ -84,3 +84,15 @@ single-member section still has a working grip, empty groups mount only
 mid-drag and accept a drop there, and a plain in-section drag still commits
 `onReorderWorkspaces` without also firing a section drop. Static props, no
 app, no backend.
+Open `/tests/browser/agent-prompt-menus.html` to check the composer's `#`
+agent picker and `!` prompt picker against seeded stores: the agent menu
+groups 我的智能体 then one section per enabled built-in division (flat when
+filtering), and the prompt menu rows carry 工作区/全局 scope badges; both
+end in a fixed "new" row that jumps to Settings. No app, no backend.
+
+Open `/tests/browser/delete-confirm-popover.html` to check the session-delete
+confirmation: right-clicking the thread row and picking 删除 must open a
+pointer-anchored popover (not the centered modal) next to the click point
+with 确认 focused; Escape and outside press cancel without deleting, 确认
+fires the store's deleteSession once. Real AiChatSidebar, ThreadContextMenu
+and ChatPageDialogs; only deleteSession is stubbed. No app, no backend.

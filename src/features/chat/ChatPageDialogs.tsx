@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { ConfirmDialog, PromptDialog } from "@/components/dialogs";
+import { ConfirmDialog, ConfirmPopover, PromptDialog } from "@/components/dialogs";
 import { fileName, useFilesStore } from "@/features/files/store";
 import { useTerminalStore } from "@/features/terminal/store";
 import type { SessionMeta } from "@/lib/ipc";
@@ -9,7 +9,10 @@ import { useChatStore } from "./store";
 /** Modal dialogs owned by the chat page. */
 export type ChatPageDialog =
   | { kind: "rename"; session: SessionMeta }
-  | { kind: "delete"; session: SessionMeta }
+  // anchor: pointer position of the delete click — the confirmation opens
+  // next to the cursor (ConfirmPopover) instead of screen center; absent
+  // (keyboard/no recent pointer) falls back to the centered ConfirmDialog.
+  | { kind: "delete"; session: SessionMeta; anchor?: { x: number; y: number } }
   | { kind: "removeWorkspace"; workspaceId: string }
   | { kind: "workspaceAlias"; workspaceId: string }
   | { kind: "closeFile"; path: string };
@@ -24,10 +27,9 @@ export function ChatPageDialogs({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const { renameSession, deleteSession, removeWorkspace, setWorkspaceAlias } = useChatStore(
+  const { renameSession, removeWorkspace, setWorkspaceAlias } = useChatStore(
     useShallow((s) => ({
       renameSession: s.renameSession,
-      deleteSession: s.deleteSession,
       removeWorkspace: s.removeWorkspace,
       setWorkspaceAlias: s.setWorkspaceAlias,
     })),
@@ -51,15 +53,7 @@ export function ChatPageDialogs({
         />
       )}
       {dialog?.kind === "delete" && (
-        <ConfirmDialog
-          danger
-          message={t("chat.confirmDeleteSession")}
-          onConfirm={() => {
-            onClose();
-            void deleteSession(dialog.session.engine, dialog.session.sessionId);
-          }}
-          onCancel={onClose}
-        />
+        <DeleteSessionConfirm dialog={dialog} onClose={onClose} />
       )}
       {dialog?.kind === "closeFile" && (
         <ConfirmDialog
@@ -99,5 +93,32 @@ export function ChatPageDialogs({
         />
       )}
     </>
+  );
+}
+/** Session delete confirmation: pointer-anchored popover when the delete
+ *  came from a pointer click (the cursor is already there), centered modal
+ *  as the keyboard/no-anchor fallback. */
+function DeleteSessionConfirm({
+  dialog,
+  onClose,
+}: {
+  dialog: Extract<ChatPageDialog, { kind: "delete" }>;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const deleteSession = useChatStore((s) => s.deleteSession);
+  const props = {
+    danger: true,
+    message: t("chat.confirmDeleteSession"),
+    onConfirm: () => {
+      onClose();
+      void deleteSession(dialog.session.engine, dialog.session.sessionId);
+    },
+    onCancel: onClose,
+  };
+  return dialog.anchor ? (
+    <ConfirmPopover anchor={dialog.anchor} {...props} />
+  ) : (
+    <ConfirmDialog {...props} />
   );
 }

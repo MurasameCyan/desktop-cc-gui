@@ -45,10 +45,21 @@ body {
   /* File-link green ported from desktop-cc-gui (itself from
      idea-claude-code-gui): light #107c10 / dark #a5d6a7. */
   --md-link-color: #107c10;
+  /* GitHub alert accents (light-theme values; dark overrides below). */
+  --md-alert-note: #0969da;
+  --md-alert-tip: #1a7f37;
+  --md-alert-important: #8250df;
+  --md-alert-warning: #9a6700;
+  --md-alert-caution: #cf222e;
   /* hljs token palettes live in styles/theme.css (--color-md-token-*). */
 }
 .dark {
   --md-link-color: #a5d6a7;
+  --md-alert-note: #4493f8;
+  --md-alert-tip: #3fb950;
+  --md-alert-important: #ab7df8;
+  --md-alert-warning: #d29922;
+  --md-alert-caution: #f85149;
 }
 
 .prose-chat {
@@ -155,6 +166,42 @@ body {
   background: transparent;
   color: inherit;
   font-style: normal;
+}
+
+/* ---- GitHub-style alerts (`> [!NOTE]` …) render as a minimal left bar ----
+ * Class beats the `:where(blockquote)` flatten above (0 specificity), and
+ * the accent rides CSS variables so dark mode flips for free. */
+.prose-chat .md-alert {
+  border-left: 2px solid var(--md-alert-accent);
+  padding-left: 12px;
+}
+.prose-chat .md-alert-note {
+  --md-alert-accent: var(--md-alert-note);
+}
+.prose-chat .md-alert-tip {
+  --md-alert-accent: var(--md-alert-tip);
+}
+.prose-chat .md-alert-important {
+  --md-alert-accent: var(--md-alert-important);
+}
+.prose-chat .md-alert-warning {
+  --md-alert-accent: var(--md-alert-warning);
+}
+.prose-chat .md-alert-caution {
+  --md-alert-accent: var(--md-alert-caution);
+}
+.prose-chat .md-alert-title {
+  font-size: 0.8em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--md-alert-accent);
+  text-transform: uppercase;
+}
+.prose-chat .md-alert > p + p {
+  margin-top: 0.75em;
+}
+.prose-chat .md-alert > .md-alert-title + p {
+  margin-top: 6px;
 }
 
 /* ---- Links: file-link green + dotted underline everywhere ---- */

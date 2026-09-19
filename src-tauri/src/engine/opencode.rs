@@ -54,6 +54,7 @@ impl Engine for OpenCodeEngine {
         Ok(BuiltCommand {
             command: cmd,
             stdin_payload: None,
+            keep_stdin_open: false,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })
@@ -279,6 +280,7 @@ mod tests {
     fn req() -> SendRequest {
         SendRequest {
             session_id: None,
+            provider_id: None,
             workspace: PathBuf::from("/tmp/ws"),
             prompt: "hi".to_string(),
             prompt_contributions: Vec::new(),

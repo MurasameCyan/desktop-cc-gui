@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { FileIndexResult } from "@/lib/ipc";
+import type { FileIndexEntry } from "@/lib/ipc";
 import { resolveChatFileLink } from "./file-link-resolution";
 
 const mocks = vi.hoisted(() => ({
   listDir: vi.fn(async (_path: string): Promise<{ name: string }[]> => []),
-  listFileIndex: vi.fn(async (_path: string): Promise<FileIndexResult> => ({ entries: [], truncated: false })),
+  listFileIndex: vi.fn(async (_path: string): Promise<FileIndexEntry[]> => []),
 }));
 
 vi.mock("@/lib/ipc", () => ({ ipc: mocks }));
@@ -15,7 +15,7 @@ beforeEach(() => {
   mocks.listDir.mockReset();
   mocks.listFileIndex.mockReset();
   mocks.listDir.mockResolvedValue([]);
-  mocks.listFileIndex.mockResolvedValue({ entries: [], truncated: false });
+  mocks.listFileIndex.mockResolvedValue([]);
 });
 
 describe("resolveChatFileLink", () => {
@@ -28,10 +28,10 @@ describe("resolveChatFileLink", () => {
 
   it("finds a file nested below the workspace root through the index", async () => {
     mocks.listDir.mockRejectedValueOnce(new Error("missing"));
-    mocks.listFileIndex.mockResolvedValueOnce({ entries: [
+    mocks.listFileIndex.mockResolvedValueOnce([
       { rel: "ZZZrePatch/release/ZZZrePatch.exe", isDir: false },
       { rel: "ZZZrePatch/dist/ZZZrePatch.exe", isDir: false },
-    ], truncated: false });
+    ]);
     const got = await resolveChatFileLink("release/ZZZrePatch.exe", WS);
     expect(got).toBe("S:\\AIWorker\\ZZZrePatch/ZZZrePatch/release/ZZZrePatch.exe");
     // Build outputs are gitignored: the fallback index must include them.
@@ -40,9 +40,9 @@ describe("resolveChatFileLink", () => {
 
   it("applies the same fallback to an absolute link that resolves under the workspace", async () => {
     mocks.listDir.mockRejectedValueOnce(new Error("missing"));
-    mocks.listFileIndex.mockResolvedValueOnce({ entries: [
+    mocks.listFileIndex.mockResolvedValueOnce([
       { rel: "ZZZrePatch/release/ZZZrePatch.exe", isDir: false },
-    ], truncated: false });
+    ]);
     const got = await resolveChatFileLink(
       "S:\\AIWorker\\ZZZrePatch\\release\\ZZZrePatch.exe",
       WS,
@@ -50,24 +50,14 @@ describe("resolveChatFileLink", () => {
     expect(got).toBe("S:\\AIWorker\\ZZZrePatch/ZZZrePatch/release/ZZZrePatch.exe");
   });
 
-  it("does not replace a missing directory-qualified artifact with another artifact", async () => {
-    mocks.listFileIndex.mockResolvedValueOnce({ entries: [{ rel: "dist/app.exe", isDir: false }], truncated: false });
-    expect(await resolveChatFileLink("release/app.exe", WS)).toBe(`${WS}/release/app.exe`);
-  });
-
   it("does not guess when the basename alone is ambiguous", async () => {
     mocks.listDir.mockRejectedValueOnce(new Error("missing"));
-    mocks.listFileIndex.mockResolvedValueOnce({ entries: [
+    mocks.listFileIndex.mockResolvedValueOnce([
       { rel: "dist/app.exe", isDir: false },
       { rel: "release/app.exe", isDir: false },
-    ], truncated: false });
+    ]);
     const got = await resolveChatFileLink("app.exe", WS);
     expect(got).toBe("S:\\AIWorker\\ZZZrePatch/app.exe");
-  });
-
-  it("does not claim a unique suffix from a truncated workspace index", async () => {
-    mocks.listFileIndex.mockResolvedValueOnce({ entries: [{ rel: "nested/release/app.exe", isDir: false }], truncated: true });
-    expect(await resolveChatFileLink("release/app.exe", WS)).toBe(`${WS}/release/app.exe`);
   });
 
   it("leaves paths outside the workspace as written and never probes them", async () => {

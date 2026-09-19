@@ -1043,6 +1043,7 @@ struct UpdateSettingsArgs {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SendMessageArgs {
+    run_id: Option<String>,
     engine: String,
     workspace_path: String,
     session_id: Option<String>,
@@ -1053,6 +1054,7 @@ struct SendMessageArgs {
     model: Option<String>,
     effort: Option<String>,
     permission: Option<String>,
+    provider_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1133,6 +1135,12 @@ struct RecordAcceptedFrameArgs {
     frame: String,
     workspace_path: String,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveSessionArgs {
+    session: crate::history::SessionMeta,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PinSessionArgs {
@@ -1160,6 +1168,13 @@ struct RememberEffortArgs {
     engine: String,
     session_id: String,
     effort: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RememberProviderArgs {
+    engine: String,
+    session_id: String,
+    provider_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1196,6 +1211,73 @@ struct IdsArgs {
 #[serde(rename_all = "camelCase")]
 struct IdArgs {
     id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAddArgs {
+    name: String,
+    prompt: Option<String>,
+    icon: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUpdateArgs {
+    id: String,
+    name: Option<String>,
+    prompt: Option<String>,
+    icon: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocaleArgs {
+    locale: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltInAgentIdArgs {
+    agent_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltInAgentEnabledArgs {
+    agent_id: String,
+    enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltInAgentDivisionEnabledArgs {
+    division_id: String,
+    enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptsCreateArgs {
+    path: String,
+    scope: String,
+    name: String,
+    description: Option<String>,
+    argument_hint: Option<String>,
+    content: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptPathArgs {
+    path: String,
+    prompt_path: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptUpdateArgs {
+    path: String,
+    prompt_path: String,
+    updates: crate::prompts::PromptUpdates,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptMoveArgs {
+    path: String,
+    prompt_path: String,
+    scope: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1408,6 +1490,8 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
                 a.model,
                 a.effort,
                 a.permission,
+                a.provider_id,
+                a.run_id,
             )
             .await)
         }
@@ -1440,6 +1524,17 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         }
         // history
         "list_sessions" => ser(crate::history::reader::list_sessions(app.state())),
+        "list_archived_sessions" => {
+            ser(crate::history::reader::list_archived_sessions(app.state()))
+        }
+        "archive_session" => {
+            let a: ArchiveSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::archive_session(app.state(), a.session))
+        }
+        "restore_session" => {
+            let a: EngineSessionArgs = parse_args(&raw)?;
+            ser(crate::history::reader::restore_session(app.state(), a.engine, a.session_id))
+        }
         // Usage ledger: the mobile/web client renders the same page, so the
         // bridge must route it like every other settings surface.
         "usage_summary" => {
@@ -1545,6 +1640,15 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
                 a.effort,
             ))
         }
+        "remember_session_provider" => {
+            let a: RememberProviderArgs = parse_args(&raw)?;
+            ser(crate::history::reader::remember_session_provider(
+                app.state(),
+                a.engine,
+                a.session_id,
+                a.provider_id,
+            ))
+        }
         "rescan_sessions" => {
             crate::history::reader::rescan_sessions(app.state());
             Ok(Value::Null)
@@ -1634,6 +1738,83 @@ async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value
         "list_slash_commands" => {
             let a: PathArgs = parse_args(&raw)?;
             ser(crate::slash_commands::list_slash_commands(app.state(), a.path).await)
+        }
+        // agents & prompts (composer `#`/`!` pickers)
+        "agent_list" => ser(crate::agents::agent_list().await),
+        "agent_add" => {
+            let a: AgentAddArgs = parse_args(&raw)?;
+            ser(crate::agents::agent_add(a.name, a.prompt, a.icon).await)
+        }
+        "agent_update" => {
+            let a: AgentUpdateArgs = parse_args(&raw)?;
+            ser(crate::agents::agent_update(a.id, a.name, a.prompt, a.icon).await)
+        }
+        "agent_delete" => {
+            let a: IdArgs = parse_args(&raw)?;
+            ser(crate::agents::agent_delete(a.id).await)
+        }
+        // built-in agent catalog (agency-agents pack)
+        "list_built_in_agents" => {
+            let a: LocaleArgs = parse_args(&raw)?;
+            ser(crate::agent_catalog::list_built_in_agents(a.locale, app.clone()).await)
+        }
+        "set_built_in_agent_enabled" => {
+            let a: BuiltInAgentEnabledArgs = parse_args(&raw)?;
+            ser(crate::agent_catalog::set_built_in_agent_enabled(
+                a.agent_id,
+                a.enabled,
+                app.clone(),
+            )
+            .await)
+        }
+        "set_built_in_agent_division_enabled" => {
+            let a: BuiltInAgentDivisionEnabledArgs = parse_args(&raw)?;
+            ser(crate::agent_catalog::set_built_in_agent_division_enabled(
+                a.division_id,
+                a.enabled,
+                app.clone(),
+            )
+            .await)
+        }
+        "get_built_in_agent_prompt" => {
+            let a: BuiltInAgentIdArgs = parse_args(&raw)?;
+            ser(crate::agent_catalog::get_built_in_agent_prompt(a.agent_id, app.clone()).await)
+        }
+        "resolve_enabled_built_in_agent" => {
+            let a: BuiltInAgentIdArgs = parse_args(&raw)?;
+            ser(crate::agent_catalog::resolve_enabled_built_in_agent(a.agent_id, app.clone()).await)
+        }
+        "prompts_list" => {
+            let a: PathArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_list(app.state(), a.path).await)
+        }
+        "prompts_dirs" => {
+            let a: PathArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_dirs(app.state(), a.path).await)
+        }
+        "prompts_create" => {
+            let a: PromptsCreateArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_create(
+                app.state(),
+                a.path,
+                a.scope,
+                a.name,
+                a.description,
+                a.argument_hint,
+                a.content,
+            ).await)
+        }
+        "prompts_update" => {
+            let a: PromptUpdateArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_update(app.state(), a.path, a.prompt_path, a.updates).await)
+        }
+        "prompts_delete" => {
+            let a: PromptPathArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_delete(app.state(), a.path, a.prompt_path).await)
+        }
+        "prompts_move" => {
+            let a: PromptMoveArgs = parse_args(&raw)?;
+            ser(crate::prompts::prompts_move(app.state(), a.path, a.prompt_path, a.scope).await)
         }
         // NB: grant_scope/grant_root/revoke_granted_root are intentionally
         // absent — remote clients must not widen the filesystem boundary.

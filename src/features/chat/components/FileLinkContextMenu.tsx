@@ -111,6 +111,9 @@ export function FileLinkContextMenu({
       id: "copy-link",
       label: t("files.copyLink"),
       icon: <Link2 className="size-4" aria-hidden />,
+      // Unlike open/reveal, copying is meaningful even when the path cannot be
+      // resolved on disk: the link the message wrote is what lands on the
+      // clipboard then.
       onSelect: () =>
         void resolveChatFileLink(menu.path, menu.workspacePath).then((resolvedPath) => {
           const path = resolvedPath ?? menu.path;

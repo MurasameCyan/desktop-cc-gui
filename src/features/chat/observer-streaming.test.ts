@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatStore } from "./store";
-import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
+import { handleEngineEvents, settledRuns, type EngineEventDeps } from "./store/engine-events";
 import { sessionKey } from "./store/persistence";
 import { EMPTY_SESSION, runRouting } from "./store/stream";
 
@@ -29,7 +29,7 @@ function deps(): EngineEventDeps {
 
 /** An event from a run this client never sent — the phone watching the
  *  desktop's turn, or the desktop watching the phone's. */
-function observed(kind: "delta" | "session" | "done", seq: number, data: unknown) {
+function observed(kind: "delta" | "session" | "done" | "error" | "usage" | "warn", seq: number, data: unknown) {
   return { runId: "run-7", sessionId: "s-1", engine: "codex", seq, kind, data };
 }
 
@@ -38,6 +38,7 @@ describe("a turn this client did not start", () => {
     localStorage.clear();
     vi.clearAllMocks();
     runRouting.clear();
+    settledRuns.clear();
     // Opened from history: no send happened here, so nothing is flagged and
     // no run routes to it.
     useChatStore.setState({
@@ -98,5 +99,27 @@ describe("a turn this client did not start", () => {
     // Clearing drops the map entry rather than storing a false (see
     // setStreamingFlag): no dot, no key.
     expect(useChatStore.getState().streamingByKey[KEY]).toBeUndefined();
+  });
+
+  it.each(["done", "error"] as const)("does not revive a %s run when its final usage arrives", (kind) => {
+    const d = { ...deps(), refreshSessionUsage: vi.fn(async () => {}) };
+    handleEngineEvents([observed("delta", 1, "finished")], d);
+    handleEngineEvents([observed(kind, 2, kind === "done" ? { usage: null } : "failed")], d);
+    handleEngineEvents([
+      observed("usage", 3, { input_tokens: 89400, output_tokens: 409 }),
+      observed("warn", 4, "late process warning"),
+    ], d);
+    expect(useChatStore.getState().bySession[KEY]!.streaming).toBe(false);
+    expect(useChatStore.getState().streamingByKey[KEY]).toBeUndefined();
+    expect(runRouting.has("run-7")).toBe(false);
+    expect(d.refreshSessionUsage).toHaveBeenCalledWith(KEY);
+  });
+
+  it("ignores an old completion after the next run has started", () => {
+    handleEngineEvents([observed("done", 2, { usage: null })], deps());
+    handleEngineEvents([{ ...observed("delta", 1, "next"), runId: "run-next" }], deps());
+    handleEngineEvents([observed("done", 2, { usage: null })], deps());
+    expect(useChatStore.getState().bySession[KEY]!.streaming).toBe(true);
+    expect(runRouting.get("run-next")).toBe(KEY);
   });
 });

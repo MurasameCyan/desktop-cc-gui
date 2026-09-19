@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useBrowserStore } from "@/features/browser/store";
 import {
   ipc,
   type DirEntry,
@@ -292,6 +293,9 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
 
   activateFile: (path) => {
     if (get().fileStates[path]) set({ activeFilePath: path });
+    // A file taking the center dismisses any browser tab in view (mutual
+    // exclusion enforced here so file-tree opens cover it too).
+    useBrowserStore.getState().deactivate();
   },
 
   clearActiveFile: () => set({ activeFilePath: null }),

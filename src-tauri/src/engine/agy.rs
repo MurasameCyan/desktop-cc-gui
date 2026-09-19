@@ -12,6 +12,32 @@ pub(crate) fn agy_home() -> PathBuf {
 
 pub struct AgyEngine;
 
+/// 提取并规范化上下文窗口字段
+fn attach_context_window(mut usage: Value) -> Value {
+    if usage.get("model_context_window").is_some() {
+        return usage;
+    }
+
+    let window = usage
+        .get("context_window")
+        .or_else(|| usage.get("contextWindow"))
+        .or_else(|| usage.get("model_context_window"))
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .filter(|&w| w > 0);
+
+    if let Some(w) = window {
+        if let Some(obj) = usage.as_object_mut() {
+            obj.insert("model_context_window".to_string(), Value::Number(w.into()));
+        }
+    }
+
+    usage
+}
+
 impl Engine for AgyEngine {
     fn id(&self) -> &'static str {
         "agy"
@@ -91,6 +117,7 @@ impl Engine for AgyEngine {
         Ok(BuiltCommand {
             command: cmd,
             stdin_payload: None,
+            keep_stdin_open: false,
             cleanup_files: Vec::new(),
             preassigned_session_id: None,
         })
@@ -193,7 +220,7 @@ fn parse_step_update(step: &Value, out: &mut Vec<EngineEvent>) {
 
 fn parse_result(result: &Value, out: &mut Vec<EngineEvent>) {
     push_conversation_id(result, out);
-    let usage = result.get("usage").and_then(parse_tool_args_value);
+    let usage = result.get("usage").and_then(parse_tool_args_value).map(attach_context_window);
     if let Some(usage) = usage.clone() {
         out.push(EngineEvent::Usage(usage));
     }
@@ -232,6 +259,7 @@ mod tests {
             service_tier: None,
             permission: permission.map(str::to_string),
             additional_dirs: Vec::new(),
+            provider_id: None,
         }
     }
 

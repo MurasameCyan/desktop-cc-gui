@@ -59,7 +59,7 @@ function buildEntries(raw: FileIndexEntry[]): MentionEntry[] {
 
 const { useStore: useMentionIndexStore, prune: pruneMentionIndex } =
   createRootCacheStore<MentionEntry>({
-    fetch: (root) => ipc.listFileIndex(root).then(({ entries }) => buildEntries(entries)),
+    fetch: (root) => ipc.listFileIndex(root).then(buildEntries),
     ttlMs: INDEX_TTL_MS,
   });
 

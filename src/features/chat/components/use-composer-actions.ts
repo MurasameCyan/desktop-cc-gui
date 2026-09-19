@@ -79,17 +79,16 @@ export function useComposerActions({
     [sessionKey, setDraft],
   );
 
-  // "Add → Files and folders": native multi-picker. Images flow through the
-  // sandboxed image pipeline (chips); every other picked file becomes an
+  // Shared partition for the file picker and OS drops: images flow through
+  // the sandboxed image pipeline (chips); every other file becomes an
   // @mention at the caret — same as the file tree's "+" — so its content
   // stays live instead of a frozen sandbox copy.
-  const handleAddAttachments = useCallback(() => {
-    void (async () => {
-      const picked = await pickFiles(t("chat.addFilesFolders"));
-      if (picked.length === 0) return;
+  const routeIncomingPaths = useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return;
       const imagePaths: string[] = [];
       const mentionPaths: string[] = [];
-      for (const path of picked) {
+      for (const path of paths) {
         const ext = path.split(".").pop()?.toLowerCase() ?? "";
         (IMAGE_EXTENSIONS.includes(ext) ? imagePaths : mentionPaths).push(path);
       }
@@ -101,8 +100,17 @@ export function useComposerActions({
         }
       }
       if (imagePaths.length > 0) importImageFiles(imagePaths, supportsImages);
+    },
+    [composerInputRef, importImageFiles, supportsImages],
+  );
+
+  // "Add → Files and folders": native multi-picker.
+  const handleAddAttachments = useCallback(() => {
+    void (async () => {
+      const picked = await pickFiles(t("chat.addFilesFolders"));
+      routeIncomingPaths(picked);
     })();
-  }, [t, composerInputRef, importImageFiles, supportsImages]);
+  }, [t, routeIncomingPaths]);
 
   const handleStop = useCallback(() => void interrupt(), [interrupt]);
   const handlePickSkills = useCallback(
@@ -114,6 +122,8 @@ export function useComposerActions({
     submit,
     handleDraftChange,
     handleAddAttachments,
+    /** OS file drop onto the composer (absolute native paths). */
+    handleDroppedPaths: routeIncomingPaths,
     handleStop,
     handlePickSkills,
   };

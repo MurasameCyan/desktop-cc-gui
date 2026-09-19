@@ -1,57 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import FileImage from "lucide-react/dist/esm/icons/file-image";
 import { ipc } from "@/lib/ipc";
+import { ImageLightbox } from "@/components/base/image-lightbox";
 import { fileName } from "@/features/files/store";
-
-/** Full-screen image preview: backdrop click or Escape closes. */
-export function ImageLightbox({
-  src,
-  name,
-  onClose,
-}: {
-  src: string;
-  name: string;
-  onClose: () => void;
-}) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-
-  // A modal <dialog> renders in the top layer, so no portal is needed to
-  // escape the timeline's transformed virtual rows (a transformed ancestor
-  // traps position: fixed). Escape closes natively (close event); the
-  // mousedown listener keeps the press-anywhere-to-close behavior, including
-  // presses on the image itself. The ref holds the latest handler so the
-  // listener subscribes once instead of per render.
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  });
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (!dialog.open) dialog.showModal();
-    const close = () => onCloseRef.current();
-    dialog.addEventListener("mousedown", close);
-    dialog.addEventListener("close", close);
-    return () => {
-      dialog.removeEventListener("mousedown", close);
-      dialog.removeEventListener("close", close);
-    };
-  }, []);
-
-  return (
-    <dialog
-      ref={dialogRef}
-      aria-label={name}
-      className="fixed inset-0 z-50 flex h-full max-h-none w-full max-w-none cursor-zoom-out items-center justify-center bg-overlay-backdrop"
-    >
-      <img
-        src={src}
-        alt={name}
-        className="h-full w-full cursor-zoom-out object-contain"
-      />
-    </dialog>
-  );
-}
 
 /** Display name for an image ref; data URLs carry no filename. */
 function imageName(ref: string): string {

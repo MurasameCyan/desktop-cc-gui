@@ -10,13 +10,17 @@ import type { ContextSegment } from "@/components/application/agent-limits/agent
 import type { BranchInfo, Workspace } from "@/lib/ipc";
 import type { ActiveSession, QueuedMessage } from "../store";
 import { useChatStore } from "../store";
-import { ImageLightbox } from "./MessageImages";
+import { ImageLightbox } from "@/components/base/image-lightbox";
+import { imageMetaText } from "@/utils/image-meta";
+import type { AttachmentPreview } from "./use-composer-images";
 import { RunStatusStrip } from "./RunStatusStrip";
+import { QuestionDock, usePendingQuestion } from "./QuestionDock";
 import { ErrorBanner } from "./ErrorBanner";
 import { sessionKey } from "../store";
 import { ComposerSlotExtras } from "@/features/plugins/boundary/composer-slot-extras";
 import { COMPOSER_DRAFT_TOPIC, pluginBus } from "@/features/plugins/runtime/events";
 import { USAGE_PART_LABEL_KEYS, usageBreakdown } from "./usage-breakdown";
+import { useComposerFileDrop } from "./use-composer-file-drop";
 
 /** Path → trailing name (folder or file) for status-bar and chip labels.
  *  Both separators: workspace/attachment paths are native — backslashes on
@@ -39,12 +43,13 @@ function AttachmentChip({
   onZoom,
 }: {
   path: string;
-  preview: { url: string; name: string } | undefined;
+  preview: AttachmentPreview | undefined;
   onRemove: (path: string) => void;
   onZoom: (zoom: NonNullable<ZoomImage>) => void;
 }) {
   const { t } = useTranslation();
   const name = preview?.name ?? baseName(path);
+  const meta = preview ? imageMetaText(preview) : "";
   return (
     <span
       className="inline-flex items-center rounded-full bg-background-tertiary-default text-caption-1-medium text-text-secondary"
@@ -65,6 +70,11 @@ function AttachmentChip({
           />
         )}
         <span className="max-w-48 truncate">{name}</span>
+        {meta && (
+          <span className="shrink-0 whitespace-nowrap text-text-tertiary">
+            {meta}
+          </span>
+        )}
       </button>
       <button
         type="button"
@@ -86,7 +96,7 @@ function AttachmentChips({
   onZoomImage,
 }: {
   images: string[];
-  previews: Record<string, { url: string; name: string }>;
+  previews: Record<string, AttachmentPreview>;
   onRemoveImage: (path: string) => void;
   onZoomImage: (zoom: NonNullable<ZoomImage>) => void;
 }) {
@@ -322,6 +332,8 @@ export function ConversationFooter({
   permissionMenu,
   supportsImages,
   onPasteImages,
+  onDropPaths,
+  onDropFiles,
   sessionUsage,
   contextMax,
   branch,
@@ -341,7 +353,7 @@ export function ConversationFooter({
   onDismissImageError: () => void;
   onDismissBranchError: () => void;
   images: string[];
-  previews: Record<string, { url: string; name: string }>;
+  previews: Record<string, AttachmentPreview>;
   onRemoveImage: (path: string) => void;
   draft: string;
   onDraftChange: (value: string) => void;
@@ -356,6 +368,11 @@ export function ConversationFooter({
   permissionMenu: ReactNode;
   supportsImages: boolean;
   onPasteImages: (files: File[]) => void;
+  /** OS files dropped on the composer (desktop: absolute paths). Absent =
+   *  no active session: drops stay ignored. */
+  onDropPaths?: (paths: string[]) => void;
+  /** Web-bridge drop: image File blobs only (browsers expose no path). */
+  onDropFiles?: (files: File[]) => void;
   sessionUsage: unknown;
   contextMax: number;
   branch: string | undefined;
@@ -366,6 +383,9 @@ export function ConversationFooter({
 }) {
   /** Composer attachment chip lightbox: preview URL + display name. */
   const [zoomImage, setZoomImage] = useState<ZoomImage>(null);
+  // While the CLI waits on an AskUserQuestion the panel takes the composer's
+  // place — it covers the input box instead of floating beside it.
+  const pendingQuestion = usePendingQuestion();
 
   // The draft prop is the store's per-session value, so watching it covers
   // every change source at once: typing, submit-clear, and session switches
@@ -374,11 +394,28 @@ export function ConversationFooter({
     pluginBus.emit(COMPOSER_DRAFT_TOPIC, { text: draft });
   }, [draft]);
 
+  const { t } = useTranslation();
+  // OS file drop target: the whole footer column (chips + composer + status
+  // bar). Images become attachments, other files @mentions at the caret.
+  const { dropRef, isDragOver } = useComposerFileDrop({
+    disabled: !onDropPaths,
+    onDropPaths,
+    onDropFiles,
+  });
+
   return (
     <>
       <div
-        className="flex w-full flex-col gap-2.5 bg-background-primary-default px-4 pt-2.5 pb-2"
+        ref={dropRef}
+        className="relative flex w-full flex-col gap-2.5 bg-background-primary-default px-4 pt-2.5 pb-2"
       >
+        {isDragOver && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-border-focus-ring bg-background-primary-default/85">
+            <span className="text-body-medium text-text-secondary">
+              {t("chat.dropFilesHint")}
+            </span>
+          </div>
+        )}
         <MessageQueue queue={queue} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
         <ErrorBanner message={imageError} onDismiss={onDismissImageError} />
         <ErrorBanner message={branchError} onDismiss={onDismissBranchError} />
@@ -389,23 +426,27 @@ export function ConversationFooter({
           onZoomImage={setZoomImage}
         />
         <ActiveRunStatus active={active} />
-        <FooterComposer
-          active={active}
-          draft={draft}
-          onDraftChange={onDraftChange}
-          onSubmit={onSubmit}
-          sendShortcut={sendShortcut}
-          onStop={onStop}
-          streaming={streaming}
-          noEnabledEngines={noEnabledEngines}
-          images={images}
-          composerInputRef={composerInputRef}
-          addMenu={addMenu}
-          cliMenu={cliMenu}
-          permissionMenu={permissionMenu}
-          supportsImages={supportsImages}
-          onPasteImages={onPasteImages}
-        />
+        {pendingQuestion ? (
+          <QuestionDock />
+        ) : (
+          <FooterComposer
+            active={active}
+            draft={draft}
+            onDraftChange={onDraftChange}
+            onSubmit={onSubmit}
+            sendShortcut={sendShortcut}
+            onStop={onStop}
+            streaming={streaming}
+            noEnabledEngines={noEnabledEngines}
+            images={images}
+            composerInputRef={composerInputRef}
+            addMenu={addMenu}
+            cliMenu={cliMenu}
+            permissionMenu={permissionMenu}
+            supportsImages={supportsImages}
+            onPasteImages={onPasteImages}
+          />
+        )}
         <FooterStatusBar
           active={active}
           streaming={streaming}

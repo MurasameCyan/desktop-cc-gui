@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { createPortal } from "react-dom";
 import { cx } from "@/utils/cx";
 import { Button } from "@/components/base/buttons/button";
 import { Input } from "@/components/base/input/input";
@@ -159,6 +160,84 @@ export function ConfirmDialog({ message, danger = false, onConfirm, onCancel, ch
         </Button>
       </div>
     </ModalShell>
+  );
+}
+interface ConfirmPopoverProps extends ConfirmDialogProps {
+  /** Pointer position the popover opens next to. */
+  anchor: { x: number; y: number };
+}
+
+/** Pointer-anchored ConfirmDialog variant for destructive row actions
+ * (session delete): the confirmation surfaces next to the cursor instead of
+ * at screen center, so the mouse barely travels. Non-modal — no backdrop;
+ * positioning and dismissal (Escape, outside press, blur/resize) mirror the
+ * ContextMenu contract. */
+export function ConfirmPopover({ message, danger = false, anchor, onConfirm, onCancel }: ConfirmPopoverProps) {
+  const { t } = useTranslation();
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState(anchor);
+  // Latest-handler ref so the global dismissal listeners below subscribe
+  // once yet always invoke the current onCancel.
+  const onCancelRef = useRef(onCancel);
+  useLayoutEffect(() => {
+    onCancelRef.current = onCancel;
+  });
+
+  // Clamp into the viewport once the popover's real size is known; the small
+  // offset keeps the cursor from covering the panel edge.
+  useLayoutEffect(() => {
+    const el = popoverRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(8, Math.min(anchor.x + 4, window.innerWidth - rect.width - 8));
+    const y = Math.max(8, Math.min(anchor.y + 8, window.innerHeight - rect.height - 8));
+    setPos({ x, y });
+  }, [anchor]);
+
+  useLayoutEffect(() => {
+    const close = () => onCancelRef.current();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+      }
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (!popoverRef.current?.contains(e.target as Node)) close();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+    };
+  }, []);
+
+  return createPortal(
+    <div
+      ref={popoverRef}
+      role="alertdialog"
+      aria-label={message}
+      className="fixed z-120 w-72 rounded-2lg border border-border-button-default bg-background-primary-default p-3 shadow-xl"
+      style={{ left: pos.x, top: pos.y }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <p className="text-body-medium text-text-primary">{message}</p>
+      <div className="mt-3 flex justify-end gap-2">
+        <Button variant="secondary" size="small" onClick={onCancel}>
+          {t("common.cancel")}
+        </Button>
+        {/* Same focus contract as the modal: Enter confirms. */}
+        <Button variant={danger ? "danger" : "primary"} size="small" autoFocus onClick={onConfirm}>
+          {t("common.confirm")}
+        </Button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

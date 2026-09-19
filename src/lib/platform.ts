@@ -10,6 +10,9 @@ export { isWeb } from "./transport";
 /** Windows desktop: 唯一有「原生标题栏 / 仿 mac」切换的平台。 */
 export const IS_WINDOWS =
   typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+/** macOS desktop: overlay titlebar 下系统红绿灯悬浮在内容左上。 */
+export const IS_MAC =
+  typeof navigator !== "undefined" && /macintosh|mac os x/i.test(navigator.userAgent);
 
 /**
  * Platform shims for the few places that touch native APIs outside the

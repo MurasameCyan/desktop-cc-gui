@@ -10,6 +10,8 @@ import {
 } from "@/components/application/ai-chat/file-tags";
 import { type FileMentionMenuHandle } from "@/components/application/ai-chat/file-mention-menu";
 import { type SlashCommandMenuHandle } from "@/components/application/ai-chat/slash-command-menu";
+import { type AgentMenuHandle } from "@/components/application/ai-chat/agent-menu";
+import { type PromptMenuHandle } from "@/components/application/ai-chat/prompt-menu";
 import { cx } from "@/utils/cx";
 
 /**
@@ -26,12 +28,16 @@ export function ComposerEditable({
   sendShortcut,
   mentionOpen,
   slashOpen,
+  agentOpen,
+  promptOpen,
   completionSuffix,
   acceptCompletion,
   setEditableText,
   handleHistoryKeyDown,
   mentionMenuRef,
   slashMenuRef,
+  agentMenuRef,
+  promptMenuRef,
   isComposingRef,
   lastCompositionEndTimeRef,
   setIsComposing,
@@ -49,6 +55,10 @@ export function ComposerEditable({
   mentionOpen: boolean;
   /** A `/` command trigger is active: same gating as mentionOpen. */
   slashOpen: boolean;
+  /** A `#` agent trigger is active: same gating as mentionOpen. */
+  agentOpen: boolean;
+  /** A `!` prompt trigger is active: same gating as mentionOpen. */
+  promptOpen: boolean;
   /** Ghost-text history suffix painted after the caret ("" = none). */
   completionSuffix: string;
   /** Accept the ghost suggestion: returns the full text, or null. */
@@ -57,6 +67,8 @@ export function ComposerEditable({
   handleHistoryKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => boolean;
   mentionMenuRef: MutableRefObject<FileMentionMenuHandle | null>;
   slashMenuRef: MutableRefObject<SlashCommandMenuHandle | null>;
+  agentMenuRef: MutableRefObject<AgentMenuHandle | null>;
+  promptMenuRef: MutableRefObject<PromptMenuHandle | null>;
   isComposingRef: MutableRefObject<boolean>;
   lastCompositionEndTimeRef: MutableRefObject<number>;
   setIsComposing: (composing: boolean) => void;
@@ -83,7 +95,7 @@ export function ComposerEditable({
       data-placeholder={sendShortcut === "cmdEnter"
         ? t(isMac ? "chat.inputPlaceholderCmdEnter" : "chat.inputPlaceholderCmdEnterCtrl")
         : t("chat.inputPlaceholder")}
-      data-completion-suffix={mentionOpen || slashOpen ? undefined : completionSuffix || undefined}
+      data-completion-suffix={mentionOpen || slashOpen || agentOpen || promptOpen ? undefined : completionSuffix || undefined}
       onInput={() => {
         emitChange();
         syncTags();
@@ -122,6 +134,28 @@ export function ComposerEditable({
           !isComposingRef.current &&
           event.nativeEvent.keyCode !== 229 &&
           slashMenuRef.current?.handleKey(event.key)
+        ) {
+          event.preventDefault();
+          return;
+        }
+        // An open `#` agent picker owns the same keys (same IME gating).
+        if (
+          agentOpen &&
+          !event.nativeEvent.isComposing &&
+          !isComposingRef.current &&
+          event.nativeEvent.keyCode !== 229 &&
+          agentMenuRef.current?.handleKey(event.key)
+        ) {
+          event.preventDefault();
+          return;
+        }
+        // An open `!` prompt picker owns the same keys (same IME gating).
+        if (
+          promptOpen &&
+          !event.nativeEvent.isComposing &&
+          !isComposingRef.current &&
+          event.nativeEvent.keyCode !== 229 &&
+          promptMenuRef.current?.handleKey(event.key)
         ) {
           event.preventDefault();
           return;

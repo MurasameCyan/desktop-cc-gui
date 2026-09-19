@@ -1,4 +1,7 @@
+pub mod agents;
+pub mod agent_catalog;
 pub mod baidu_tongji;
+pub mod browser;
 pub mod cc_switch;
 pub mod cli_lifecycle;
 pub mod config;
@@ -14,6 +17,7 @@ pub mod open_app;
 pub mod paths;
 pub mod plugins;
 pub mod plugin_caps;
+pub mod prompts;
 pub mod proxy;
 pub mod provider_files;
 pub mod provider_models;
@@ -22,6 +26,7 @@ pub mod usage;
 pub mod slash_commands;
 pub mod terminal;
 pub mod relay;
+pub mod updater;
 pub mod web;
 
 use std::sync::Arc;
@@ -67,6 +72,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let db = Arc::new(db::Db::open().expect("failed to open app db"));
+            // Sweep per-send credential staging left behind by a crash.
+            engine::sweep_staging_dirs();
             if let Err(error) = db::import_legacy_workspaces_once(&db) {
                 // Import failure must never block startup; the sidebar simply
                 // starts empty and the user adds workspaces by hand.
@@ -77,6 +84,15 @@ pub fn run() {
                 // Same non-fatal rule: groups stay unassigned and the user can
                 // redo them in Settings → 工作区.
                 eprintln!("[settings] legacy group import failed: {error}");
+            }
+
+            if let Err(error) = agents::import_legacy_agents_once(&db) {
+                // Same non-fatal rule: the `#` picker simply starts empty.
+                eprintln!("[agents] legacy agent import failed: {error}");
+            }
+            if let Err(error) = prompts::import_legacy_prompts_once(&db) {
+                // Same non-fatal rule: the `!` picker simply starts empty.
+                eprintln!("[prompts] legacy prompt import failed: {error}");
             }
             // files.rs commands inject State<'_, Arc<db::Db>> for workspace
             // confinement, so the Arc itself must be managed alongside.
@@ -171,6 +187,7 @@ pub fn run() {
             // 保留 DWM 阴影与四边缩放），macOS 保持 Overlay + 系统原生红绿灯（与原配置
             // 一致）。放在 manage(state) 之后：窗口一开始加载前端就会 invoke 命令，
             // 状态必须已经就位。设置改动需重启应用。
+            #[cfg(target_os = "windows")]
             let settings = settings::read_settings().unwrap_or_default();
             let mut window_builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
@@ -221,6 +238,16 @@ pub fn run() {
             provider_files::official_config_write,
             config::reorder_providers,
             config::set_engine_enabled,
+            // in-app browser tabs (child webviews)
+            browser::browser_create,
+            browser::browser_close,
+            browser::browser_navigate,
+            browser::browser_set_bounds,
+            browser::browser_set_visible,
+            browser::browser_go_back,
+            browser::browser_go_forward,
+            browser::browser_reload,
+            browser::browser_current_url,
             // cc-switch interop
             cc_switch::check_cc_switch,
             cc_switch::dismiss_cc_switch,
@@ -231,6 +258,8 @@ pub fn run() {
             settings::get_app_settings,
             settings::update_app_settings,
             settings::set_window_theme,
+            // updater
+            updater::fetch_latest_release_info,
             // plugins
             plugins::plugin_list,
             plugins::plugin_install_from_path,
@@ -259,6 +288,7 @@ pub fn run() {
             // engine
             engine::send_message,
             engine::interrupt_session,
+            engine::answer_question,
             engine::list_engines,
             engine::models::list_engine_models,
             engine::pi_family_auth::pi_family_auth_list,
@@ -270,6 +300,9 @@ pub fn run() {
             engine::images::import_attachments,
             // history
             history::reader::list_sessions,
+            history::reader::list_archived_sessions,
+            history::reader::archive_session,
+            history::reader::restore_session,
             usage::usage_record,
             usage::usage_summary,
             usage::usage_clear,
@@ -281,6 +314,7 @@ pub fn run() {
             history::reader::rename_session,
             history::reader::remember_session_model,
             history::reader::remember_session_effort,
+            history::reader::remember_session_provider,
             history::reader::rescan_sessions,
             history::reader::record_accepted_internal_frame,
             history::reader::list_workspaces,
@@ -302,6 +336,23 @@ pub fn run() {
             files::list_file_index,
             // composer `/` slash-command picker
             slash_commands::list_slash_commands,
+            // agents & prompts (composer `#`/`!` pickers)
+            agents::agent_list,
+            agents::agent_add,
+            agents::agent_update,
+            agents::agent_delete,
+            // built-in agent catalog (agency-agents pack)
+            agent_catalog::list_built_in_agents,
+            agent_catalog::set_built_in_agent_enabled,
+            agent_catalog::set_built_in_agent_division_enabled,
+            agent_catalog::get_built_in_agent_prompt,
+            agent_catalog::resolve_enabled_built_in_agent,
+            prompts::prompts_list,
+            prompts::prompts_dirs,
+            prompts::prompts_create,
+            prompts::prompts_update,
+            prompts::prompts_delete,
+            prompts::prompts_move,
             // On-demand directory grants (desktop-only — see grant_root).
             files::grant_scope,
             files::grant_root,

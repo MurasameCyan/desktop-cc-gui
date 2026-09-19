@@ -5,11 +5,30 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Scanning and deletion must agree on disk + index state. In particular, a
+// scan that parsed a file before deletion must not upsert it afterwards.
+pub(super) static SCAN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Bump when indexed title or preview derivation changes so unchanged files
 /// are rebuilt from the current normalized history rows. v9: internal frames
 /// are hidden only when a live capture validator recorded their identity, so
 /// summaries derived by the older "any JSON-valid frame" guess are stale.
 const TITLE_VERSION: &str = "9";
+
+/// Titles matching these prefixes were derived before envelope stripping
+/// existed; one migration pass re-derives them even when files are unchanged.
+const NOISE_TITLE_WHERE: &str = "title LIKE '<file %' ESCAPE '\\'
+     OR title LIKE '[Image #%' ESCAPE '\\'
+     OR title LIKE '<user\\_info%' ESCAPE '\\'
+     OR title LIKE '<user\\_query%' ESCAPE '\\'
+     OR title LIKE '# AGENTS.md instructions%'
+     OR title LIKE '<environment\\_context%' ESCAPE '\\'
+     OR title LIKE '<agents-instructions%'
+     OR title LIKE '<skill>%'
+     OR title LIKE '<recommended\\_plugins%' ESCAPE '\\'
+     OR title LIKE '<command-message%'
+     OR title LIKE '<command-name%'
+     OR title LIKE '<INSTRUCTIONS>%'";
 
 /// Bounded head peek: parse up to `max_lines` JSON lines from the head of a
 /// file (plain or zstd). Reads in 16 KiB chunks and stops as soon as
@@ -837,18 +856,30 @@ fn scan_with_sink(
     db: &crate::db::Db,
     sink: &Arc<crate::event_sink::EventSink>,
 ) -> Result<ScanReport, String> {
+    let guard = SCAN_LOCK.lock();
     let changed_sink = Arc::clone(sink);
     let progress_sink = Arc::clone(sink);
     scan_inner(
         db,
         move || changed_sink.emit_sessions_changed(),
         move |p| progress_sink.emit_scan_progress(p),
+        &guard,
     )
 }
 
 /// The scan itself, decoupled from the event sink for testing.
 pub fn scan_with(db: &crate::db::Db, on_changed: impl Fn()) -> Result<ScanReport, String> {
-    scan_inner(db, on_changed, |_| {})
+    let guard = SCAN_LOCK.lock();
+    scan_with_guard(db, on_changed, &guard)
+}
+
+/// Deletion keeps this guard until both the file and database rows are gone.
+pub(super) fn scan_with_guard(
+    db: &crate::db::Db,
+    on_changed: impl Fn(),
+    guard: &parking_lot::MutexGuard<'_, ()>,
+) -> Result<ScanReport, String> {
+    scan_inner(db, on_changed, |_| {}, guard)
 }
 
 // ---------- phase helpers (each stage is lock-free except where noted) ----------
@@ -1298,6 +1329,7 @@ fn scan_inner(
     db: &crate::db::Db,
     on_changed: impl Fn(),
     on_progress: impl Fn(crate::event_sink::ScanProgress),
+    _guard: &parking_lot::MutexGuard<'_, ()>,
 ) -> Result<ScanReport, String> {
     let workspaces = db.workspace_paths()?;
     let candidates = gather_candidates(&workspaces);
@@ -2180,6 +2212,101 @@ mod tests {
         );
         drop(db);
         std::fs::remove_dir_all(&home).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn delete_unscanned_failed_sessions_on_first_attempt() -> Result<(), String> {
+        let home = scratch_dir(&format!("delete-unscanned-{}", uuid::Uuid::new_v4()));
+        let _home_guard = HomeGuard::set(&home);
+        // HomeGuard owns HOME_LOCK; restore engine overrides even on a panic.
+        struct EngineHomes(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EngineHomes {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let _engine_homes = EngineHomes(
+            ["CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        std::env::set_var("CODEX_HOME", home.join(".codex"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+        let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
+        db.0.lock().execute(
+            "INSERT INTO workspaces(id,path,name) VALUES('w1',?1,'ws')",
+            [workspace.to_string_lossy().as_ref()],
+        ).map_err(|e| e.to_string())?;
+        let session_id = "failed-first-turn";
+        let claude_path = home.join(".claude").join("projects")
+            .join(super::super::claude_encode_project_path(&workspace.to_string_lossy()))
+            .join(format!("{session_id}.jsonl"));
+        let codex_path = home.join(".codex").join("sessions").join("2026").join("09").join("18")
+            .join(format!("rollout-2026-09-18T00-00-00-{session_id}.jsonl"));
+        let fixtures = [
+            ("claude", claude_path, vec![serde_json::json!({
+                "type": "user", "sessionId": session_id,
+                "message": {"role": "user", "content": "hello"}
+            })]),
+            ("codex", codex_path, vec![
+                serde_json::json!({"type": "session_meta", "payload": {
+                    "id": session_id, "cwd": workspace.to_string_lossy()
+                }}),
+                serde_json::json!({"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}]
+                }}),
+            ]),
+        ];
+        for (engine, path, lines) in &fixtures {
+            // Each engine starts with a real file and no sessions-table row.
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let text = lines.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            std::fs::write(path, text).map_err(|e| e.to_string())?;
+            db.remember_session_model(engine, session_id, "model", 1)?;
+            db.remember_session_effort(engine, session_id, "high", 1)?;
+            let count: i64 = db.0.lock().query_row(
+                "SELECT COUNT(*) FROM sessions WHERE engine=?1 AND session_id=?2",
+                rusqlite::params![engine, session_id], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            assert_eq!(count, 0);
+
+            super::super::reader::delete_session_blocking(&db, engine, session_id)?;
+            assert!(!path.exists(), "{engine}: first delete must remove the transcript");
+            scan_with(&db, || {})?;
+            for table in ["sessions", "session_models", "session_efforts"] {
+                let count: i64 = db.0.lock().query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE engine=?1 AND session_id=?2"),
+                    rusqlite::params![engine, session_id], |r| r.get(0),
+                ).map_err(|e| e.to_string())?;
+                assert_eq!(count, 0, "{engine}: {table} must stay deleted after scanning");
+            }
+            // An already deleted session and one that never wrote a transcript
+            // both complete without asking the user to delete a second time.
+            super::super::reader::delete_session_blocking(&db, engine, session_id)?;
+            db.remember_session_model(engine, "never-persisted", "model", 1)?;
+            super::super::reader::delete_session_blocking(&db, engine, "never-persisted")?;
+            let count: i64 = db.0.lock().query_row(
+                "SELECT COUNT(*) FROM session_models WHERE engine=?1 AND session_id='never-persisted'",
+                [engine], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            assert_eq!(count, 0);
+        }
+        db.0.lock().execute("DROP TABLE meta", []).map_err(|e| e.to_string())?;
+        let error = super::super::reader::delete_session_blocking(&db, "codex", "scan-failed").unwrap_err();
+        assert!(error.contains("scan before deleting codex/scan-failed"), "{error}");
+        assert!(error.contains("no such table"), "{error}");
+        drop(db);
+        std::fs::remove_dir_all(&home).map_err(|e| e.to_string())?;
         Ok(())
     }
 

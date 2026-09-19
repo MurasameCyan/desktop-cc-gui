@@ -5,6 +5,8 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkDisplayMath } from "./remark-display-math";
+import { remarkGithubAlerts } from "./remark-github-alerts";
+import { AlertTitle, isAlertClassName } from "./github-alerts";
 import {
   prepareMathText,
   restoreMathDollars,
@@ -31,7 +33,7 @@ import {
   toFileLink,
 } from "@/lib/fileLinks";
 
-const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkDisplayMath];
+const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkDisplayMath, remarkGithubAlerts];
 /** ReactMarkdown's plugin-list prop type, derived here instead of importing
  * `PluggableList` from unified (a transitive dep we don't declare). */
 type PluginListProp = NonNullable<
@@ -251,6 +253,20 @@ export default memo(function Markdown({
         );
       },
       pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+      // GitHub-style alert (`> [!NOTE]` …): the remark plugin stamps the
+      // className onto the blockquote; a plain quote keeps the flattened
+      // Codex-style flow.
+      blockquote: ({ node, children }) => {
+        const alertType = isAlertClassName(node?.properties?.className);
+        return alertType ? (
+          <blockquote className={`md-alert md-alert-${alertType}`}>
+            <AlertTitle type={alertType} />
+            {children}
+          </blockquote>
+        ) : (
+          <blockquote>{children}</blockquote>
+        );
+      },
     }),
     [workspacePath, controller],
   );

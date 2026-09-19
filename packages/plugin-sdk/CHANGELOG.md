@@ -50,6 +50,33 @@
 - `plugin_exec_spawn` 桥命令成功时 resolve 为 void（Rust 返回 ()），文档同步更正。
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
+## 0.3.11 — 2026-09-18
+- **修复权限漂移**：`registerComposerSlot` 运行时一直校验 `ui:composer`，
+  但该字符串在 0.3.9 改名为 `ui:composer-status` 时未同步更新
+  （`spec/permissions.json` 的 `knownPermissions` 早已只保留
+  `ui:composer-status`），导致 `registerComposerSlot` 自 0.3.9 起对任何
+  manifest 声明都必然拒绝——没有任何权限字符串能通过校验。改为校验
+  `ui:composer-status`，与 `registerComposerStatusItem` 共享同一权限，
+  两个注册点现在都能正常声明使用。
+
+## 0.3.9 — 2026-09-16
+- **新增能力**：`ctx.ui.registerComposerStatusItem({ key?, component, order? })`
+  （新权限 `ui:composer-status`）——在 composer 状态行（分支/上下文用量那行）
+  左组、分支切换器之后渲染 chip。首个消费者：token-meter 指标插件从底部状态栏
+  迁至会话工具行。
+
+## 0.3.8 — 2026-09-16
+- **新增能力**：`registerStatusBarItem` 的 `zone?: "start" | "end"`——`"start"`
+  把 chip 渲染到状态栏左对齐区（内建控件簇左侧），缺省/`"end"` 保持既有槽位
+  （同步状态之后、版本号之前）不变。首个消费者：token-meter 指标插件。
+- **新增宿主话题**（权限 `events`）：`usage://done`——引擎 done 事件透传
+  （payload 同 EngineEventPayload，`data.usage` 携带该轮最终用量；claude/grok
+  等只经 Done 上报用量的引擎由此对插件可见）；`session://activated`——活动会话
+  切换，payload `{ engine, sessionId }`，pending 标签 sessionId 为 null，无活动
+  标签时两者皆 null。
+- **payload 增强**：引擎事件 wire payload 新增 `ts`（宿主发射时刻，Unix 毫秒），
+  前端 `EngineEventPayload` 同步为 `ts?: number`；插件可用它算吞吐而不受 IPC
+  批量/到达抖动影响，旧宿主上缺省回退到达时间。
 
 ## 0.3.7 — 2026-09-16
 - **新增能力**：`ctx.sessions.refresh()`（复用权限 `host:session`）——请求宿主立即

@@ -1,6 +1,8 @@
 import { lazy, Suspense } from "react";
 import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-chat-composer";
 import { CenteredSpinner } from "@/components/base/empty-state";
+import { BrowserPane, useBrowserNavSync } from "@/features/browser/BrowserPane";
+import type { BrowserTab } from "@/features/browser/store";
 import { DiffView } from "@/features/git/DiffView";
 import type { DiffTarget } from "@/features/git/store";
 import type { EngineInfo, GitStatus, Workspace } from "@/lib/ipc";
@@ -24,6 +26,8 @@ export function ChatCenterPane({
   composerInputRef,
   openFiles,
   activeFilePath,
+  browserTabs,
+  activeBrowserId,
   diffView,
   diffStatus,
   closeDiff,
@@ -35,16 +39,23 @@ export function ChatCenterPane({
   composerInputRef: React.RefObject<ComposerInputHandle | null>;
   openFiles: string[];
   activeFilePath: string | null;
+  /** Open browser tabs and the one in view (mutually exclusive with
+   *  activeFilePath; use-chat-tabs enforces it). */
+  browserTabs: BrowserTab[];
+  activeBrowserId: string | null;
   diffView: { workspacePath: string; target: DiffTarget } | null;
   diffStatus: GitStatus | undefined;
   closeDiff: () => void;
 }) {
+  // Native nav/title events → store, mounted once while this pane lives.
+  useBrowserNavSync();
+  const browserInView = activeBrowserId !== null && !diffView;
   return (
     <>
       <div
         className={cx(
           "flex min-w-0 flex-col overflow-hidden bg-background-primary-default",
-          activeFilePath || diffView
+          activeFilePath || browserInView || diffView
             ? "invisible absolute inset-0"
             : "relative min-w-0 flex-1 basis-0",
         )}
@@ -62,7 +73,7 @@ export function ChatCenterPane({
         <div
           className={cx(
             "flex min-w-0 flex-col overflow-hidden bg-background-primary-default",
-            activeFilePath && !diffView
+            activeFilePath && !browserInView && !diffView
               ? "relative min-w-0 flex-1 basis-0"
               : "invisible absolute inset-0",
           )}
@@ -82,6 +93,33 @@ export function ChatCenterPane({
               </div>
             ))}
           </Suspense>
+        </div>
+      )}
+
+      {/* Browser tabs: one pane per tab, each owning a native child webview
+          painted over its placeholder rect (see BrowserPane). */}
+      {browserTabs.length > 0 && (
+        <div
+          className={cx(
+            "flex min-w-0 flex-col overflow-hidden bg-background-primary-default",
+            browserInView
+              ? "relative min-w-0 flex-1 basis-0"
+              : "invisible absolute inset-0",
+          )}
+        >
+          {browserTabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={cx(
+                "min-h-0 flex-col",
+                tab.id === activeBrowserId
+                  ? "flex flex-1"
+                  : "invisible absolute inset-0",
+              )}
+            >
+              <BrowserPane tab={tab} active={browserInView && tab.id === activeBrowserId} />
+            </div>
+          ))}
         </div>
       )}
 

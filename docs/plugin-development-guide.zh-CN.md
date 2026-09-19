@@ -235,6 +235,12 @@ interface PluginContext {
 生命周期 hook 按插件注册顺序调用且逐插件隔离错误；`beforeTurn` 与 `beforeSwitch` 最多等待 2 秒，超时或异常均不阻断聊天或客户端切换。`beforeTurn` 可返回 `PromptContribution[]` 及内部消息捕获声明。内部提示不会进入 CCGUI 聊天画布、乐观用户消息或标题；当 CLI 无真正 system channel 时，`system-tail` 会降级为带清晰标记的 request tail，因此仍可能进入 CLI 自身原生历史。
 
 `turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用，并保证先于该回合的 `afterTurn`，即使终态事件先于启动响应到达；失败的发送不能据此登记为已消费。
+| 事件 topic | 载荷 | 所需权限 |
+|---|---|---|
+| `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起） | `events` |
+| `usage://done`（SDK 0.3.8 起） | 同上形状，`kind: "done"`；`data.usage` 携带该轮最终用量——claude/grok 等不发独立 usage 事件的引擎只经此上报，其它引擎用作轮结束信号 | `events` |
+| `session://activated`（SDK 0.3.8 起） | `{ engine, sessionId }`；pending 标签 `sessionId` 为 null，无活动标签两者皆 null | `events` |
+| `composer://draft` | `{ text }`；草稿变化/清空/会话切换均发射 | `events` |
 
 SDK 0.4.3 新增 `TurnHooks.onTurnStarted(event)`：只需 `runtime.events.read`，不要求 `prompt.contribute.internal`。它在 `beforeTurn` 收集完成、即将发送给引擎时派发；不等待观察者返回的 Promise，异常不会阻断发送。与 `afterTurn` 使用相同 `turnId`。发送准备阶段已经取消的回合不发布开始事件；开始后取消、发送拒绝和提前到达的终态均有对应结算。它不是可写提示钩子。
 

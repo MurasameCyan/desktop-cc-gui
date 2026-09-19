@@ -2,10 +2,21 @@ import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "@/lib/ipc";
 import { fileName } from "@/features/files/store";
+import { dataUrlBytes, imageDimensions } from "@/utils/image-meta";
 
 /** Extensions routed through the path-based image pipeline; anything else a
  *  user picks becomes an @mention instead of an attachment. */
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp"];
+/** Chip thumbnail plus the metadata shown beside it: pixel dimensions and
+ *  file size recovered from the preview data URL (exact base64 math, no
+ *  extra stat IPC). Fields appear asynchronously after the preview loads. */
+export interface AttachmentPreview {
+  url: string;
+  name: string;
+  width?: number;
+  height?: number;
+  size?: number;
+}
 
 /** Composer image attachments: the attached image paths, their chip
  * thumbnails, and clipboard-paste handling.
@@ -21,7 +32,7 @@ export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp"];
 export interface ComposerImages {
   images: string[];
   /** path → { preview-url, display name } for attachment chip thumbnails. */
-  previews: Record<string, { url: string; name: string }>;
+  previews: Record<string, AttachmentPreview>;
   imageError: string | null;
   removeImage: (path: string) => void;
   clearImages: () => void;
@@ -33,7 +44,7 @@ export interface ComposerImages {
 export function useComposerImages(): ComposerImages {
   const { t } = useTranslation();
   const [images, setImages] = useState<string[]>([]);
-  const [previews, setPreviews] = useState<Record<string, { url: string; name: string }>>({});
+  const [previews, setPreviews] = useState<Record<string, AttachmentPreview>>({});
   const [imageError, setImageError] = useState<string | null>(null);
   /** Drop one attachment and its preview. */
   const removeImage = useCallback((path: string) => {
@@ -52,16 +63,27 @@ export function useComposerImages(): ComposerImages {
   }, []);
   /** Dismiss the paste-error banner without clearing attachments. */
   const dismissImageError = useCallback(() => setImageError(null), []);
-  /** Resolve one attachment's chip thumbnail through readFile (data URL).
-   * Unreadable/oversized files simply get no thumbnail — the chip falls back
-   * to a plain filename. */
+  /** Resolve one attachment's chip thumbnail through readFile (data URL),
+   * then fill in size (from the data URL payload) and pixel dimensions (from
+   * decoding the image). Unreadable/oversized files simply get no thumbnail —
+   * the chip falls back to a plain filename. */
   const loadPreview = useCallback((path: string, name: string) => {
     ipc
       .readFile(path)
-      .then((content) => {
+      .then(async (content) => {
         if (content.kind !== "image" || !content.dataUrl) return;
         const url = content.dataUrl;
-        setPreviews((prev) => ({ ...prev, [path]: { url, name } }));
+        const dims = (await imageDimensions(url)) ?? undefined;
+        setPreviews((prev) => ({
+          ...prev,
+          [path]: {
+            url,
+            name,
+            width: dims?.width,
+            height: dims?.height,
+            size: dataUrlBytes(url) ?? undefined,
+          },
+        }));
       })
       .catch(() => {});
   }, []);
