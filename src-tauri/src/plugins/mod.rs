@@ -17,6 +17,8 @@
 //! transaction, and the manifest/record merge.
 
 mod file_lock;
+pub(crate) mod asset_protocol;
+pub(crate) mod assets;
 mod fs;
 mod manifest;
 pub mod market;
@@ -101,6 +103,8 @@ fn uninstall_with_storage_at(
         };
         fs::remove_dir_if_exists(&dir)?;
         state.plugins.remove(id);
+        // Directory grants are capabilities, never retained user data.
+        state.asset_directories.remove(id);
         if let Some(guard) = &document_guard {
             // Preserve document files and their selected location unless the
             // user explicitly requests whole-plugin data deletion.
@@ -484,6 +488,12 @@ mod tests {
             )
             .unwrap();
             write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
+            let mut state = super::state::read_state(&state_path).unwrap();
+            state.asset_directories.insert("docs.plugin".into(), vec![super::assets::AssetDirectoryGrant {
+                grant_id: "old-capability".into(),
+                path: custom.to_string_lossy().into_owned(),
+            }]);
+            super::state::write_state(&state_path, &state).unwrap();
             let document = custom.join("plugin-data/docs.plugin/state");
             let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
             uninstall_with_storage_at(
@@ -498,6 +508,7 @@ mod tests {
             assert_eq!(document.exists(), !delete_data);
             let state = super::state::read_state(&state_path).unwrap();
             assert_eq!(state.document_storage.contains_key("docs.plugin"), !delete_data);
+            assert!(!state.asset_directories.contains_key("docs.plugin"));
         }
     }
 }

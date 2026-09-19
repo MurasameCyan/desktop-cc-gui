@@ -814,7 +814,7 @@ async fn static_handler(
     }
 }
 
-fn content_type(path: &str) -> &'static str {
+pub(crate) fn content_type(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "html" => "text/html; charset=utf-8",

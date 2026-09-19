@@ -81,6 +81,13 @@ export interface ComposerStatusItemDef {
   order?: number;
 }
 
+/** Persistent viewport content. The host does not control its placement. */
+export interface OverlayDef {
+  id: string;
+  component: ComponentType;
+  order?: number;
+}
+
 /** Command palette entry (plan §4.2 #9). */
 export interface CommandDef {
   id: string;
@@ -232,6 +239,9 @@ export const panelTabRegistry = new Registry<PanelTabDef>();
 export const statusBarRegistry = new Registry<StatusBarItemDef>();
 /** Composer status-row item registry (0.3.9). */
 export const composerStatusRegistry = new Registry<ComposerStatusItemDef>();
+
+/** Non-modal viewport mounts, independent of the current route. */
+export const overlayRegistry = new Registry<OverlayDef>();
 
 /** Command palette registry (plan §4.2 #9). */
 export const commandRegistry = new Registry<CommandDef>();

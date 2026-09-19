@@ -76,7 +76,7 @@ fn version_of(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.contains('\\')
         || value.contains("//")
@@ -580,7 +580,7 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
 /// raced by swapping a directory for a junction. A residual race remains for
 /// the final component-to-syscall window; closing it needs handle-relative
 /// opens, which is out of scope for this hardening pass.
-fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
+pub(crate) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
@@ -925,6 +925,27 @@ pub async fn plugin_document_storage_list(
 pub(crate) struct DocumentsGuard {
     root: PathBuf,
     _lock: super::file_lock::FileLock,
+}
+
+/// Physical document root of a plugin, without taking the root lock: reading
+/// its location and reading its files are different privileges, and the asset
+/// protocol resolves roots per request.
+pub(crate) fn document_root_at(
+    state_path: &Path,
+    id: &str,
+    roots: Option<&StorageRoots>,
+) -> Result<PathBuf, String> {
+    super::manifest::require_valid_id(id)?;
+    let system_roots;
+    let roots = match roots {
+        Some(roots) => roots,
+        None => {
+            system_roots = StorageRoots::system()?;
+            &system_roots
+        }
+    };
+    let (_, base) = selected_base(state_path, roots, id)?;
+    Ok(plugin_root(&base, id))
 }
 
 pub(crate) fn lock_documents_at(

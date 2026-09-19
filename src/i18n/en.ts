@@ -870,6 +870,7 @@ export const en: Messages = {
     installing: "Installing…",
     installingPct: "Installing {{pct}}%",
     installPickTitle: "Choose a plugin directory (with manifest.json)",
+    assetPickTitle: "Choose a resource directory for this plugin",
     empty: "No plugins installed yet",
     uninstall: "Uninstall",
     uninstallConfirm: 'Uninstall plugin "{{name}}"? (its saved data is kept for 30 days)',
