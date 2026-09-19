@@ -573,24 +573,40 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
-/// TOCTOU-hardened confinement: walk every existing component of `target`
-/// under `root`, refusing reparse points (symlink/junction) and anything
-/// whose canonical form leaves the canonical root. This runs again right
-/// before each mutating operation, because a check performed once can be
-/// raced by swapping a directory for a junction. A residual race remains for
-/// the final component-to-syscall window; closing it needs handle-relative
-/// opens, which is out of scope for this hardening pass.
+/// TOCTOU-hardened confinement: walk every component of `root` and of the
+/// existing part of `target` below it, refusing reparse points
+/// (symlink/junction) and anything whose canonical form leaves the canonical
+/// root. The root's own chain is walked too: a granted directory that is
+/// itself replaced by a junction (or that sits under one) must not become a
+/// way out. This runs again right before each mutating operation, because a
+/// check performed once can be raced by swapping a directory for a junction.
+/// A residual race remains for the final component-to-syscall window;
+/// closing it needs handle-relative opens, out of scope here.
 pub(crate) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
+    // Walk from the volume/share root down: probing a child first would follow
+    // a parent junction before discovering its reparse attribute.
+    let mut cursor = PathBuf::with_capacity(target.as_os_str().len());
+    for component in root.components() {
+        cursor.push(component);
+        if !matches!(component, Component::Prefix(_)) && is_reparse_point(&cursor)? {
+            return Err(format!(
+                "path crosses a reparse point: {}",
+                cursor.display()
+            ));
+        }
+    }
     let canonical_root =
         fs::canonicalize(root).map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    let mut cursor = root.to_path_buf();
     for component in relative.components() {
         cursor.push(component);
         if is_reparse_point(&cursor)? {
-            return Err(format!("path crosses a reparse point: {}", cursor.display()));
+            return Err(format!(
+                "path crosses a reparse point: {}",
+                cursor.display()
+            ));
         }
         if !cursor.exists() {
             return Ok(()); // the rest of the path does not exist yet

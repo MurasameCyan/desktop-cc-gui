@@ -49,7 +49,15 @@ impl Worker {
         let deadline = Instant::now() + Duration::from_secs(30);
         let stream = loop {
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((stream, _)) => {
+                    // The listener is non-blocking so the accept can poll for a
+                    // dead child. On Windows the accepted socket INHERITS that
+                    // mode, and every later read would then fail with
+                    // WSAEWOULDBLOCK instead of waiting for the worker's reply
+                    // (the protocol below is blocking with 30s timeouts).
+                    stream.set_nonblocking(false).unwrap();
+                    break stream;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if let Some(status) = child.try_wait().unwrap() {
                         panic!("storage worker exited before connecting: {status}");
