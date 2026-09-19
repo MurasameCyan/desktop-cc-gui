@@ -54,7 +54,7 @@ fn attach_context_window(mut usage: Value) -> Value {
     usage
 }
 
-use super::{EngineEvent, SendRequest, TurnCore, TurnState};
+use super::{EngineEvent, SendRequest, TurnCore, TurnState, VirtualRunGuard};
 
 const ACP_PROTOCOL_VERSION: u32 = 1;
 const RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -894,6 +894,10 @@ pub(crate) async fn run_acp_turn(
     let mut state = TurnState::new(req.session_id.clone());
     let mut view = TurnView::default();
     let preassigned_session_id = req.session_id.clone();
+    // Abort-safe backstop: the by-name removals below only run when the task
+    // finishes normally. An aborted task would leave its keys in the
+    // concurrency budget forever.
+    let _registry_guard = VirtualRunGuard::new(Arc::clone(&core.registry), virtual_pid);
     let result = turn_inner(&core, &mut state, &mut view, &req, &bin, &killed).await;
     if let Err(error) = result {
         if !killed.load(Ordering::SeqCst) {

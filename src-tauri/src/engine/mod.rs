@@ -867,6 +867,69 @@ impl ProcessRegistry {
         }
     }
 
+    /// Drop every key of the run identified by `pid`. The settle path removes
+    /// keys by name, but an aborted reader never reaches it — and the session
+    /// id adopted mid-run is not known to the abort path, so removal has to be
+    /// pid-keyed. pid 0 is never matched: it identifies the pre-spawn
+    /// reservations of OTHER runs.
+    fn remove_by_pid(&self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        if let Ok(mut map) = self.0.lock() {
+            map.retain(|_, entry| entry.pid != pid);
+        }
+    }
+
+    /// Prune runs whose reader/transport task is already finished, then
+    /// reserve `run_id` for a new run.
+    ///
+    /// Both halves fix the same class of wedge. The registry keys one run
+    /// under BOTH its run id and its session id, so the old `map.len()` gate
+    /// refused the 9th concurrent run while claiming a limit of 16 — count
+    /// distinct run ids instead. And cleanup lives at the end of the
+    /// reader/transport task: an aborted task (Stop's force-abort grace, a
+    /// killed child that never EOF'd, a panicking reader) leaves its keys
+    /// behind forever, so the budget fills with ghosts whose processes are
+    /// long gone and sending becomes permanently impossible until restart.
+    /// A set abort handle that reports finished is exactly that ghost;
+    /// in-flight launches (handle not yet set) are never pruned.
+    fn reserve(
+        &self,
+        run_id: &str,
+        killed: Arc<std::sync::atomic::AtomicBool>,
+        reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
+    ) -> Result<(), String> {
+        let mut map = self.0.lock().map_err(|e| e.to_string())?;
+        map.retain(|_, entry| match entry.reader_abort.get() {
+            Some(handle) => !handle.is_finished(),
+            None => true,
+        });
+        if map.contains_key(run_id) {
+            return Err("run id already active".into());
+        }
+        let runs: std::collections::HashSet<&str> =
+            map.values().map(|entry| entry.run_id.as_str()).collect();
+        if runs.len() >= MAX_CONCURRENT_RUNS {
+            return Err(format!(
+                "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
+            ));
+        }
+        map.insert(
+            run_id.to_string(),
+            ChildEntry {
+                child: None,
+                pid: 0,
+                run_id: run_id.to_string(),
+                killed,
+                reader_abort,
+                stdin: None,
+                questions: Arc::new(Mutex::new(HashMap::new())),
+            },
+        );
+        Ok(())
+    }
+
     /// Kill one entry (pid-reuse guarded). Returns false when the child was
     /// already reaped — nothing left to signal. Virtual runs (no child) only
     /// raise the killed flag: the transport task observes it on its next
@@ -1461,6 +1524,33 @@ impl Drop for RunContext {
     fn drop(&mut self) {
         // Also runs when the reader is aborted during interrupt or shutdown.
         cleanup_staged_files(&self.cleanup_files);
+        // Backstop for the settle path's by-name removals: an aborted reader
+        // (Stop's force-abort grace, a child that never EOF'd) never reaches
+        // them, and its keys would then occupy the concurrency budget
+        // forever. Drop runs on every exit path, normal settle included,
+        // where the by-name removals already ran and this finds nothing.
+        self.core.registry.remove_by_pid(self.pid);
+    }
+}
+
+/// Abort-safe registry cleanup for virtual (host-stream) runs, which own no
+/// `RunContext`: their settle code sits at the end of the transport task, so
+/// an abort (Stop's force-abort, shutdown) would strand their keys in the
+/// concurrency budget. Held by the task for its whole life.
+pub(crate) struct VirtualRunGuard {
+    registry: Arc<ProcessRegistry>,
+    virtual_pid: u32,
+}
+
+impl VirtualRunGuard {
+    pub(crate) fn new(registry: Arc<ProcessRegistry>, virtual_pid: u32) -> Self {
+        Self { registry, virtual_pid }
+    }
+}
+
+impl Drop for VirtualRunGuard {
+    fn drop(&mut self) {
+        self.registry.remove_by_pid(self.virtual_pid);
     }
 }
 
@@ -2198,31 +2288,13 @@ pub async fn send_message_inner(
     // The placeholder owns the run's killed/reader_abort handles, so a Stop
     // landing inside the launch window still settles the turn; every error
     // path before the real registration drops the reservation.
+    // `reserve` also prunes ghost entries and counts distinct runs, not keys
+    // (a run occupies two keys once its session id is known).
     let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_abort = Arc::new(std::sync::OnceLock::new());
-    {
-        let mut map = state.processes.0.lock().map_err(|e| e.to_string())?;
-        if map.contains_key(&run_id) {
-            return Err("run id already active".into());
-        }
-        if map.len() >= MAX_CONCURRENT_RUNS {
-            return Err(format!(
-                "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
-            ));
-        }
-        map.insert(
-            run_id.clone(),
-            ChildEntry {
-                child: None,
-                pid: 0,
-                run_id: run_id.clone(),
-                killed: Arc::clone(&killed),
-                reader_abort: Arc::clone(&reader_abort),
-                stdin: None,
-                questions: Arc::new(Mutex::new(HashMap::new())),
-            },
-        );
-    }
+    state
+        .processes
+        .reserve(&run_id, Arc::clone(&killed), Arc::clone(&reader_abort))?;
     let reserved = run_id.clone();
     let result = send_reserved(
         state,
@@ -3181,6 +3253,101 @@ mod registry_tests {
         registry.remove_if_pid("session-9", pid);
         registry.remove_if_pid("run-1", pid);
         assert_eq!(registry.len(), 0);
+    }
+
+    /// Child-less registry entry: enough for the registry's own bookkeeping
+    /// (budget accounting, key removal), which never touches the process.
+    fn virtual_entry(run_id: &str, pid: u32) -> ChildEntry {
+        ChildEntry {
+            child: None,
+            pid,
+            run_id: run_id.to_string(),
+            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reader_abort: Arc::new(std::sync::OnceLock::new()),
+            stdin: None,
+            questions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// The wedge users hit: every live run occupies TWO keys (run id +
+    /// session id), so a key-counting gate refused the 9th run while
+    /// reporting a limit of 16.
+    #[tokio::test]
+    async fn concurrency_budget_counts_runs_not_registry_keys() {
+        let registry = ProcessRegistry::default();
+        for i in 0..MAX_CONCURRENT_RUNS - 1 {
+            let run_id = format!("run-{i}");
+            let entry = virtual_entry(&run_id, 1000 + i as u32);
+            registry.insert(run_id.clone(), entry.clone());
+            registry.insert_alias(format!("session-{i}"), entry);
+        }
+        assert_eq!(registry.len(), (MAX_CONCURRENT_RUNS - 1) * 2);
+
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let abort = Arc::new(std::sync::OnceLock::new());
+        registry
+            .reserve("run-last", Arc::clone(&killed), Arc::clone(&abort))
+            .expect("15 double-keyed runs are 15 runs, not 30: the 16th must be admitted");
+        let error = registry
+            .reserve("run-over", killed, abort)
+            .expect_err("the 17th run exceeds the budget");
+        assert!(error.contains("too many concurrent runs"), "{error}");
+    }
+
+    /// Cleanup lives at the end of the reader/transport task, so an aborted
+    /// task (Stop's force-abort grace, a child that never EOF'd) used to
+    /// strand its keys forever — the budget filled with ghosts and sending
+    /// became impossible until restart.
+    #[tokio::test]
+    async fn reserve_prunes_runs_whose_reader_task_is_already_finished() {
+        let registry = ProcessRegistry::default();
+        let task = tokio::spawn(async {});
+        let abort = Arc::new(std::sync::OnceLock::new());
+        let _ = abort.set(task.abort_handle());
+        task.await.expect("task completes");
+
+        let mut ghost = virtual_entry("run-ghost", 4242);
+        ghost.reader_abort = Arc::clone(&abort);
+        registry.insert("run-ghost".to_string(), ghost.clone());
+        registry.insert_alias("session-ghost".to_string(), ghost);
+        // A run still inside its launch window has no abort handle yet and
+        // must never be pruned.
+        registry.insert("run-live".to_string(), virtual_entry("run-live", 4343));
+
+        registry
+            .reserve(
+                "run-new",
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(std::sync::OnceLock::new()),
+            )
+            .expect("reserve succeeds");
+
+        assert!(registry.get("run-ghost").is_none(), "finished run keeps its run-id key");
+        assert!(registry.get("session-ghost").is_none(), "finished run keeps its alias");
+        assert!(registry.get("run-live").is_some(), "in-flight launch was pruned");
+        assert!(registry.get("run-new").is_some());
+    }
+
+    /// Virtual (host-stream) runs settle at the end of their transport task;
+    /// the guard is what frees their keys when that task is aborted instead.
+    #[tokio::test]
+    async fn dropping_a_virtual_run_guard_frees_every_key_of_that_run() {
+        let registry = Arc::new(ProcessRegistry::default());
+        let entry = virtual_entry("run-v", 5150);
+        registry.insert("run-v".to_string(), entry.clone());
+        registry.insert_alias("session-v".to_string(), entry);
+        // Another run's pre-spawn reservation shares pid 0 with every other
+        // reservation: removal is pid-keyed, so it must be left alone.
+        registry.insert("run-other".to_string(), virtual_entry("run-other", 0));
+
+        {
+            let _guard = VirtualRunGuard::new(Arc::clone(&registry), 5150);
+            assert_eq!(registry.len(), 3);
+        }
+
+        assert!(registry.get("run-v").is_none());
+        assert!(registry.get("session-v").is_none());
+        assert!(registry.get("run-other").is_some(), "pid 0 reservations are not swept");
     }
 
     /// A resumed session is registered under its preassigned id at spawn:
