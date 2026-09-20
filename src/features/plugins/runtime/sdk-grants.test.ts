@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   KNOWN_PERMISSIONS,
+  SDK_VERSION,
   execGrantAllows,
   isKnownPermission,
   networkGrantAllows,
@@ -8,6 +9,23 @@ import {
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
 
 describe("isKnownPermission", () => {
+  it("accepts the generic lifecycle, runtime, prompt, workspace, and storage grants", () => {
+    for (const permission of [
+      "session.lifecycle.read",
+      "runtime.events.read",
+      "runtime.switch.observe",
+      "prompt.contribute.internal",
+      "workspace.metadata.read",
+      "plugin.storage",
+    ]) {
+      expect(isKnownPermission(permission)).toBe(true);
+    }
+  });
+
+  it("keeps the SDK on the compatibility line newer than 0.3", async () => {
+    const { SDK_VERSION } = await import("@ccgui/plugin-sdk");
+    expect(SDK_VERSION).not.toMatch(/^0\.3\./);
+  });
   it("accepts every base permission (19 项)", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
