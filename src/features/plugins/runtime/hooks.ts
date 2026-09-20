@@ -334,6 +334,7 @@ export async function runBeforeSwitch(
   options: BeforeHookOptions = {},
 ): Promise<void> {
   const key = `${event.switchId}:${event.sourceEngine}->${event.targetEngine}@${event.workspace.id}`;
+  const { generation, invalidated } = startGeneration(switchGenerations, key);
   const work = Promise.all(
     [...switchRegistrations].map(async (registration) => {
       const { pluginId, hooks } = registration;
