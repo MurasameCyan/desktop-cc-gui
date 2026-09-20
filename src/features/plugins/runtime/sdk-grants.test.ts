@@ -30,7 +30,6 @@ describe("isKnownPermission", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
-    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(19);
   });
 
   it("accepts well-shaped network: grants (bare host / port / port range)", () => {

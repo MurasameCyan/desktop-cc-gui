@@ -41,6 +41,24 @@ pub struct RepositorySummary {
     pub untracked: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkspaceVcsMetadata {
+    pub git_branch: Option<String>,
+    pub git_head: Option<String>,
+    pub dirty: bool,
+}
+
+/// Small read-only VCS summary used by the generic workspace metadata API.
+pub fn workspace_vcs_metadata(path: &Path) -> Option<WorkspaceVcsMetadata> {
+    let repo = Repository::discover(path).ok()?;
+    let git_branch = repo.head().ok().and_then(|head| head.shorthand().map(str::to_owned));
+    let git_head = repo.head().ok().and_then(|head| head.target()).map(|oid| oid.to_string());
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let dirty = repo.statuses(Some(&mut opts)).map(|statuses| !statuses.is_empty()).unwrap_or(false);
+    Some(WorkspaceVcsMetadata { git_branch, git_head, dirty })
+}
+
 /// Open `path` only when that directory is itself a worktree root. Standard
 /// worktrees have a `.git` directory; linked worktrees carry a `.git` file.
 /// The cheap `.git` existence guard avoids `Repository::discover` walking up

@@ -275,6 +275,9 @@ pub fn run() {
             plugins::storage::plugin_document_storage_write_text_atomic,
             plugins::storage::plugin_document_storage_remove,
             plugins::storage::plugin_document_storage_list,
+            db::workspace_metadata,
+            db::plugin_list_workspaces,
+            history::reader::record_accepted_internal_frame,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,

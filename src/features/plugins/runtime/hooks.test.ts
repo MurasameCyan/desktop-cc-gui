@@ -388,6 +388,17 @@ describe("plugin hook runtime", () => {
     slow.resolve();
     await expect(first).resolves.toBeUndefined();
   });
+  it("keeps same-target switches independent by switchId", async () => {
+    const slow = Promise.withResolvers<void>();
+    disposers.push(registerRuntimeSwitchHooks("plugin", {
+      beforeSwitch: (event) => event.switchId === "switch-slow" ? slow.promise : undefined,
+    }));
+    const first = runBeforeSwitch({ ...switchEvent, switchId: "switch-slow" }, { timeoutMs: 100 });
+    const second = runBeforeSwitch({ ...switchEvent, switchId: "switch-fast" }, { timeoutMs: 100 });
+    await expect(second).resolves.toBeUndefined();
+    slow.resolve();
+    await expect(first).resolves.toBeUndefined();
+  });
 
   it("caps before-switch waiting and fails open when a plugin rejects", async () => {
     vi.useFakeTimers();

@@ -581,6 +581,9 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
 /// the final component-to-syscall window; closing it needs handle-relative
 /// opens, which is out of scope for this hardening pass.
 fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
+    if is_reparse_point(root)? {
+        return Err(format!("path crosses a reparse point: {}", root.display()));
+    }
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;

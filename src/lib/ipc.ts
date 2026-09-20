@@ -331,11 +331,6 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
-export interface FileIndexResult {
-  entries: FileIndexEntry[];
-  /** True when additional admissible entries exceeded the index cap. */
-  truncated: boolean;
-}
 
 /** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
  *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
@@ -908,8 +903,8 @@ export const ipc = {
   /** Remote (plugin-fed, e.g. WSL distro) session delete: no local db row
    *  exists, so the host rm's the validated remotePath over the same remote
    *  channel loadRemoteSessionPage reads through. */
-  deleteRemoteSession: (workspacePath: string, engine: string, sessionId: string, remotePath: string) =>
-    invoke<void>("delete_remote_session", { workspacePath, engine, sessionId, remotePath }),
+  deleteRemoteSession: (workspacePath: string, engine: string, remotePath: string) =>
+    invoke<void>("delete_remote_session", { workspacePath, engine, remotePath }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
@@ -969,11 +964,11 @@ export const ipc = {
     withGrantRetry(() => invoke<FileOpResult>("paste_item", { source, targetDir })),
   searchText: (path: string, query: string) =>
     withGrantRetry(() => invoke<SearchHit[]>("search_text", { path, query })),
-  /** Bounded file index for the composer @-mention picker (relative paths;
-   * backend caps at 20k entries and reports whether more were omitted). */
+  /** Whole-tree file index for the composer @-mention picker (relative
+   * paths; backend caps at 20k entries). */
   listFileIndex: (path: string, includeIgnored = false) =>
     withGrantRetry(() =>
-      invoke<FileIndexResult>("list_file_index", { path, includeIgnored }),
+      invoke<FileIndexEntry[]>("list_file_index", { path, includeIgnored }),
     ),
   /** Catalog for the composer `/` picker (workspace `.claude/commands` +
    *  `.claude/skills`, plus the global skill roots of the CLIs the app

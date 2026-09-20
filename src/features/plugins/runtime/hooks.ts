@@ -113,7 +113,7 @@ function dispatchNonBlocking<T>(
     queueMicrotask(() => {
       if (!entry.active || (isCurrent && !isCurrent())) return;
       try {
-        void Promise.resolve(hook(event as never)).catch((error: unknown) =>
+        void Promise.resolve(runAsPlugin(() => hook(event as never))).catch((error: unknown) =>
           reportHookError(pluginId, hookName, error),
         );
       } catch (error) {
@@ -220,7 +220,7 @@ export async function collectBeforeTurnContributions(
       const { pluginId, hooks } = registration;
       if (!registration.active || !hooks.beforeTurn) return;
       try {
-        results[index].result = await hooks.beforeTurn(event);
+        results[index].result = await runAsPlugin(() => hooks.beforeTurn(event));
       } catch (error) {
         reportHookError(pluginId, "beforeTurn", error);
       }
@@ -333,14 +333,13 @@ export async function runBeforeSwitch(
   event: RuntimeSwitchEvent,
   options: BeforeHookOptions = {},
 ): Promise<void> {
-  const key = `${event.sourceEngine}->${event.targetEngine}@${event.workspace.id}`;
-  const { generation, invalidated } = startGeneration(switchGenerations, key);
+  const key = `${event.switchId}:${event.sourceEngine}->${event.targetEngine}@${event.workspace.id}`;
   const work = Promise.all(
     [...switchRegistrations].map(async (registration) => {
       const { pluginId, hooks } = registration;
       if (!registration.active || !hooks.beforeSwitch) return;
       try {
-        await hooks.beforeSwitch(event);
+        await runAsPlugin(() => hooks.beforeSwitch(event));
       } catch (error) {
         reportHookError(pluginId, "beforeSwitch", error);
       }

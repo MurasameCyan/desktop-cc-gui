@@ -1,5 +1,6 @@
 use super::{parse_session_file, Message, ParsedSession, SessionMeta};
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -833,6 +834,24 @@ pub async fn delete_session(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn record_accepted_internal_frame(
+    state: tauri::State<'_, crate::AppState>,
+    engine: String,
+    session_id: String,
+    frame: String,
+    workspace_path: String,
+) -> Result<(), String> {
+    if engine.is_empty() || session_id.is_empty() || workspace_path.trim().is_empty() {
+        return Err("invalid accepted frame scope".into());
+    }
+    if frame.len() > 64 * 1024 {
+        return Err("accepted frame exceeds the recording limit".into());
+    }
+    let hash = format!("{:x}", sha2::Sha256::digest(frame.as_bytes()));
+    state.db.record_accepted_internal_frame_hash(&engine, &session_id, &hash, workspace_path.trim())
+        .map(|_| ())
+}
 /// 远程(WSL 发行版内)会话删除:插件会话源上报的 remotePath 经与
 /// load_remote_session_page 相同的形状白名单校验后,走同一套远程通道
 /// rm。dsh 的同目录旧世代日志一并清掉,目录仅在删空时移除(有其它文件

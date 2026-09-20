@@ -114,10 +114,10 @@ export function normalizeEngineEvent(
     // A mutating tool call may report its path in the call args, while OMP's
     // edit tool reports the authoritative path only in result.details.path.
     // Either shape is structured host data; neither asserts write success.
-    if (Object.hasOwn(MUTATING_TOOLS, toolName)) {
+    if (Object.hasOwn(MUTATING_TOOLS, toolName) && data.hasResult) {
       const path =
         (args ? firstString(args, PATH_ARGS) : null) ??
-        (data.hasResult ? resultDetailsPath(data.result) : null);
+        resultDetailsPath(data.result);
       if (path !== null) {
         return {
           ...base,
