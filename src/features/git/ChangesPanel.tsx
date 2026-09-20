@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
@@ -9,6 +9,8 @@ import { Tooltip, TooltipContent } from "@/components/base/tooltip/tooltip";
 import { type GitFileEntry, type GitStatus } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { cx } from "@/utils/cx";
+import { useFilesStore } from "@/features/files/store";
+import { resolveWorkspaceRepository } from "@/features/files/repositorySelection";
 import { useGitStore } from "./store";
 import { ChangesPanelHeader } from "./ChangesPanelHeader";
 import { CommitFooter } from "./CommitFooter";
@@ -21,19 +23,30 @@ export function ChangesPanel({
   className?: string;
 }) {
   const { t } = useTranslation();
-  const status = useGitStore((s) => s.statusByWorkspace[workspacePath]);
-  const notRepo = useGitStore((s) => s.notRepoByWorkspace[workspacePath]);
-  const refreshError = useGitStore((s) => s.errorByWorkspace[workspacePath]);
-  const branches = useGitStore((s) => s.branchesByWorkspace[workspacePath]);
+  const selectedPath = useFilesStore((s) => s.selectedPath);
+  const repositories = useFilesStore((s) => s.repositories);
+  const gitWorkspacePath = useMemo(
+    () =>
+      resolveWorkspaceRepository({
+        selectedPath,
+        repositoryRoots: Object.keys(repositories),
+        workspacePath,
+      }),
+    [repositories, selectedPath, workspacePath],
+  );
+  const status = useGitStore((s) => s.statusByWorkspace[gitWorkspacePath]);
+  const notRepo = useGitStore((s) => s.notRepoByWorkspace[gitWorkspacePath]);
+  const refreshError = useGitStore((s) => s.errorByWorkspace[gitWorkspacePath]);
+  const branches = useGitStore((s) => s.branchesByWorkspace[gitWorkspacePath]);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, true>>({});
   const [commitMsg, setCommitMsg] = useState("");
 
   useEffect(() => {
-    void useGitStore.getState().refresh(workspacePath);
-    void useGitStore.getState().loadBranches(workspacePath);
-  }, [workspacePath]);
+    void useGitStore.getState().refresh(gitWorkspacePath);
+    void useGitStore.getState().loadBranches(gitWorkspacePath);
+  }, [gitWorkspacePath]);
 
   /** Runs a mutating action: tracks busy state, surfaces errors inline. */
   const run = useCallback((key: string, action: () => Promise<unknown>) => {
@@ -53,36 +66,36 @@ export function ChangesPanel({
    * last refresh failure. */
   const dismissError = useCallback(() => {
     setActionError(null);
-    useGitStore.getState().clearError(workspacePath);
-  }, [workspacePath]);
+    useGitStore.getState().clearError(gitWorkspacePath);
+  }, [gitWorkspacePath]);
 
   const stage = useCallback(
     (files: string[]) =>
-      run("stage", () => useGitStore.getState().stage(workspacePath, files)),
-    [run, workspacePath],
+      run("stage", () => useGitStore.getState().stage(gitWorkspacePath, files)),
+    [run, gitWorkspacePath],
   );
   const unstage = useCallback(
     (files: string[]) =>
-      run("unstage", () => useGitStore.getState().unstage(workspacePath, files)),
-    [run, workspacePath],
+      run("unstage", () => useGitStore.getState().unstage(gitWorkspacePath, files)),
+    [run, gitWorkspacePath],
   );
   const stageOne = useCallback((file: string) => stage([file]), [stage]);
   const unstageOne = useCallback((file: string) => unstage([file]), [unstage]);
   // File rows open the diff in the center area, where it has room.
   const openStagedDiff = useCallback(
     (file: string) =>
-      useGitStore.getState().openDiff(workspacePath, { file, staged: true }),
-    [workspacePath],
+      useGitStore.getState().openDiff(gitWorkspacePath, { file, staged: true }),
+    [gitWorkspacePath],
   );
   const openUnstagedDiff = useCallback(
     (file: string) =>
-      useGitStore.getState().openDiff(workspacePath, { file, staged: false }),
-    [workspacePath],
+      useGitStore.getState().openDiff(gitWorkspacePath, { file, staged: false }),
+    [gitWorkspacePath],
   );
 
   const header = (
     <ChangesPanelHeader
-      workspacePath={workspacePath}
+      workspacePath={gitWorkspacePath}
       notRepo={notRepo}
       branch={status?.branch}
       ahead={status?.ahead}
@@ -161,7 +174,7 @@ export function ChangesPanel({
         )}
       </div>
       <CommitFooter
-        workspacePath={workspacePath}
+        workspacePath={gitWorkspacePath}
         stagedCount={status?.staged.length ?? 0}
         busy={pending.commit === true}
         commitMsg={commitMsg}

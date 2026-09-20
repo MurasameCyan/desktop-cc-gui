@@ -78,3 +78,8 @@ export function resolveSelectedRepository(
   }
   return null;
 }
+
+/** Resolve the Git path used by a workspace-scoped surface. */
+export function resolveWorkspaceRepository(input: RepositorySelectionInput): string {
+  return resolveSelectedRepository(input) ?? input.workspacePath;
+}
