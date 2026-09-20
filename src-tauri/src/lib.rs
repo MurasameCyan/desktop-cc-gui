@@ -269,6 +269,12 @@ pub fn run() {
             plugins::plugin_storage_get,
             plugins::plugin_storage_set,
             plugins::plugin_storage_delete,
+            plugins::storage::plugin_document_storage_get_location,
+            plugins::storage::plugin_document_storage_select_location,
+            plugins::storage::plugin_document_storage_read_text,
+            plugins::storage::plugin_document_storage_write_text_atomic,
+            plugins::storage::plugin_document_storage_remove,
+            plugins::storage::plugin_document_storage_list,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,
