@@ -193,6 +193,7 @@ mod channel_tests {
             session_id: Some("existing-session".into()),
             workspace: std::env::temp_dir(),
             prompt: "routing probe".into(),
+            prompt_contributions: vec![],
             images: vec![],
             model: Some("selected-model".into()),
             effort: None,
