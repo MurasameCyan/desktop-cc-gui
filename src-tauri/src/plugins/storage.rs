@@ -82,6 +82,7 @@ pub(super) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
         || value.contains("//")
         || value.contains(':')
         || value.contains('\0')
+        || value.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(format!("unsafe relative path: {value:?}"));
     }
@@ -1041,7 +1042,7 @@ mod tests {
     #[test]
     fn path_table_rejects_escape_and_accepts_safe_nested_paths() {
         assert_eq!(safe_relative_path("one/two.txt").unwrap(), PathBuf::from("one/two.txt"));
-        for bad in ["", ".", "..", "../x", "x/../y", "/absolute", "x\\y", "x//y"] {
+        for bad in ["", ".", "..", "../x", "x/../y", "/absolute", "x\\y", "x//y", "x/./y", "x/"] {
             assert!(safe_relative_path(bad).is_err(), "accepted {bad:?}");
         }
     }

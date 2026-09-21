@@ -258,11 +258,15 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 
 `ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
 
+路径使用 `/` 分隔；检查原始输入中的空段、`.`、`..`，不接受 `a/./b`、`a//b` 或末尾 `/` 的别名写法。`list()` 的空前缀仍表示列出根目录。
+
 `documentStorage` 是内容寻址（CAS）文本存储：`readText` 返回 `{ content, version }`，`version` 是不透明比较令牌，仅用于回传，不要解析或据其推断顺序。`remove(path, expectedVersion?)` 与写入同样走 CAS——传入上一次读取到的 `version` 即为条件删除，若磁盘上的版本已被其它写入推进（stale），删除以 conflict 被拒绝并保留较新的文档；省略或传 `null` 为无条件删除。据此模式：读到版本 → 基于该版本删除，可保证「只删除我刚读到的那份内容」，避免误删他处并发写入的新版本。
 
 ### 6.3 标准化运行时事件（只读）
 
 `TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`permission-requested`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
+
+`beforeSwitch` / `beforeTurn` 准备期间被用户 Stop 的发送，不再触发 `onTurnStarted` 或启动后端回合。发送已经启动但响应迟到时，取消只清理该次发送的 `runId`；同一会话中后续启动的替代回合不受影响。
 
 `permission-requested` 来自引擎结构化 `permission_denied`，只携带 `tool: string | null` 与 `path: string | null`，不携带给用户展示的 message。缺失、空白或非字符串字段为 `null`，非对象载荷不发布事件。它表示宿主可以展示授权卡片，**不保证引擎仍在运行或正在暂停等待**；插件仍须用回合终态收敛状态。
 
@@ -298,6 +302,8 @@ interface PluginAssets {
 - `ctx.shell.revealPath(path)`：只在文件管理器中定位真实存在的本插件 documentStorage 路径或已授权目录内路径；分别要求 `plugin.storage` / `assets:directory`。不提供任意文件打开、进程启动或目录外探测能力。
 
 返回的 URL 可用于 `fetch`、图片、音频及描述文件的相对依赖加载；资源内容按字节传递，不经文本或 base64 转换。桌面使用 `pluginasset` 协议，Web 使用带鉴权路径前缀的宿主路由，因此相对资源请求仍携带凭据；这些 URL 是临时能力地址，不应记录到日志或分享给外部站点。
+
+本地 MP3、WAV、OGG、M4A、MP4、WebM 按对应的 `audio/*` / `video/*` MIME 返回；未知扩展名仍为 `application/octet-stream`，非包内主动内容仍受下述 MIME 降级规则约束。
 
 本地来源（包内、documentStorage、已授权目录）单文件上限 64 MiB；远程代理单次上限 8 MiB 且限时 30 秒——两个上限语义不同，大贴图集走本地来源，不要指望远程代理放行同样体积。每次读取都重新检查插件是否安装、启用、未隔离以及对应权限，响应禁止缓存；目录撤权、插件禁用/隔离/卸载后，旧 URL 不能继续读取资源。卸载始终清除目录授权（能力，不是用户数据）；documentStorage 文件和位置选择则沿用 `delete_data` 策略，不会因新增资源能力而自动删除用户保留的数据。
 

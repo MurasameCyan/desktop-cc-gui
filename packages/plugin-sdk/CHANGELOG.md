@@ -12,6 +12,8 @@
 - 新增 `TurnHooks.onTurnStarted`，只需 `runtime.events.read`，不授予提示写入能力；与 `afterTurn` 共享同一 `turnId`。
 - 新增 `permission-requested` 运行时事实：只投影引擎结构化工具名和路径，缺失即为 `null`，不携带 message，不保证 CLI 正在等待。
 - 资源上限：本地（包内/文档根/授权目录）单文件 64 MiB，远程代理单次 8 MiB 且限时 30 秒；禁止通过远程/目录资源执行脚本。
+- 补齐来源行为：文档与资源路径在规范化前拒绝空段、`.`、`..`（包括末尾 `/`）；本地 MP3/WAV/OGG/M4A/MP4/WebM 资源保留音视频 MIME，不再退回通用二进制类型。
+- 保留来源的逐次发送取消语义：`beforeSwitch` / `beforeTurn` 准备期间 Stop 后不启动旧回合；迟到启动响应只中断旧 `runId`，不按共享 `sessionId` 误停替代回合。
 
 来自 CCB 通用层（截至 0.4.2，历史条目见下）：会话/回合/切换 hooks、标准化运行时事件 union、内部提示贡献与内部帧 capture/validate、`BeforeTurnResult.isCurrent`、`switchId`/`turnId` 稳定关联、`ctx.workspace.getMetadata`、CAS `documentStorage`（含 `remove` 的 stale 拒绝）。
 

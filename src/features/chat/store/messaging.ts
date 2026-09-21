@@ -115,6 +115,9 @@ export function createMessagingActions(
   markUnseenIfBackground: (key: string) => void;
 } {
   const { set, get, loadHistoryPage, subscribe } = deps;
+  // A replacement turn can reset the session's shared interrupted flag.
+  // Keep cancellation attached to the send waiting on hooks or its ACK.
+  const pendingSends = new Map<string, { cancelled: boolean }>();
 
   /**
    * Send a prompt to a specific tab. Unlike the public `send` action this is
@@ -217,6 +220,10 @@ export function createMessagingActions(
     // Optimistic user message.
     const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
     const hookRunId = newId();
+    const previousSend = pendingSends.get(key);
+    if (previousSend) previousSend.cancelled = true;
+    const pendingSend = { cancelled: false };
+    pendingSends.set(key, pendingSend);
     // Optimistic user message, right away: the hooks below can take up to
     // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
@@ -265,6 +272,7 @@ export function createMessagingActions(
         occurredAt: new Date().toISOString(),
       };
       await runBeforeSwitch(switchEvent);
+      if (pendingSend.cancelled) return;
     }
     const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
     const beforeTurn = await collectBeforeTurnContributions({
@@ -275,6 +283,7 @@ export function createMessagingActions(
       workspace,
       occurredAt: new Date().toISOString(),
     });
+    if (pendingSend.cancelled) return;
     // Retire old owners and withdraw their native-history instructions once.
     const prepared = prepareSessionContributions(
       get().sessionContributions,
@@ -463,29 +472,22 @@ export function createMessagingActions(
         upsertSessionMeta: (meta) => upsertSessionMetaInto(set, meta),
         refreshSessionUsage: (sessionKey) => get().refreshSessionUsage(sessionKey),
       });
-      // Stop pressed while this send was still in flight: interrupt() ran
-      // before runRouting had this run (it is written above, after the
-      // await), so it settled the UI and killed nothing — the CLI kept
-      // streaming. Now that the ids exist, kill it. A native id adopted
       // Stop can precede native spawn while invoke is still in flight; retry
       // the interrupt now that the backend has registered the child.
-      // just above moved the state to a new key, so read the key the turn
-      // actually lives under.
+      // Session adoption may have moved the state, so read the live key.
       const liveKey = runRouting.get(result.runId) ?? knownKey ?? (
         result.sessionId && !tab.sessionId
           ? sessionKey(engine, result.sessionId, tab.workspacePath)
           : key);
-      if (get().bySession[liveKey]?.interrupted) {
+      if (pendingSend.cancelled || get().bySession[liveKey]?.interrupted) {
+        finishRunLifecycle(result.runId, "cancelled");
         patchSession(set, liveKey, { settledRunIds: rememberSettledRun(get().bySession[liveKey], result.runId) });
         runRouting.delete(result.runId);
         untrackRun(result.runId);
         dropRunUsage(result.runId);
-        await Promise.all([
-          ipc.interruptSession(result.runId).catch(() => false),
-          ...(result.sessionId
-            ? [ipc.interruptSession(result.sessionId).catch(() => false)]
-            : []),
-        ]);
+        // A replacement may already own the same native session. Only the
+        // immutable run id belongs to this late acknowledgement.
+        await ipc.interruptSession(result.runId).catch(() => false);
       }
     } catch (error) {
       finishRunLifecycle(hookRunId, "failed", String(error));
@@ -508,6 +510,8 @@ export function createMessagingActions(
       // the queue instead of looping.
       void get().refreshSessionUsage(failedKey);
       if (!get().bySession[failedKey]?.interrupted) drainQueue(failedKey);
+    } finally {
+      if (pendingSends.get(key) === pendingSend) pendingSends.delete(key);
     }
   }
 
@@ -719,6 +723,11 @@ export function createMessagingActions(
         active.sessionId,
         active.workspacePath,
       );
+      const pendingSend = pendingSends.get(key);
+      if (pendingSend) {
+        pendingSend.cancelled = true;
+        pendingSends.delete(key);
+      }
       // Settle locally FIRST: the killed run's done event can arrive while
       // the kill IPCs below are still in flight, and onDone drains the queue
       // whenever interrupted is still false — that would fire the next
