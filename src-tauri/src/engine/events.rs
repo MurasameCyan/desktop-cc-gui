@@ -170,11 +170,8 @@ pub(crate) fn tool_call_message_with_id(
         tool_call_id: tool_call_identity(tool_call_id),
     }
 }
-/// Same as [`tool_call_message`] but patches the matching in-flight tool row.
-pub(crate) fn tool_call_patch(name: impl Into<String>, args: Option<&Value>) -> EngineEvent {
-    tool_call_patch_with_id(name, args, None)
-}
-/// Same as [`tool_call_patch`], carrying the engine's id for the call.
+/// Patches the matching in-flight tool row, carrying the engine's id for the
+/// call when it reports one.
 pub(crate) fn tool_call_patch_with_id(
     name: impl Into<String>,
     args: Option<&Value>,
@@ -505,7 +502,7 @@ mod tool_args_tests {
             }
             _ => panic!("expected tool message"),
         }
-        match tool_call_patch("Read", Some(&json!({"file_path": "src/a.ts"}))) {
+        match tool_call_patch_with_id("Read", Some(&json!({"file_path": "src/a.ts"})), None) {
             EngineEvent::Message { patch, .. } => assert!(patch),
             _ => panic!("expected patch"),
         }
