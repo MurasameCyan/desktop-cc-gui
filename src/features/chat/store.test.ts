@@ -342,6 +342,7 @@ describe("compactContext and refreshSessionUsage", () => {
     expect(ipc.deleteRemoteSession).toHaveBeenCalledWith(
       WS,
       "dsh",
+      "remote-1",
       "/home/u/.dsh/sessions/-tmp-ws/s-1/session.jsonl.zstd",
     );
     expect(ipc.deleteSession).not.toHaveBeenCalled();

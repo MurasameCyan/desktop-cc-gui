@@ -491,6 +491,11 @@ fn valid_internal_nonce(nonce: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// Opening marker of an internal frame. Shared by the recorder (which derives
+/// an identity from one complete frame) and the parser (which hides only the
+/// frames whose identities were recorded), so both agree on what a frame is.
+const INTERNAL_FRAME_OPEN: &str = "<CCGUI_INTERNAL_";
+
 /// Identity of one internal frame: the exact bytes the engine wrote.
 pub fn internal_frame_hash(frame: &str) -> String {
     format!("{:x}", Sha256::digest(frame.as_bytes()))
@@ -505,11 +510,10 @@ pub const MAX_RECORDED_FRAME_BYTES: usize = 64 * 1024;
 /// JSON payload, and return its identity. The IPC command is reachable by any
 /// enabled plugin, so the host re-derives this instead of trusting the caller.
 pub fn recordable_internal_frame_hash(frame: &str) -> Option<String> {
-    const OPEN: &str = "<CCGUI_INTERNAL_";
     if frame.len() > MAX_RECORDED_FRAME_BYTES {
         return None;
     }
-    let rest = frame.strip_prefix(OPEN)?;
+    let rest = frame.strip_prefix(INTERNAL_FRAME_OPEN)?;
     let open_end = rest.find('>')?;
     let nonce = &rest[..open_end];
     if !valid_internal_nonce(nonce) {
@@ -526,14 +530,21 @@ pub fn recordable_internal_frame_hash(frame: &str) -> Option<String> {
     Some(internal_frame_hash(frame))
 }
 
+/// Hide only those internal frames whose exact identities a live capture
+/// validator accepted. `text` comes back untouched, without allocating, when
+/// no identity is recorded or the row carries no frame marker at all — the
+/// case for every ordinary assistant row the scanner walks.
 pub(super) fn strip_recorded_internal_frames(
-    text: &str,
+    text: String,
     accepted_internal_frames: &HashSet<String>,
 ) -> String {
-    const OPEN: &str = "<CCGUI_INTERNAL_";
+    if accepted_internal_frames.is_empty() || !text.contains(INTERNAL_FRAME_OPEN) {
+        return text;
+    }
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find(OPEN) {
+    let mut removed = false;
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find(INTERNAL_FRAME_OPEN) {
         out.push_str(&rest[..start]);
         let candidate = &rest[start..];
         let Some(open_end) = candidate.find('>') else {
@@ -541,7 +552,7 @@ pub(super) fn strip_recorded_internal_frames(
             rest = "";
             break;
         };
-        let nonce = &candidate[OPEN.len()..open_end];
+        let nonce = &candidate[INTERNAL_FRAME_OPEN.len()..open_end];
         if !valid_internal_nonce(nonce) {
             out.push_str(&candidate[..open_end + 1]);
             rest = &candidate[open_end + 1..];
@@ -556,16 +567,21 @@ pub(super) fn strip_recorded_internal_frames(
         };
         let frame_end = payload_start + close_offset + close.len();
         let frame = &candidate[..frame_end];
-        if !accepted_internal_frames.contains(&internal_frame_hash(frame)) {
+        if accepted_internal_frames.contains(&internal_frame_hash(frame)) {
+            removed = true;
+        } else {
             out.push_str(frame);
         }
         rest = &candidate[frame_end..];
     }
     out.push_str(rest);
+    // Only a removed frame can leave the surrounding text padded; a row that
+    // kept everything it had must keep its own spacing too.
+    if !removed {
+        return text;
+    }
     out.trim().to_string()
 }
-
-
 /// Remove host-only prompt tails and only those internal frames whose exact
 /// identities were accepted by a live capture validator.
 fn normalize_extracted_row(
@@ -573,7 +589,14 @@ fn normalize_extracted_row(
     accepted_internal_frames: &HashSet<String>,
 ) -> Option<LineRow> {
     if row.role == "assistant" {
-        row.text = strip_recorded_internal_frames(&row.text, accepted_internal_frames);
+        // Nothing recorded, or no marker in the row: the row stands exactly as
+        // the engine wrote it. Only a row that lost a hidden frame can end up
+        // empty here, and only that row may be dropped — an assistant row the
+        // engine itself left blank is the history's business, not ours.
+        if accepted_internal_frames.is_empty() || !row.text.contains(INTERNAL_FRAME_OPEN) {
+            return Some(row);
+        }
+        row.text = strip_recorded_internal_frames(row.text, accepted_internal_frames);
         return (!row.text.trim().is_empty() || !row.images.is_empty()).then_some(row);
     }
     if row.role != "user" {
@@ -1570,6 +1593,36 @@ mod tests {
                 .expect("unrecorded malformed frame remains visible")
                 .text,
             "keep <CCGUI_INTERNAL_n-1>{bad}</CCGUI_INTERNAL_n-1>"
+        );
+    }
+
+    /// The overwhelmingly common case: nothing recorded. The frame filter must
+    /// then be invisible — an assistant row keeps its own bytes, spacing
+    /// included, and is never dropped for looking empty. Both are observable
+    /// as sidebar message counts and rendered text, and both regressed when
+    /// the filter trimmed and dropped rows unconditionally.
+    #[test]
+    fn assistant_rows_are_untouched_when_no_frame_identity_is_recorded() {
+        let padded = LineRow::new("assistant", "  spaced reply\n".into(), None);
+        assert_eq!(
+            normalize_extracted_row(padded, &HashSet::new())
+                .expect("assistant row survives")
+                .text,
+            "  spaced reply\n"
+        );
+
+        // A frame present but unrecorded is still ordinary text: keeping it is
+        // what leaves the row non-empty.
+        let only_frame = LineRow::new(
+            "assistant",
+            "<CCGUI_INTERNAL_n-1>{\"ok\":true}</CCGUI_INTERNAL_n-1>".into(),
+            None,
+        );
+        assert_eq!(
+            normalize_extracted_row(only_frame, &HashSet::new())
+                .expect("unrecorded frame keeps the row")
+                .text,
+            "<CCGUI_INTERNAL_n-1>{\"ok\":true}</CCGUI_INTERNAL_n-1>"
         );
     }
 

@@ -242,6 +242,7 @@ impl TurnCore {
                 args,
                 result,
                 patch,
+                tool_call_id,
             } => {
                 let mut payload = serde_json::json!({ "role": role, "text": text });
                 if let Some(path) = path {
@@ -257,6 +258,12 @@ impl TurnCore {
                 }
                 if let Some(result) = result {
                     payload["result"] = result;
+                }
+                // The engine's own call id, when it reported one: the
+                // frontend pairs a result with its call on this rather than
+                // on the tool name, which collides across parallel calls.
+                if let Some(tool_call_id) = tool_call_id {
+                    payload["toolCallId"] = Value::String(tool_call_id);
                 }
                 if patch {
                     payload["patch"] = Value::Bool(true);

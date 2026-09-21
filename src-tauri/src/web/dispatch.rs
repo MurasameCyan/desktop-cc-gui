@@ -170,6 +170,7 @@ struct LoadRemoteSessionPageArgs {
 struct DeleteRemoteSessionArgs {
     workspace_path: String,
     engine: String,
+    session_id: String,
     remote_path: String,
 }
 #[derive(Deserialize)]
@@ -647,7 +648,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "delete_remote_session" => {
             let a: DeleteRemoteSessionArgs = parse_args(&raw)?;
-            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.remote_path).await)
+            ser(crate::history::reader::delete_remote_session(app.state(), a.workspace_path, a.engine, a.session_id, a.remote_path).await)
         }
         "pin_session" => {
             let a: PinSessionArgs = parse_args(&raw)?;

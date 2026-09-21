@@ -498,7 +498,7 @@ export function createSessionActions(
       );
       try {
         if (meta?.remote && meta.remotePath) {
-          await ipc.deleteRemoteSession(meta.workspacePath, engine, meta.remotePath);
+          await ipc.deleteRemoteSession(meta.workspacePath, engine, sessionId, meta.remotePath);
         } else {
           await ipc.deleteSession(engine, sessionId);
         }

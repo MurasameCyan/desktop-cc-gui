@@ -928,12 +928,19 @@ pub async fn delete_remote_session(
     state: tauri::State<'_, crate::AppState>,
     workspace_path: String,
     engine: String,
+    session_id: String,
     remote_path: String,
 ) -> Result<(), String> {
     let script = remote_session_delete_script(&engine, &remote_path)?;
     let transport = crate::engine::wsl_transport::transport_for_workspace(&state.db, &workspace_path)
         .ok_or_else(|| format!("工作区 {workspace_path} 未登记远程传输"))?;
-    crate::engine::wsl_transport::run_script_output(&transport, &script).await
+    delete_remote_session_and_frames(
+        Arc::clone(&state.db),
+        engine,
+        session_id,
+        crate::engine::wsl_transport::run_script_output(&transport, &script),
+    )
+    .await
 }
 
 #[tauri::command]

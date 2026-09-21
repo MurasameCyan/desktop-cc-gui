@@ -902,9 +902,16 @@ export const ipc = {
     invoke<void>("delete_session", { engine, sessionId }),
   /** Remote (plugin-fed, e.g. WSL distro) session delete: no local db row
    *  exists, so the host rm's the validated remotePath over the same remote
-   *  channel loadRemoteSessionPage reads through. */
-  deleteRemoteSession: (workspacePath: string, engine: string, remotePath: string) =>
-    invoke<void>("delete_remote_session", { workspacePath, engine, remotePath }),
+   *  channel loadRemoteSessionPage reads through. The native id travels with
+   *  it because no local row can recover it, and the accepted-frame
+   *  identities recorded for this session are reclaimed with the transcript. */
+  deleteRemoteSession: (
+    workspacePath: string,
+    engine: string,
+    sessionId: string,
+    remotePath: string,
+  ) =>
+    invoke<void>("delete_remote_session", { workspacePath, engine, sessionId, remotePath }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
