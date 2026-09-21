@@ -373,8 +373,14 @@ fn resolve_prompt<'a>(
         .find(|entry| entry.id == agent_id)
         .ok_or_else(|| format!("unknown built-in agent id `{}`", agent_id))?;
     let prompt_path = catalog.root.join(&agent.prompt_path);
-    let prompt = fs::read_to_string(&prompt_path)
+    let raw = fs::read_to_string(&prompt_path)
         .map_err(|error| format!("failed to read built-in agent prompt: {}", error))?;
+    // The pinned hash is over the LF-normalized source (git stores these
+    // prompts with LF). A Windows checkout under core.autocrlf=true rewrites
+    // them to CRLF on disk, so hashing raw bytes fails every built-in agent
+    // at runtime. Normalize line endings back before both the hash check and
+    // injection, so the verified body is byte-identical across platforms.
+    let prompt = raw.replace("\r\n", "\n");
     if prompt.trim().is_empty() {
         return Err(format!("built-in agent prompt `{}` is empty", agent_id));
     }
