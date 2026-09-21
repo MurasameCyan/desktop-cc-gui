@@ -126,6 +126,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     thinkingAutoCollapse: true,
     bySession: {},
     streamingByKey: {},
+    retryingByKey: {},
     unseen: {},
     drafts: {},
     pendingMention: null,

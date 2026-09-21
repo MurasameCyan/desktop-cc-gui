@@ -129,6 +129,7 @@ export default function ChatPage() {
     handleTabReorder,
     sessionById,
     threadStreaming,
+    threadRetrying,
     openFiles,
     activeFilePath,
     browserTabs,
@@ -162,6 +163,7 @@ export default function ChatPage() {
   } = useChatSidebar({
     sessionById,
     threadStreaming,
+    threadRetrying,
     collapseSidebarOnMobile,
     composerInputRef,
     setDialog,

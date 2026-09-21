@@ -1,7 +1,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentThinking } from "./agent-thinking";
+import "../../../index.css";
 
 const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
 actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
@@ -98,5 +99,43 @@ describe("AgentThinking", () => {
       root.render(<AgentThinking label="响应中" startedAt={Date.now() - 5000} usage={null} />);
     });
     expect(container.textContent ?? "").not.toContain("↑");
+  });
+
+  it("pauses visual heartbeat while waiting for a provider retry", () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    try {
+      act(() => {
+        root.render(
+          <AgentThinking
+            label="响应中"
+            retry="重试中 8/50"
+            startedAt={Date.now() - 5000}
+          />,
+        );
+      });
+
+      expect(container.querySelector(".bui-agent-thinking-label")).toBeNull();
+      expect(setIntervalSpy).not.toHaveBeenCalledWith(expect.any(Function), 80);
+      expect(container.textContent).toContain("重试中 8/50");
+    } finally {
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("keeps the stars indicator visible while waiting for a retry", () => {
+    act(() => {
+      root.render(
+        <AgentThinking
+          variant="stars"
+          label="响应中"
+          retry="重试中 3/10"
+          startedAt={Date.now() - 5000}
+        />,
+      );
+    });
+
+    const star = container.querySelector<SVGElement>(".bui-agent-thinking-star");
+    expect(star).not.toBeNull();
+    expect(getComputedStyle(star!).opacity).toBe("0.7");
   });
 });

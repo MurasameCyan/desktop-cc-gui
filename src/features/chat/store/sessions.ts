@@ -251,11 +251,13 @@ export function createSessionActions(
         const drafts = { ...s.drafts };
         const unseen = { ...s.unseen };
         const streamingByKey = { ...s.streamingByKey };
+        const retryingByKey = { ...s.retryingByKey };
         for (const key of Object.keys(archivedSessionKeys)) {
           delete bySession[key];
           delete drafts[key];
           delete unseen[key];
           delete streamingByKey[key];
+          delete retryingByKey[key];
         }
         for (const meta of merged) {
           const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
@@ -288,6 +290,7 @@ export function createSessionActions(
           drafts,
           unseen,
           streamingByKey,
+          retryingByKey,
           openTabs,
           active,
         };
@@ -495,14 +498,23 @@ export function createSessionActions(
         // Permanent delete: the cached session state is dead weight.
         const bySession = { ...s.bySession };
         const drafts = { ...s.drafts };
+        const streamingByKey = { ...s.streamingByKey };
+        const retryingByKey = { ...s.retryingByKey };
         delete bySession[key];
         delete drafts[key];
+        // Deleting a running session must clear its flat-map flags too:
+        // nothing re-scans a deleted key later (archive is swept by
+        // refreshSessions; a delete is gone for good).
+        delete streamingByKey[key];
+        delete retryingByKey[key];
         return {
           sessions: s.sessions.filter(
             (x) => !(x.engine === engine && x.sessionId === sessionId),
           ),
           bySession,
           drafts,
+          streamingByKey,
+          retryingByKey,
           unseen: omitKey(s.unseen, key),
         };
       });

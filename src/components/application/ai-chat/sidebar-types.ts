@@ -9,9 +9,10 @@ export interface AiChatThread {
   time: string;
   isSelected?: boolean;
   pinned?: boolean;
-  /** A turn is streaming in this session — breathing blue dot. */
+  /** A turn is streaming in this session — breathing blue dot unless retrying. */
   streaming?: boolean;
-  /** Finished activity the user has not opened yet — solid green dot. */
+  /** Provider backoff is active; keep the running dot visible but static. */
+  retrying?: boolean;
   unseen?: boolean;
   /** Pending tab: first message not sent, so pin/rename/copy-id do not apply. */
   isDraft?: boolean;

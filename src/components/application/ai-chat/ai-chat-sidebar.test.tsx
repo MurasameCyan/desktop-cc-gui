@@ -205,6 +205,30 @@ async function rightClick(row: HTMLElement) {
   });
 }
 
+it("renders a retrying streaming thread with a static status dot", async () => {
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[{
+          id: "a",
+          label: "a",
+          defaultOpen: true,
+          threads: [{
+            id: "omp/retry-1",
+            label: "重试会话",
+            time: "刚刚",
+            streaming: true,
+            retrying: true,
+          }],
+        }]}
+      />,
+    );
+  });
+
+  const dot = threadRow("重试会话").querySelector(".sidebar-thread-status");
+  expect(dot?.classList.contains("sidebar-thread-status-retrying")).toBe(true);
+});
+
 it("keeps hover actions to pin / rename / delete (archive is context-menu only)", async () => {
   const onThreadAction = vi.fn();
   await act(async () => {
