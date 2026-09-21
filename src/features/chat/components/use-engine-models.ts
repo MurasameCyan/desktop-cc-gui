@@ -66,13 +66,25 @@ export function useEngineModels(
 ): EngineModelsState {
   const { t } = useTranslation();
   const [cliConfig, setCliConfig] = useState<CliConfig | null>(null);
-  // Catalogs are workspace-scoped (a WSL distro's CLIs answer differently
-  // than local ones), so the cache is keyed by workspace path: switching
-  // workspaces reads the other context's entries (repopulated on demand)
-  // instead of reacting to the prop with a state reset.
-  const [catalogsByWs, setCatalogsByWs] = useState<
+  // A catalog is a property of the *context*, not of every workspace: the
+  // backend answers from the local CLIs unless the workspace is a remote one
+  // (a WSL distro's CLIs answer differently), so all local workspaces share
+  // one catalog while each remote workspace carries its own. Caching per
+  // workspace instead made refresh act on the active workspace alone — every
+  // other (already cached) workspace kept serving its stale list until the
+  // user refreshed it there too.
+  const [localCatalogs, setLocalCatalogs] = useState<Record<string, EngineCatalog>>(
+    {},
+  );
+  const [remoteCatalogsByWs, setRemoteCatalogsByWs] = useState<
     Record<string, Record<string, EngineCatalog>>
   >({});
+  // Which context a workspace's probes answered from. Until a workspace has
+  // answered once it stays unresolved and gets probed (its context cannot be
+  // guessed from the shared local bucket).
+  const [contextByWs, setContextByWs] = useState<Record<string, "local" | "remote">>(
+    {},
+  );
   const wsKey = workspacePath ?? "";
   // Engine-level custom models (设置 → CLI → 自定义模型): user-added ids
   // merged into the picker next to the CLI's catalog.
@@ -102,37 +114,73 @@ export function useEngineModels(
     window.addEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
     return () => window.removeEventListener(CLI_CONFIG_CHANGED_EVENT, reload);
   }, []);
-  const catalogs = catalogsByWs[wsKey] ?? EMPTY_CATALOGS;
+  // Catalog for the active workspace. Until the workspace's context is known
+  // the shared local catalog proves nothing about it (it may be a remote one),
+  // so the picker starts empty there and fills as the workspace's probes land.
+  const context = wsKey === "" ? "local" : contextByWs[wsKey];
+  const catalogs =
+    context === "remote"
+      ? (remoteCatalogsByWs[wsKey] ?? EMPTY_CATALOGS)
+      : context === "local"
+        ? localCatalogs
+        : EMPTY_CATALOGS;
   const pending = pendingByWs[wsKey] ?? EMPTY_PENDING;
+  // File one probe answer. A `remote` flag means the answer came from a distro
+  // CLI: that workspace is a remote context and keeps its own bucket — which is
+  // exactly what stops a distro list from leaking into the shared local one.
+  // Everything else is local data for the one catalog every local workspace
+  // shares, flag cleared (an engine-derived catalog is blank for a remote
+  // workspace by contract, so its flag is local information).
+  const applyCatalog = useCallback(
+    (engineId: string, ws: string, list: EngineCatalog) => {
+      if (list.remote === true && ws !== "") {
+        setContextByWs((prev) => (prev[ws] === "remote" ? prev : { ...prev, [ws]: "remote" }));
+        setRemoteCatalogsByWs((prev) => ({
+          ...prev,
+          [ws]: { ...(prev[ws] ?? {}), [engineId]: list },
+        }));
+        return;
+      }
+      if (ws !== "") {
+        setContextByWs((prev) => (prev[ws] === "local" ? prev : { ...prev, [ws]: "local" }));
+      }
+      setLocalCatalogs((prev) => ({
+        ...prev,
+        [engineId]: list.remote ? { ...list, remote: false } : list,
+      }));
+    },
+    [],
+  );
+  // Live pending flags, keyed by workspace: the picker shows what it already
+  // knows (usually just the configured model) until a probe lands, so the panel
+  // says "still loading" instead of looking truncated. Both directions go
+  // through here so a probe's start and settle can never disagree (a set flag
+  // replaced rather than merged would outlive its probe).
+  const markPending = useCallback(
+    (ws: string, engineId: string, running: boolean) =>
+      setPendingByWs((prev) => {
+        const bucket = prev[ws] ?? {};
+        if (running === (engineId in bucket)) return prev;
+        const next = { ...bucket };
+        if (running) next[engineId] = true;
+        else delete next[engineId];
+        return { ...prev, [ws]: next };
+      }),
+    [],
+  );
   // Model catalogs for every engine (pi/omp probe their CLI; others return
   // empty and fall back to provider-config models below). The CLI menu's
   // per-engine model flyouts all read from this map.
   const probeCatalog = useCallback(
     (engineId: string) => {
-      setPendingByWs((prev) => ({
-        ...prev,
-        [wsKey]: { ...(prev[wsKey] ?? {}), [engineId]: true },
-      }));
-      ipc
+      markPending(wsKey, engineId, true);
+      return ipc
         .listEngineModels(engineId, workspacePath)
-        .then((list) => {
-          setCatalogsByWs((prev) => ({
-            ...prev,
-            [wsKey]: { ...(prev[wsKey] ?? {}), [engineId]: list },
-          }));
-        })
+        .then((list) => applyCatalog(engineId, wsKey, list))
         .catch(() => {})
-        .finally(() => {
-          setPendingByWs((prev) => {
-            const ws = prev[wsKey];
-            if (!ws?.[engineId]) return prev;
-            const next = { ...ws };
-            delete next[engineId];
-            return { ...prev, [wsKey]: next };
-          });
-        });
+        .finally(() => markPending(wsKey, engineId, false));
     },
-    [wsKey, workspacePath],
+    [wsKey, workspacePath, applyCatalog, markPending],
   );
   useEffect(() => {
     // One probe per engine (per workspace, per availability state). A probe
@@ -287,25 +335,37 @@ export function useEngineModels(
     if (Object.keys(updates).length > 0) void pinModels(updates);
   }, [engines, models, cliConfig, catalogs, wsKey, customModels, knownIdsByEngine, pinModels]);
 
-  // Manual refresh from the flyout: re-read provider configs and re-probe
-  // every engine's catalog (the mount effect skips engines already probed,
+  // Manual refresh from the flyout: re-read provider configs and re-probe the
+  // catalogs. The probe effect skips engines already probed, so settings edits
+  // otherwise only land after an app restart. Scope = the active workspace's
+  // context plus every remote context already cached: all local workspaces
+  // share one catalog, so refreshing any of them covers the rest, while each
+  // remote (distro) workspace keeps its own and would otherwise stay stale.
   const refresh = useCallback(async () => {
     await ipc.getCliConfig().then(setCliConfig).catch(() => {});
+    // Local context first — probed with the active workspace when that one is
+    // local, so the spinner lands in the bucket the picker reads — then every
+    // cached remote context, each of which owns its own catalog.
+    const targets = [
+      context === "remote" ? "" : wsKey,
+      ...Object.keys(contextByWs).filter((ws) => contextByWs[ws] === "remote"),
+    ];
     await Promise.all(
-      engines.map(async (engine) => {
-        try {
-          const list = await ipc.listEngineModels(engine.id, workspacePath);
-          setCatalogsByWs((prev) => ({
-            ...prev,
-            [wsKey]: { ...(prev[wsKey] ?? {}), [engine.id]: list },
-          }));
-        } catch {
-          // A failed probe keeps the stale catalog rather than blanking the
-          // flyout.
-        }
-      }),
+      targets.flatMap((ws) =>
+        engines.map(async (engine) => {
+          markPending(ws, engine.id, true);
+          try {
+            applyCatalog(engine.id, ws, await ipc.listEngineModels(engine.id, ws || undefined));
+          } catch {
+            // A failed probe keeps the stale catalog rather than blanking the
+            // flyout.
+          } finally {
+            markPending(ws, engine.id, false);
+          }
+        }),
+      ),
     );
-  }, [engines, wsKey, workspacePath, setCatalogsByWs]);
+  }, [engines, wsKey, context, applyCatalog, markPending, contextByWs]);
 
   return {
     catalogs,
