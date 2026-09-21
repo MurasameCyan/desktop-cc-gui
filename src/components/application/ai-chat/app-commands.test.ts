@@ -136,9 +136,14 @@ describe("compaction progress", () => {
     await vi.waitFor(() => {
       expect(useChatStore.getState().bySession[KEY]?.compaction).toMatchObject({ automatic: false });
     });
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ engine: "omp", sessionId: "s-1", prompt: "/compact" }),
-    );
+    // The flag is patched before the send, and the send now awaits the
+    // beforeTurn plugin hooks first — wait for the call itself instead of
+    // reading it synchronously off the flag.
+    await vi.waitFor(() => {
+      expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+        expect.objectContaining({ engine: "omp", sessionId: "s-1", prompt: "/compact" }),
+      );
+    });
     // The store routes events by its own requested run id, not the mocked
     // response — replay the id sendMessage actually received.
     const runId = vi.mocked(ipc.sendMessage).mock.calls[0][0].runId!;
