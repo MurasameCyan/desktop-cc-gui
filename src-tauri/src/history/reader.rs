@@ -311,18 +311,48 @@ static PARSED_CACHE_BYTES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(
 const PARSED_CACHE_CAPACITY: usize = 32;
 const PARSED_CACHE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
-/// Rough in-memory footprint of one parsed session (text + image payloads).
-fn parsed_footprint(parsed: &ParsedSession) -> usize {
-    parsed
-        .messages
+/// Rough in-memory footprint of one parsed session. Text and images used to
+/// be the whole story, but tool-result-heavy sessions keep most of their
+/// bytes in retained payloads: an hourly task's omp transcript measured
+/// 28MB of `result.details` against 18MB of chat text, so a text-only sum
+/// lets the 128MB budget admit multiples of itself.
+fn value_footprint(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(items) => {
+            items.iter().map(value_footprint).sum::<usize>() + items.len() * 32
+        }
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| k.len() + value_footprint(v) + 32)
+            .sum::<usize>(),
+        _ => 8,
+    }
+}
+
+fn todo_footprint(todos: &crate::engine::TodosPayload) -> usize {
+    todos
+        .items
         .iter()
-        .map(|m| {
-            m.text.len()
-                + m.images.iter().map(|i| i.len()).sum::<usize>()
-                + m.ts.as_deref().map(str::len).unwrap_or(0)
-                + 128
-        })
-        .sum()
+        .map(|i| i.content.len() + i.status.len() + i.id.as_deref().map(str::len).unwrap_or(0) + 32)
+}
+
+fn message_footprint(m: &Message) -> usize {
+    m.text.len()
+        + m.images.iter().map(|i| i.len()).sum::<usize>()
+        + m.ts.as_deref().map(str::len).unwrap_or(0)
+        + m.path.as_deref().map(str::len).unwrap_or(0)
+        + m.model.as_deref().map(str::len).unwrap_or(0)
+        + m.effort.as_deref().map(str::len).unwrap_or(0)
+        + m.args.as_ref().map(value_footprint).unwrap_or(0)
+        + m.result.as_ref().map(value_footprint).unwrap_or(0)
+        + m.usage.as_ref().map(value_footprint).unwrap_or(0)
+        + m.todos.as_ref().map(todo_footprint).unwrap_or(0)
+        + 128
+}
+
+fn parsed_footprint(parsed: &ParsedSession) -> usize {
+    parsed.messages.iter().map(message_footprint).sum()
 }
 
 fn cached_session(engine: &str, path: &Path) -> Result<Arc<CachedSession>, String> {
@@ -340,7 +370,10 @@ fn cached_session(engine: &str, path: &Path) -> Result<Arc<CachedSession>, Strin
     let fold = subagent_fold(&parsed.messages);
     // The fold's cloned delegation rows count toward the budget too.
     let footprint = parsed_footprint(&parsed)
-        + fold.iter().map(|(_, row)| row.text.len() + 128).sum::<usize>();
+        + fold
+            .iter()
+            .map(|(_, row)| message_footprint(row))
+            .sum::<usize>();
     let cached = Arc::new(CachedSession { parsed, fold });
     let mut cache = PARSED_CACHE.lock().map_err(|e| e.to_string())?;
     let mut bytes = PARSED_CACHE_BYTES.lock().map_err(|e| e.to_string())?;
@@ -1521,5 +1554,51 @@ mod tests {
             "dsh",
             "/home/dev/notes/session.jsonl.zstd"
         ));
+    }
+    /// Tool-result-heavy sessions are the steady state (an hourly task's omp
+    /// transcript measured 28MB of `result.details` against 18MB of chat
+    /// text): the cache budget must see those payloads, or the 128MB cap
+    /// admits multiples of itself. Regression: `parsed_footprint` only
+    /// summed text + images + ts, so args AND result are each sized here.
+    #[test]
+    fn parsed_footprint_counts_retained_tool_payloads() {
+        let big_args = "A".repeat(20_000);
+        let big_result = "R".repeat(20_000);
+        let row = |args: Option<serde_json::Value>, result: Option<serde_json::Value>| Message {
+            seq: 1,
+            role: "tool".into(),
+            text: "ok".into(),
+            ts: None,
+            path: None,
+            args,
+            result,
+            todos: None,
+            usage: Some(json!({ "input_tokens": 10 })),
+            model: None,
+            effort: None,
+            duration_ms: None,
+            images: Vec::new(),
+        };
+        let full = ParsedSession {
+            messages: vec![row(
+                Some(json!({ "command": big_args })),
+                Some(json!({ "details": { "log": big_result } })),
+            )],
+        };
+        // 40k of args+result dwarfs the 2-char text; a threshold above either
+        // payload alone fails if args OR result accounting is dropped.
+        assert!(
+            parsed_footprint(&full) >= 38_000,
+            "args and result payloads must both count toward the cache budget",
+        );
+        // The same row shape without the payloads is orders of magnitude
+        // smaller: the footprint tracks retained bytes, not the row count.
+        let bare = ParsedSession {
+            messages: vec![row(None, None)],
+        };
+        assert!(
+            parsed_footprint(&full) > parsed_footprint(&bare) + 39_000,
+            "the payloads, not the row, drive the footprint",
+        );
     }
 }
