@@ -9,6 +9,7 @@ import {
   bufferStreamPart,
   drainPending,
   migratePendingStream,
+  moveRetryingFlag,
   moveStreamingFlag,
   patchSession,
   resolveSessionEffort,
@@ -17,6 +18,7 @@ import {
   routeRun,
   runRouting,
   scheduleDeltaFlush,
+  setRetryingFlag,
   setStreamingFlag,
   settleLiveRows,
   touchRun,
@@ -863,6 +865,7 @@ function onSession(
       delete drafts[fromKey];
     }
     const streamingByKey = moveStreamingFlag(s.streamingByKey, fromKey, newKey);
+    const retryingByKey = moveRetryingFlag(s.retryingByKey, fromKey, newKey);
     const activeNext =
       s.active &&
       s.active.engine === event.engine &&
@@ -870,7 +873,7 @@ function onSession(
       s.active.workspacePath === workspacePath
         ? { ...s.active, sessionId: nativeId, effort: undefined, provider: undefined }
         : s.active;
-    return { bySession, drafts, streamingByKey, active: activeNext };
+    return { bySession, drafts, streamingByKey, retryingByKey, active: activeNext };
   });
   // The pending tab owning this run adopts the native id. Stamp only the
   // first match: blanketing every pending tab of this engine+workspace
@@ -959,16 +962,18 @@ export function settleOrphanedRuns(
   for (const [, key] of orphaned) retryingKeys.delete(key);
   set((s) => {
     let streamingByKey = s.streamingByKey;
+    let retryingByKey = s.retryingByKey;
     let bySession = s.bySession;
     for (const [, key] of orphaned) {
       streamingByKey = setStreamingFlag(streamingByKey, key, false);
+      retryingByKey = setRetryingFlag(retryingByKey, key, false);
       const cur = bySession[key];
       if (cur?.streaming || cur?.retry) {
         if (bySession === s.bySession) bySession = { ...s.bySession };
         bySession[key] = { ...cur, streaming: false, turnStartedAt: null, retry: null, compaction: null };
       }
     }
-    return { bySession, streamingByKey };
+    return { bySession, streamingByKey, retryingByKey };
   });
 }
 
@@ -1075,8 +1080,7 @@ function onError(
       stampedEffort(deps, event.engine, key),
     );
   }
-  retryingKeys.delete(key);
-  if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
+  clearRetry(key, deps);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
@@ -1123,6 +1127,7 @@ function onError(
         },
       },
       streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+      retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
     };
   });
   // The run is over: drop its routing entry and usage bookkeeping so the
@@ -1352,6 +1357,9 @@ function onRetry(event: EngineEventPayload, key: string, deps: EngineEventDeps) 
     return;
   }
   retryingKeys.add(key);
+  if (!deps.get().retryingByKey[key]) {
+    deps.set((s) => ({ retryingByKey: setRetryingFlag(s.retryingByKey, key, true) }));
+  }
   patchSession(deps.set, key, {
     retry: {
       attempt,
@@ -1366,8 +1374,11 @@ function onRetry(event: EngineEventPayload, key: string, deps: EngineEventDeps) 
  *  event and the chip never lingers over a healthy stream. */
 function clearRetry(key: string, deps: EngineEventDeps) {
   retryingKeys.delete(key);
-  if (!deps.get().bySession[key]?.retry) return;
-  patchSession(deps.set, key, { retry: null });
+  const state = deps.get();
+  if (state.bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
+  if (state.retryingByKey[key]) {
+    deps.set((s) => ({ retryingByKey: setRetryingFlag(s.retryingByKey, key, false) }));
+  }
 }
 
 /** Engine-reported compaction progress (omp rpc-ui `auto_compaction_*`):
@@ -1387,8 +1398,7 @@ function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventD
 }
 
 function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
-  retryingKeys.delete(key);
-  if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
+  clearRetry(key, deps);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const data = event.data as { usage: unknown };
@@ -1468,6 +1478,7 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
         },
       },
       streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+      retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
     };
   });
   // The run is over: drop its routing entry so the map cannot grow forever.

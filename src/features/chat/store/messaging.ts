@@ -20,6 +20,7 @@ import {
   routeRun,
   rememberSettledRun,
   runRouting,
+  setRetryingFlag,
   setStreamingFlag,
   settleLiveRows,
   untrackRun,
@@ -727,9 +728,11 @@ export function createMessagingActions(
               streaming: false,
               interrupted: true,
               turnStartedAt: null,
+              retry: null,
             },
           },
           streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+          retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
         };
       });
       // Registry is keyed by native session id once known; before that the

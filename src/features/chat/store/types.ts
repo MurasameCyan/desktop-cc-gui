@@ -59,6 +59,9 @@ export interface ChatStore {
    * tab strip and sidebar select this instead of scanning bySession on every
    * store write (streaming deltas would otherwise re-render them per frame). */
   streamingByKey: Record<string, true>;
+  /** Flat sessionKey -> retrying flag, written only on retry start/stop.
+   * Keeps the sidebar out of the per-token bySession update path. */
+  retryingByKey: Record<string, true>;
   /** Sessions with activity the user has not opened yet (sidebar green dot),
    * keyed `${engine}/${sessionId}` like the sidebar thread id. In-memory only. */
   unseen: Record<string, boolean>;

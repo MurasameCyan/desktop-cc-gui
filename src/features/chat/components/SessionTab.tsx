@@ -9,6 +9,8 @@ export interface SessionTabItem {
   key: string;
   label: string;
   streaming: boolean;
+  /** Provider backoff on the running turn — keep the dot but stop its pulse. */
+  retrying?: boolean;
   /** Engine (CLI) id, shown as a brand mark before the label. */
   engine?: string;
   /** Icon for non-session tabs (e.g. files); takes precedence over engine. */
@@ -50,16 +52,21 @@ function TabLeadingIcon({
  * solid green for unseen finished activity. */
 function TabStatusDot({
   streaming,
+  retrying,
   unseen,
 }: {
   streaming: boolean;
+  retrying?: boolean;
   unseen?: boolean;
 }) {
   const { t } = useTranslation();
   if (streaming) {
     return (
       <span
-        className="sidebar-thread-status sidebar-thread-status-processing"
+        className={cx(
+          "sidebar-thread-status sidebar-thread-status-processing",
+          retrying && "sidebar-thread-status-retrying",
+        )}
         role="status"
         aria-label={t("chat.sessionRunning")}
         title={t("chat.sessionRunning")}
@@ -150,7 +157,7 @@ export function SessionTab({
         className="flex min-w-0 flex-1 cursor-default items-center gap-1.5"
       >
         <TabLeadingIcon icon={tab.icon} engine={tab.engine} />
-        <TabStatusDot streaming={tab.streaming} unseen={tab.unseen} />
+        <TabStatusDot streaming={tab.streaming} retrying={tab.retrying} unseen={tab.unseen} />
         {tab.dirty && (
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-foreground-icon-primary" />
         )}

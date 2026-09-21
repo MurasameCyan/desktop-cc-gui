@@ -61,6 +61,7 @@ describe("provider retry progress", () => {
       openTabs: [],
       active: null,
       unseen: {},
+      retryingByKey: {},
       bySession: {
         [KEY]: {
           ...EMPTY_SESSION,
@@ -83,6 +84,7 @@ describe("provider retry progress", () => {
     });
     expect(s.error).toBeNull();
     expect(s.streaming).toBe(true);
+    expect(useChatStore.getState().retryingByKey[KEY]).toBe(true);
   });
 
   it("tracks the latest attempt", () => {
@@ -96,6 +98,7 @@ describe("provider retry progress", () => {
     handleEngineEvents([ev("delta", 3, "back on")], deps());
 
     expect(useChatStore.getState().bySession[KEY]!.retry).toBeNull();
+    expect(useChatStore.getState().retryingByKey[KEY]).toBeUndefined();
   });
 
   it("clears on an explicit end (attempt 0) with nothing streamed yet", () => {
@@ -103,12 +106,13 @@ describe("provider retry progress", () => {
     handleEngineEvents([ev("retry", 3, { attempt: 0, max: 0, message: "" })], deps());
 
     expect(useChatStore.getState().bySession[KEY]!.retry).toBeNull();
+    expect(useChatStore.getState().retryingByKey[KEY]).toBeUndefined();
   });
-
   it("does not outlive the turn", () => {
     handleEngineEvents([retry(2, 9)], deps());
     handleEngineEvents([ev("done", 3, { usage: null })], deps());
     expect(useChatStore.getState().bySession[KEY]!.retry).toBeNull();
+    expect(useChatStore.getState().retryingByKey[KEY]).toBeUndefined();
 
     useChatStore.setState((s) => ({
       bySession: { ...s.bySession, [KEY]: { ...s.bySession[KEY]!, streaming: true } },
@@ -119,6 +123,7 @@ describe("provider retry progress", () => {
     const s = useChatStore.getState().bySession[KEY]!;
     expect(s.retry).toBeNull();
     expect(s.error).toBe("gave up after 10 attempts");
+    expect(useChatStore.getState().retryingByKey[KEY]).toBeUndefined();
   });
 
   it("keeps an errored run settled after retry and warn in the same batch", () => {
@@ -141,6 +146,7 @@ describe("provider retry progress", () => {
       turnStartedAt: null,
     });
     expect(state.streamingByKey[KEY]).toBeUndefined();
+    expect(state.retryingByKey[KEY]).toBeUndefined();
   });
 
   it.each(["claude", "codex"])("rescans %s history after retries are exhausted", (engine) => {

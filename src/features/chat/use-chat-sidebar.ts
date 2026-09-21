@@ -20,12 +20,14 @@ import type { ChatPageDialog } from "./ChatPageDialogs";
 export function useChatSidebar({
   sessionById,
   threadStreaming,
+  threadRetrying,
   collapseSidebarOnMobile,
   composerInputRef,
   setDialog,
 }: {
   sessionById: Map<string, SessionMeta>;
   threadStreaming: boolean[];
+  threadRetrying: boolean[];
   collapseSidebarOnMobile: () => void;
   composerInputRef: React.RefObject<ComposerInputHandle | null>;
   setDialog: (dialog: ChatPageDialog) => void;
@@ -78,8 +80,10 @@ export function useChatSidebar({
       return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
     });
     const streamingById = new Map<string, boolean>();
+    const retryingById = new Map<string, boolean>();
     sessions.forEach((s, i) => {
       if (threadStreaming[i]) streamingById.set(`${s.engine}/${s.sessionId}`, true);
+      if (threadRetrying[i]) retryingById.set(`${s.engine}/${s.sessionId}`, true);
     });
     return visibleWorkspaces.map((w, index) => {
       // Sidebar alias: a user-set name replaces the folder name in the
@@ -116,6 +120,7 @@ export function useChatSidebar({
                 time: relativeTime(s.updatedAt),
                 pinned: s.pinned,
                 streaming: streamingById.get(`${s.engine}/${s.sessionId}`) ?? false,
+                retrying: retryingById.get(`${s.engine}/${s.sessionId}`) ?? false,
                 unseen: unseen[`${s.engine}/${s.sessionId}`] ?? false,
               },
             ];
@@ -123,7 +128,7 @@ export function useChatSidebar({
         ],
       };
     });
-  }, [visibleWorkspaces, workspaceAliases, sessions, openTabs, threadLimit, threadStreaming, unseen, i18n.language, uiHooks, t]);
+  }, [visibleWorkspaces, workspaceAliases, sessions, openTabs, threadLimit, threadStreaming, threadRetrying, unseen, i18n.language, uiHooks, t]);
   // 工作区二级分类: bucket repos by their workspace's group assignment.
   // Ungrouped repos come first (no header), then groups in settings order.
   // Empty groups stay in the tree — the sidebar renders them like populated

@@ -464,6 +464,35 @@ export function setStreamingFlag(
   return next;
 }
 
+/** Write one session's retrying flag into the flat map consumed by the
+ * sidebar. Reference-stable when the flag does not actually flip, so retry
+ * progress never makes the sidebar subscribe to per-token session writes. */
+export function setRetryingFlag(
+  rec: Record<string, true>,
+  key: string,
+  on: boolean,
+): Record<string, true> {
+  const has = rec[key] === true;
+  if (has === on) return rec;
+  const next = { ...rec };
+  if (on) next[key] = true;
+  else delete next[key];
+  return next;
+}
+
+/** Carry the retrying flag across a pending-to-native session-key migration. */
+export function moveRetryingFlag(
+  rec: Record<string, true>,
+  fromKey: string,
+  toKey: string,
+): Record<string, true> {
+  if (rec[fromKey] !== true || fromKey === toKey) return rec;
+  const next = { ...rec };
+  delete next[fromKey];
+  next[toKey] = true;
+  return next;
+}
+
 /** Carry the streaming flag across a session-key migration. */
 export function moveStreamingFlag(
   rec: Record<string, true>,
