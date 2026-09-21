@@ -53,8 +53,11 @@ describe("satisfiesSdkRange", () => {
     expect(satisfiesSdkRange("0.2", "0.2.0")).toBe(false);
   });
 
-  it("the shipped SDK_VERSION satisfies the range plugins now declare (>=0.4.0)", () => {
-    expect(satisfiesSdkRange(">=0.4.0", SDK_VERSION)).toBe(true);
+  it("the shipped SDK_VERSION is the exact value plugins now pin (0.3.12)", () => {
+    // The compat line froze at 0.3.12; CCB and Live2D manifests pin that exact
+    // value, so the host must ship it verbatim for the handshake to accept them.
+    expect(satisfiesSdkRange("0.3.12", SDK_VERSION)).toBe(true);
+    expect(SDK_VERSION).toBe("0.3.12");
   });
 
   it("plugin.d.ts header version stamp matches SDK_VERSION", () => {
