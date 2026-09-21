@@ -485,6 +485,7 @@ describe("binding a run that outran the send result", () => {
       models: {},
       efforts: {},
       streamingByKey: { [key]: true },
+      retryingByKey: {},
     };
     const deps = {
       set: (update: (current: typeof state) => Partial<typeof state>) => Object.assign(state, update(state)),
@@ -536,6 +537,7 @@ describe("binding a run that outran the send result", () => {
       models: {},
       efforts: {},
       streamingByKey: { [key]: true },
+      retryingByKey: {},
     };
     const deps = {
       set: (update: (current: typeof state) => Partial<typeof state>) =>
