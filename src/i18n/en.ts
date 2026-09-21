@@ -727,6 +727,16 @@ export const en: Messages = {
     piAuthCustomTitle: "Custom Providers",
     piAuthCustomHint: "Written to {{path}} · relays / custom models",
     piAuthEditConfig: "Edit config",
+    piAuthCustomSearchPlaceholder: "Filter custom providers...",
+    piAuthCustomProviderEditorLabel: "Edit provider {{id}}",
+    piAuthCustomProviderEditorTips:
+      "Only this provider block is replaced; the other providers, comments and order stay unchanged.",
+    piAuthCustomEditNotFound:
+      "Could not locate provider {{id}} in the file. Use the full editor instead.",
+    piAuthCustomEditProviderMissing:
+      "The edited block no longer contains provider {{id}}. Nothing was saved.",
+    piAuthCustomDeleteConfirm:
+      "Delete custom provider {{name}}? This cannot be undone.",
     piAuthCustomParseError:
       "Failed to parse the config — fix it in the editor below",
     piAuthCustomModelCount: "{{count}} models",

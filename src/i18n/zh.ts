@@ -699,6 +699,13 @@ export const zh = {
     piAuthCustomTitle: "自定义供应商",
     piAuthCustomHint: "写入 {{path}} · 中转站 / 自定义模型",
     piAuthEditConfig: "编辑配置",
+    piAuthCustomSearchPlaceholder: "筛选自定义供应商...",
+    piAuthCustomProviderEditorLabel: "编辑供应商「{{id}}」",
+    piAuthCustomProviderEditorTips:
+      "只替换该供应商配置块，其余供应商、注释和顺序保持不变。",
+    piAuthCustomEditNotFound: "无法定位供应商「{{id}}」的配置块，请使用完整编辑器。",
+    piAuthCustomEditProviderMissing: "编辑后的配置不再包含供应商「{{id}}」，未保存。",
+    piAuthCustomDeleteConfirm: "删除自定义供应商「{{name}}」？此操作不可撤销。",
     piAuthCustomParseError: "配置解析失败，可在下方编辑修复",
     piAuthCustomModelCount: "{{count}} 个模型",
     piAuthCustomHasKey: "含 Key",
