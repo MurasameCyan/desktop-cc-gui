@@ -303,6 +303,18 @@ impl TurnCore {
                 let run_id = self.run_id.clone();
                 tokio::task::spawn_blocking(move || registry.kill(&run_id));
             }
+            EngineEvent::Compaction { active, reason } => {
+                // Not terminal: compaction is a mid-turn pause while the CLI
+                // summarizes; the UI swaps its status label until the end
+                // event (or turn settle) clears it.
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "compaction",
+                    serde_json::json!({ "active": active, "reason": reason }),
+                );
+            }
             EngineEvent::Warn(error) => {
                 // Not terminal: no saw_error — EOF settle still decides the
                 // turn's fate if the CLI gives up after this notice.
@@ -371,6 +383,19 @@ impl TurnCore {
                     }),
                 );
             }
+            EngineEvent::AgentSettled => {
+                // 等价一次性模式的 EOF 收尾(见下方 finalize):未恢复的尝试
+                // 错误按 Error 落定,否则正常 Done。Done 分支会关掉 stdin,
+                // rpc 进程随之 drain 退出,EOF 收尾看到 saw_done 自然空转。
+                let event = match state.attempt_error.take() {
+                    Some(error) => EngineEvent::Error(error),
+                    None => EngineEvent::Done {
+                        session_id: None,
+                        usage: None,
+                    },
+                };
+                self.dispatch_event(state, event);
+            }
             EngineEvent::QuestionSettled { request_id } => {
                 if let Some(entry) = self.registry.get(&self.run_id) {
                     if let Ok(mut questions) = entry.questions.lock() {
@@ -423,6 +448,15 @@ impl TurnCore {
                     Value::String(model),
                 );
             }
+            EngineEvent::Effort(effort) => {
+                state.push(
+                    &self.sink,
+                    &self.run_id,
+                    &self.engine_id,
+                    "effort",
+                    Value::String(effort),
+                );
+            }
             EngineEvent::Done { session_id, usage } => {
                 state.saw_done = true;
                 if let Some(id) = session_id {
@@ -450,6 +484,7 @@ pub(crate) struct RunContext {
     /// Session id fixed before spawn (grok `-s`); seeds TurnState.
     pub(crate) preassigned_session_id: Option<String>,
     pub(crate) initial_model: Option<String>,
+    pub(crate) initial_effort: Option<String>,
     pub(crate) child: Arc<TokioMutex<Child>>,
     pub(crate) killed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cleanup_files: Vec<PathBuf>,
@@ -594,6 +629,9 @@ pub(crate) async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     let mut state = TurnState::new(ctx.preassigned_session_id.clone());
     if let Some(model) = ctx.initial_model.clone() {
         ctx.dispatch_event(&mut state, EngineEvent::Model(model));
+    }
+    if let Some(effort) = ctx.initial_effort.clone() {
+        ctx.dispatch_event(&mut state, EngineEvent::Effort(effort));
     }
     // codex reports usage into its own session log instead of the stdout
     // stream (the stream only carries it with `turn.completed`), so a long
@@ -882,7 +920,7 @@ mod staging_tests {
             let ctx = RunContext {
                 core: TurnCore {sink: event_sink::EventSink::new(Arc::new(Noop)), registry: Arc::new(ProcessRegistry::default()), engine_id: "grok".into(), run_id: "test".into()},
                 engine_impl: Box::new(grok::GrokEngine), pid: 0,
-                preassigned_session_id: None, initial_model: None,
+                preassigned_session_id: None, initial_model: None, initial_effort: None,
                 child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
                 stdout_plain_buf: Arc::new(Mutex::new(String::new())),
@@ -936,6 +974,7 @@ mod staging_tests {
             pid: 4242,
             preassigned_session_id: None,
             initial_model: None,
+            initial_effort: None,
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: Vec::new(),

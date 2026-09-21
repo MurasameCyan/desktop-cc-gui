@@ -15,11 +15,13 @@ export interface EngineEventPayload {
     | "error"
     | "warn"
     | "retry"
+    | "compaction"
     | "permission_denied"
     | "question"
     | "question_settled"
     | "done"
-    | "model";
+    | "model"
+    | "effort";
   data: unknown;
   /** Emit-side timestamp (Unix ms), stamped in TurnState::push. Absent from
    *  payloads produced before SDK 0.3.8. */

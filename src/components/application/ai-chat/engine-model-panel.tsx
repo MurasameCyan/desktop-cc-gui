@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Check from "lucide-react/dist/esm/icons/check";
@@ -115,6 +115,7 @@ function ChannelPicker({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const listId = useId();
   if (channels.length === 0) return null;
   const needle = query.trim().toLowerCase();
   // Match the id too: the visible label is the channel's name, but people
@@ -131,6 +132,7 @@ function ChannelPicker({
       <button
         type="button"
         aria-expanded={expanded}
+        aria-controls={listId}
         onClick={() => {
           // Filtered? The arrow clears the filter instead of hiding the list
           // the text is still narrowing.
@@ -147,7 +149,7 @@ function ChannelPicker({
           {t("chat.channelPicker")}
         </span>
         <span className="min-w-0 truncate text-body-medium text-text-primary">
-          {selected?.label ?? channels[0].label}
+          {selected?.label ?? t("chat.channelUnselected")}
         </span>
         <ChevronDownSmall
           className={cx(
@@ -158,6 +160,7 @@ function ChannelPicker({
       </button>
       {expanded && (
         <div
+          id={listId}
           role="radiogroup"
           aria-label={t("chat.channelPicker")}
           className="flex max-h-[200px] w-full flex-col overflow-y-auto"

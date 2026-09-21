@@ -297,6 +297,9 @@ function EngineMenuBody({
 
         {!isMobile && flyoutOption && (
           <EngineFlyout
+            // Remount per engine: the panel's channel filter is local state
+            // and must not leak into the next engine's flyout.
+            key={flyoutOption.id}
             option={flyoutOption}
             models={modelsByEngine[flyoutOption.id] ?? []}
             selectedModelId={models[flyoutOption.id] ?? ""}

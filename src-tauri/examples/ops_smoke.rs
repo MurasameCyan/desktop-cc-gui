@@ -57,9 +57,21 @@ async fn git_smoke() {
     assert_eq!(status.unstaged.len(), 1);
     assert_eq!(status.untracked.len(), 1);
 
-    let diff = git::git_diff(path.clone(), "a.txt".into(), false).unwrap();
+    let diff = git::git_diff(path.clone(), "a.txt".into(), false)
+        .await
+        .unwrap();
     assert!(diff.contains("+world"), "diff shows added line: {diff}");
     println!("diff: ok ({} bytes)", diff.len());
+    // Untracked files must produce a real patch for preview (regression:
+    // worktree diffs used to return empty for them).
+    let diff = git::git_diff(path.clone(), "b.txt".into(), false)
+        .await
+        .unwrap();
+    assert!(
+        diff.contains("+new file"),
+        "untracked diff shows file content: {diff}"
+    );
+    println!("untracked diff: ok ({} bytes)", diff.len());
 
     git::git_stage(path.clone(), vec!["a.txt".into(), "b.txt".into()]).unwrap();
     let status = git::git_status(path.clone()).await.unwrap();

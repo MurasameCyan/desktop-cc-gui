@@ -28,6 +28,7 @@ export const useShortcutsStore = create<ShortcutsState>((set) => ({
         interruptShortcut: settings.interruptShortcut,
         commandPaletteShortcut: settings.commandPaletteShortcut,
         sidebarSearchShortcut: settings.sidebarSearchShortcut,
+        chatSearchShortcut: settings.chatSearchShortcut,
         toggleTerminalShortcut: settings.toggleTerminalShortcut,
         toggleSidebarShortcut: settings.toggleSidebarShortcut,
         toggleSidePanelShortcut: settings.toggleSidePanelShortcut,

@@ -203,6 +203,16 @@ impl Engine for ClaudeEngine {
                 {
                     out.push(EngineEvent::Model(model.to_string()));
                 }
+                if let Some(effort) = value
+                    .get("message")
+                    .and_then(|m| m.get("thinking_effort"))
+                    .or_else(|| value.get("thinking_effort"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(EngineEvent::Effort(effort.to_string()));
+                }
             }
             "user" => {
                 // tool_result blocks carry permission denials as is_error
@@ -708,6 +718,39 @@ fn parse_content_block_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_message_reports_actual_thinking_effort() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "session_id": "s-1",
+            "message": { "model": "claude-opus-4", "thinking_effort": "high" }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "high")),
+            "got {out:?}"
+        );
+
+        // Top-level fallback; blank values are ignored.
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({ "type": "assistant", "thinking_effort": " low " }).to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "low")),
+            "got {out:?}"
+        );
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({ "type": "assistant", "thinking_effort": "  " }).to_string(),
+            &mut out,
+        );
+        assert!(!out.iter().any(|e| matches!(e, EngineEvent::Effort(_))), "got {out:?}");
+    }
 
     #[test]
     fn ask_user_question_control_request_emits_question() {

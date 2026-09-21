@@ -54,15 +54,20 @@ function channelEnv(raw: unknown): Record<string, unknown> {
   return { ...flat, ...nested };
 }
 
-/** Claude's family aliases: the env key that remaps each one, and the CLI
- *  menu's own wording for a remapped row ("Custom Opus model"). Mirrors the
- *  backend's FAMILY_ENV_KEYS (engine/models/claude.rs). */
-export const CLAUDE_FAMILY_ALIASES: Record<string, { envKey: string; label: string }> = {
-  opus: { envKey: "ANTHROPIC_DEFAULT_OPUS_MODEL", label: "Opus" },
-  sonnet: { envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL", label: "Sonnet" },
-  haiku: { envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL", label: "Haiku" },
-  fable: { envKey: "ANTHROPIC_DEFAULT_FABLE_MODEL", label: "Fable" },
-};
+/** Claude family-alias env keys follow one CLI contract — the same shape the
+ *  backend's FAMILY_ENV_KEYS (engine/models/claude.rs) matches:
+ *  ANTHROPIC_DEFAULT_<FAMILY>_MODEL remaps that alias family. Derived from
+ *  the key pattern instead of a mirrored literal table, so a new family
+ *  (ANTHROPIC_DEFAULT_<NEW>_MODEL) is picked up on both sides without a
+ *  frontend edit. */
+const FAMILY_ENV_PATTERN = /^ANTHROPIC_DEFAULT_([A-Z]+)_MODEL$/;
+
+/** The alias id a family env key remaps ("ANTHROPIC_DEFAULT_OPUS_MODEL" →
+ *  "opus"). */
+export function familyAliasOfEnvKey(key: string): string | null {
+  const match = FAMILY_ENV_PATTERN.exec(key);
+  return match ? match[1].toLowerCase() : null;
+}
 
 /** Family-alias remaps a channel defines: family → concrete model id. This
  *  is what a pick of that alias runs while the channel is selected (spawn
@@ -72,9 +77,11 @@ export function providerFamilyModels(engine: string, raw: unknown): Record<strin
   if (engine !== "claude") return {};
   const env = channelEnv(raw);
   const result: Record<string, string> = {};
-  for (const [family, { envKey }] of Object.entries(CLAUDE_FAMILY_ALIASES)) {
-    const value = asString(env[envKey]).trim();
-    if (value) result[family] = value;
+  for (const [key, value] of Object.entries(env)) {
+    const family = familyAliasOfEnvKey(key);
+    if (!family) continue;
+    const id = asString(value).trim();
+    if (id) result[family] = id;
   }
   return result;
 }

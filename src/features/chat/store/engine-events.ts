@@ -563,6 +563,25 @@ function onModel(
   });
 }
 
+function onEffort(
+  event: EngineEventPayload,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  const reported = typeof event.data === "string" ? event.data.trim() : "";
+  if (!reported) return;
+  deps.set((s) => {
+    const cur = s.bySession[key];
+    if (!cur || cur.activeEffort === reported) return {};
+    return {
+      bySession: {
+        ...s.bySession,
+        [key]: { ...cur, activeEffort: reported },
+      },
+    };
+  });
+}
+
 /** Sessions whose run is inside a provider-retry backoff. Kept out of the
  *  store read path on purpose: the delta handlers test this set (O(1)) rather
  *  than reading `bySession` for every streamed token. */
@@ -946,7 +965,7 @@ export function settleOrphanedRuns(
       const cur = bySession[key];
       if (cur?.streaming || cur?.retry) {
         if (bySession === s.bySession) bySession = { ...s.bySession };
-        bySession[key] = { ...cur, streaming: false, turnStartedAt: null, retry: null };
+        bySession[key] = { ...cur, streaming: false, turnStartedAt: null, retry: null, compaction: null };
       }
     }
     return { bySession, streamingByKey };
@@ -1058,6 +1077,7 @@ function onError(
   }
   retryingKeys.delete(key);
   if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
+  if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
@@ -1350,9 +1370,26 @@ function clearRetry(key: string, deps: EngineEventDeps) {
   patchSession(deps.set, key, { retry: null });
 }
 
+/** Engine-reported compaction progress (omp rpc-ui `auto_compaction_*`):
+ *  automatic mid-turn summarization, surfaced as the tail indicator's label
+ *  swap. `active: false` clears only an automatic flag — a manual compact
+ *  turn owns its flag until the turn settles. */
+function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
+  const data = (event.data ?? {}) as { active?: unknown };
+  if (data.active === true) {
+    if (deps.get().bySession[key]?.compaction) return;
+    patchSession(deps.set, key, {
+      compaction: { automatic: true, startedAt: Date.now() },
+    });
+  } else if (deps.get().bySession[key]?.compaction?.automatic) {
+    patchSession(deps.set, key, { compaction: null });
+  }
+}
+
 function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   retryingKeys.delete(key);
   if (deps.get().bySession[key]?.retry) patchSession(deps.set, key, { retry: null });
+  if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const data = event.data as { usage: unknown };
   const buffered = flushInternalFrameDelta(event.runId);
@@ -1644,6 +1681,9 @@ export function handleEngineEvents(
       case "retry":
         onRetry(event, key, deps);
         break;
+      case "compaction":
+        onCompaction(event, key, deps);
+        break;
       case "permission_denied":
         onPermissionDenied(event, key, deps);
         break;
@@ -1658,6 +1698,9 @@ export function handleEngineEvents(
         break;
       case "model":
         onModel(event, key, deps);
+        break;
+      case "effort":
+        onEffort(event, key, deps);
         break;
     }
   }

@@ -197,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   build_linux:
-    name: appimage (x86_64)
+    name: linux (x86_64)
     runs-on: ubuntu-24.04
     environment: release
     needs: preflight
@@ -232,12 +232,22 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Build AppImage
+      # Compile once, unbundled, so a cold Rust build is never killed by the
+      # bundling timeouts below.
+      - name: Build application
         env:
           NODE_OPTIONS: "--max-old-space-size=8192"
+        run: pnpm exec tauri build --no-bundle
+
+      # AppImage and RPM are separate invocations. tauri-bundler restores the
+      # unpatched binary after each package type (tauri-bundler/src/bundle.rs),
+      # so a later run starts from the `..._UNK` token again and patches
+      # cleanly.
+      - name: Bundle AppImage
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm exec tauri build --bundles appimage
+        run: pnpm exec tauri bundle --bundles appimage
 
       # Bundled Wayland client libs crash the AppImage on hosts whose system
       # libwayland differs; prune and repack, then the build-time .sig is
@@ -278,11 +288,38 @@ jobs:
             -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
             "$APPIMAGE"
 
+      # The RPM bundler's in-process rpm-rs compression is known to
+      # occasionally stall on CI (tauri-apps/tauri#11478, #15698) and the
+      # stall never self-resolves, so cap each attempt and retry instead of
+      # letting the job hang for hours.
+      - name: Bundle RPM
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30s 25m \
+              pnpm exec tauri bundle --bundles rpm; then
+              exit 0
+            fi
+            echo "::warning::rpm bundling attempt $attempt failed; retrying"
+          done
+          echo "::error::rpm bundling failed after 3 attempts"
+          exit 1
+
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
         with:
           name: appimage-x86_64
           path: src-tauri/target/release/bundle/appimage/*.AppImage*
+          if-no-files-found: error
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-x86_64
+          path: src-tauri/target/release/bundle/rpm/*.rpm*
           if-no-files-found: error
 
   build_windows:
@@ -362,6 +399,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: appimage-x86_64
+          path: release-artifacts
+
+      - name: Download Linux RPM
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-x86_64
           path: release-artifacts
 
       - name: Download Windows installer
@@ -525,6 +568,8 @@ jobs:
             "release-artifacts/ccgui_x86_64.app.tar.gz.sig" \
             "release-artifacts/*.AppImage" \
             "release-artifacts/*.AppImage.sig" \
+            "release-artifacts/*.rpm" \
+            "release-artifacts/*.rpm.sig" \
             "release-artifacts/*-setup.exe" \
             "release-artifacts/*-setup.exe.sig" \
             "release-artifacts/latest.json"

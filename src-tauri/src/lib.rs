@@ -43,6 +43,7 @@ pub struct AppState {
     pub web: web::WebAccessState,
     pub relay: relay::RelayState,
     pub dsh_host: std::sync::Arc<dsh_host::DshHostState>,
+    pub opencode_server: std::sync::Arc<engine::opencode_server::OpencodeServerState>,
 }
 
 
@@ -111,6 +112,9 @@ pub fn run() {
                 web: web::WebAccessState::default(),
                 relay: relay::RelayState::default(),
                 dsh_host: std::sync::Arc::new(dsh_host::DshHostState::default()),
+                opencode_server: std::sync::Arc::new(
+                    engine::opencode_server::OpencodeServerState::default(),
+                ),
             };
             // Clone what the initial scan needs before state moves into manage.
             let scan_db = Arc::clone(&state.db);
@@ -220,6 +224,7 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.processes.kill_all();
                     state.dsh_host.kill_spawned();
+                    state.opencode_server.kill_spawned();
                     plugin_caps::kill_all_tracked_children();
                     tauri::async_runtime::block_on(terminal::kill_all(&state.terminals));
                 }
@@ -309,6 +314,7 @@ pub fn run() {
             usage::usage_clear,
             history::reader::load_session_page,
             history::reader::load_remote_session_page,
+            history::search::search_messages,
             history::reader::delete_session,
             history::reader::delete_remote_session,
             history::reader::pin_session,
@@ -366,6 +372,7 @@ pub fn run() {
             git::git_diff,
             git::git_stage,
             git::git_unstage,
+            git::git_discard,
             git::git_commit,
             git::git_push,
             git::git_pull,

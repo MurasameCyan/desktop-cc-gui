@@ -777,6 +777,12 @@ export function createMessagingActions(
         ) ?? active;
       if (!targetTab) return;
 
+      // Manual-compaction flag: the tail status strip swaps to the compacting
+      // label for the whole run. Cleared in the finally below.
+      patchSession(set, targetKey, {
+        compaction: { automatic: false, startedAt: Date.now() },
+      });
+
       // Track the compaction turn completion so callers (and UI) can await it.
       let cleanup: (() => void) | undefined;
       const completionPromise = new Promise<void>((resolve) => {
@@ -819,6 +825,7 @@ export function createMessagingActions(
         await sendPrompt(targetTab, "/compact", []);
       } catch (error) {
         cleanup?.();
+        patchSession(set, targetKey, { compaction: null });
         throw error;
       }
 
@@ -839,6 +846,12 @@ export function createMessagingActions(
           )
         : targetKey;
       await get().refreshSessionUsage(finalKey);
+      // The settle paths clear the flag as well; this covers the subscription
+      // timing out while the run keeps streaming in the background — the
+      // indicator then belongs to that turn, not to compaction.
+      if (get().bySession[targetKey]?.compaction?.automatic === false) {
+        patchSession(set, targetKey, { compaction: null });
+      }
     },
 
     refreshSessionUsage: async (key?: string) => {

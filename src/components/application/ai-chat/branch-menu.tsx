@@ -23,7 +23,6 @@ const POPOVER_CLASSES = menuPopoverSurface({ width: "w-[266px]", origin: "origin
 
 export interface BranchMenuItem {
   name: string;
-  isCurrent: boolean;
 }
 
 /** Status-bar trigger + branch popover. `repoName` labels the repository the
@@ -101,14 +100,17 @@ export function BranchMenu({
                 <button
                   key={branch.name}
                   type="button"
-                  aria-pressed={branch.isCurrent}
+                  aria-pressed={branch.name === currentName}
                   onClick={() => {
-                    if (!branch.isCurrent) onSelect?.(branch.name);
+                    // Compare against the displayed current name, not a cached
+                    // isCurrent: the list snapshot lags behind external
+                    // checkouts and would no-op the click.
+                    if (branch.name !== currentName) onSelect?.(branch.name);
                     close();
                   }}
                   className={cx(
                     "flex w-full cursor-pointer items-center gap-2 rounded-2lg p-2 outline-none transition-colors",
-                    branch.isCurrent
+                    branch.name === currentName
                       ? "bg-background-primary-hover"
                       : "hover:bg-background-primary-hover focus-visible:bg-background-primary-hover",
                   )}
@@ -120,7 +122,7 @@ export function BranchMenu({
                   <span className="truncate text-body-medium whitespace-nowrap text-text-primary">
                     {branch.name}
                   </span>
-                  {branch.isCurrent && (
+                  {branch.name === currentName && (
                     <Check
                       className="ml-auto size-4 shrink-0 text-foreground-icon-secondary"
                       aria-hidden

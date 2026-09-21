@@ -31,6 +31,9 @@ impl Engine for DshEngine {
     fn parse_line(&self, _line: &str, _out: &mut Vec<super::EngineEvent>) {}
 
     fn supports_images(&self) -> bool {
-        false
+        // Images go out as `session/prompt` image content parts (base64) —
+        // that IS the dsh image transport; `dsh_images` declares the
+        // input modality on hand-declared llm-pi-ai routes first.
+        true
     }
 }

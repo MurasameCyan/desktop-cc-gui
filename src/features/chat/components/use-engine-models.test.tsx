@@ -3,6 +3,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliConfig, EngineCatalog, EngineInfo, ProviderSection } from "@/lib/ipc";
 import { ipc } from "@/lib/ipc";
+import "@/lib/i18n";
+import i18n from "@/lib/i18n";
 import { useEngineModels, type EngineModelsState } from "./use-engine-models";
 
 vi.mock("@/lib/ipc", () => ({
@@ -142,6 +144,10 @@ describe("useEngineModels channel models", () => {
     const opusLabel = () =>
       latest.modelsByEngine.claude?.find((model) => model.id === "opus")?.label;
     expect(opusLabel()).toBe("one-opus");
+    // The remapped row carries the CLI menu's own subtitle, translated.
+    expect(
+      latest.modelsByEngine.claude?.find((model) => model.id === "opus")?.description,
+    ).toBe(i18n.t("chat.customFamilyModel", { family: "Opus" }));
 
     await show(null, undefined, { claude: "c2" });
     expect(opusLabel()).toBe("two-opus");

@@ -4,7 +4,6 @@ import type { ModelOption } from "@/components/application/ai-chat/cli-menu";
 import type { ChannelOption } from "@/components/application/ai-chat/engine-model-panel";
 import { ipc, type CliConfig, type EngineCatalog, type EngineInfo } from "@/lib/ipc";
 import {
-  CLAUDE_FAMILY_ALIASES,
   CLI_CONFIG_CHANGED_EVENT,
   isPseudoProvider,
   providerEntries,
@@ -200,7 +199,11 @@ export function useEngineModels(
           id: m,
           label: mapped ?? (entry?.name || m),
           description: mapped
-            ? `Custom ${CLAUDE_FAMILY_ALIASES[m]?.label ?? m} model`
+            ? // The CLI menu's own row shape ("Custom Opus model"): family is
+              // the alias id, capitalized the way the CLI displays it.
+              t("chat.customFamilyModel", {
+                family: m.charAt(0).toUpperCase() + m.slice(1),
+              })
             : entry?.description ?? undefined,
           // Channel/override ids keep the "provider/model" shape, so the
           // prefix stands in when the catalog doesn't name the provider.
@@ -209,7 +212,7 @@ export function useEngineModels(
       });
     }
     return result;
-  }, [engines, cliConfig, catalogs, wsKey, models, customModels, providers]);
+  }, [engines, cliConfig, catalogs, wsKey, models, customModels, providers, t]);
   // Selectable ids WITHOUT the current-override append: what the channel,
   // the backend catalog, and the custom model list can actually serve.
   const knownIdsByEngine = useMemo(() => {

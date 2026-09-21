@@ -45,6 +45,7 @@ interface GitStore {
   // re-thrown so callers can surface them inline.
   stage: (workspacePath: string, files: string[]) => Promise<void>;
   unstage: (workspacePath: string, files: string[]) => Promise<void>;
+  discard: (workspacePath: string, files: string[]) => Promise<void>;
   commit: (workspacePath: string, message: string) => Promise<string>;
   push: (workspacePath: string) => Promise<void>;
   pull: (workspacePath: string) => Promise<void>;
@@ -160,6 +161,8 @@ export const useGitStore = create<GitStore>((set, get) => {
       runMutation(workspacePath, () => ipc.gitStage(workspacePath, files)) as Promise<void>,
     unstage: (workspacePath, files) =>
       runMutation(workspacePath, () => ipc.gitUnstage(workspacePath, files)) as Promise<void>,
+    discard: (workspacePath, files) =>
+      runMutation(workspacePath, () => ipc.gitDiscard(workspacePath, files)) as Promise<void>,
     commit: (workspacePath, message) =>
       runMutation(workspacePath, () => ipc.gitCommit(workspacePath, message)) as Promise<string>,
     push: (workspacePath) =>

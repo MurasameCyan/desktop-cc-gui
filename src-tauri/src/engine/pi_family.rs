@@ -29,17 +29,172 @@ fn attach_context_window(mut usage: Value) -> Value {
     usage
 }
 
-/// pi and omp are the same CLI protocol (omp is a fork of pi): identical
-/// spawn args and NDJSON event stream, different binary + home dir.
+/// pi and omp are the same CLI protocol (omp is a fork of pi), but they
+/// diverge at spawn: pi runs one-shot `--print --mode json`, while omp runs
+/// `--mode rpc-ui` — the only headless mode where the CLI registers its `ask`
+/// tool (hasUI gate) and bridges the question dialogs as `extension_ui_request`
+/// frames we can answer over stdin.
 pub struct PiFamilyEngine {
     pub id: &'static str,
     pub home_dir_name: &'static str, // ".pi" | ".omp"
+    /// omp rpc-ui v2 大帧的重组缓冲:chunkId → 分片。pi 的 json 模式用不到。
+    rpc_chunks: std::sync::Mutex<std::collections::HashMap<String, RpcChunkAcc>>,
+}
+
+/// v2 `rpc_chunk` 分片序列的重组中间态。
+struct RpcChunkAcc {
+    parts: Vec<Option<String>>,
+    received: usize,
+}
+
+/// omp `confirm` 对话框映射成两选卡片时的「确认」选项 label;应答帧的
+/// confirmed 判定与 emit 侧共用这一常量,两边不许各自拼字符串。
+pub(crate) const CONFIRM_YES_LABEL: &str = "确认";
+
+/// pi 没有内置提问工具(omp 的 ask 是 fork 自加的):这个桥扩展就是 pi 会话
+/// 的 ask_user 工具,逐题调 ctx.ui.select/input —— rpc 模式下它们成为
+/// extension_ui_request 帧,由本应用渲染成问题卡并应答。选项语义对齐 omp
+/// 的 ask 降级链:单选一帧 select;多选是「选到 Done 为止」的循环;Other
+/// 哨兵转 input 收自由文本。运行时零导入(jiti 不需要解析任何依赖),
+/// parameters 直接给 JSON Schema(TypeBox schema 本就是 JSON Schema)。
+const PI_ASK_BRIDGE: &str = r#"// CC GUI ask bridge — pi sessions get their ask_user tool from this
+// extension. One select/input dialog per question (pi's wire format has no
+// multi-select), mirroring omp's degraded ask chain so the host app renders
+// both engines with the same card.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const OTHER_OPTION = "Other (type your own)";
+const DONE_OPTION = "✓ Done selecting";
+
+interface AskOption {
+	label: string;
+	description?: string;
+}
+interface AskQuestion {
+	id: string;
+	question: string;
+	header?: string;
+	multi?: boolean;
+	options: AskOption[];
+}
+
+const DISMISSED = "The user dismissed the question; continue without it and say what you assumed.";
+
+export default function ccguiAskBridge(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "ask_user",
+		label: "Ask user",
+		description:
+			"Ask the user one or more questions and wait for the answers. Use it when a decision, " +
+			"preference or missing detail changes what you would do; never for facts you can look up. " +
+			"Each question takes 2-4 mutually exclusive options (first = recommended when one is " +
+			"clearly best); the user can always pick Other to type a custom answer.",
+		promptSnippet: "ask the user questions with selectable options",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			required: ["questions"],
+			properties: {
+				questions: {
+					type: "array",
+					minItems: 1,
+					items: {
+						type: "object",
+						additionalProperties: false,
+						required: ["id", "question", "options"],
+						properties: {
+							id: { type: "string", description: "Stable question id, echoed in the answer." },
+							question: { type: "string" },
+							header: { type: "string", description: "Short chip label." },
+							multi: { type: "boolean", description: "Allow selecting several options." },
+							options: {
+								type: "array",
+								minItems: 2,
+								items: {
+									type: "object",
+									additionalProperties: false,
+									required: ["label"],
+									properties: {
+										label: { type: "string" },
+										description: { type: "string" },
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		} as never,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!ctx.hasUI) {
+				return {
+					content: [{ type: "text", text: "Error: ask_user needs an interactive session (rpc mode provides one)." }],
+				};
+			}
+			const lines: string[] = [];
+			for (const q of params.questions as AskQuestion[]) {
+				const labels = q.options.map((o) => o.label);
+				if (q.multi === true) {
+					const selected: string[] = [];
+					let custom: string | undefined;
+					for (;;) {
+						const remaining = labels.filter((l) => !selected.includes(l));
+						const title = selected.length > 0 ? `${q.question} (${selected.length} selected)` : q.question;
+						const choice = await ctx.ui.select(title, [...remaining, DONE_OPTION, OTHER_OPTION]);
+						if (choice === undefined) {
+							return { content: [{ type: "text", text: DISMISSED }], details: { cancelled: true } };
+						}
+						if (choice === DONE_OPTION) break;
+						if (choice === OTHER_OPTION) {
+							custom = (await ctx.ui.input(q.question, "Type your answer")) ?? undefined;
+							break;
+						}
+						selected.push(choice);
+					}
+					lines.push(`${q.id}: ${custom !== undefined ? `custom: ${custom}` : selected.join(", ") || "(none)"}`);
+				} else {
+					const choice = await ctx.ui.select(q.question, [...labels, OTHER_OPTION]);
+					if (choice === undefined) {
+						return { content: [{ type: "text", text: DISMISSED }], details: { cancelled: true } };
+					}
+					if (choice === OTHER_OPTION) {
+						const custom = await ctx.ui.input(q.question, "Type your answer");
+						lines.push(`${q.id}: ${custom ?? "(no answer)"}`);
+					} else {
+						lines.push(`${q.id}: ${choice}`);
+					}
+				}
+			}
+			return {
+				content: [{ type: "text", text: `User answers:\n${lines.join("\n")}` }],
+				details: { answers: lines },
+			};
+		},
+	});
+}
+"#;
+
+/// 把桥扩展写到 app_home(内容比对,变了才重写),返回 `-e` 要用的路径。
+fn ensure_pi_ask_bridge() -> Result<String, String> {
+    let dir = crate::paths::app_home().join("pi-extensions");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create pi extension dir {}: {e}", dir.display()))?;
+    let path = dir.join("ccgui-ask-bridge.ts");
+    let stale = std::fs::read_to_string(&path)
+        .map(|current| current != PI_ASK_BRIDGE)
+        .unwrap_or(true);
+    if stale {
+        std::fs::write(&path, PI_ASK_BRIDGE)
+            .map_err(|e| format!("write pi ask bridge {}: {e}", path.display()))?;
+    }
+    Ok(path.to_string_lossy().into_owned())
 }
 
 pub fn pi() -> PiFamilyEngine {
     PiFamilyEngine {
         id: "pi",
         home_dir_name: ".pi",
+        rpc_chunks: std::sync::Mutex::new(std::collections::HashMap::new()),
     }
 }
 
@@ -47,6 +202,7 @@ pub fn omp() -> PiFamilyEngine {
     PiFamilyEngine {
         id: "omp",
         home_dir_name: ".omp",
+        rpc_chunks: std::sync::Mutex::new(std::collections::HashMap::new()),
     }
 }
 
@@ -80,9 +236,24 @@ impl Engine for PiFamilyEngine {
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = command_for_binary(bin);
-        cmd.arg("--print");
-        cmd.arg("--mode");
-        cmd.arg("json");
+        // pi 与 omp 都走 rpc:提问对话框以 extension_ui_request 帧到达、应答
+        // 写回 stdin。omp 用 rpc-ui(hasUI 打开 CLI 内置 ask);pi 用 rpc 加
+        // 自带的 ask 桥扩展(pi 没有内置提问工具)。
+        let rpc_ui = self.id == "omp";
+        let rpc_mode = rpc_ui || self.id == "pi";
+        if rpc_ui {
+            cmd.arg("--mode");
+            cmd.arg("rpc-ui");
+        } else if rpc_mode {
+            cmd.arg("--mode");
+            cmd.arg("rpc");
+            cmd.arg("--extension");
+            cmd.arg(ensure_pi_ask_bridge()?);
+        } else {
+            cmd.arg("--print");
+            cmd.arg("--mode");
+            cmd.arg("json");
+        }
         if let Some(model) = req.model.as_deref() {
             cmd.arg("--model");
             cmd.arg(model);
@@ -131,10 +302,13 @@ impl Engine for PiFamilyEngine {
         }
         if let Some(session_id) = req.session_id.as_deref() {
             if !session_id.starts_with('-') {
-                // pi supports `--session-id <id>`; omp dropped it, resume goes
-                // through `-r/--resume` (accepts an ID prefix).
+                // rpc 模式的 resume:omp 用 `--resume`(接受 id 前缀),pi 用
+                // `--session <id>`(--session-id 在 pi 是「给新会话指派
+                // id」,不是恢复)。pi 的 json 一次性模式才走 --session-id。
                 if self.id == "omp" {
                     cmd.arg("--resume");
+                } else if rpc_mode {
+                    cmd.arg("--session");
                 } else {
                     cmd.arg("--session-id");
                 }
@@ -144,11 +318,56 @@ impl Engine for PiFamilyEngine {
         // Image attachments as `@<abs path>` file references ahead of the
         // prompt. data: URLs can't be file-referenced; the frontend's paste
         // flow already materializes blobs to files, so anything left is
-        // skipped here rather than breaking argv.
-        for raw in &req.images {
-            if let Some(absolute) = images::absolutize_image_path(raw, &req.workspace) {
-                cmd.arg(format!("@{}", absolute.display()));
+        // skipped here rather than breaking argv. rpc 模式拒绝 @file 参数,
+        // omp 的图片改走 prompt 命令的 base64 字段(见下)。
+        if !rpc_mode {
+            for raw in &req.images {
+                if let Some(absolute) = images::absolutize_image_path(raw, &req.workspace) {
+                    cmd.arg(format!("@{}", absolute.display()));
+                }
             }
+        }
+        if rpc_mode {
+            // rpc 模式的 prompt 是 stdin 上的 NDJSON 命令(位置参数不派发)。
+            // 命令按序执行:get_state 拿 sessionId(json 模式的 session 头帧
+            // 在 rpc 没有等价物)→ 下发任务;omp 额外先协商 v2 分片。早写无
+            // 害:输入循环在 session 就绪后才启动,管道会缓冲这些行。
+            let mut prompt = serde_json::json!({
+                "id": "ccgui-prompt",
+                "type": "prompt",
+                "message": req.prompt,
+            });
+            if !req.images.is_empty() {
+                let mut payloads = Vec::new();
+                for raw in &req.images {
+                    let (mime, data) = images::load_image(raw, &req.workspace)?;
+                    payloads.push(serde_json::json!({
+                        "type": "image",
+                        "data": data,
+                        "mimeType": mime,
+                    }));
+                }
+                prompt["images"] = Value::Array(payloads);
+            }
+            // v2 分片协商是 omp 的 fork 自加;pi 只有 v1(超大帧截断降级,
+            // 不影响会话)。json 模式的 session 头帧在 rpc 没有等价物,
+            // get_state 响应带回 sessionId。
+            let mut lines = Vec::new();
+            if rpc_ui {
+                lines.push(serde_json::json!({"id": "ccgui-negotiate", "type": "negotiate_protocol", "protocolVersion": 2}).to_string());
+            }
+            lines.push(serde_json::json!({"id": "ccgui-state", "type": "get_state"}).to_string());
+            lines.push(prompt.to_string());
+            let payload = lines.join("\n");
+            return Ok(BuiltCommand {
+                command: cmd,
+                stdin_payload: Some(format!("{payload}\n")),
+                // 提问应答(extension_ui_response)在同一根 stdin 上回写;
+                // Done 事件落定时 reader 会关闭它,rpc 进程随之 drain 退出。
+                keep_stdin_open: true,
+                cleanup_files: Vec::new(),
+                preassigned_session_id: None,
+            });
         }
         // Prompt travels through stdin, never argv: on Windows the pi shim is a
         // `.cmd` batch file spawned via `cmd /c`, and cmd.exe cuts a multiline
@@ -166,8 +385,99 @@ impl Engine for PiFamilyEngine {
     }
 
     fn parse_line(&self, line: &str, out: &mut Vec<EngineEvent>) {
+        // v2 分片重组:完整帧递归走正常解析,分片中途不产生事件。廉价前置
+        // 判断避免给每一行付出锁的代价。
+        if line.contains("\"rpc_chunk\"") {
+            if let Some(frame) = self.reassemble_chunk(line) {
+                parse_pi_family_line(&frame, out);
+            }
+            return;
+        }
         parse_pi_family_line(line, out);
     }
+}
+
+impl PiFamilyEngine {
+    /// 重组一条 v2 `rpc_chunk` 序列;收齐时返回完整帧文本。乱序/重复分片
+    /// 都接受;count 自相矛盾的序列整条丢弃。
+    fn reassemble_chunk(&self, line: &str) -> Option<String> {
+        use base64::Engine as _;
+        let value: Value = serde_json::from_str(line).ok()?;
+        if value.get("type").and_then(Value::as_str) != Some("rpc_chunk") {
+            return None;
+        }
+        let chunk_id = value.get("chunkId").and_then(Value::as_str)?.to_string();
+        let index = value.get("index").and_then(Value::as_u64)? as usize;
+        let count = value.get("count").and_then(Value::as_u64)? as usize;
+        let data = value.get("data").and_then(Value::as_str)?.to_string();
+        if count == 0 || index >= count {
+            return None;
+        }
+        let mut chunks = self.rpc_chunks.lock().ok()?;
+        let acc = chunks.entry(chunk_id.clone()).or_insert_with(|| RpcChunkAcc {
+            parts: vec![None; count],
+            received: 0,
+        });
+        if acc.parts.len() != count {
+            chunks.remove(&chunk_id);
+            return None;
+        }
+        if acc.parts.get(index).is_some_and(Option::is_none) {
+            acc.parts[index] = Some(data);
+            acc.received += 1;
+        }
+        if acc.received < count {
+            return None;
+        }
+        let acc = chunks.remove(&chunk_id)?;
+        let mut bytes = Vec::new();
+        for part in acc.parts {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(part?.as_bytes())
+                .ok()?;
+            bytes.extend_from_slice(&decoded);
+        }
+        String::from_utf8(bytes).ok()
+    }
+}
+
+/// 构造 omp rpc-ui 的提问应答帧。answers 是 UI 的 map(渲染题文 → 选中
+/// label 或自由文本);omp 的降级链一次一题,取唯一的值。None = 用户忽略
+/// (cancelled,CLI 侧按用户取消继续)。
+pub(crate) fn extension_ui_answer_frame(method: &str, request_id: &str, answers: Option<&Value>) -> Value {
+    let answer = answers
+        .and_then(Value::as_object)
+        .and_then(|map| map.values().next());
+    let Some(answer) = answer else {
+        return serde_json::json!({
+            "type": "extension_ui_response",
+            "id": request_id,
+            "cancelled": true,
+        });
+    };
+    // select/input/editor 的应答都是单个字符串;数组只可能来自 UI 的
+    // 多选卡片(omp 的 select 帧是单选),兜底拼接。
+    let text = match answer {
+        Value::String(s) => s.clone(),
+        Value::Array(labels) => labels
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    };
+    if method == "confirm" {
+        return serde_json::json!({
+            "type": "extension_ui_response",
+            "id": request_id,
+            "confirmed": text == CONFIRM_YES_LABEL,
+        });
+    }
+    serde_json::json!({
+        "type": "extension_ui_response",
+        "id": request_id,
+        "value": text,
+    })
 }
 
 /// Shared NDJSON parser for pi and omp (`--mode json`).
@@ -214,6 +524,12 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             | "agent_end"
             | "auto_retry_start"
             | "auto_retry_end"
+            | "auto_compaction_start"
+            | "auto_compaction_end"
+            | "agent_settled"
+            | "response"
+            | "extension_ui_request"
+            | "rpc_frame_error"
     ) {
         return;
     }
@@ -224,6 +540,46 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
         "session" => {
             push_session_id(&value, "id", out);
         }
+        // omp rpc-ui 的命令响应:get_state 带回 sessionId(json 模式的
+        // session 头帧在 rpc 模式没有等价物);prompt 下发失败是致命的,其余
+        // 命令失败仅告警。negotiate_protocol 失败 = 服务端只讲 v1,大帧可能
+        // 截断降级,但会话本身不受影响。
+        "response" => {
+            let command = value.get("command").and_then(Value::as_str).unwrap_or("");
+            let success = value.get("success").and_then(Value::as_bool).unwrap_or(false);
+            if success {
+                if command == "get_state" {
+                    if let Some(id) = value
+                        .pointer("/data/sessionId")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                    {
+                        out.push(EngineEvent::SessionId(id.to_string()));
+                    }
+                }
+            } else {
+                let error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("未知错误");
+                match command {
+                    "prompt" => {
+                        out.push(EngineEvent::Error(format!("omp 任务下发失败:{error}")))
+                    }
+                    "negotiate_protocol" => {}
+                    _ => out.push(EngineEvent::Warn(format!("omp 命令 {command} 失败:{error}"))),
+                }
+            }
+        }
+        // v1 超大帧被截断或服务端分帧失败:内容有损,但至少让用户知道。
+        "rpc_frame_error" => {
+            out.push(EngineEvent::Warn(
+                "omp 协议帧错误,部分输出可能被截断".to_string(),
+            ));
+        }
+        "extension_ui_request" => parse_ui_request(&value, out),
+        // pi 的完全落定(omp 不发这个帧,真发了也被单调落定守卫丢弃)。
+        "agent_settled" => out.push(EngineEvent::AgentSettled),
         "tool_execution_start" => {
             let name = value
                 .get("toolName")
@@ -259,6 +615,16 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             {
                 out.push(EngineEvent::Model(model.to_string()));
             }
+            if let Some(effort) = value
+                .get("message")
+                .and_then(|m| m.get("thinking_effort"))
+                .or_else(|| value.get("thinking_effort"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push(EngineEvent::Effort(effort.to_string()));
+            }
             if let Some(usage) = value
                 .get("message")
                 .and_then(|m| m.get("usage"))
@@ -271,6 +637,26 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             if let Some(error) = nested_error_text(&value, &["message"]) {
                 out.push(EngineEvent::Warn(error));
             }
+        }
+        "auto_compaction_start" => {
+            // Forwarded by rpc-ui (omp) only — pi's rpc whitelist carries
+            // just the end event, which harmlessly clears a never-shown
+            // indicator.
+            out.push(EngineEvent::Compaction {
+                active: true,
+                reason: value
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            });
+        }
+        "auto_compaction_end" => {
+            out.push(EngineEvent::Compaction {
+                active: false,
+                reason: None,
+            });
         }
         "auto_retry_start" => {
             // The CLI is backing off before re-issuing the request (provider
@@ -385,9 +771,124 @@ fn nested_error_text(value: &Value, prefix: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// omp rpc-ui 的提问/输入对话框桥。AskTool 在没有 askDialog 帧的 rpc-ui 下
+/// 退化为逐题 select/editor 链(多选是 CLI 侧的多轮 select 循环),所以线
+/// 上只有单选与自由文本;每个需应答的 method 映射为一张问题卡,应答帧由
+/// `extension_ui_answer_frame` 构造。cancel 是撤销通知(无需应答,关掉卡片即可);
+/// notify/setStatus/setWidget 等 fire-and-forget method 不在此出现。
+fn parse_ui_request(value: &Value, out: &mut Vec<EngineEvent>) {
+    let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+    if method == "cancel" {
+        if let Some(target) = value.get("targetId").and_then(Value::as_str) {
+            out.push(EngineEvent::QuestionSettled {
+                request_id: target.to_string(),
+            });
+        }
+        return;
+    }
+    let id = value.get("id").and_then(Value::as_str).unwrap_or("");
+    if id.is_empty() {
+        return;
+    }
+    let title = value
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let (question, options) = match method {
+        "select" => {
+            let labels = value
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            // optionDetails 与 options 位置对齐,只携带 description。
+            let details = value.get("optionDetails").and_then(Value::as_array);
+            let options: Vec<Value> = labels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, label)| {
+                    let label = label.as_str()?;
+                    let description = details
+                        .and_then(|d| d.get(index))
+                        .and_then(|d| d.get("description"))
+                        .and_then(Value::as_str);
+                    Some(match description {
+                        Some(d) => serde_json::json!({ "label": label, "description": d }),
+                        None => serde_json::json!({ "label": label }),
+                    })
+                })
+                .collect();
+            if options.is_empty() {
+                return;
+            }
+            (title, options)
+        }
+        "confirm" => {
+            let message = value.get("message").and_then(Value::as_str).unwrap_or("");
+            let question = if message.is_empty() {
+                title
+            } else {
+                format!("{title}\n\n{message}")
+            };
+            (
+                question,
+                vec![
+                    serde_json::json!({ "label": CONFIRM_YES_LABEL }),
+                    serde_json::json!({ "label": "取消" }),
+                ],
+            )
+        }
+        // input/editor 是自由文本:卡片的自由输入框承担,无选项。
+        "input" | "editor" => (title, Vec::new()),
+        _ => return,
+    };
+    out.push(EngineEvent::Question {
+        request_id: id.to_string(),
+        tool_use_id: None,
+        input: serde_json::json!({
+            "questions": [{
+                "question": question,
+                "header": "提问",
+                "multiSelect": false,
+                "options": options,
+            }],
+            // 应答侧只需要 method 来决定响应帧形状;id 就是 request_id。
+            "extui": { "method": method },
+        }),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_end_reports_actual_thinking_effort() {
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({
+                "type": "message_end",
+                "message": { "model": "kimi-k2", "thinking_effort": "xhigh" }
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "xhigh")),
+            "got {out:?}"
+        );
+
+        // Blank or absent effort emits nothing.
+        for line in [
+            serde_json::json!({ "type": "message_end", "thinking_effort": " " }).to_string(),
+            serde_json::json!({ "type": "message_end", "message": {} }).to_string(),
+        ] {
+            let mut out = Vec::new();
+            parse_pi_family_line(&line, &mut out);
+            assert!(!out.iter().any(|e| matches!(e, EngineEvent::Effort(_))), "got {out:?}");
+        }
+    }
 
     #[test]
     fn stream_updates_skip_snapshots_and_preserve_delta_order() {
@@ -414,6 +915,231 @@ mod tests {
             parse_pi_family_line(line, &mut out);
         }
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn rpc_get_state_response_announces_the_session_id() {
+        let line = serde_json::json!({
+            "id": "ccgui-state",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": { "sessionId": "01JABC", "isStreaming": false },
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        assert!(
+            matches!(&out[..], [EngineEvent::SessionId(id)] if id == "01JABC"),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn rpc_prompt_failure_is_terminal_and_other_commands_warn() {
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({
+                "id": "ccgui-prompt", "type": "response", "command": "prompt",
+                "success": false, "error": "rate limited",
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(matches!(&out[..], [EngineEvent::Error(_)]), "got {out:?}");
+
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({
+                "id": "x", "type": "response", "command": "compact",
+                "success": false, "error": "busy",
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(matches!(&out[..], [EngineEvent::Warn(_)]), "got {out:?}");
+
+        // negotiate_protocol 失败 = v1 降级,不告警不致命。
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({
+                "id": "ccgui-negotiate", "type": "response", "command": "negotiate_protocol",
+                "success": false, "error": "unsupported",
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn auto_compaction_events_map_to_compaction_progress() {
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({
+                "type": "auto_compaction_start", "reason": "threshold", "action": "compact",
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            matches!(&out[..], [EngineEvent::Compaction { active: true, reason }] if reason.as_deref() == Some("threshold")),
+            "got {out:?}"
+        );
+
+        let mut out = Vec::new();
+        parse_pi_family_line(
+            &serde_json::json!({ "type": "auto_compaction_end" }).to_string(),
+            &mut out,
+        );
+        assert!(
+            matches!(&out[..], [EngineEvent::Compaction { active: false, .. }]),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn select_request_becomes_a_question_card() {
+        let line = serde_json::json!({
+            "type": "extension_ui_request",
+            "id": "0192ab3cd4ef0123",
+            "method": "select",
+            "title": "部署到哪?",
+            "options": ["staging (Recommended)", "prod", "Other (type your own)"],
+            "optionDetails": [{ "description": "预发" }, {}, {}],
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[..] {
+            [EngineEvent::Question {
+                request_id, input, ..
+            }] => {
+                assert_eq!(request_id, "0192ab3cd4ef0123");
+                assert_eq!(input["questions"][0]["question"], "部署到哪?");
+                assert_eq!(input["questions"][0]["options"][0]["label"], "staging (Recommended)");
+                assert_eq!(input["questions"][0]["options"][0]["description"], "预发");
+                assert_eq!(input["extui"]["method"], "select");
+            }
+            other => panic!("expected question event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_and_editor_requests_are_free_text_cards() {
+        for method in ["input", "editor"] {
+            let line = serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "req-free",
+                "method": method,
+                "title": "随便说点啥",
+            })
+            .to_string();
+            let mut out = Vec::new();
+            parse_pi_family_line(&line, &mut out);
+            match &out[..] {
+                [EngineEvent::Question { input, .. }] => {
+                    assert_eq!(input["questions"][0]["options"], serde_json::json!([]));
+                    assert_eq!(input["extui"]["method"], method);
+                }
+                other => panic!("expected question event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn confirm_request_maps_to_a_two_option_card_and_cancel_settles() {
+        let line = serde_json::json!({
+            "type": "extension_ui_request",
+            "id": "req-confirm",
+            "method": "confirm",
+            "title": "继续吗",
+            "message": "这会删除文件",
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[..] {
+            [EngineEvent::Question { input, .. }] => {
+                assert_eq!(input["questions"][0]["question"], "继续吗\n\n这会删除文件");
+                assert_eq!(input["questions"][0]["options"][0]["label"], CONFIRM_YES_LABEL);
+                assert_eq!(input["extui"]["method"], "confirm");
+            }
+            other => panic!("expected question event, got {other:?}"),
+        }
+
+        let cancel = serde_json::json!({
+            "type": "extension_ui_request",
+            "method": "cancel",
+            "targetId": "req-confirm",
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&cancel, &mut out);
+        assert!(
+            matches!(&out[..], [EngineEvent::QuestionSettled { request_id }] if request_id == "req-confirm"),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn extension_ui_answer_frame_builds_the_response_per_method() {
+        // select:input 的 value 原样回传(CLI 按 label 恒等匹配,自由文本兜底
+        // 成选中项)。
+        let frame = extension_ui_answer_frame("select", "r1", Some(&serde_json::json!({ "部署到哪?": "prod" })));
+        assert_eq!(frame["type"], "extension_ui_response");
+        assert_eq!(frame["id"], "r1");
+        assert_eq!(frame["value"], "prod");
+
+        // 自由文本同样走 value。
+        let frame = extension_ui_answer_frame("editor", "r2", Some(&serde_json::json!({ "q": "随便" })));
+        assert_eq!(frame["value"], "随便");
+
+        // confirm 映射 confirmed 布尔。
+        let yes = extension_ui_answer_frame("confirm", "r3", Some(&serde_json::json!({ "q": CONFIRM_YES_LABEL })));
+        assert_eq!(yes["confirmed"], true);
+        let no = extension_ui_answer_frame("confirm", "r3", Some(&serde_json::json!({ "q": "取消" })));
+        assert_eq!(no["confirmed"], false);
+
+        // 忽略 = cancelled。
+        let cancel = extension_ui_answer_frame("select", "r4", None);
+        assert_eq!(cancel["cancelled"], true);
+    }
+
+    #[test]
+    fn rpc_chunks_reassemble_into_a_full_frame() {
+        use base64::Engine as _;
+        let engine = omp();
+        let frame = serde_json::json!({
+            "type": "extension_ui_request",
+            "id": "chunked-1",
+            "method": "input",
+            "title": "大帧标题",
+        })
+        .to_string();
+        let bytes = frame.as_bytes();
+        let half = bytes.len() / 2;
+        for (index, slice) in [(0, &bytes[..half]), (1, &bytes[half..])].into_iter() {
+            let chunk = serde_json::json!({
+                "type": "rpc_chunk",
+                "chunkId": "c1",
+                "index": index,
+                "count": 2,
+                "byteLength": slice.len(),
+                "data": base64::engine::general_purpose::STANDARD.encode(slice),
+            })
+            .to_string();
+            let mut out = Vec::new();
+            engine.parse_line(&chunk, &mut out);
+            if index == 0 {
+                assert!(out.is_empty(), "mid-sequence events: {out:?}");
+            } else {
+                assert!(
+                    matches!(&out[..], [EngineEvent::Question { request_id, .. }] if request_id == "chunked-1"),
+                    "got {out:?}"
+                );
+            }
+        }
     }
 
     #[test]

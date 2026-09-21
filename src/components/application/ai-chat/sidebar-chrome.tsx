@@ -139,8 +139,9 @@ function SearchPaletteButton({ onOpen }: { onOpen?: () => void }) {
 }
 
 /** Window drag strip reaching the overlay titlebar: macOS traffic lights
- *  float over its left edge, action icons pin right. Windows 仿 mac 模式在
- *  这里放自绘三色按钮。 */
+ *  float over its left edge, action icons pin right. "deep" lets the container wrappers
+ *  (icon gaps) drag/zoom too; the icon buttons stay clickable. Windows
+ *  仿 mac 模式在这里放自绘三色按钮。 */
 export function SidebarDragStrip({
   onClose,
   onOpenSearch,
@@ -152,7 +153,7 @@ export function SidebarDragStrip({
   const titlebarStyle = useTitlebarStyle();
   return (
     <div
-      data-tauri-drag-region
+      data-tauri-drag-region="deep"
       className="flex h-10 w-full shrink-0 items-center justify-between gap-1 border-b border-separator-border px-3"
     >
       <div className="flex min-w-0 items-center">

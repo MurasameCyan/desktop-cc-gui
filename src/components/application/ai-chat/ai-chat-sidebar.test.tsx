@@ -9,6 +9,9 @@ import type * as ReactI18next from "react-i18next";
 vi.mock("react-i18next", async (importOriginal) => ({
   ...(await importOriginal<typeof ReactI18next>()),
   useTranslation: () => ({ t: (key: string) => key }),
+  // The palette's content-hit rows format relative time via the real i18n
+  // instance (time.ts), which initializes i18next with this plugin.
+  initReactI18next: { type: "3rdParty", init: () => {} },
 }));
 
 const KEY = "ccgui-next.sidebarExpandedWorkspaces:v1";

@@ -4,6 +4,7 @@ pub(crate) mod discovery;
 mod extract;
 pub mod reader;
 pub mod scanner;
+pub mod search;
 
 pub use extract::{
     internal_frame_hash, parse_session_file, recordable_internal_frame_hash, scan_summary_file,

@@ -32,6 +32,18 @@ async function existsInParent(candidate: string): Promise<boolean> {
     return false;
   }
 }
+/** Existence probe shared with the terminal's path-link provider. Callers
+ *  MUST only pass paths under a registered workspace — outside paths reject
+ *  through withGrantRetry, which would surface a grant dialog. */
+export function pathExistsOnDisk(candidate: string): Promise<boolean> {
+  return existsInParent(candidate);
+}
+
+/** True when `path` equals or sits below `root` (canonical compare — the
+ *  terminal link provider gates its existence probes on this). */
+export function isPathUnder(path: string, root: string): boolean {
+  return isUnder(path, root);
+}
 
 /**
  * `release/app.exe` must not silently bind to `dist/app.exe`: only an

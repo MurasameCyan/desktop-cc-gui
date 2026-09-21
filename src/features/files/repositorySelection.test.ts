@@ -1,8 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { isWithinDirectory, resolveSelectedRepository } from "./repositorySelection";
+import {
+  isWithinDirectory,
+  resolveSelectedRepository,
+  resolveWorkspaceRepository,
+} from "./repositorySelection";
+
 
 describe("resolveSelectedRepository", () => {
   const WS = "S:/AIWorker/ReverseProject";
+  it("returns the nested repository for a selected file and falls back to the workspace", () => {
+    const nested = `${WS}/Project/CialloAssist`;
+    expect(
+      resolveWorkspaceRepository({
+        selectedPath: `${nested}/src/main.rs`,
+        repositoryRoots: [nested],
+        workspacePath: WS,
+      }),
+    ).toBe(nested);
+    expect(
+      resolveWorkspaceRepository({
+        selectedPath: `${WS}/notes`,
+        repositoryRoots: [WS],
+        workspacePath: WS,
+      }),
+    ).toBe(WS);
+  });
 
   it("finds the nested repo when a repo directory itself is selected", () => {
     expect(

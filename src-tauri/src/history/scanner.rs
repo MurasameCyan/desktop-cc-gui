@@ -621,6 +621,12 @@ pub fn spawn_scan(db: Arc<crate::db::Db>, sink: Arc<crate::event_sink::EventSink
         if let Err(error) = scan_with_sink(&db, &sink) {
             eprintln!("[scanner] scan failed: {error}");
         }
+        // Full-text index follows every scan — including tier-1
+        // short-circuits: right after an upgrade the scan may see no file
+        // change while the (empty) index still has every session pending.
+        // The pass re-parses only sessions whose stat moved, so on a steady
+        // machine this is one cheap COUNT query.
+        super::search::spawn_index(db);
     });
 }
 

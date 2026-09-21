@@ -147,6 +147,34 @@ describe("a session's provider and model memory", () => {
     expect(useChatStore.getState().bySession[KEY]!.activeModel).toBe("glm-5.3");
   });
 
+  it("tracks the effort the run actually reports, ignoring blanks and repeats", () => {
+    useChatStore.setState({
+      bySession: { [KEY]: { ...EMPTY_SESSION, activeEffort: "medium" } },
+    });
+
+    // The engine's own report wins over the launch-time value.
+    handleEngineEvents(
+      [{ runId: "run-2", sessionId: SID, engine: "omp", seq: 1, kind: "effort", data: "high" }],
+      deps(),
+    );
+    expect(useChatStore.getState().bySession[KEY]!.activeEffort).toBe("high");
+
+    // A repeat of the same level is a no-op: the store object is untouched.
+    const before = useChatStore.getState().bySession;
+    handleEngineEvents(
+      [{ runId: "run-2", sessionId: SID, engine: "omp", seq: 2, kind: "effort", data: "high" }],
+      deps(),
+    );
+    expect(useChatStore.getState().bySession).toBe(before);
+
+    // Blank payloads never clear the known level.
+    handleEngineEvents(
+      [{ runId: "run-2", sessionId: SID, engine: "omp", seq: 3, kind: "effort", data: "  " }],
+      deps(),
+    );
+    expect(useChatStore.getState().bySession[KEY]!.activeEffort).toBe("high");
+  });
+
   it("adopts the reasoning level this session ran when it is opened", async () => {
     useChatStore.setState({ sessions: [meta(SENT, "xhigh")] });
 

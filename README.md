@@ -38,8 +38,39 @@ Every engine below is wired in through a **dedicated protocol adapter** in the R
   <a href="https://docs.qoder.com/en/cli/using-cli"><kbd><img src="https://www.google.com/s2/favicons?domain=qoder.com&sz=64" alt="Qoder logo" width="16" valign="middle" /> Qoder</kbd></a>
 </p>
 
----
+### Feature compatibility matrix
 
+Legend: ✅ Supported · ⚠️ Partial · ❌ Not yet supported · 🔁 Not supported by the CLI, but ccgui has a GUI equivalent · ➖ N/A
+
+| Feature | <kbd><img src="https://www.google.com/s2/favicons?domain=anthropic.com&sz=64" width="16" valign="middle" /> Claude Code</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" width="16" valign="middle" /> Codex CLI</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=moonshot.cn&sz=64" width="16" valign="middle" /> Kimi CLI</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=x.ai&sz=64" width="16" valign="middle" /> Grok CLI</kbd> | <kbd><img src="https://pi.dev/favicon.svg" width="16" valign="middle" /> Pi CLI</kbd> | <kbd><img src="https://omp.sh/favicon.svg" width="16" valign="middle" /> OMP CLI</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=deepseek.com&sz=64" width="16" valign="middle" /> DSH</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=antigravity.google&sz=64" width="16" valign="middle" /> Antigravity</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" width="16" valign="middle" /> OpenCode</kbd> | <kbd><img src="https://www.google.com/s2/favicons?domain=qoder.com&sz=64" width="16" valign="middle" /> Qoder (Global/CN)</kbd> |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Streaming output (per-token) | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Session history & resume | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Interrupt (Stop) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Message queue | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Image attachments | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Permission modes | auto·manual·plan·bypass | auto·manual·bypass | auto·plan·bypass | bypass only | auto only | auto·plan·bypass | auto only | auto·plan·bypass | auto·plan | bypass only |
+| Model picker | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reasoning effort | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | ⚠️ | ❌ | ✅ |
+| Token usage & context window | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ |
+| Todo list rendering | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Sub-agent display (dispatch panel) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
+| Team mode (multi-agent orchestration) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `/` slash commands & skills (picker) | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ❌ | ⚠️ | ⚠️ |
+| `@` file mentions | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Provider/channel switching | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| CC Switch import | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Fast mode (service tier) | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Session rename | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Native command `/new` (new session) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Native command `/clear` (clear context) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Native command `/compact` (compact context) | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
+| Native command `ask` (question cards) | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
+| Native command `/mcp` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Native command `/plugins` | ➖ | ➖ | ➖ | ➖ | ❌ | ✅ | ➖ | ➖ | ➖ | ➖ |
+| Native command `/goal` (persistent goal) | ➖ | ➖ | ➖ | ➖ | ➖ | ❌ | ➖ | ➖ | ➖ | ➖ |
+
+---
 ## What can ccgui do?
 
 ### One client, ten AI engines
@@ -90,7 +121,9 @@ Grab the installer for your platform from the [Releases page](https://github.com
 | --- | --- |
 | macOS (Apple Silicon, signed) | `aarch64.dmg` |
 | Windows | `.exe` (NSIS) |
-| Linux | `.AppImage` |
+| Linux | `.AppImage`, `.rpm` |
+
+The `.rpm` is zstd-compressed and requires rpm ≥ 4.14 (Fedora 28+, RHEL 8+); on older rpm-based systems use the AppImage instead.
 
 After installing, open Settings, configure a provider channel for the CLI you want (or sign in), add a project folder, and start chatting.
 
@@ -99,6 +132,7 @@ After installing, open Settings, configure a provider channel for the CLI you wa
 1. Install the DSH CLI on your machine and configure its models and API keys in DSH itself — not as a separate vendor preset inside ccgui.
 2. In Settings → DeepSeek Harness, ccgui can adopt a running local `dsh web` host or auto-start one.
 3. Select **DeepSeek Harness** in the composer engine picker. Chat runs through DSH's headless profile; models and credentials stay in DSH.
+4. Image attachments (paste, pick, or drop) are supported. For custom providers added in DSH (`llm-pi-ai` routes), ccgui declares image input on the route before sending — no manual DSH settings edit needed; official adapters report their own capabilities.
 
 ---
 

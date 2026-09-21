@@ -7,8 +7,11 @@ mod codex_usage;
 #[cfg(windows)]
 pub(crate) mod job;
 pub mod dsh;
+mod dsh_images;
 mod dsh_session;
 pub mod grok;
+pub(crate) mod opencode_server;
+mod opencode_session;
 pub mod images;
 pub mod kimi;
 pub mod models;
@@ -105,6 +108,7 @@ fn effective_prompt(prompt: &str, contributions: Vec<PromptContribution>) -> Str
     effective
 }
 
+#[derive(Clone)]
 pub struct SendRequest {
     pub session_id: Option<String>,
     pub workspace: PathBuf,
@@ -751,6 +755,7 @@ async fn send_reserved(
     } else {
         launch.req.model.clone()
     };
+    let initial_effort = launch.req.effort.clone().filter(|e| !e.trim().is_empty());
     let ctx = RunContext {
         core: TurnCore {
             sink: Arc::clone(&state.sink),
@@ -762,6 +767,7 @@ async fn send_reserved(
         pid,
         preassigned_session_id: launch.built.preassigned_session_id.clone(),
         initial_model,
+        initial_effort,
         child,
         killed,
         cleanup_files,
@@ -825,6 +831,14 @@ async fn send_host_stream(
             killed,
             pid,
         )),
+        "opencode" => tokio::spawn(opencode_session::run_server_turn(
+            core,
+            launch.req,
+            launch.bin,
+            state.opencode_server.clone(),
+            killed,
+            pid,
+        )),
         "qoder" | "qoder-cn" => tokio::spawn(qoder_session::run_acp_turn(
             core, launch.req, launch.bin, killed, pid,
         )),
@@ -849,11 +863,18 @@ pub async fn interrupt_session(
         .await
         .map_err(|e| e.to_string())
 }
-/// Answer a pending AskUserQuestion (claude control protocol). `answers` maps
-/// each question's text to the chosen option label — an array of labels for
-/// multiSelect questions. `None` means the user skipped: the CLI records
-/// "did not answer" and the model continues without a choice. Accepts either
-/// the run id or the conversation session id, like `interrupt_session`.
+/// Answer a pending question card. Three transports share this command:
+/// - claude (control protocol): the answers merge into the parked tool input
+///   and ride stdin as a `control_response`.
+/// - omp (rpc-ui): the parked value carries the dialog method; the answer is
+///   an `extension_ui_response` frame on the CLI's stdin.
+/// - dsh (host session): the parked value is an answer context (origin +
+///   clientId + eventId + original request); the answer is an HTTP
+///   `$events/result` outcome.
+/// `answers` maps each question's text to the chosen option label — an array
+/// of labels for multiSelect questions. `None` means the user
+/// skipped/dismissed. Accepts either the run id or the conversation session
+/// id, like `interrupt_session`.
 #[tauri::command]
 pub async fn answer_question(
     state: tauri::State<'_, crate::AppState>,
@@ -874,6 +895,102 @@ pub async fn answer_question(
         .get(&request_id)
         .cloned()
         .ok_or_else(|| "question is no longer pending".to_string())?;
+    // pi/omp rpc sessions park the render input plus the dialog method: the
+    // answer is an extension_ui_response frame on the CLI's stdin.
+    if let Some(extui) = input.get("extui") {
+        let method = extui.get("method").and_then(Value::as_str).unwrap_or("");
+        let frame = pi_family::extension_ui_answer_frame(method, &request_id, answers.as_ref());
+        // A failed write must surface: the frontend keeps the card pending on
+        // Err instead of falsely marking the question answered.
+        state.processes.write_line(&session_id, frame.to_string()).await?;
+        if let Ok(mut questions) = entry.questions.lock() {
+            questions.remove(&request_id);
+        }
+        return Ok(());
+    }
+    // opencode attached sessions park an answer context: the reply is an HTTP
+    // POST to the managed server, not a stdin line.
+    if let Some(opencode) = input.get("opencode") {
+        let origin = opencode
+            .get("origin")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "question answer context is missing the server origin".to_string())?;
+        let directory = opencode
+            .get("directory")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let request_id = opencode
+            .get("requestId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "question answer context is missing the request id".to_string())?;
+        let request = opencode.get("request").cloned().unwrap_or(Value::Null);
+        // 忽略 = reject(工具侧抛 QuestionRejectedError,模型得到「用户拒绝
+        // 回答」并继续);否则 reply,answers 与 questions 同序。
+        let result = match answers.as_ref() {
+            None => {
+                opencode_server::post(
+                    origin,
+                    &format!("/question/{request_id}/reject"),
+                    directory,
+                    None,
+                )
+                .await
+            }
+            Some(answers) => {
+                let answers = opencode_session::reply_answers(&request, answers)
+                    .ok_or_else(|| "question answer context is malformed".to_string())?;
+                opencode_server::post(
+                    origin,
+                    &format!("/question/{request_id}/reply"),
+                    directory,
+                    Some(serde_json::json!({ "answers": answers })),
+                )
+                .await
+            }
+        };
+        // A failed post must surface: the frontend keeps the card pending on
+        // Err instead of falsely marking the question answered.
+        result?;
+        if let Ok(mut questions) = entry.questions.lock() {
+            questions.remove(request_id);
+        }
+        return Ok(());
+    }
+    // dsh host sessions park an answer context instead of a tool input: the
+    // answer is an HTTP outcome, not a stdin line.
+    if let Some(dsh) = input.get("dsh") {
+        let origin = dsh
+            .get("origin")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "question answer context is missing the host origin".to_string())?;
+        let client_id = dsh
+            .get("clientId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "question answer context is missing the events client id".to_string())?;
+        let event_id = dsh
+            .get("eventId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "question answer context is missing the event id".to_string())?;
+        let request = dsh.get("request").cloned().unwrap_or(Value::Null);
+        let outcome = dsh_session::question_outcome(&request, answers.as_ref());
+        // A failed post must surface: the frontend keeps the card pending on
+        // Err instead of falsely marking the question answered.
+        crate::dsh_host::host_call(
+            origin,
+            "$events/result",
+            serde_json::json!({
+                "clientId": client_id,
+                "eventId": event_id,
+                "outcome": outcome,
+            }),
+        )
+        .await?;
+        // Delivered: drop the parked copy so the turn-end drain skips it.
+        if let Ok(mut questions) = entry.questions.lock() {
+            questions.remove(&request_id);
+        }
+        return Ok(());
+    }
     let mut updated = match input {
         Value::Object(map) => map,
         // Defensive: a non-object input cannot merge answers; rebuild the
@@ -976,27 +1093,62 @@ mod permission_tests {
     }
 
     #[test]
-    fn pi_prompt_goes_through_stdin_not_argv() {
-        // Windows resolves the pi install to a `.cmd` shim spawned via `cmd /c`;
-        // cmd.exe cuts a multiline argument at the first newline, so only line 1
-        // ever reached the model. The prompt must ride stdin verbatim, and the
-        // `@<abs path>` image refs must stay in argv.
+    fn pi_prompt_rides_the_rpc_prompt_command() {
+        // pi 也走 rpc 模式(提问桥扩展需要):prompt 是 stdin NDJSON 命令的
+        // message 字段,多行文本不再被 Windows 的 cmd.exe shim 截断。
         let mut request = req(None);
         request.prompt = "first line\nsecond line\n%PATH%".to_string();
-        request.images = vec!["C:/tmp/paste.png".to_string()];
-        let engines: [&dyn Engine; 2] = [&pi_family::pi(), &pi_family::omp()];
-        for engine in engines {
-            let built = engine.build_command(&request, "fake-bin").unwrap();
-            let args: Vec<String> = built
-                .command
-                .as_std()
-                .get_args()
-                .map(|a| a.to_string_lossy().to_string())
-                .collect();
-            assert!(!args.iter().any(|a| a.contains("first line")), "{args:?}");
-            assert!(args.iter().any(|a| a.contains("paste.png")), "{args:?}");
-            assert_eq!(built.stdin_payload.as_deref(), Some(request.prompt.as_str()));
-        }
+        let built = pi_family::pi().build_command(&request, "fake-bin").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--mode", "rpc"]), "{args:?}");
+        // The ask bridge extension rides along via --extension.
+        let at = args.iter().position(|a| a == "--extension").expect("{args:?}");
+        assert!(args[at + 1].ends_with("ccgui-ask-bridge.ts"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("first line")), "{args:?}");
+        let payload = built.stdin_payload.expect("rpc prompt must ride stdin");
+        let mut lines = payload.lines();
+        // pi 只有 v1:没有 negotiate_protocol 前导。
+        let state: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(state["type"], "get_state");
+        let prompt: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        assert_eq!(prompt["message"], request.prompt);
+        assert!(lines.next().is_none(), "unexpected extra command: {payload}");
+        assert!(built.keep_stdin_open);
+    }
+
+    #[test]
+    fn omp_prompt_rides_the_rpc_prompt_command() {
+        // rpc-ui 模式拒绝位置参数与 @file:prompt 是 stdin NDJSON 命令里的
+        // message 字段,图片是命令里的 base64 payload,argv 只带协议 flags。
+        // 图片走 prompt 命令的 base64 字段(load_image 覆盖),这里纯文本即可。
+        let mut request = req(None);
+        request.prompt = "first line\nsecond line".to_string();
+        let built = pi_family::omp().build_command(&request, "fake-bin").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--mode", "rpc-ui"]), "{args:?}");
+        assert!(!args.contains(&"--print".to_string()), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("first line")), "{args:?}");
+        let payload = built.stdin_payload.expect("rpc prompt must ride stdin");
+        let mut lines = payload.lines();
+        assert!(lines.next().unwrap().contains("negotiate_protocol"));
+        assert!(lines.next().unwrap().contains("get_state"));
+        let prompt: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(prompt["type"], "prompt");
+        assert_eq!(prompt["message"], "first line\nsecond line");
+        assert!(lines.next().is_none(), "unexpected extra command: {payload}");
+        // The question answer frames write back over this same stdin.
+        assert!(built.keep_stdin_open);
     }
 
     #[test]
@@ -1327,6 +1479,7 @@ mod retry_lifecycle_tests {
             pid: child.id().unwrap(),
             preassigned_session_id: Some("session".to_string()),
             initial_model: None,
+            initial_effort: None,
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: vec![path],
@@ -1374,6 +1527,7 @@ mod retry_lifecycle_tests {
             pid: child.id().unwrap(),
             preassigned_session_id: None,
             initial_model: None,
+            initial_effort: None,
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: Vec::new(),
@@ -1482,6 +1636,7 @@ mod retry_lifecycle_tests {
             pid,
             preassigned_session_id: Some("session-held".to_string()),
             initial_model: None,
+            initial_effort: None,
             child,
             killed,
             cleanup_files: Vec::new(),

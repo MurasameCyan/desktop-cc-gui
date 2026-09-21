@@ -22,6 +22,14 @@ body,
 body {
   overscroll-behavior: none;
 }
+/* 对话内搜索（⌘F / Ctrl+F）命中底色：Custom Highlight API 注册的 Range
+   用 ::highlight 伪元素上色——不动 DOM，选择/复制行为不变。 */
+::highlight(ccgui-chat-search) {
+  background-color: color-mix(in srgb, #eab308 35%, transparent);
+}
+::highlight(ccgui-chat-search-current) {
+  background-color: color-mix(in srgb, #f97316 55%, transparent);
+}
 /* Horizontal scroll strips (tab bar) without a visible scrollbar. */
 .scrollbar-none {
   scrollbar-width: none;

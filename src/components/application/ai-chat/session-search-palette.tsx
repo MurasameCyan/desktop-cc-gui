@@ -7,9 +7,17 @@ import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import type { AiChatRepo } from "@/components/application/ai-chat/sidebar-types";
 import { cx } from "@/utils/cx";
 import { useBrowserOcclusion } from "@/features/browser/occlusion";
+import { ipc, type MessageSearchHit } from "@/lib/ipc";
+import { relativeTime } from "@/features/chat/time";
 
 /** Hard cap on listed rows: the palette is a jumper, not a browser. */
 const MAX_RESULTS = 50;
+/** Content hits fetched per query — small on purpose, ranked by bm25. */
+const CONTENT_LIMIT = 20;
+/** Debounce before a content query fires (agentsview uses the same 300ms). */
+const CONTENT_DEBOUNCE_MS = 300;
+/** Content search needs at least this many chars; title match runs always. */
+const CONTENT_MIN_CHARS = 2;
 
 interface SessionMatch {
   id: string;
@@ -21,11 +29,11 @@ interface SessionMatch {
 }
 
 /**
- * Session quick-search palette (sidebar strip icon / ⌘L). Title-only:
- * matches session labels (and workspace names, which surface that
- * workspace's sessions) — message-content search is deliberately out of
- * scope. Empty query lists the most recent sessions in sidebar order.
- * Enter/click jumps to the session; Esc or a backdrop press closes.
+ * Session quick-search palette (sidebar strip icon / ⌘L). Two lanes: title
+ * matches are instant and local; message-content hits come from the
+ * backend's FTS5 trigram index (debounced, stale responses dropped by a
+ * request counter). Empty query lists the most recent sessions in sidebar
+ * order. Enter/click jumps to the session; Esc or a backdrop press closes.
  *
  * Dialog mechanics (native <dialog>, backdrop press-to-close, window-level
  * key navigation) mirror the ⌘K command palette.
@@ -46,9 +54,17 @@ export function SessionSearchPalette({
   useBrowserOcclusion(open);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [sort, setSort] = useState<"relevance" | "recency">("relevance");
+  const [contentHits, setContentHits] = useState<MessageSearchHit[]>([]);
+  const [contentPending, setContentPending] = useState(0);
+  // Invalidate in-flight content responses: Tauri invoke cannot be
+  // aborted, so a monotonically increasing request id drops late arrivals
+  // (agentsview's requestVersion — the AbortController equivalent here).
+  const requestSeq = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const trimmedQuery = query.trim();
 
   const matches = useMemo<SessionMatch[]>(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -78,6 +94,38 @@ export function SessionSearchPalette({
     }
     return out;
   }, [repos, query]);
+  // Content lane: debounced backend FTS. Title matches above are free;
+  // this fires at most once per 300ms pause and only for ≥2 chars.
+  useEffect(() => {
+    if (!open || trimmedQuery.length < CONTENT_MIN_CHARS) {
+      setContentHits([]);
+      setContentPending(0);
+      return;
+    }
+    const seq = ++requestSeq.current;
+    const timer = setTimeout(() => {
+      ipc
+        .searchMessages(trimmedQuery, sort, CONTENT_LIMIT, 0)
+        .then((page) => {
+          if (requestSeq.current !== seq) return;
+          setContentHits(page.hits);
+          setContentPending(page.pending);
+        })
+        .catch(() => {
+          if (requestSeq.current !== seq) return;
+          setContentHits([]);
+        });
+    }, CONTENT_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [open, trimmedQuery, sort]);
+
+  // A session matching by title is not repeated as a content hit.
+  const content = useMemo(() => {
+    if (contentHits.length === 0) return contentHits;
+    const titled = new Set(matches.map((m) => m.id));
+    return contentHits.filter((h) => !titled.has(`${h.engine}/${h.sessionId}`));
+  }, [matches, contentHits]);
+  const rowCount = matches.length + content.length;
 
   // Native <dialog>: keep the modal open state in sync with the prop.
   useEffect(() => {
@@ -98,6 +146,15 @@ export function SessionSearchPalette({
   const jump = (match: SessionMatch) => {
     onClose();
     onThreadSelect?.(match.id);
+  };
+  const jumpContent = (hit: MessageSearchHit) => {
+    onClose();
+    onThreadSelect?.(`${hit.engine}/${hit.sessionId}`);
+  };
+
+  const jumpRow = (index: number) => {
+    if (index < matches.length) jump(matches[index]);
+    else jumpContent(content[index - matches.length]);
   };
 
   // Backdrop press-to-close (see CommandPalette for why this is a window
@@ -123,29 +180,31 @@ export function SessionSearchPalette({
         onClose();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
-        setActiveIndex((i) => Math.min(i + 1, matches.length - 1));
+        setActiveIndex((i) => Math.min(i + 1, rowCount - 1));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setActiveIndex((i) => Math.max(i - 1, 0));
       } else if (e.key === "Enter") {
         e.preventDefault();
-        const match = matches[Math.min(activeIndex, Math.max(0, matches.length - 1))];
-        if (match) jump(match);
+        if (rowCount > 0) jumpRow(Math.min(activeIndex, rowCount - 1));
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, matches, activeIndex, onClose]);
+  }, [open, matches, content, activeIndex, onClose]);
 
   // The filtered list can shrink under the cursor; clamp the active row.
-  const active = Math.min(activeIndex, Math.max(0, matches.length - 1));
+  const active = Math.min(activeIndex, Math.max(0, rowCount - 1));
 
   // Keep the keyboard-highlighted row visible while arrowing through a
-  // scrolled list.
+  // scrolled list. Section headers sit between option rows, so address by
+  // role, not child index.
   useEffect(() => {
     if (!open) return;
-    listRef.current?.children[active]?.scrollIntoView?.({ block: "nearest" });
+    listRef.current
+      ?.querySelectorAll("[role='option']")
+      [active]?.scrollIntoView?.({ block: "nearest" });
   }, [open, active]);
 
   return (
@@ -172,9 +231,32 @@ export function SessionSearchPalette({
             aria-label={t("chat.searchSessions")}
             className="h-11 w-full bg-transparent text-body-medium text-text-primary outline-none placeholder:text-text-placeholder"
           />
+          {trimmedQuery.length >= CONTENT_MIN_CHARS && (
+            <div className="flex shrink-0 items-center gap-1">
+              {(["relevance", "recency"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={sort === mode}
+                  onClick={() => {
+                    setSort(mode);
+                    setActiveIndex(0);
+                  }}
+                  className={cx(
+                    "cursor-pointer rounded-2lg px-2 py-1 text-caption-1-medium outline-none transition-colors",
+                    sort === mode
+                      ? "bg-background-secondary-default text-text-primary"
+                      : "text-text-tertiary hover:bg-dropdown-item-hover-background",
+                  )}
+                >
+                  {mode === "relevance" ? t("chat.sortByRelevance") : t("chat.sortByRecency")}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div ref={listRef} role="listbox" className="max-h-[320px] overflow-y-auto p-2">
-          {matches.length === 0 ? (
+          {matches.length === 0 && content.length === 0 ? (
             <div className="px-2 py-6 text-center text-body-medium text-text-secondary">
               {t("chat.noSessions")}
             </div>
@@ -212,6 +294,69 @@ export function SessionSearchPalette({
                 </span>
               </button>
             ))
+          )}
+          {content.length > 0 && (
+            <div
+              aria-hidden
+              className="px-2 pt-2 pb-1 text-caption-1-medium text-text-tertiary"
+            >
+              {t("chat.searchMessageMatches")}
+            </div>
+          )}
+          {content.map((hit, i) => {
+            const index = matches.length + i;
+            return (
+              <button
+                key={`${hit.engine}/${hit.sessionId}`}
+                type="button"
+                role="option"
+                aria-selected={index === active}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => jumpContent(hit)}
+                className={cx(
+                  "flex w-full cursor-pointer flex-col gap-0.5 rounded-2lg px-2 py-1.5 text-left outline-none transition-colors",
+                  index === active && "bg-dropdown-item-hover-background",
+                )}
+              >
+                <span className="flex w-full items-center gap-2">
+                  <EngineIcon
+                    engine={hit.engine}
+                    size={12}
+                    className="size-3 shrink-0 text-foreground-icon-secondary"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
+                    {hit.customTitle || hit.title || hit.sessionId.slice(0, 8)}
+                  </span>
+                  {hit.updatedAt ? (
+                    <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                      {relativeTime(hit.updatedAt)}
+                    </span>
+                  ) : null}
+                  <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                    {hit.workspaceName ?? hit.workspacePath}
+                  </span>
+                </span>
+                <span className="w-full truncate pl-5 text-caption-1-medium text-text-secondary">
+                  {hit.snippet.map((part, j) =>
+                    part.marked ? (
+                      <mark
+                        key={j}
+                        className="rounded-xs bg-background-tertiary-warning px-0.5 text-text-warning-primary"
+                      >
+                        {part.text}
+                      </mark>
+                    ) : (
+                      <span key={j}>{part.text}</span>
+                    ),
+                  )}
+                </span>
+              </button>
+            );
+          })}
+          {contentPending > 0 && trimmedQuery.length >= CONTENT_MIN_CHARS && (
+            <div aria-live="polite" className="px-2 pt-1 pb-1 text-caption-1-medium text-text-tertiary">
+              {t("chat.searchIndexing", { count: contentPending })}
+            </div>
           )}
         </div>
       </div>
