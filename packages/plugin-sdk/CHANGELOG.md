@@ -1,6 +1,10 @@
 # @ccgui/plugin-sdk changelog
 
-## 未发布
+## 未发布（共通兼容线，施工中——最终版本号冻结阶段落定）
+
+本条目把两批来源能力收敛为一份自洽的公共契约：CCB 通用层（截至 0.4.2 的会话/回合/切换 hooks、标准化运行时事件、内部提示贡献与 CAS 文档存储）与 Live2D 通用层（0.4.3 的常驻悬浮层、同源资源路由与目录授权）。两批合并后 `context.ts`、`plugin.d.ts`、`contract-check.ts` 三方逐 key 对齐，权限单一事实源 `spec/permissions.json` 覆盖全部新增 id。来源历史条目见下方各版本；本兼容线的最终版本号在冻结阶段才写入，暂不落值。
+
+来自 Live2D 通用层（0.4.3）：
 
 - 新增 `ctx.ui.registerOverlay` / `ui:overlay`：跨路由非模态视口挂载，空白区域点击穿透，单插件渲染边界与卸载清理。
 - 新增 `ctx.assets`：包内、文档根、显式授权目录及受 `network:` 授权的远程二进制资源 URL；桌面与 Web 共用授权、路径和响应策略，相对资源请求保留授权前缀。
@@ -8,6 +12,12 @@
 - 新增 `TurnHooks.onTurnStarted`，只需 `runtime.events.read`，不授予提示写入能力；与 `afterTurn` 共享同一 `turnId`。
 - 新增 `permission-requested` 运行时事实：只投影引擎结构化工具名和路径，缺失即为 `null`，不携带 message，不保证 CLI 正在等待。
 - 资源上限：本地（包内/文档根/授权目录）单文件 64 MiB，远程代理单次 8 MiB 且限时 30 秒；禁止通过远程/目录资源执行脚本。
+
+来自 CCB 通用层（截至 0.4.2，历史条目见下）：会话/回合/切换 hooks、标准化运行时事件 union、内部提示贡献与内部帧 capture/validate、`BeforeTurnResult.isCurrent`、`switchId`/`turnId` 稳定关联、`ctx.workspace.getMetadata`、CAS `documentStorage`（含 `remove` 的 stale 拒绝）。
+
+契约收敛（本兼容线）：
+
+- `contract-check.ts` 补齐 `ExternalSessionRow` 的双向可赋值断言（此前该公共镜像类型缺守卫）；`PluginAssets` / `AssetDirectoryGrant` / `PermissionRequestedEvent` / `NormalizedRuntimeEvent` 的双向断言与 `PluginContext` 各能力组（含 `assets`、`shell`、`documentStorage`）的 key 对齐均已覆盖。
 
 ## 0.4.2 — 2026-09-17
 

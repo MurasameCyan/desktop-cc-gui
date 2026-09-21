@@ -187,6 +187,8 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 
 ### 6.2 PluginContext
 
+`PluginContext` 只暴露**通用**能力——会话/回合/切换生命周期、标准化运行时事实、内部提示贡献、受控文档存储、同源资源路由、悬浮层与工作区/会话扩展点。它不承载任何特定产品的领域概念（如某类协调器状态机、角色人设、渲染引擎对象或专有会话协议）；这类逻辑应完全由插件在自己的 bundle 内实现，宿主只提供上面这组与产品无关的原语。据此，同一份 SDK 契约可以同时承载能力取向迥异的插件，而互不感知对方引入的概念。
+
 ```ts
 interface PluginContext {
   readonly pluginId: string;
@@ -256,6 +258,8 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 
 `ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
 
+`documentStorage` 是内容寻址（CAS）文本存储：`readText` 返回 `{ content, version }`，`version` 是不透明比较令牌，仅用于回传，不要解析或据其推断顺序。`remove(path, expectedVersion?)` 与写入同样走 CAS——传入上一次读取到的 `version` 即为条件删除，若磁盘上的版本已被其它写入推进（stale），删除以 conflict 被拒绝并保留较新的文档；省略或传 `null` 为无条件删除。据此模式：读到版本 → 基于该版本删除，可保证「只删除我刚读到的那份内容」，避免误删他处并发写入的新版本。
+
 ### 6.3 标准化运行时事件（只读）
 
 `TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`permission-requested`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
@@ -304,7 +308,7 @@ interface PluginAssets {
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`openSettings` 复用 `ui:settings-section` | 低 |
+| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer-status`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`registerComposerSlot` 与 `registerComposerStatusItem` 共享 `ui:composer-status`，`openSettings` 复用 `ui:settings-section` | 低 |
 | `ui:overlay` | 常驻视口悬浮内容；不得遮挡宿主关键操作 | 中 |
 | `assets:bundle` | 读取本插件包内二进制资源和已审核脚本 | 中 |
 | `assets:directory` | 用户选择的每插件只读目录与范围内 reveal | 高（必须明确告知目录范围） |
@@ -472,6 +476,8 @@ App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三�
 
 - `minAppVersion` 决定哪些 App 版本能装。宿主 SDK 按 semver 演进，废弃 API 至少保留一个大版本并提前在索引仓公告。
 - 宿主升级后若插件 `minAppVersion` 不再满足，插件被**自动禁用**并在市场页提示「等待插件更新」——用户数据保留。
+- 插件用 manifest 的 `sdkVersion` range（如 `^0.4`）声明兼容的 SDK 契约区间，宿主加载时握手校验。range 必须是可解析的 semver 约束：只支持 `*`/缺省、精确 `x.y.z`、`^x.y.z`、`~x.y.z`、`>=x.y.z`，其余写法一律视为不满足。**`0.3.x` 这类占位写法不是合法值**——`x` 不是数字段，握手会判定不兼容；文档在能力条目里出现的 `0.3.5 起`、`0.4.2 起` 是能力**引入序标注**，不是可照抄进 manifest 的 range。
+- 共通兼容线目前处于施工版本，最终 SDK 版本号在冻结阶段才落定。请勿把开发期见到的临时版本戳硬写进插件；用 `^`/`~` 声明区间由宿主握手兜底，比钉死某个具体 patch 更稳。
 
 ### 12.3 配置迁移（`configVersion`）
 

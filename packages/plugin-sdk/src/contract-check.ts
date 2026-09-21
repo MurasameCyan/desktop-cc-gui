@@ -13,6 +13,7 @@ import type {
   DocumentStorage,
   DocumentStorageLocationKind,
   DocumentWriteResult,
+  ExternalSessionRow,
   FileChangedEvent,
   InternalMessageCapture,
   InternalMessageEvent,
@@ -83,6 +84,7 @@ export type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
 export type _PluginIdValidator = Assert<Mutual<typeof isValidPluginId, typeof Pub.isValidPluginId>>;
 export type _WorkspaceMetadata = Assert<Mutual<WorkspaceMetadata, Pub.WorkspaceMetadata>>;
 export type _RegisteredWorkspace = Assert<Mutual<RegisteredWorkspace, Pub.RegisteredWorkspace>>;
+export type _ExternalSessionRow = Assert<Mutual<ExternalSessionRow, Pub.ExternalSessionRow>>;
 export type _WorkspaceMenuStatusTone = Assert<Mutual<WorkspaceMenuStatusTone, Pub.WorkspaceMenuStatusTone>>;
 export type _WorkspaceMenuLabel = Assert<Mutual<WorkspaceMenuLabel, Pub.WorkspaceMenuLabel>>;
 export type _WorkspaceMenuLabelValue = Assert<Mutual<WorkspaceMenuLabelValue, Pub.WorkspaceMenuLabelValue>>;
