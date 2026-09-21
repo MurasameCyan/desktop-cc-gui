@@ -1342,6 +1342,7 @@ mod tests {
     fn discard_restores_worktree_from_index_preserving_staged_hunks() {
         let scratch = Scratch::new();
         let repo = Repository::init(&scratch.0).unwrap();
+        repo.config().unwrap().set_bool("core.autocrlf", false).unwrap();
         commit_file(&repo, "a.txt", "base\n");
         // Stage one revision, then dirty the worktree again: discard must drop
         // only the unstaged layer, leaving the staged content in the index.
@@ -1364,6 +1365,7 @@ mod tests {
     fn discard_restores_unstaged_deletion() {
         let scratch = Scratch::new();
         let repo = Repository::init(&scratch.0).unwrap();
+        repo.config().unwrap().set_bool("core.autocrlf", false).unwrap();
         commit_file(&repo, "a.txt", "keep\n");
         std::fs::remove_file(scratch.0.join("a.txt")).unwrap();
 
@@ -1378,6 +1380,7 @@ mod tests {
         // must leave the worktree content untouched.
         let scratch = Scratch::new();
         let repo = Repository::init(&scratch.0).unwrap();
+        repo.config().unwrap().set_bool("core.autocrlf", false).unwrap();
         commit_file(&repo, "base.txt", "base\n");
         std::fs::write(scratch.0.join("new.txt"), "fresh\n").unwrap();
         {
