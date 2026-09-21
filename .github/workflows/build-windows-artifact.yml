@@ -19,13 +19,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: SDK contract typecheck
+        run: pnpm --filter @ccgui/plugin-sdk typecheck
+
+      - name: Frontend tests
+        run: pnpm exec vitest run src
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
