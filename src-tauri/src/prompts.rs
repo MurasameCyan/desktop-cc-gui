@@ -809,17 +809,18 @@ mod tests {
         fs::write(custom_home.join("prompts/c.md"), "custom home body").unwrap();
 
         let workspaces_json = root.join("workspaces.json");
-        fs::write(
-            &workspaces_json,
-            format!(
-                r#"[{{"id":"w1","path":"{}","settings":{{"codexHome":"{}"}}}},
-                   {{"id":"gone","path":"{}"}}]"#,
-                project.display(),
-                custom_home.display(),
-                root.join("missing").display(),
-            ),
-        )
-        .unwrap();
+        // Build with serde_json so Windows paths (C:\Users\…) are escaped;
+        // formatting them raw into a JSON string literal yields invalid
+        // escapes (\U) and fails the parse.
+        let workspaces = serde_json::json!([
+            {
+                "id": "w1",
+                "path": project.display().to_string(),
+                "settings": { "codexHome": custom_home.display().to_string() }
+            },
+            { "id": "gone", "path": root.join("missing").display().to_string() }
+        ]);
+        fs::write(&workspaces_json, serde_json::to_string(&workspaces).unwrap()).unwrap();
 
         let dest_global = root.join("new-global");
         import_legacy_prompts_from(
