@@ -335,6 +335,7 @@ fn todo_footprint(todos: &crate::engine::TodosPayload) -> usize {
         .items
         .iter()
         .map(|i| i.content.len() + i.status.len() + i.id.as_deref().map(str::len).unwrap_or(0) + 32)
+        .sum()
 }
 
 fn message_footprint(m: &Message) -> usize {
