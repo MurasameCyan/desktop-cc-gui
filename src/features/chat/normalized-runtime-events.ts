@@ -104,6 +104,17 @@ export function normalizeEngineEvent(
     };
   }
 
+  if (event.kind === "permission_denied") {
+    const data = asRecord(event.data);
+    if (!data || Array.isArray(event.data)) return null;
+    return {
+      ...base,
+      kind: "permission-requested",
+      tool: typeof data.tool === "string" && data.tool.trim() ? data.tool : null,
+      path: typeof data.path === "string" && data.path.trim() ? data.path : null,
+    };
+  }
+
   if (event.kind === "message") {
     const data = asToolMessage(event.data);
     if (!data) return null;

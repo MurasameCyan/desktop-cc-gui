@@ -55,16 +55,27 @@ declare global {
 }
 
 let installed = false;
+let reportedUnwrappable = false;
 
 /** Wrap the Tauri IPC entry point with the plugin-execution guard. Idempotent;
- *  no-op outside the desktop webview (web bridge has no __TAURI_INTERNALS__). */
+ *  no-op outside the desktop webview (web bridge has no __TAURI_INTERNALS__).
+ *
+ *  The real desktop webview can expose `invoke` as a non-writable own property,
+ *  and the assignment then throws. That throw used to escape into plugin
+ *  bootstrap, surfacing as a failed first activation plus a delayed retry, so
+ *  the wrap is best-effort: report once and keep running without the in-page
+ *  guard (server-side permission checks are unaffected). A failed wrap leaves
+ *  `installed` false so a later attempt can still install the guard, while the
+ *  separate flag keeps the warning one-shot. */
 export function installHardening(): void {
   if (installed) return;
-  installed = true;
   const internals = window.__TAURI_INTERNALS__;
   const original = internals?.invoke;
-  if (!internals || !original) return;
-  internals.invoke = (cmd, args) => {
+  if (!internals || !original) {
+    installed = true;
+    return;
+  }
+  const wrapped = (cmd: string, args?: unknown) => {
     if (pluginDepth > 0 && authorizedInvokeDepth !== pluginDepth) {
       return Promise.reject(
         new Error(
@@ -75,4 +86,14 @@ export function installHardening(): void {
     authorizedInvokeDepth = null;
     return original(cmd, args);
   };
+  try {
+    internals.invoke = wrapped;
+    installed = true;
+  } catch {
+    if (reportedUnwrappable) return;
+    reportedUnwrappable = true;
+    console.warn(
+      "[plugins] direct-IPC guard unavailable: __TAURI_INTERNALS__.invoke is not writable here",
+    );
+  }
 }

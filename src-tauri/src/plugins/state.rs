@@ -45,6 +45,9 @@ pub struct PluginsState {
     pub plugins: HashMap<String, PluginRecord>,
     pub kv_tombstones: HashMap<String, i64>,
     pub document_storage: HashMap<String, DocumentStorageSelection>,
+    /// Per-plugin granted resource directories. Capabilities, not user data:
+    /// uninstall always clears them, independent of `delete_data`.
+    pub asset_directories: HashMap<String, Vec<super::assets::AssetDirectoryGrant>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

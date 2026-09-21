@@ -66,6 +66,7 @@ import {
   confirmPromptContributions,
   dispatchAfterSwitch,
   dispatchSessionCreated,
+  dispatchTurnStarted,
   isInternalMessageCaptureActive,
   runBeforeSwitch,
 } from "@/features/plugins/runtime/hooks";
@@ -302,6 +303,18 @@ export function createMessagingActions(
       patchSession(set, key, { error: agentResolveError });
     }
     try {
+      // Read-only launch observation, after the lifecycle registration so a
+      // fast engine's events cannot precede it, and before the send so the
+      // hook sees the turn start rather than its result. Same turnId as
+      // beforeTurn/afterTurn.
+      dispatchTurnStarted({
+        runId: hookRunId,
+        turnId: hookRunId,
+        engine,
+        sessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      });
       const result = await ipc.sendMessage({
         runId: requestedRunId,
         engine,

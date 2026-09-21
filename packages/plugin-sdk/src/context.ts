@@ -150,6 +150,14 @@ export interface ToolFinishedEvent extends NormalizedRuntimeEventBase {
   status: "completed" | "failed" | "cancelled" | "unknown";
 }
 
+/** The engine reported a denied capability and the host can present an
+ * approval card. This does not assert that the engine is paused. */
+export interface PermissionRequestedEvent extends NormalizedRuntimeEventBase {
+  kind: "permission-requested";
+  tool: string | null;
+  path: string | null;
+}
+
 export interface AssistantCompletedEvent extends NormalizedRuntimeEventBase {
   kind: "assistant-completed";
 }
@@ -173,6 +181,7 @@ export type NormalizedRuntimeEvent =
   | CommandStartedEvent
   | CommandFinishedEvent
   | ToolFinishedEvent
+  | PermissionRequestedEvent
   | AssistantCompletedEvent
   | TurnCancelledEvent
   | TurnFailedEvent
@@ -186,6 +195,9 @@ export interface SessionHooks {
 
 export interface TurnHooks {
   beforeTurn?(event: BeforeTurnEvent): BeforeTurnResult | void | Promise<BeforeTurnResult | void>;
+  /** Read-only launch observation; requires runtime.events.read, not prompt
+   * contribution permission. Correlate start and finish using turnId. */
+  onTurnStarted?(event: BeforeTurnEvent): void | Promise<void>;
   onRuntimeEvent?(event: NormalizedRuntimeEvent): void;
   afterTurn?(event: AfterTurnEvent): void | Promise<void>;
   onInternalMessage?(event: InternalMessageEvent): void | Promise<void>;
@@ -233,6 +245,30 @@ export interface DocumentStorage {
   list(prefix?: string): Promise<string[]>;
 }
 
+export interface AssetDirectoryGrant {
+  grantId: string;
+  /** Canonical host filesystem path, for display and revealPath. */
+  path: string;
+}
+
+export interface PluginAssets {
+  /** Bundled resource URL; requires assets:bundle. */
+  bundleUrl(relativePath: string): string;
+  /** Resource under the current documentStorage root; requires plugin.storage. */
+  documentUrl(relativePath: string): string;
+  /** Proxied HTTP(S) URL; requires an exact network:<host> grant. Relative
+   * resources remain proxied. Embedded URL credentials are not accepted. */
+  remoteUrl(url: string): string;
+  /** Call from a user action, never activation: opens the host directory
+   * chooser. Cancellation rejects. Requires assets:directory. */
+  grantDirectory(): Promise<AssetDirectoryGrant>;
+  listDirectories(): Promise<AssetDirectoryGrant[]>;
+  revokeDirectory(grantId: string): Promise<void>;
+  /** Resource in a directory granted to this plugin; requires assets:directory.
+   * Paths use forward slashes and are relative to the directory root. */
+  directoryUrl(grantId: string, relativePath: string): string;
+}
+
 
 /**
  * PluginContext（plan §5.2）：插件唯一能力门面。宿主 runtime/context.ts
@@ -272,6 +308,12 @@ export interface PluginContext {
   };
   /** Isolated CAS text storage rooted under plugin-data/<plugin-id>. */
   documentStorage: DocumentStorage;
+  assets: PluginAssets;
+  shell: {
+    /** Reveal an existing path inside this plugin's documentStorage root or
+     * an explicitly granted resource directory. No arbitrary open/execute. */
+    revealPath(path: string): Promise<void>;
+  };
   ui: {
     registerSettingsSection(def: {
       /** Optional sub-key; the settings page key becomes
@@ -320,6 +362,13 @@ export interface PluginContext {
      *  renders in the composer's status row (branch/context meter row),
      *  left group after the branch switcher. */
     registerComposerStatusItem(def: {
+      key?: string;
+      component: ComponentType;
+      order?: number;
+    }): Disposer;
+    /** Persistent viewport mount; requires ui:overlay. The plugin controls
+     * placement and opts interactive children into pointer-events: auto. */
+    registerOverlay(def: {
       key?: string;
       component: ComponentType;
       order?: number;

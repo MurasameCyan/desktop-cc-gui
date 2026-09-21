@@ -200,6 +200,8 @@ interface PluginContext {
   };
   workspace: { getMetadata(): Promise<{ id: string; path: string }> };
   documentStorage: DocumentStorage;
+  assets: PluginAssets;
+  shell: { revealPath(path: string): Promise<void> };
 
   ui: {
     registerSettingsSection(d: SettingsSectionDef): Disposer;
@@ -207,6 +209,7 @@ interface PluginContext {
     registerComposerSlot(d: ComposerSlotDef): Disposer;
     registerPanelTab(d: PanelTabDef): Disposer;
     registerStatusBarItem(d: StatusBarItemDef): Disposer;
+    registerOverlay(d: Omit<OverlayDef, "id"> & { key?: string }): Disposer;
     registerCommand(d: CommandDef): Disposer;
     registerSessionMenuItem(d: Omit<SessionMenuItemDef, "id"> & { key?: string }): Disposer;
     openSettings(key?: string): void; // 跳转到本插件设置页（0.3.6 起）
@@ -232,6 +235,8 @@ interface PluginContext {
 
 `turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用，并保证先于该回合的 `afterTurn`，即使终态事件先于启动响应到达；失败的发送不能据此登记为已消费。
 
+新增 `TurnHooks.onTurnStarted(event)`：只需 `runtime.events.read`，不要求 `prompt.contribute.internal`。它在 `beforeTurn` 收集完成、即将发送给引擎时派发；不等待观察者返回的 Promise，异常不会阻断发送。与 `afterTurn` 使用相同 `turnId`。开始后取消、发送拒绝和提前到达的终态均有对应结算。它不是可写提示钩子。
+
 | 事件 topic | 载荷 | 所需权限 |
 |---|---|---|
 | `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起） | `events` |
@@ -253,7 +258,9 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 
 ### 6.3 标准化运行时事件（只读）
 
-`TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
+`TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`permission-requested`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
+
+`permission-requested` 来自引擎结构化 `permission_denied`，只携带 `tool: string | null` 与 `path: string | null`，不携带给用户展示的 message。缺失、空白或非字符串字段为 `null`，非对象载荷不发布事件。它表示宿主可以展示授权卡片，**不保证引擎仍在运行或正在暂停等待**；插件仍须用回合终态收敛状态。
 
 > 想消费这里没有的宿主事实？到索引仓开 issue 提议通用事件，不要绕过 SDK 抓 DOM/store。
 
@@ -263,17 +270,49 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 - 样式优先用 BoardUI 语义 token（`bg-background-*`、`text-text-*` 等），**禁止**写死 hex 颜色——深色模式靠 token 自动翻转。
 - 插件 UI 文本必须走 `ctx.i18n` 注册的资源，至少提供 `en` 与 `zh-CN`。
 
+### 6.5 常驻悬浮层与资源 URL
+
+`ctx.ui.registerOverlay({ key?, component, order? })` 提供视口级非模态挂载点，与设置页、插件页面路由无关。宿主不管理位置、尺寸或拖动；挂载容器 `pointer-events: none`，交互子元素应显式设置 `pointer-events: auto`。返回的 Disposer 和插件卸载都会移除挂载，渲染错误由各自的 `PluginBoundary` 隔离（悬浮层的 fallback 为空，不在视口里留下错误卡片）；注册表为空时宿主不渲染任何容器。普通悬浮内容不应挡住宿主操作；确需浏览器顶层时由插件管理 Popover API，并在卸载时清理。
+
+```ts
+interface AssetDirectoryGrant { grantId: string; path: string }
+interface PluginAssets {
+  bundleUrl(relativePath: string): string;
+  documentUrl(relativePath: string): string;
+  remoteUrl(url: string): string;
+  grantDirectory(): Promise<AssetDirectoryGrant>;
+  listDirectories(): Promise<AssetDirectoryGrant[]>;
+  revokeDirectory(grantId: string): Promise<void>;
+  directoryUrl(grantId: string, relativePath: string): string;
+}
+```
+
+- `bundleUrl`：权限 `assets:bundle`，路径相对于已安装插件目录；包内 JS/wasm 可作为资源读取，不允许从远程或目录授权来源执行脚本。
+- `documentUrl`：权限 `plugin.storage`，始终解析到本插件当前选择的 documentStorage 根。写入仍走原有 CAS 文档接口。
+- `remoteUrl`：只接受无用户名/密码的 HTTP(S) URL；复用精确 `network:<host>[:port或范围]` 授权，子域不会自动获得权限。远程重定向的每个目标也必须已授权。没有运行时动态域名授权。
+- `grantDirectory` / `listDirectories` / `revokeDirectory` / `directoryUrl`：权限 `assets:directory`；选择器只能由明确用户操作触发，不能在插件激活期弹出。取消选择会 reject。每插件最多 16 个目录，重复选同一规范目录复用 grant；授权不会放开宿主的通用文件访问。路径用 `/` 分隔且相对于授权根，不能带绝对路径、`.` 或 `..` 段。
+- `ctx.shell.revealPath(path)`：只在文件管理器中定位真实存在的本插件 documentStorage 路径或已授权目录内路径；分别要求 `plugin.storage` / `assets:directory`。不提供任意文件打开、进程启动或目录外探测能力。
+
+返回的 URL 可用于 `fetch`、图片、音频及描述文件的相对依赖加载；资源内容按字节传递，不经文本或 base64 转换。桌面使用 `pluginasset` 协议，Web 使用带鉴权路径前缀的宿主路由，因此相对资源请求仍携带凭据；这些 URL 是临时能力地址，不应记录到日志或分享给外部站点。
+
+本地来源（包内、documentStorage、已授权目录）单文件上限 64 MiB；远程代理单次上限 8 MiB 且限时 30 秒——两个上限语义不同，大贴图集走本地来源，不要指望远程代理放行同样体积。每次读取都重新检查插件是否安装、启用、未隔离以及对应权限，响应禁止缓存；目录撤权、插件禁用/隔离/卸载后，旧 URL 不能继续读取资源。卸载始终清除目录授权（能力，不是用户数据）；documentStorage 文件和位置选择则沿用 `delete_data` 策略，不会因新增资源能力而自动删除用户保留的数据。
+
+非包内 HTML、JS、SVG、XML、CSS、PDF、wasm 等主动内容按 `application/octet-stream` 返回并带 `nosniff` / sandbox CSP，不可借资源代理扩大脚本执行能力。插件仍运行在宿主同一 JS realm；overlay 与资源门面是可审计能力面，不是新的强制沙箱边界。
+
 ## 7. 权限规范
 
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
 | `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`openSettings` 复用 `ui:settings-section` | 低 |
+| `ui:overlay` | 常驻视口悬浮内容；不得遮挡宿主关键操作 | 中 |
+| `assets:bundle` | 读取本插件包内二进制资源和已审核脚本 | 中 |
+| `assets:directory` | 用户选择的每插件只读目录与范围内 reveal | 高（必须明确告知目录范围） |
 | `theme` | 注入 CSS / 覆盖 token | 低（Tier-0 隐含拥有） |
 | `i18n` | 注册语言资源 | 低 |
 | `events` | 插件事件总线；订阅涉及用户行为数据的宿主事件时须在 description 说明用途 | 按订阅数据评审 |
 | `session.lifecycle.read` | 观察 session 新建、恢复、关闭 | 中 |
-| `runtime.events.read` | 读取标准化运行时事实 | 中 |
+| `runtime.events.read` | 只读回合开始、结算及标准化运行时事实 | 中 |
 | `runtime.switch.observe` | 观察切换前后生命周期；失败不阻断切换 | 中 |
 | `workspace.metadata.read` | 读取稳定 workspace ID 与绝对路径 | 中 |
 | `plugin.storage` | 使用受控文档存储和位置选择 | 中 |

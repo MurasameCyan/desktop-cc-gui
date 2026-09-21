@@ -68,7 +68,7 @@ export const ipcBackend: LoaderBackend = {
     return ipc.pluginWorkspaceMetadata(id, workspacePath);
   },
   workspaceList: (id) => ipc.pluginListWorkspaces(id),
-  pickDirectory: () => pickDirectory("Select plugin document storage directory"),
+  pickDirectory: (title = "Select plugin document storage directory") => pickDirectory(title),
   documentStorageGetLocation: (id) => ipc.pluginDocumentStorageGetLocation(id),
   documentStorageSelectLocation: (id, kind, customPath) =>
     ipc.pluginDocumentStorageSelectLocation(id, kind, customPath),

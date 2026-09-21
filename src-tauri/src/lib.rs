@@ -64,7 +64,7 @@ pub fn run() {
         settings::apply_codex_home(&settings);
     }
 
-    tauri::Builder::default()
+    plugins::asset_protocol::register(tauri::Builder::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -275,6 +275,10 @@ pub fn run() {
             plugins::storage::plugin_document_storage_write_text_atomic,
             plugins::storage::plugin_document_storage_remove,
             plugins::storage::plugin_document_storage_list,
+            plugins::assets::plugin_asset_grant_directory,
+            plugins::assets::plugin_asset_list_directories,
+            plugins::assets::plugin_asset_revoke_directory,
+            plugins::assets::plugin_reveal_path,
             db::workspace_metadata,
             db::plugin_list_workspaces,
             history::reader::record_accepted_internal_frame,

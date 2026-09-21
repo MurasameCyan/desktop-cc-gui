@@ -1,5 +1,14 @@
 # @ccgui/plugin-sdk changelog
 
+## 未发布
+
+- 新增 `ctx.ui.registerOverlay` / `ui:overlay`：跨路由非模态视口挂载，空白区域点击穿透，单插件渲染边界与卸载清理。
+- 新增 `ctx.assets`：包内、文档根、显式授权目录及受 `network:` 授权的远程二进制资源 URL；桌面与 Web 共用授权、路径和响应策略，相对资源请求保留授权前缀。
+- 新增 `assets:bundle`、`assets:directory` 及每插件目录授权管理；卸载清除目录能力，不改变文档保留策略。新增 `ctx.shell.revealPath`，仅可定位本插件已授权范围。
+- 新增 `TurnHooks.onTurnStarted`，只需 `runtime.events.read`，不授予提示写入能力；与 `afterTurn` 共享同一 `turnId`。
+- 新增 `permission-requested` 运行时事实：只投影引擎结构化工具名和路径，缺失即为 `null`，不携带 message，不保证 CLI 正在等待。
+- 资源上限：本地（包内/文档根/授权目录）单文件 64 MiB，远程代理单次 8 MiB 且限时 30 秒；禁止通过远程/目录资源执行脚本。
+
 ## 0.4.2 — 2026-09-17
 
 - `RuntimeSwitchEvent` 新增必填 `switchId`：同一次启动的 `beforeSwitch` 与 `afterSwitch` 共享身份，插件可拒绝停用前或已被后续切换替代的迟到完成。

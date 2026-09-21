@@ -76,7 +76,7 @@ fn version_of(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
+pub(super) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.contains('\\')
         || value.contains("//")
@@ -580,16 +580,26 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
 /// raced by swapping a directory for a junction. A residual race remains for
 /// the final component-to-syscall window; closing it needs handle-relative
 /// opens, which is out of scope for this hardening pass.
-fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
-    if is_reparse_point(root)? {
-        return Err(format!("path crosses a reparse point: {}", root.display()));
-    }
+///
+/// `root` itself is not trusted either: the walk starts at the volume/share
+/// prefix and descends through every ancestor of `root` (the last of which is
+/// `root`), so a junction *above* the root cannot be followed before its
+/// reparse attribute is discovered. Asset grants rely on this: they call
+/// `confine_to_root(path, path)` to reject a path whose own ancestry leaves
+/// the namespace it appears to live in.
+pub(super) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
+    let mut cursor = PathBuf::with_capacity(target.as_os_str().len());
+    for component in root.components() {
+        cursor.push(component);
+        if !matches!(component, Component::Prefix(_)) && is_reparse_point(&cursor)? {
+            return Err(format!("path crosses a reparse point: {}", cursor.display()));
+        }
+    }
     let canonical_root =
         fs::canonicalize(root).map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
-    let mut cursor = root.to_path_buf();
     for component in relative.components() {
         cursor.push(component);
         if is_reparse_point(&cursor)? {
@@ -921,6 +931,28 @@ pub async fn plugin_document_storage_list(
             prefix.as_deref(),
         )
     }).await.map_err(|e| e.to_string())?
+}
+
+/// The document root a plugin's resources resolve against, following the
+/// current location selection. Asset reads need the path without taking the
+/// uninstall document lock, so this is deliberately lock-free: callers
+/// re-resolve it after reading to detect a location switch mid-read.
+pub(super) fn document_root_at(
+    state_path: &Path,
+    id: &str,
+    roots: Option<&StorageRoots>,
+) -> Result<PathBuf, String> {
+    super::manifest::require_valid_id(id)?;
+    let system_roots;
+    let roots = match roots {
+        Some(roots) => roots,
+        None => {
+            system_roots = StorageRoots::system()?;
+            &system_roots
+        }
+    };
+    let (_, base) = selected_base(state_path, roots, id)?;
+    Ok(plugin_root(&base, id))
 }
 
 /// Held by uninstall from its preflight through state persistence. The caller

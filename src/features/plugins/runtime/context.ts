@@ -9,6 +9,7 @@ import {
   execGrantAllows,
   markdownRegistry,
   networkGrantAllows,
+  overlayRegistry,
   pageRegistry,
   panelTabRegistry,
   scopedPluginId,
@@ -20,6 +21,7 @@ import {
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
 import type {
+  AssetDirectoryGrant,
   Disposer,
   MarkdownRendererDef,
   PluginContext,
@@ -36,6 +38,7 @@ import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import { addPluginWorkspace, openPluginSession } from "./workspace-bridge";
 import { registerSessionSource } from "./session-source";
+import { directoryAssetUrl, fileAssetUrl, remoteAssetUrl } from "./asset-url";
 import { runAsPlugin, withAuthorizedHostInvoke } from "./hardening";
 
 /** Storage transport the context talks to; the loader binds the IPC-backed
@@ -66,7 +69,7 @@ export interface PluginContextBackend extends PluginStorageBackend {
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
   workspaceMetadata(id: string): Promise<WorkspaceMetadata>;
   workspaceList(id: string): Promise<RegisteredWorkspace[]>;
-  pickDirectory(): Promise<string | null>;
+  pickDirectory(title?: string): Promise<string | null>;
   documentStorageGetLocation(id: string): Promise<DocumentStorageLocationResponse>;
   documentStorageSelectLocation(
     id: string,
@@ -200,7 +203,7 @@ export function createPluginContext(
         return track(registerSessionHooks(id, hooks));
       },
       registerTurnHooks(hooks) {
-        if (hooks.onRuntimeEvent || hooks.afterTurn) {
+        if (hooks.onTurnStarted || hooks.onRuntimeEvent || hooks.afterTurn) {
           requirePermission("runtime.events.read");
         }
         if (hooks.beforeTurn || hooks.onInternalMessage) {
@@ -266,6 +269,67 @@ export function createPluginContext(
       async list(prefix) {
         requirePermission("plugin.storage");
         return withAuthorizedHostInvoke(() => backend.documentStorageList(id, prefix));
+      },
+    },
+    assets: {
+      bundleUrl(relativePath) {
+        requirePermission("assets:bundle");
+        return fileAssetUrl(id, "bundle", relativePath);
+      },
+      documentUrl(relativePath) {
+        requirePermission("plugin.storage");
+        return fileAssetUrl(id, "doc", relativePath);
+      },
+      remoteUrl(url) {
+        if (typeof url !== "string") throw new Error("asset URL must be an HTTP(S) string");
+        const parsed = new URL(url);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new Error("asset URL must use HTTP or HTTPS");
+        }
+        if (parsed.username || parsed.password) {
+          throw new Error("asset URL credentials are not allowed");
+        }
+        if (!networkGrantAllows(manifest.permissions, parsed.href)) {
+          throw new Error(`[plugins] "${id}" asset request matches no declared network: grant`);
+        }
+        return remoteAssetUrl(id, parsed);
+      },
+      async grantDirectory() {
+        requirePermission("assets:directory");
+        const title = i18n.t("plugins.assetPickTitle");
+        const path = await withAuthorizedHostInvoke(() => backend.pickDirectory(title));
+        if (path === null) throw new Error("asset directory selection cancelled");
+        return withAuthorizedHostInvoke(() => backend.bridgeInvoke(
+          "plugin_asset_grant_directory", { pluginId: id, path },
+        )) as Promise<AssetDirectoryGrant>;
+      },
+      async listDirectories() {
+        requirePermission("assets:directory");
+        return withAuthorizedHostInvoke(() => backend.bridgeInvoke(
+          "plugin_asset_list_directories", { pluginId: id },
+        )) as Promise<AssetDirectoryGrant[]>;
+      },
+      async revokeDirectory(grantId) {
+        requirePermission("assets:directory");
+        if (typeof grantId !== "string") throw new Error("asset grant id must be a string");
+        await withAuthorizedHostInvoke(() => backend.bridgeInvoke(
+          "plugin_asset_revoke_directory", { pluginId: id, grantId },
+        ));
+      },
+      directoryUrl(grantId, relativePath) {
+        requirePermission("assets:directory");
+        return directoryAssetUrl(id, grantId, relativePath);
+      },
+    },
+    shell: {
+      async revealPath(path) {
+        if (!manifest.permissions.includes("plugin.storage") && !manifest.permissions.includes("assets:directory")) {
+          throw new Error(`[plugins] "${id}" revealPath requires plugin.storage or assets:directory`);
+        }
+        if (typeof path !== "string") throw new Error("reveal path must be a string");
+        await withAuthorizedHostInvoke(() => backend.bridgeInvoke(
+          "plugin_reveal_path", { pluginId: id, path },
+        ));
       },
     },
     ui: {
@@ -340,6 +404,14 @@ export function createPluginContext(
             order: def.order,
           }),
         );
+      },
+      registerOverlay(def) {
+        requirePermission("ui:overlay");
+        return track(overlayRegistry.register({
+          id: scopedPluginId(id, def.key),
+          component: def.component,
+          order: def.order,
+        }));
       },
       registerCommand(def) {
         requirePermission("ui:command");

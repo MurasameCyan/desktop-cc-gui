@@ -229,6 +229,13 @@ export interface ToolFinishedEvent extends NormalizedRuntimeEventBase {
   toolName: string;
   status: "completed" | "failed" | "cancelled" | "unknown";
 }
+/** A denied engine capability surfaced for host approval, not a promise
+ * that the engine is paused. No user-facing message text is exposed. */
+export interface PermissionRequestedEvent extends NormalizedRuntimeEventBase {
+  kind: "permission-requested";
+  tool: string | null;
+  path: string | null;
+}
 export interface AssistantCompletedEvent extends NormalizedRuntimeEventBase {
   kind: "assistant-completed";
 }
@@ -249,6 +256,7 @@ export type NormalizedRuntimeEvent =
   | CommandStartedEvent
   | CommandFinishedEvent
   | ToolFinishedEvent
+  | PermissionRequestedEvent
   | AssistantCompletedEvent
   | TurnCancelledEvent
   | TurnFailedEvent
@@ -261,6 +269,9 @@ export interface SessionHooks {
 }
 export interface TurnHooks {
   beforeTurn?(event: BeforeTurnEvent): BeforeTurnResult | void | Promise<BeforeTurnResult | void>;
+  /** Read-only launch observation; requires runtime.events.read, not prompt
+   * contribution permission. Correlate start and finish using turnId. */
+  onTurnStarted?(event: BeforeTurnEvent): void | Promise<void>;
   onRuntimeEvent?(event: NormalizedRuntimeEvent): void;
   afterTurn?(event: AfterTurnEvent): void | Promise<void>;
   onInternalMessage?(event: InternalMessageEvent): void | Promise<void>;
@@ -294,6 +305,26 @@ export interface DocumentStorage {
   list(prefix?: string): Promise<string[]>;
 }
 
+export interface AssetDirectoryGrant {
+  grantId: string;
+  /** Canonical host filesystem path. */
+  path: string;
+}
+export interface PluginAssets {
+  /** assets:bundle permission. */
+  bundleUrl(relativePath: string): string;
+  /** plugin.storage permission; follows the selected document root. */
+  documentUrl(relativePath: string): string;
+  /** HTTP(S) proxy, exact network:<host> grant; no embedded credentials. */
+  remoteUrl(url: string): string;
+  /** User action only; assets:directory permission. Cancellation rejects. */
+  grantDirectory(): Promise<AssetDirectoryGrant>;
+  listDirectories(): Promise<AssetDirectoryGrant[]>;
+  revokeDirectory(grantId: string): Promise<void>;
+  /** Forward-slash relative path inside a directory granted to this plugin. */
+  directoryUrl(grantId: string, relativePath: string): string;
+}
+
 
 /** 插件唯一能力门面（plan §5.2）。每个 register* 需要对应权限声明，
  *  返回 Disposer；未显式回收也由宿主 disposer 栈兜底。 */
@@ -314,7 +345,19 @@ export interface PluginContext {
   };
   /** 插件隔离的 CAS 文本文档存储（权限 plugin.storage）。 */
   documentStorage: DocumentStorage;
+  assets: PluginAssets;
+  shell: {
+    /** Reveal only within this plugin's document root or granted directories. */
+    revealPath(path: string): Promise<void>;
+  };
   ui: {
+    /** Persistent viewport mount (ui:overlay); interactive children must
+     * explicitly opt into pointer-events: auto. Removed on plugin unload. */
+    registerOverlay(def: {
+      key?: string;
+      component: ComponentLike;
+      order?: number;
+    }): Disposer;
     /** 设置页 section（权限 ui:settings-section）。 */
     registerSettingsSection(def: {
       key?: string;
