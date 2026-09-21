@@ -534,9 +534,9 @@ describe("compactContext and refreshSessionUsage", () => {
     const compactPromise = useChatStore.getState().compactContext(key);
 
     // Verify /compact message was sent
-    expect(ipc.sendMessage).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "/compact" }),
-    );
+    ));
 
     // Simulate completion by clearing streamingByKey
     useChatStore.setState({
