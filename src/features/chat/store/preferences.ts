@@ -29,6 +29,7 @@ export function createPreferenceActions(
 ): Pick<
   ChatStore,
   | "setPermission"
+  | "setComputerUse"
   | "setOmpServiceTier"
   | "setCodexServiceTier"
   | "setEffort"
@@ -45,6 +46,9 @@ export function createPreferenceActions(
     setPermission: (permission) => {
       writeStored(PERMISSION_PREF_KEY, permission);
       set({ permission });
+    },
+    setComputerUse: (computerUse) => {
+      set({ computerUse });
     },
     setOmpServiceTier: async (tier) => {
       const settings = await ipc.getAppSettings();

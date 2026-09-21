@@ -237,6 +237,7 @@ impl Engine for CodexEngine {
             stdin_payload: Some(req.prompt.clone()),
             keep_stdin_open: false,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: preassigned,
         })
     }
@@ -466,6 +467,7 @@ mod tests {
             permission: Some("auto".into()),
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         }
     }
 

@@ -113,6 +113,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     openTabs: [],
     activeEngine: localStorage.getItem(ENGINE_PREF_KEY) ?? "claude",
     permission: readPermissionPref(),
+    computerUse: false,
     efforts: {},
     ompServiceTier: null,
     codexServiceTier: null,

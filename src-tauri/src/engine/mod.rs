@@ -10,7 +10,7 @@ pub mod dsh;
 mod dsh_images;
 mod dsh_session;
 pub mod grok;
-pub(crate) mod opencode_server;
+pub mod opencode_server;
 mod opencode_session;
 pub mod images;
 pub mod kimi;
@@ -134,6 +134,10 @@ pub struct SendRequest {
     /// Session-scoped channel id. Official / empty injects nothing; spawn
     /// falls back to the engine's `current` when this is None.
     pub provider_id: Option<String>,
+    /// Computer use: expose the app's screenshot/input driver to the agent
+    /// as an MCP server (see computer_use.rs). Engines without an
+    /// MCP-config launch flag ignore it.
+    pub computer_use: Option<bool>,
 }
 pub struct BuiltCommand {
     pub command: Command,
@@ -145,6 +149,9 @@ pub struct BuiltCommand {
     pub keep_stdin_open: bool,
     /// Private staging files/directories to remove once the process exits.
     pub cleanup_files: Vec<PathBuf>,
+    /// omp computer-use injection into the workspace's `.omp/mcp.json`;
+    /// restored once the process exits (same funnel as cleanup_files).
+    pub mcp_restore: Option<crate::computer_use::McpRestore>,
     /// Session id assigned before spawn (grok `-s <uuid>`).
     pub preassigned_session_id: Option<String>,
 }
@@ -162,6 +169,11 @@ pub trait Engine: Send + Sync {
     }
     /// Whether this engine accepts image attachments.
     fn supports_images(&self) -> bool;
+    /// Whether the engine can hand the agent the app's computer-use driver
+    /// (requires an MCP-server launch flag the CLI honors).
+    fn supports_computer_use(&self) -> bool {
+        false
+    }
     /// Permission modes this engine can honor at spawn ("auto" | "manual" |
     /// "plan" | "bypass"). These are one-shot headless launches that cannot
     /// ask mid-turn, so most engines support only a subset; the UI greys out
@@ -266,6 +278,9 @@ pub struct EngineInfo {
     /// from pickers and history lists rather than erroring on launch.
     pub enabled: bool,
     pub supports_images: bool,
+    /// Drives the composer's computer-use toggle: engines without an
+    /// MCP-config launch flag cannot receive the driver.
+    pub supports_computer_use: bool,
     /// Permission modes the engine honors at spawn; drives the composer
     /// picker's disabled options.
     pub permissions: Vec<String>,
@@ -336,6 +351,7 @@ pub fn list_engines() -> Vec<EngineInfo> {
                 enabled: config.section(id).and_then(|s| s.current.as_deref())
                     != Some(crate::config::DISABLED_PROVIDER_ID),
                 supports_images: engine.supports_images(),
+                supports_computer_use: engine.supports_computer_use(),
                 permissions: engine
                     .supported_permissions()
                     .iter()
@@ -370,6 +386,7 @@ fn prepare_launch(
     permission: Option<String>,
     additional_dirs: Vec<String>,
     provider_id: Option<String>,
+    computer_use: Option<bool>,
 ) -> Result<Launch, String> {
     let engine_impl = engine_by_id(engine).ok_or_else(|| format!("unknown engine: {engine}"))?;
     // 停用 still gates sending. Channel settings apply to this child below;
@@ -419,6 +436,8 @@ fn prepare_launch(
             .take(32)
             .collect(),
         provider_id,
+        // Only honored by engines that can actually mount the driver.
+        computer_use: computer_use.filter(|on| *on && engine_impl.supports_computer_use()),
     };
     let bin = engine_bin(&settings, engine);
     // Host-stream engines never spawn: hand back a placeholder command so
@@ -430,6 +449,7 @@ fn prepare_launch(
             stdin_payload: None,
             keep_stdin_open: false,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         }
     } else if engine == "kimi" && provider.is_some() {
@@ -449,6 +469,9 @@ fn prepare_launch(
     };
     if let Err(error) = configured {
         cleanup_staged_files(&built.cleanup_files);
+        if let Some(restore) = &built.mcp_restore {
+            restore.restore();
+        }
         return Err(error);
     }
     Ok(Launch {
@@ -473,6 +496,7 @@ pub async fn send_message(
     permission: Option<String>,
     provider_id: Option<String>,
     run_id: Option<String>,
+    computer_use: Option<bool>,
 ) -> Result<SendResult, String> {
     send_message_inner(
         &state,
@@ -487,6 +511,7 @@ pub async fn send_message(
         permission,
         provider_id,
         run_id,
+        computer_use,
     )
     .await
 }
@@ -507,6 +532,7 @@ pub async fn send_message_inner(
     permission: Option<String>,
     provider_id: Option<String>,
     run_id: Option<String>,
+    computer_use: Option<bool>,
 ) -> Result<SendResult, String> {
     let run_id = run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if run_id.is_empty() || run_id.len() > 128
@@ -563,6 +589,7 @@ pub async fn send_message_inner(
         run_id,
         killed,
         reader_abort,
+        computer_use,
     )
     .await;
     if result.is_err() {
@@ -590,6 +617,7 @@ async fn send_reserved(
     run_id: String,
     killed: Arc<std::sync::atomic::AtomicBool>,
     reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
+    computer_use: Option<bool>,
 ) -> Result<SendResult, String> {
     let launch = prepare_launch(
         &engine,
@@ -606,6 +634,7 @@ async fn send_reserved(
         // (each send is a fresh process).
         state.db.granted_roots().unwrap_or_default(),
         provider_id,
+        computer_use,
     )?;
 
     // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
@@ -621,6 +650,12 @@ async fn send_reserved(
     }
     let (mut command, extra_cleanup, skip_local_cwd) = match &wsl_tp {
         Some(tp) => {
+            // 操作电脑注入的是本机 .omp/mcp.json 与本机 exe:WSL 远端 omp 都
+            // 用不上,先恢复再拒绝,不留下被改过的工作区文件。
+            if let Some(restore) = &launch.built.mcp_restore {
+                restore.restore();
+                return Err("操作电脑不支持远程工作区(WSL):注入的是本机驱动".into());
+            }
             // 依赖本机 staging 文件的引擎(grok 等 cleanup_files 非空):
             // 远端 CLI 读不到本机文件,直接拒绝而非跑出莫名其妙的失败;
             // 已写盘的 staging 文件顺手清掉,不 strand。
@@ -682,6 +717,9 @@ async fn send_reserved(
         Err(error) => {
             // Never strand the staging files build_command wrote (grok).
             cleanup_staged_files(&cleanup_files);
+            if let Some(restore) = &launch.built.mcp_restore {
+                restore.restore();
+            }
             return Err(format!("failed to spawn {}: {error}", launch.bin));
         }
     };
@@ -712,6 +750,9 @@ async fn send_reserved(
             None => {
                 let _ = child.start_kill();
                 cleanup_staged_files(&cleanup_files);
+                if let Some(restore) = &launch.built.mcp_restore {
+                    restore.restore();
+                }
                 return Err("missing stdout/stderr pipe after spawn".to_string());
             }
         }
@@ -771,6 +812,7 @@ async fn send_reserved(
         child,
         killed,
         cleanup_files,
+        mcp_restore: launch.built.mcp_restore,
         stderr_buf,
         stdout_plain_buf: Arc::new(Mutex::new(String::new())),
         #[cfg(windows)]
@@ -1079,6 +1121,7 @@ mod permission_tests {
             permission: permission.map(str::to_string),
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         }
     }
 
@@ -1090,6 +1133,35 @@ mod permission_tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect()
+    }
+
+    #[test]
+    fn claude_computer_use_mounts_driver_mcp_and_preapproves_it() {
+        let mut request = req(None);
+        request.computer_use = Some(true);
+        let args = argv(&claude::ClaudeEngine::new(), &request);
+        let at = args
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .unwrap_or_else(|| panic!("{args:?}"));
+        let config: Value = serde_json::from_str(&args[at + 1])
+            .expect("mcp config must be inline JSON");
+        let server = &config["mcpServers"]["ccgui-computer"];
+        assert_eq!(server["args"], serde_json::json!(["--computer-use-mcp"]));
+        assert!(!server["command"].as_str().unwrap_or_default().is_empty());
+        // Pre-approved: a click-per-approval loop would be unusable.
+        let tools_at = args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert!(
+            args[tools_at + 1..].contains(&"mcp__ccgui-computer".to_string()),
+            "{args:?}"
+        );
+        // Off by default: no driver, no pre-approval.
+        let off = argv(&claude::ClaudeEngine::new(), &req(None));
+        assert!(!off.contains(&"--mcp-config".to_string()));
+        assert!(!off.contains(&"mcp__ccgui-computer".to_string()));
     }
 
     #[test]
@@ -1119,6 +1191,9 @@ mod permission_tests {
         assert_eq!(prompt["type"], "prompt");
         assert_eq!(prompt["message"], request.prompt);
         assert!(lines.next().is_none(), "unexpected extra command: {payload}");
+        // 末尾不得自带换行:writer 统一补 `\n`,自带会在 rpc stdin 上产生
+        // 空行,pi 回一帧 `command:"parse"` 失败响应(parse 错误警告横幅)。
+        assert!(!payload.ends_with('\n'), "writer appends the terminator: {payload:?}");
         assert!(built.keep_stdin_open);
     }
 
@@ -1483,6 +1558,7 @@ mod retry_lifecycle_tests {
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: vec![path],
+            mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
             // Windows-only guard field the production constructor fills; this
@@ -1531,6 +1607,7 @@ mod retry_lifecycle_tests {
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
             // See the pipe-retry constructor above.
@@ -1640,6 +1717,7 @@ mod retry_lifecycle_tests {
             child,
             killed,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
             // See the pipe-retry constructor above.

@@ -617,8 +617,11 @@ export function EngineModelPanel({
  *  the CLI popover. On mobile CliMenu renders the same panel in a modal
  *  dialog instead (hover flyouts don't work on touch). */
 export function EngineFlyout(props: Parameters<typeof EngineModelPanel>[0]) {
+  // data-engine-flyout: CliMenu's hover-intent guard checks focus against
+  // this marker so hovering a row never swaps the panel while the user is
+  // typing in its search / channel filter.
   return (
-    <div className={FLYOUT_CLASSES}>
+    <div data-engine-flyout className={FLYOUT_CLASSES}>
       <EngineModelPanel {...props} />
     </div>
   );

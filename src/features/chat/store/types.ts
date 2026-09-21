@@ -26,6 +26,10 @@ export interface ChatStore {
    * persisted in localStorage; engines resolve unsupported modes to their
    * first supported one at send time (and the picker greys them out). */
   permission: ComposerPermission;
+  /** Computer use: mount the app's screen/mouse/keyboard driver on the next
+   * send (engines without support ignore it). Session-scoped, intentionally
+   * not persisted — every app run starts with it off. */
+  computerUse: boolean;
   /** Per-engine reasoning effort ("low" | … | "ultra"), persisted in app settings. */
   efforts: Record<string, EffortLevel>;
   ompServiceTier: OmpServiceTier;
@@ -126,6 +130,7 @@ export interface ChatStore {
   startNewChat: (workspacePath: string) => void;
   setActiveEngine: (engine: string) => void;
   setPermission: (permission: ComposerPermission) => void;
+  setComputerUse: (on: boolean) => void;
   setEffort: (engine: string, effort: EffortLevel) => Promise<void>;
   setOmpServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;

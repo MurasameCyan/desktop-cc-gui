@@ -34,6 +34,7 @@ const engineInfo = (id: string, available: boolean): EngineInfo => ({
   available,
   enabled: true,
   supportsImages: false,
+  supportsComputerUse: false,
   permissions: [],
 });
 

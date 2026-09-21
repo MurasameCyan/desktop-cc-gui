@@ -1,4 +1,5 @@
 import { ipc } from "@/lib/ipc";
+import { useComputerUseStore } from "@/features/computer-use/store";
 import { errorText } from "@/lib/errors";
 import { newId } from "@/lib/id";
 import i18n from "@/lib/i18n";
@@ -302,6 +303,10 @@ export function createMessagingActions(
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
     }
+    const computerUseOn =
+      get().computerUse &&
+      (get().engines.find((e) => e.id === engine)?.supportsComputerUse ??
+        false);
     try {
       const result = await ipc.sendMessage({
         runId: requestedRunId,
@@ -319,6 +324,7 @@ export function createMessagingActions(
           get().permission,
         ),
         providerId: provider,
+        computerUse: computerUseOn ? true : null,
       });
       confirmPromptContributions(promptContributions);
       if (switchEvent) {
@@ -332,6 +338,9 @@ export function createMessagingActions(
       // early event already bound it) and adopt the native session id.
       bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
       settleLaunch(result.sessionId ?? tab.sessionId);
+      // Arm Esc-to-stop for this run; the computer-use store disarms when
+      // the session's streaming flag clears.
+      if (computerUseOn) useComputerUseStore.getState().arm(key);
       // Older backends choose their own id. Retire the provisional route.
       if (result.runId !== requestedRunId) {
         runRouting.delete(requestedRunId);

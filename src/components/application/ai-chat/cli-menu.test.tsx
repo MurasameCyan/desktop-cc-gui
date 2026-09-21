@@ -104,6 +104,19 @@ describe("CliMenu flyout switching", () => {
       element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     });
   };
+  const leave = async (element: Element) => {
+    await act(async () => {
+      element.dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
+    });
+  };
+  /** Let the hover-intent timer (and then some) elapse. */
+  const settleHover = async () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 400);
+    await act(async () => {
+      await promise;
+    });
+  };
 
   const click = async (element: Element) => {
     await act(async () => {
@@ -111,19 +124,48 @@ describe("CliMenu flyout switching", () => {
     });
   };
 
-  it("指针掠过引擎行不会换掉正在使用的面板", async () => {
+  it("指针掠过引擎行不触发切换", async () => {
     render();
     await openMenu();
     await click(engineRow("Codex")!);
     expect(flyoutTitle()).toBe("Codex CLI 引擎");
 
-    // A pointer passing over Claude's row (the path from the engine rows to
-    // the panel's own controls) must not swap the panel out from under the
-    // filter or search the user is working in — only a click switches it.
+    // A pointer crossing Claude's row on its way into the panel leaves
+    // before the hover-intent delay, so the panel must stay put.
     await enter(engineRow("Claude")!);
+    await leave(engineRow("Claude")!);
+    await settleHover();
+    expect(flyoutTitle()).toBe("Codex CLI 引擎");
+  });
+
+  it("悬停停留后打开对应引擎面板", async () => {
+    render();
+    await openMenu();
+    await click(engineRow("Codex")!);
+    expect(flyoutTitle()).toBe("Codex CLI 引擎");
+
+    // Dwelling on a row past the intent delay pre-opens its flyout.
+    await enter(engineRow("Claude")!);
+    await settleHover();
+    expect(flyoutTitle()).toBe("Claude Code 引擎");
+  });
+
+  it("面板搜索框输入期间悬停不换面板", async () => {
+    render();
+    await openMenu();
+    await click(engineRow("Codex")!);
+    expect(flyoutTitle()).toBe("Codex CLI 引擎");
+
+    // While the user is typing in the panel's search field, a dwelling
+    // hover must not yank the panel away; the click path still works.
+    const search = document.querySelector<HTMLInputElement>(
+      "[data-engine-flyout] input",
+    )!;
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      search.focus();
     });
+    await enter(engineRow("Claude")!);
+    await settleHover();
     expect(flyoutTitle()).toBe("Codex CLI 引擎");
   });
 

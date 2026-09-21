@@ -212,10 +212,13 @@ impl Engine for PiFamilyEngine {
     }
 
     fn supports_images(&self) -> bool {
-        // Images go out as `@<path>` argv entries (the pi/omp print-mode file
-        // reference contract); whether the configured provider admits image
-        // content is provider-dependent, but the transport is supported.
         true
+    }
+
+    /// omp reads `.omp/mcp.json` from the workspace, which the send injects;
+    /// pi's MCP discovery differs and is not wired up (honest no).
+    fn supports_computer_use(&self) -> bool {
+        self.id == "omp"
     }
     /// omp exposes real approval switches (`--approval-mode`,
     /// `--auto-approve`) plus a headless plan flow (`--plan-yolo`); pi 0.85
@@ -359,13 +362,22 @@ impl Engine for PiFamilyEngine {
             lines.push(serde_json::json!({"id": "ccgui-state", "type": "get_state"}).to_string());
             lines.push(prompt.to_string());
             let payload = lines.join("\n");
+            // omp 没有 --mcp-config 启动参数(MCP 只从固定文件发现):
+            // 注入工作区 .omp/mcp.json,回合结束按引用计数恢复,崩溃残留
+            // 由下次启动的 sweep 兜底(见 computer_use::inject_workspace_mcp)。
+            let mcp_restore = if req.computer_use == Some(true) && self.id == "omp" {
+                crate::computer_use::inject_workspace_mcp(&req.workspace)?
+            } else {
+                None
+            };
             return Ok(BuiltCommand {
                 command: cmd,
-                stdin_payload: Some(format!("{payload}\n")),
+                stdin_payload: Some(payload),
                 // 提问应答(extension_ui_response)在同一根 stdin 上回写;
                 // Done 事件落定时 reader 会关闭它,rpc 进程随之 drain 退出。
                 keep_stdin_open: true,
                 cleanup_files: Vec::new(),
+                mcp_restore,
                 preassigned_session_id: None,
             });
         }
@@ -380,6 +392,7 @@ impl Engine for PiFamilyEngine {
             stdin_payload: Some(req.prompt.clone()),
             keep_stdin_open: false,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         })
     }

@@ -22,6 +22,8 @@ import {
 import { useChatTabs } from "./use-chat-tabs";
 import { useChatSidebar } from "./use-chat-sidebar";
 import { ChatPageDialogs, type ChatPageDialog } from "./ChatPageDialogs";
+import { ComputerUseDialog } from "@/features/computer-use/ComputerUseDialog";
+import { useComputerUseEscapeHandler } from "@/features/computer-use/use-escape-handler";
 import { ChatPanelHeader } from "./ChatPanelHeader";
 import { PANEL_TOGGLE_CLASSES } from "./panel-toggle-classes";
 import { ChatSidebarFrame } from "./ChatSidebarFrame";
@@ -84,6 +86,7 @@ export default function ChatPage() {
   // default while an explicit expand sticks until the next crossing.
   const narrowPanel = useMediaQuery(PANEL_MEDIA);
   const [narrowPanelExpanded, setNarrowPanelExpanded] = useState(false);
+  useComputerUseEscapeHandler();
   useEffect(() => {
     setNarrowPanelExpanded(false);
   }, [narrowPanel]);
@@ -305,6 +308,7 @@ export default function ChatPage() {
       </div>
 
       <ChatPageDialogs dialog={dialog} onClose={() => setDialog(null)} />
+      <ComputerUseDialog />
     </div>
   );
 }

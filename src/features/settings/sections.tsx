@@ -4,6 +4,7 @@ import Globe from "lucide-react/dist/esm/icons/globe";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
 import Archive from "lucide-react/dist/esm/icons/archive";
 import Info from "lucide-react/dist/esm/icons/info";
+import MonitorCog from "lucide-react/dist/esm/icons/monitor-cog";
 import Bot from "lucide-react/dist/esm/icons/bot";
 import Smartphone from "lucide-react/dist/esm/icons/smartphone";
 import ChartColumn from "lucide-react/dist/esm/icons/chart-column";
@@ -21,6 +22,7 @@ import { AgentsPromptsSection } from "./agents-prompts/AgentsPromptsSection";
 import { CliConfigSection } from "./CliConfigSection";
 import { AboutSection } from "./AboutSection";
 import { WebAccessSection } from "./WebAccessSection";
+import { ComputerUseSettingsSection } from "@/features/computer-use/ComputerUseSettingsSection";
 import { UsageSection } from "./UsageSection";
 import { ShortcutsSection } from "@/features/shortcuts/ShortcutsSection";
 import { ENGINE_IDS, type EngineId } from "./providers";
@@ -108,6 +110,15 @@ settingsRegistry.register({
   group: "settings",
   order: 3,
   component: WebAccessSection,
+});
+settingsRegistry.register({
+  id: "computerUse",
+  key: "computerUse",
+  label: () => i18n.t("settings.computerUse"),
+  icon: MonitorCog,
+  group: "settings",
+  order: 3,
+  component: ComputerUseSettingsSection,
 });
 settingsRegistry.register({
   id: "usage",

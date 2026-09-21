@@ -119,6 +119,7 @@ impl Engine for AgyEngine {
             stdin_payload: None,
             keep_stdin_open: false,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         })
     }
@@ -260,6 +261,7 @@ mod tests {
             permission: permission.map(str::to_string),
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         }
     }
 

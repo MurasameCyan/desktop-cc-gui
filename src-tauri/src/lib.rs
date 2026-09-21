@@ -5,6 +5,9 @@ pub mod browser;
 pub mod cc_switch;
 pub mod cli_lifecycle;
 pub mod config;
+pub mod computer_use;
+pub mod computer_use_ax;
+pub mod cu_overlay;
 pub mod db;
 pub mod dsh_host;
 pub mod engine;
@@ -31,6 +34,7 @@ pub mod web;
 
 use std::sync::Arc;
 use tauri::Manager;
+use tauri::Emitter;
 
 pub struct AppState {
     pub db: Arc<db::Db>,
@@ -50,7 +54,20 @@ pub struct AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     paths::ensure_dirs().expect("failed to create app home");
+    // MCP server mode: engine CLIs spawn this binary as a computer-use MCP
+    // child process (`--mcp-config`). stdout is the protocol channel, so no
+    // Tauri runtime — and nothing that prints to stdout — may start here.
+    if std::env::args().any(|arg| arg == "--computer-use-mcp") {
+        if let Err(error) = computer_use::mcp::serve_stdio() {
+            eprintln!("[computer-use] MCP server exited: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     engine::images::sweep_pasted_images();
+    // Restore workspace .omp/mcp.json files left injected by a crash
+    // (computer use writes them per send and restores on run exit).
+    computer_use::sweep_mcp_injections();
     config::import_legacy_config_once();
     // A .app launched from Finder/Launchpad gets the launchd PATH
     // (/usr/bin:/bin:…), so `which::which` can't see CLIs installed via
@@ -71,6 +88,21 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_drag::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // Esc-to-stop: only fires while a computer-use run armed
+                    // it (computer_use::computer_use_set_active), so Esc is
+                    // never swallowed outside a session.
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed
+                        && computer_use::esc_armed()
+                    {
+                        let _ = app.emit(computer_use::ESCAPE_EVENT, ());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             let db = Arc::new(db::Db::open().expect("failed to open app db"));
             // Sweep per-send credential staging left behind by a crash.
@@ -125,6 +157,12 @@ pub fn run() {
             // otherwise every provider mutation panics with "state() called
             // before manage()".
             app.manage(config::ConfigStore::default());
+            // Virtual cursor overlay + its loopback control channel: the
+            // --computer-use-mcp child posts action targets here so the
+            // blue pointer can follow the agent.
+            if let Err(error) = cu_overlay::init(app.handle()) {
+                eprintln!("[cu-overlay] init failed (overlay disabled): {error}");
+            }
             app.manage(metrics::MetricsState::new());
             app.manage(baidu_tongji::BaiduTongjiState::load());
             // Keep the pairing key from lingering: while the switch is on, a
@@ -227,6 +265,8 @@ pub fn run() {
                     state.opencode_server.kill_spawned();
                     plugin_caps::kill_all_tracked_children();
                     tauri::async_runtime::block_on(terminal::kill_all(&state.terminals));
+                    computer_use::disarm_esc(&window.app_handle());
+                    cu_overlay::shutdown();
                 }
             }
         })
@@ -304,6 +344,11 @@ pub fn run() {
             engine::pi_family_auth::pi_family_models_config_write,
             engine::images::save_pasted_image,
             engine::images::import_attachments,
+            // computer use
+            computer_use::computer_use_permission_status,
+            computer_use::computer_use_open_permission_settings,
+            computer_use::computer_use_drag_source,
+            computer_use::computer_use_set_active,
             // history
             history::reader::list_sessions,
             history::reader::list_archived_sessions,

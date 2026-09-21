@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import type { ComposerInputHandle } from "@/components/application/ai-chat/ai-chat-composer";
 import { AddMenu } from "@/components/application/ai-chat/add-menu";
 import { PermissionMenu } from "@/components/application/ai-chat/permission-menu";
+import { ComputerUseToggle } from "@/features/computer-use/ComputerUseToggle";
 import type { ComposerPermission } from "@/components/application/ai-chat/permission-menu";
 import {
   CliMenu,
@@ -471,7 +472,12 @@ export const ChatConversation = memo(function ChatConversation({
         composerInputRef={composerInputRef}
         addMenu={addMenu}
         cliMenu={cliMenu}
-        permissionMenu={permissionMenu}
+        permissionMenu={
+          <>
+            {permissionMenu}
+            <ComputerUseToggle />
+          </>
+        }
         supportsImages={supportsImages}
         onPasteImages={pasteImages}
         onDropPaths={active ? handleDroppedPaths : undefined}

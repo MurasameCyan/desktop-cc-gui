@@ -829,6 +829,7 @@ mod tests {
             permission: None,
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         };
         let turn = tokio::spawn(run_server_turn_with_probe_port(
             core,

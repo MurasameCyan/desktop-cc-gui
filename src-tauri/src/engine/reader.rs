@@ -488,6 +488,9 @@ pub(crate) struct RunContext {
     pub(crate) child: Arc<TokioMutex<Child>>,
     pub(crate) killed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) cleanup_files: Vec<PathBuf>,
+    /// omp computer-use workspace injection; restored with the same
+    /// lifetime as cleanup_files (every exit path funnels through here).
+    pub(crate) mcp_restore: Option<crate::computer_use::McpRestore>,
     pub(crate) stderr_buf: Arc<Mutex<String>>,
     /// Off-protocol stdout lines (plain text from CLI startup failures,
     /// wrapper errors, node crashes): parse_line drops non-JSON lines, so
@@ -503,6 +506,9 @@ impl Drop for RunContext {
     fn drop(&mut self) {
         // Also runs when the reader is aborted during interrupt or shutdown.
         cleanup_staged_files(&self.cleanup_files);
+        if let Some(restore) = &self.mcp_restore {
+            restore.restore();
+        }
         // Last line of defence for the run's concurrency slot. The settle
         // path removes keys by name and `kill`'s abort backstop drains them
         // by run id, but a reader that dies any other way (a panic inside
@@ -922,7 +928,7 @@ mod staging_tests {
                 engine_impl: Box::new(grok::GrokEngine), pid: 0,
                 preassigned_session_id: None, initial_model: None, initial_effort: None,
                 child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
+                cleanup_files: vec![directory.clone()], mcp_restore: None, stderr_buf: Arc::new(Mutex::new(String::new())),
                 stdout_plain_buf: Arc::new(Mutex::new(String::new())),
                 // Upstream's own constructor omits this Windows-only guard
                 // field (E0063 on Windows); a plain test child owns no job.
@@ -978,6 +984,7 @@ mod staging_tests {
             child: Arc::new(TokioMutex::new(child)),
             killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
             #[cfg(windows)]

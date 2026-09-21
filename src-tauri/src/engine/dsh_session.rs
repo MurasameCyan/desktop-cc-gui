@@ -925,6 +925,7 @@ mod tests {
             permission: None,
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         };
         run_host_turn(
             core,
@@ -1002,6 +1003,7 @@ mod tests {
                     permission: None,
                     additional_dirs: Vec::new(),
                     provider_id: None,
+                    computer_use: None,
                 };
                 run_host_turn(
                     core,

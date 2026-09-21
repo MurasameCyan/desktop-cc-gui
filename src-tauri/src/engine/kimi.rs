@@ -106,6 +106,7 @@ fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<Bui
         stdin_payload: None,
         keep_stdin_open: false,
         cleanup_files: Vec::new(),
+        mcp_restore: None,
         preassigned_session_id: None,
     })
 }
@@ -201,6 +202,7 @@ mod channel_tests {
             permission: Some("plan".into()),
             additional_dirs: vec![],
             provider_id: Some("plugin_model-switcher_probe".into()),
+            computer_use: None,
         };
         let mut env = HashMap::from([
             ("KIMI_BASE_URL".into(), "https://selected.invalid/v1".into()),

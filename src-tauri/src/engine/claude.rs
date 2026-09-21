@@ -49,6 +49,9 @@ impl Engine for ClaudeEngine {
     fn supports_images(&self) -> bool {
         true
     }
+    fn supports_computer_use(&self) -> bool {
+        true
+    }
     fn supported_permissions(&self) -> &'static [&'static str] {
         &["auto", "manual", "plan", "bypass"]
     }
@@ -71,6 +74,10 @@ impl Engine for ClaudeEngine {
         // Headless -p cannot prompt mid-turn: "manual" maps onto claude's
         // default mode, where approval-needing tools are denied and the
         // agent is told to work around them (honest degrade, no fake ask).
+        // Tools pre-approved for this run, emitted as a single --allowedTools
+        // (headless -p cannot prompt mid-turn, so anything not listed here
+        // gets denied outright).
+        let mut preapproved: Vec<&str> = Vec::new();
         match self.resolve_permission(req.permission.as_deref()) {
             "bypass" => {
                 cmd.arg("--dangerously-skip-permissions");
@@ -87,10 +94,46 @@ impl Engine for ClaudeEngine {
                     // WebFetch still ask, and headless -p cannot prompt, so
                     // the CLI would deny every web call outright. Pre-approve
                     // the two read-only network tools in auto mode.
-                    cmd.arg("--allowedTools");
-                    cmd.arg("WebSearch");
-                    cmd.arg("WebFetch");
+                    preapproved.extend(["WebSearch", "WebFetch"]);
                 }
+            }
+        }
+        if req.computer_use == Some(true) {
+            // Computer use: expose this app's screenshot/input driver as an
+            // MCP child process (see computer_use.rs) and pre-approve its
+            // tools — a click-per-approval loop is unusable; the user opted
+            // in via the computer-use dialog and the driver itself fails
+            // closed on missing OS grants.
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("resolve own exe for computer use: {e}"))?;
+            let mut server = serde_json::json!({
+                "command": exe.to_string_lossy(),
+                "args": ["--computer-use-mcp"],
+            });
+            // Overlay control channel: the child reports action targets so
+            // the main app's virtual cursor can follow (absent in tests).
+            if let (Some(base), Some(token)) = (
+                crate::cu_overlay::control_base(),
+                crate::cu_overlay::control_token(),
+            ) {
+                server["env"] = serde_json::json!({
+                    "CCGUI_CU_CONTROL": base,
+                    "CCGUI_CU_TOKEN": token,
+                });
+            }
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "ccgui-computer": server,
+                }
+            });
+            cmd.arg("--mcp-config");
+            cmd.arg(config.to_string());
+            preapproved.push("mcp__ccgui-computer");
+        }
+        if !preapproved.is_empty() {
+            cmd.arg("--allowedTools");
+            for tool in preapproved {
+                cmd.arg(tool);
             }
         }
         if let Some(model) = req.model.as_deref() {
@@ -138,6 +181,7 @@ impl Engine for ClaudeEngine {
             stdin_payload: Some(stdin_payload),
             keep_stdin_open: true,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         })
     }

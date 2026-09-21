@@ -122,6 +122,20 @@ export interface Workspace {
   meta?: Record<string, unknown>;
 }
 
+/** OS grant state for computer use (macOS TCC; elsewhere no grant needed). */
+export interface ComputerUsePermissionStatus {
+  accessibility: boolean;
+  screenRecording: boolean;
+  /** False on Windows/Linux: the permission card shows "no grant needed". */
+  osPermissionsRequired: boolean;
+}
+
+/** What the user drags into a System Settings permission list to authorize. */
+export interface ComputerUseDragSource {
+  path: string;
+  icon: string;
+}
+
 export interface EngineInfo {
   id: string;
   available: boolean;
@@ -129,6 +143,9 @@ export interface EngineInfo {
    * picker and history lists; running sessions are unaffected. */
   enabled: boolean;
   supportsImages: boolean;
+  /** Engine can receive the computer-use driver (MCP launch flag); drives
+   * the composer toggle. */
+  supportsComputerUse: boolean;
   /** Permission modes the engine honors at spawn ("auto" | "manual" |
    * "plan" | "bypass"); the composer picker greys out the rest. */
   permissions: string[];
@@ -863,6 +880,8 @@ export const ipc = {
     effort: string | null;
     permission: string | null;
     providerId: string | null;
+    /** Mount the computer-use MCP driver for this run (claude only). */
+    computerUse?: boolean | null;
   }) => invoke<SendResult>("send_message", args),
   interruptSession: (sessionId: string) =>
     invoke<boolean>("interrupt_session", { sessionId }),
@@ -895,6 +914,15 @@ export const ipc = {
     withGrantRetry(() =>
       invoke<EngineCatalog>("list_engine_models", { engine, workspace: workspace ?? null }),
     ),
+  // computer use
+  computerUsePermissionStatus: () =>
+    invoke<ComputerUsePermissionStatus>("computer_use_permission_status"),
+  computerUseOpenPermissionSettings: (kind: "accessibility" | "screenRecording") =>
+    invoke<void>("computer_use_open_permission_settings", { kind }),
+  computerUseDragSource: () => invoke<ComputerUseDragSource>("computer_use_drag_source"),
+  /** Arm/disarm the global Esc-to-stop while a computer-use run is active. */
+  computerUseSetActive: (active: boolean) =>
+    invoke<void>("computer_use_set_active", { active }),
   // history
   listSessions: () => invoke<SessionMeta[]>("list_sessions"),
   listArchivedSessions: () => invoke<SessionMeta[]>("list_archived_sessions"),

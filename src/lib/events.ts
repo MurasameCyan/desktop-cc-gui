@@ -54,6 +54,11 @@ export interface ScanProgress {
 export function listenSettingsChanged(cb: () => void): Promise<UnlistenFn> {
   return listen("settings://changed", () => cb());
 }
+/** Global Esc fired while a computer-use run armed it; the chat store
+ * interrupts the active run in response. */
+export function listenComputerUseEscape(cb: () => void): Promise<UnlistenFn> {
+  return listen("computeruse://escape", () => cb());
+}
 
 /**
  * The outbound relay's state changed. The switch itself never disappears, so

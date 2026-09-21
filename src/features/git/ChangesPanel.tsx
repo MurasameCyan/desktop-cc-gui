@@ -398,11 +398,8 @@ const FileRow = memo(function FileRow({
   const sepIdx = Math.max(entry.path.lastIndexOf("/"), entry.path.lastIndexOf("\\"));
   const dirPart = sepIdx > 0 ? entry.path.slice(0, sepIdx + 1) : "";
   const filePart = sepIdx >= 0 ? entry.path.slice(sepIdx + 1) : entry.path;
-  // Full diffstat for the truncated fixed-width stats column (title fallback).
-  const statsTitle =
-    entry.additions !== undefined ? `+${entry.additions} −${entry.deletions ?? 0}` : undefined;
   return (
-    <li className="group grid min-h-8 grid-cols-[1rem_minmax(0,1fr)_4.5rem_0.75rem_1.25rem_1.25rem] items-center gap-1.5 px-3 hover:bg-background-secondary-hover">
+    <li className="group relative grid min-h-8 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-1.5 px-3 hover:bg-background-secondary-hover">
       <span
         className={cx(
           "w-4 shrink-0 text-center font-mono text-xs",
@@ -433,10 +430,19 @@ const FileRow = memo(function FileRow({
         </Focusable>
         <TooltipContent className="break-all font-mono">{entry.path}</TooltipContent>
       </Tooltip>
-      <span
-        className="flex min-w-0 items-center justify-end gap-1 font-mono text-xs tabular-nums"
-        title={statsTitle}
-      >
+      <span className="flex min-w-0 items-center justify-end gap-1 font-mono text-xs tabular-nums">
+        {isNew && (
+          <Tooltip>
+            <Focusable>
+              <span
+                role="img"
+                aria-label={t("git.newFile")}
+                className="size-1.5 shrink-0 rounded-full bg-notification-success-foreground"
+              />
+            </Focusable>
+            <TooltipContent>{t("git.newFile")}</TooltipContent>
+          </Tooltip>
+        )}
         {entry.additions !== undefined && (
           <span className="truncate text-state-success-text">+{entry.additions}</span>
         )}
@@ -444,60 +450,53 @@ const FileRow = memo(function FileRow({
           <span className="truncate text-text-error-primary">−{entry.deletions}</span>
         )}
       </span>
-      <span className="flex items-center justify-center">
-        {isNew && (
-          <Tooltip>
-            <Focusable>
-              <span
-                role="img"
-                aria-label={t("git.newFile")}
-                className="size-1.5 rounded-full bg-notification-success-foreground"
-              />
-            </Focusable>
-            <TooltipContent>{t("git.newFile")}</TooltipContent>
-          </Tooltip>
+      <div
+        // Row actions overlay the trailing edge instead of reserving
+        // permanent columns, so path + stats use the full row width. The
+        // solid background (matching the row's own bg in each state) hides
+        // the text underneath; reveal happens on row hover or keyboard
+        // focus within the row.
+        className={cx(
+          "absolute inset-y-0 right-1.5 flex items-center gap-0.5 pl-3",
+          "bg-background-primary-default group-hover:bg-background-secondary-hover",
+          "pointer-events-none opacity-0",
+          "group-hover:pointer-events-auto group-hover:opacity-100",
+          "focus-within:pointer-events-auto focus-within:opacity-100",
         )}
-      </span>
-      {/* Two trailing action slots keep stage/unstage aligned across
-          groups; the discard slot stays empty on staged rows. */}
-      {discardLabel !== undefined && onDiscard !== undefined ? (
+      >
+        {discardLabel !== undefined && onDiscard !== undefined && (
+          <button
+            type="button"
+            disabled={actionBusy}
+            onClick={() => onDiscard(entry.path)}
+            aria-label={discardLabel}
+            title={discardLabel}
+            className={cx(
+              "rounded p-0.5 text-foreground-icon-secondary",
+              "hover:bg-background-tertiary-hover disabled:text-foreground-icon-disabled",
+            )}
+          >
+            <Undo2 aria-hidden className="size-4" />
+          </button>
+        )}
         <button
           type="button"
           disabled={actionBusy}
-          onClick={() => onDiscard(entry.path)}
-          aria-label={discardLabel}
-          title={discardLabel}
+          onClick={() => onAction(entry.path)}
+          aria-label={actionLabel}
+          title={actionLabel}
           className={cx(
-            "rounded p-0.5 text-foreground-icon-secondary opacity-0",
-            "group-hover:opacity-100 focus-visible:opacity-100 hover:bg-background-tertiary-hover",
-            "disabled:text-foreground-icon-disabled",
+            "rounded p-0.5 text-foreground-icon-secondary",
+            "hover:bg-background-tertiary-hover disabled:text-foreground-icon-disabled",
           )}
         >
-          <Undo2 aria-hidden className="size-4" />
+          {actionKind === "stage" ? (
+            <Plus aria-hidden className="size-4" />
+          ) : (
+            <Minus aria-hidden className="size-4" />
+          )}
         </button>
-      ) : (
-        <span />
-      )}
-      <button
-        type="button"
-        disabled={actionBusy}
-        onClick={() => onAction(entry.path)}
-        aria-label={actionLabel}
-        title={actionLabel}
-        className={cx(
-          "rounded p-0.5 text-foreground-icon-secondary opacity-0",
-          // Reveal on row hover AND on keyboard focus (same contract as the
-          // file-tree mention button).
-          "group-hover:opacity-100 focus-visible:opacity-100 hover:bg-background-tertiary-hover",
-          "disabled:text-foreground-icon-disabled",
-        )}
-      >
-        {actionKind === "stage" ? (
-          <Plus aria-hidden className="size-4" />
-        ) : (
-          <Minus aria-hidden className="size-4" />
-        )}
-      </button>
+      </div>
     </li>
   );
 });

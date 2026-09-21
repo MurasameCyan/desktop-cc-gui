@@ -1,7 +1,7 @@
 import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier";
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
@@ -66,6 +66,9 @@ export interface ModelOption {
   provider?: string;
 }
 
+/** Hover-intent delay before a row hover opens its model flyout. */
+const HOVER_INTENT_MS = 200;
+
 /* -------------------------------------------------------------- engine row */
 
 /** One engine row in the CLI list: brand mark, name, selection dot (active
@@ -75,6 +78,9 @@ function EngineRow({
   selected,
   flyoutOpen,
   onSelect,
+  onHover,
+  onHoverEnd,
+  onFocusEngine,
 }: {
   option: MenuOption;
   selected: boolean;
@@ -83,6 +89,14 @@ function EngineRow({
   /** Row click: show this engine's model list (the engine itself switches
    *  when a model is picked there). */
   onSelect: () => void;
+  /** Pointer enters the row: schedule this engine's flyout after the
+   *  hover-intent delay (desktop only; mobile passes nothing). */
+  onHover?: () => void;
+  /** Pointer leaves the row: cancel a pending hover-open. */
+  onHoverEnd?: () => void;
+  /** Keyboard focus lands on the row: open the flyout immediately — Tab
+   *  is deliberate, no intent delay needed. */
+  onFocusEngine?: () => void;
 }) {
   return (
     <button
@@ -91,6 +105,9 @@ function EngineRow({
       title={option.disabled ? option.disabledReason : undefined}
       aria-pressed={selected}
       onClick={onSelect}
+      onMouseEnter={onHover}
+      onMouseLeave={onHoverEnd}
+      onFocus={onFocusEngine}
       className={cx(
         "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 outline-none transition-colors",
         selected || flyoutOpen
@@ -220,9 +237,9 @@ function CliMenuTrigger({
 }
 
 /** Popover body: the hairline-separated engine rows and, on desktop, the
- *  hovered engine's model flyout floating to the right. Pointer entering
- *  or leaving the rows+flyout cluster cancels/schedules the flyout's close
- *  grace period (owned by the parent). */
+ *  hovered engine's model flyout floating to the right. Row hover opens
+ *  the flyout after the parent's hover-intent delay; keyboard focus opens
+ *  it immediately. */
 function EngineMenuBody({
   options,
   value,
@@ -234,6 +251,9 @@ function EngineMenuBody({
   onQueryChange,
   isMobile,
   onSelectEngine,
+  onHoverEngine,
+  onHoverEngineEnd,
+  onFocusEngine,
   onPickModel,
   onEffortChange,
   channelsByEngine,
@@ -257,6 +277,12 @@ function EngineMenuBody({
   onQueryChange: (value: string) => void;
   isMobile: boolean;
   onSelectEngine: (option: MenuOption) => void;
+  /** Row hover: pre-open this engine's model flyout. */
+  onHoverEngine: (option: MenuOption) => void;
+  /** Row hover end: cancel a pending hover-open. */
+  onHoverEngineEnd: () => void;
+  /** Row keyboard focus: open this engine's flyout immediately. */
+  onFocusEngine: (option: MenuOption) => void;
   onPickModel: (engine: string, id: string) => void;
   onEffortChange: (engine: string, level: EffortLevel) => void;
   channelsByEngine?: Record<string, ChannelOption[]>;
@@ -290,6 +316,9 @@ function EngineMenuBody({
                 selected={option.id === value}
                 flyoutOpen={option.id === openEngine}
                 onSelect={() => onSelectEngine(option)}
+                onHover={isMobile ? undefined : () => onHoverEngine(option)}
+                onHoverEnd={isMobile ? undefined : onHoverEngineEnd}
+                onFocusEngine={isMobile ? undefined : () => onFocusEngine(option)}
               />
             </Fragment>
           ))}
@@ -472,11 +501,56 @@ export function CliMenu({
 
   const handleOpenChange = (o: boolean) => {
     if (!setOpen(o)) return;
+    clearHoverTimer();
     setOpenEngine(o ? value : null);
     if (!o) setQuery("");
   };
 
   const dialogOption = options.find((o) => o.id === dialogEngine);
+  // Hover pre-opens the row's flyout after a short intent delay: long
+  // enough that a pointer crossing rows on its way into the panel's own
+  // controls never swaps the panel (the diagonal-path bug that once
+  // removed hover), short enough to feel instant when dwelling on a row.
+  // Keyboard focus opens immediately — Tab is already deliberate. Either
+  // path skips engines without a catalog (nothing to preview) and, at
+  // fire time, stays put while the user is typing in the panel's search
+  // or channel filter; a click still switches outright.
+  const hoverTimerRef = useRef<number | null>(null);
+  const clearHoverTimer = () => {
+    if (hoverTimerRef.current !== null) {
+      window.clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+  useEffect(() => clearHoverTimer, []);
+
+  const hoverEngine = (option: MenuOption) => {
+    clearHoverTimer();
+    if (option.disabled) return;
+    if ((modelsByEngine[option.id] ?? []).length === 0) return;
+    if (option.id === openEngine) return;
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active.closest("[data-engine-flyout]") !== null &&
+        (active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
+      setOpenEngine(option.id);
+    }, HOVER_INTENT_MS);
+  };
+
+  const focusEngine = (option: MenuOption) => {
+    clearHoverTimer();
+    if (option.disabled) return;
+    if ((modelsByEngine[option.id] ?? []).length === 0) return;
+    setOpenEngine(option.id);
+  };
 
   // Keep the menu open after a model pick so Fast / effort can be adjusted in
   // the same panel (Codex desktop behavior). A model on another installed
@@ -496,6 +570,7 @@ export function CliMenu({
   };
 
   const selectEngine = (option: MenuOption) => {
+    clearHoverTimer();
     // Mobile: the row tap drills into the second-level model dialog instead
     // of switching engines outright — the engine switches when a model is
     // picked there.
@@ -507,9 +582,7 @@ export function CliMenu({
     if (option.disabled) return;
     // Desktop: the row switches WHICH model list is shown, nothing more. The
     // engine itself changes when a model is picked from that list (see
-    // pickModel), so browsing another CLI can never switch the active engine;
-    // the panel follows clicks only — hover never swaps it out from under a
-    // channel filter or a model search the user is working in.
+    // pickModel), so browsing another CLI can never switch the active engine.
     // An engine with no catalog has nothing to browse: keep the old
     // behaviour of switching outright.
     if ((modelsByEngine[option.id] ?? []).length === 0) {
@@ -556,6 +629,9 @@ export function CliMenu({
             onQueryChange={setQuery}
             isMobile={isMobile}
             onSelectEngine={selectEngine}
+            onHoverEngine={hoverEngine}
+            onHoverEngineEnd={clearHoverTimer}
+            onFocusEngine={focusEngine}
             onPickModel={pickModel}
             onEffortChange={onEffortChange}
             channelsByEngine={channelsByEngine}
