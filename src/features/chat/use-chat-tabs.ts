@@ -274,6 +274,7 @@ export function useChatTabs({
     handleTabReorder,
     sessionById,
     threadStreaming,
+    threadRetrying,
     openFiles,
     activeFilePath,
     browserTabs,
@@ -566,14 +567,5 @@ function useChatTabHandlers({
     handleTabCloseAll,
     handleTabCloseInactive,
     handleTabReorder,
-    sessionById,
-    threadStreaming,
-    threadRetrying,
-    openFiles,
-    activeFilePath,
-    browserTabs,
-    activeBrowserId,
-    diffView,
-    closeDiff,
   };
 }
