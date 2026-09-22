@@ -145,32 +145,48 @@ pub async fn list_engine_models(
         if let Some(transport) =
             crate::engine::wsl_transport::transport_for_workspace(&state.db, ws)
         {
-            match engine.as_str() {
-                "pi" | "omp" => {
-                    return Ok(wsl::pi_family_catalog_remote(engine.as_str(), &transport).await);
-                }
-                "codex" => {
-                    return Ok(wsl::codex_catalog_remote(&transport).await);
-                }
-                "kimi" => {
-                    return Ok(wsl::kimi_catalog_remote(&transport).await);
-                }
-                "claude" => {
-                    return Ok(wsl::claude_catalog_remote(&transport).await);
-                }
-                // 其余引擎暂无远程 catalog 命令形态(grok/dsh/agy 等
-                // 是本机推导):空目录 + remote 旗标,前端不掺本机配置 ——
-                // 发行版里的 CLI 用自己配置里的默认模型。
-                _ => return Ok(EngineCatalog::authoritative_remote(Vec::new())),
-            }
+            return catalog_for_transport(&engine, &transport).await;
         }
     }
-    match engine.as_str() {
+    local_catalog(&engine).await
+}
+
+/// Explicit target entry point for plugin discovery. A missing remote
+/// transport is an error, never permission to probe the local machine.
+pub async fn catalog_for_execution_target(
+    state: &crate::AppState,
+    engine: &str,
+    target: &crate::cli::ExecutionTarget,
+) -> Result<EngineCatalog, String> {
+    match target {
+        crate::cli::ExecutionTarget::Local => local_catalog(engine).await,
+        crate::cli::ExecutionTarget::Wsl { .. } => {
+            let transport = crate::engine::wsl_transport::transport_for_execution_target(&state.db, target)?;
+            catalog_for_transport(engine, &transport).await
+        }
+    }
+}
+
+async fn catalog_for_transport(
+    engine: &str,
+    transport: &crate::engine::wsl_transport::WslTransport,
+) -> Result<EngineCatalog, String> {
+    Ok(match engine {
+        "pi" | "omp" => wsl::pi_family_catalog_remote(engine, transport).await,
+        "codex" => wsl::codex_catalog_remote(transport).await,
+        "kimi" => wsl::kimi_catalog_remote(transport).await,
+        "claude" => wsl::claude_catalog_remote(transport).await,
+        _ => EngineCatalog::authoritative_remote(Vec::new()),
+    })
+}
+
+async fn local_catalog(engine: &str) -> Result<EngineCatalog, String> {
+    match engine {
         "codex" => Ok(codex_catalog().await),
         "kimi" => Ok(kimi_catalog().await),
         "grok" => Ok(grok_catalog()),
         "claude" => Ok(claude_catalog()),
-        "pi" | "omp" => Ok(pi_family_catalog(&engine).await),
+        "pi" | "omp" => Ok(pi_family_catalog(engine).await),
         "dsh" => dsh_catalog().await,
         "agy" => Ok(agy_catalog().await),
         "opencode" => Ok(opencode_catalog().await),

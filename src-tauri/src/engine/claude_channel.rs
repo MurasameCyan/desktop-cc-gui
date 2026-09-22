@@ -137,7 +137,10 @@ fn stage(
         serde_json::to_vec(&settings).map_err(|_| "Cannot serialize Claude channel settings")?;
     std::fs::create_dir_all(directory)
         .map_err(|e| format!("create Claude staging directory: {e}"))?;
-    let path = directory.join(format!("channel-{}.json", uuid::Uuid::new_v4()));
+    let private = directory.join(uuid::Uuid::new_v4().to_string());
+    super::contribution::create_private_dir(&private)?;
+    built.cleanup_files.push(private.clone());
+    let path = private.join("settings.json");
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -148,7 +151,7 @@ fn stage(
     let mut file = options
         .open(&path)
         .map_err(|e| format!("create private Claude settings: {e}"))?;
-    built.cleanup_files.push(path.clone());
+    // The private directory (including partial writes) is already owned by built.
     file.write_all(&content)
         .map_err(|e| format!("write private Claude settings: {e}"))?;
     built.command.arg("--settings").arg(path);

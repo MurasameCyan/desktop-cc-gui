@@ -17,6 +17,7 @@
  */
 
 let pluginDepth = 0;
+let authorizedInvokeDepth: number | null = null;
 
 /** Run `fn` marked as plugin code: direct Tauri IPC inside throws. */
 export function runAsPlugin<T>(fn: () => T): T {
@@ -25,6 +26,18 @@ export function runAsPlugin<T>(fn: () => T): T {
     return fn();
   } finally {
     pluginDepth -= 1;
+  }
+}
+
+/** Authorize one checked host IPC hop. Evaluate plugin arguments before
+ * entering; nested plugin callbacks and async continuations get no grant. */
+export function withAuthorizedHostInvoke<T>(fn: () => T): T {
+  const previous = authorizedInvokeDepth;
+  authorizedInvokeDepth = pluginDepth;
+  try {
+    return fn();
+  } finally {
+    authorizedInvokeDepth = previous;
   }
 }
 
@@ -38,23 +51,36 @@ declare global {
 }
 
 let installed = false;
+let reportedUnwrappable = false;
 
 /** Wrap the Tauri IPC entry point with the plugin-execution guard. Idempotent;
  *  no-op outside the desktop webview (web bridge has no __TAURI_INTERNALS__). */
 export function installHardening(): void {
   if (installed) return;
-  installed = true;
   const internals = window.__TAURI_INTERNALS__;
   const original = internals?.invoke;
-  if (!internals || !original) return;
-  internals.invoke = (cmd, args) => {
-    if (pluginDepth > 0) {
-      return Promise.reject(
-        new Error(
-          `[plugins] direct Tauri invoke("${cmd}") is blocked inside plugin code; use the PluginContext APIs`,
-        ),
-      );
+  if (!internals || !original) {
+    installed = true;
+    return;
+  }
+  const wrapped = (cmd: string, args?: unknown) => {
+    if (pluginDepth > 0 && authorizedInvokeDepth !== pluginDepth) {
+      return Promise.reject(new Error(
+        `[plugins] direct Tauri invoke("${cmd}") is blocked inside plugin code; use the PluginContext APIs`,
+      ));
     }
+    // Consume before serialization can invoke plugin getters/toJSON.
+    authorizedInvokeDepth = null;
     return original(cmd, args);
   };
+  try {
+    internals.invoke = wrapped;
+    installed = true;
+  } catch {
+    // WebView2 may expose a non-writable invoke. Backend gates still apply;
+    // this best-effort same-origin guard must not break plugin bootstrap.
+    if (reportedUnwrappable) return;
+    reportedUnwrappable = true;
+    console.warn("[plugins] direct-IPC guard unavailable: invoke is not writable");
+  }
 }

@@ -206,7 +206,7 @@ fn home_dir_name(engine: &str) -> Result<&'static str, String> {
 
 /// `<agent>` dir: `$PI_CODING_AGENT_DIR` when set (both CLIs honor it; omp kept
 /// it from the pi fork), else `~/.pi/agent` / `~/.omp/agent`.
-fn agent_dir(engine: &str) -> Result<PathBuf, String> {
+pub(crate) fn agent_dir(engine: &str) -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(dir));
     }

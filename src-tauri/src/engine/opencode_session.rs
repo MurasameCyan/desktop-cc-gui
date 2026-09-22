@@ -76,6 +76,7 @@ async fn run_server_turn_with_probe_port(
     probe_port: u16,
 ) {
     let mut state = TurnState::new(req.session_id.clone());
+    let _registry_guard = super::VirtualRunGuard::new(Arc::clone(&core.registry),core.run_id.clone(),virtual_pid);
     let mut view = TurnView::default();
     let preassigned_session_id = req.session_id.clone();
     let result = turn_inner(
@@ -138,8 +139,17 @@ async fn turn_inner(
     killed: &Arc<AtomicBool>,
     probe_port: u16,
 ) -> Result<(), String> {
-    let origin = opencode_server::ensure_server(server, bin, probe_port).await?;
+    let managed = if req.execution.is_some() { Some(opencode_server::ensure_managed_server(server, req, bin).await?) } else { None };
+    let origin = if let Some(server) = &managed { server.origin.clone() } else { opencode_server::ensure_server(server, bin, probe_port).await? };
     let directory = req.workspace.to_string_lossy().to_string();
+    if let Some(execution) = &req.execution {
+        verify_profile(&origin, &directory, execution, req.effort.as_deref()).await?;
+        if let Some(session_id) = &req.session_id {
+            let response = reqwest::Client::new().get(format!("{origin}/session/{session_id}"))
+                .query(&[("directory",directory.as_str())]).timeout(Duration::from_secs(15)).send().await.map_err(|_| "Cannot restore OpenCode session on the selected server")?;
+            if !response.status().is_success() { return Err("OpenCode session does not exist on the selected server; prompt was not sent".into()); }
+        }
+    }
 
     // Session continuity: resume the stored ses_ id, else create one. The
     // question tool only exists server-side, so the session must live on the
@@ -157,11 +167,13 @@ async fn turn_inner(
     let (mut events, ready) = spawn_event_stream(&origin, &directory, session_id.clone());
     let ready = tokio::time::timeout(Duration::from_secs(5), ready).await;
     if !matches!(ready, Ok(Ok(true))) {
+        if req.execution.is_some() { return Err("OpenCode event stream did not become ready; prompt was not sent".into()); }
         core.dispatch_event(
             state,
             EngineEvent::Warn("事件流未就绪，本轮中的提问请求可能无法显示".to_string()),
         );
     }
+    if killed.load(Ordering::SeqCst) { return Ok(()); }
     prompt(&origin, &directory, &session_id, req).await?;
 
     let mut kill_poll = tokio::time::interval(KILL_POLL);
@@ -201,6 +213,19 @@ async fn turn_inner(
     }
 }
 
+async fn verify_profile(origin: &str, directory: &str, execution: &crate::cli::ResolvedContribution, effort: Option<&str>) -> Result<(),String> {
+    let response = reqwest::Client::new().get(format!("{origin}/provider")).query(&[("directory",directory)])
+        .timeout(Duration::from_secs(15)).send().await.map_err(|_| "OpenCode provider handshake failed")?;
+    if !response.status().is_success() { return Err("OpenCode provider handshake was rejected".into()); }
+    let catalog: Value = response.json().await.map_err(|_| "Invalid OpenCode provider handshake")?;
+    let provider = super::contribution::provider_name(execution);
+    let model = catalog.get("all").and_then(Value::as_array).and_then(|all|all.iter().find(|entry|entry.get("id").and_then(Value::as_str)==Some(provider.as_str())))
+        .and_then(|entry|entry.get("models")).and_then(|models|models.get(execution.choice.selector.model_id()))
+        .ok_or("OpenCode did not register the selected provider/model; prompt was not sent")?;
+    if effort.is_some_and(|effort|model.get("variants").and_then(|variants|variants.get(effort)).is_none()) { return Err("OpenCode did not register the requested model variant; prompt was not sent".into()); }
+    Ok(())
+}
+
 async fn create_session(origin: &str, directory: &str, prompt: &str) -> Result<String, String> {
     let title: String = prompt.trim().chars().take(40).collect();
     let body = if title.is_empty() {
@@ -231,6 +256,15 @@ async fn prompt(
     session_id: &str,
     req: &SendRequest,
 ) -> Result<(), String> {
+    if req.prompt.trim() == "/compact" {
+        let (provider, model) = if let Some(execution) = &req.execution {
+            (super::contribution::provider_name(execution),execution.choice.selector.model_id().to_string())
+        } else {
+            let (provider,model) = req.model.as_deref().and_then(|m|m.split_once('/')).ok_or("OpenCode compaction requires an explicit provider/model")?;
+            (provider.to_string(),model.to_string())
+        };
+        return opencode_server::post(origin,&format!("/session/{session_id}/summarize"),directory,Some(json!({"providerID":provider,"modelID":model}))).await;
+    }
     let mut parts = vec![json!({ "type": "text", "text": req.prompt })];
     // Images ride as data-URL file parts (the serve transport).
     for raw in &req.images {
@@ -243,7 +277,9 @@ async fn prompt(
     }
     let mut body = json!({ "parts": parts });
     // GUI model selectors are `provider/model`; prompt_async wants the split.
-    if let Some(model) = req.model.as_deref().and_then(|m| m.split_once('/')) {
+    if let Some(execution) = &req.execution {
+        body["model"] = json!({"providerID":super::contribution::provider_name(execution),"modelID":execution.choice.selector.model_id()});
+    } else if let Some(model) = req.model.as_deref().and_then(|m| m.split_once('/')) {
         body["model"] = json!({ "providerID": model.0, "modelID": model.1 });
     }
     // "plan" selects the read-only plan agent; "auto" is the default build agent.
@@ -801,12 +837,10 @@ mod tests {
 
         let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
         let registry = Arc::new(ProcessRegistry::default());
-        let core = TurnCore {
-            sink: EventSink::new(emitter.clone()),
-            registry: Arc::clone(&registry),
-            engine_id: "opencode".to_string(),
-            run_id: "oc-test-run".to_string(),
-        };
+        let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+        registry: Arc::clone(&registry),
+        engine_id: "opencode".to_string(),
+        run_id: "oc-test-run".to_string(), };
         // The virtual registry entry the host path creates at send time.
         registry.insert(
             "oc-test-run".to_string(),
@@ -820,19 +854,17 @@ mod tests {
                 questions: Arc::new(StdMutex::new(HashMap::new())),
             },
         );
-        let req = SendRequest {
-            session_id: None,
-            workspace: std::path::PathBuf::from("/tmp"),
-            prompt: "测试提问".to_string(),
-            images: Vec::new(),
-            model: None,
-            effort: None,
-            service_tier: None,
-            permission: None,
-            additional_dirs: Vec::new(),
-            provider_id: None,
-            computer_use: None,
-        };
+        let req = SendRequest { execution: None, selection: None, session_id: None,
+        workspace: std::path::PathBuf::from("/tmp"),
+        prompt: "测试提问".to_string(),
+        images: Vec::new(),
+        model: None,
+        effort: None,
+        service_tier: None,
+        permission: None,
+        additional_dirs: Vec::new(),
+        provider_id: None,
+        computer_use: None, };
         let turn = tokio::spawn(run_server_turn_with_probe_port(
             core,
             req,

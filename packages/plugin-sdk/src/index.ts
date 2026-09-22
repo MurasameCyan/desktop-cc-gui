@@ -22,3 +22,5 @@ export * from "./permissions";
 export * from "./version";
 export * from "./registry";
 export * from "./context";
+export * from "./cli";
+export * from "./document-storage";

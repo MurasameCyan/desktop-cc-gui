@@ -102,7 +102,7 @@ pub(super) async fn attach_session(
     }
     let mut actual_effort = None;
     if let Some(effort) = req.effort.as_deref() {
-        let effort = supported_effort(effort, &config);
+        let effort = supported_effort(effort, &config)?;
         acp.routed(
             "session/set_config_option",
             json!({"sessionId": session_id, "configId": "thinking", "value": effort}),
@@ -133,40 +133,13 @@ fn mode(permission: Option<&str>) -> &'static str {
     }
 }
 
-fn supported_effort<'a>(requested: &'a str, config: &'a Value) -> &'a str {
-    let options = config["configOptions"]
-        .as_array()
+fn supported_effort<'a>(requested: &'a str, config: &Value) -> Result<&'a str, String> {
+    let options = config["configOptions"].as_array()
         .and_then(|options| options.iter().find(|option| option["id"] == "thinking"))
-        .and_then(|option| option["options"].as_array());
-    let Some(options) = options else {
-        return requested;
-    };
-    let accepts = |value: &str| options.iter().any(|option| option["value"] == value);
-    let boolean = options
-        .iter()
-        .find(|option| option["value"] != "off")
-        .is_some_and(|option| option["value"] == "on");
-    if boolean && !matches!(requested, "off" | "none") {
-        "on"
-    } else if accepts(requested) {
-        requested
-    } else if requested == "none" && accepts("off") {
-        "off"
-    } else if !matches!(requested, "off" | "none") && accepts("on") {
-        "on"
-    } else {
-        let levels = [
-            "off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-        ];
-        let rank = |value: &str| levels.iter().position(|level| *level == value);
-        options
-            .iter()
-            .filter_map(|option| option["value"].as_str())
-            .filter(|value| rank(value).is_some())
-            .min_by_key(|value| rank(value).unwrap().abs_diff(rank(requested).unwrap_or(4)))
-            .or_else(|| options.iter().find_map(|option| option["value"].as_str()))
-            .unwrap_or(requested)
-    }
+        .and_then(|option| option["options"].as_array())
+        .ok_or("Kimi did not report supported effort choices")?;
+    if options.iter().any(|option| option["value"] == requested) { Ok(requested) }
+    else { Err("Kimi does not support the requested effort; prompt was not sent".into()) }
 }
 
 fn fields(params: &Value) -> Result<Vec<Value>, String> {
@@ -436,19 +409,14 @@ mod tests {
     }
 
     #[test]
-    fn boolean_thinking_models_accept_effort_without_rejecting_the_turn() {
-        let config = json!({"configOptions": [{"id": "thinking", "options": [{"value":"off"}, {"value":"on"}]}]});
-        assert_eq!(supported_effort("medium", &config), "on");
-        assert_eq!(supported_effort("high", &config), "on");
-        assert_eq!(supported_effort("none", &config), "off");
-        assert_eq!(supported_effort("off", &config), "off");
-        let config = json!({"configOptions": [{"id": "thinking", "currentValue": "medium", "options": [{"value":"off"}, {"value":"on"}, {"value":"medium"}]}]});
-        assert_eq!(supported_effort("medium", &config), "on");
-        let config = json!({"configOptions": [{"id": "thinking", "options": [{"value":"medium"}, {"value":"high"}]}]});
-        assert_eq!(supported_effort("high", &config), "high");
-        assert_eq!(supported_effort("ultra", &config), "high");
-        assert_eq!(supported_effort("low", &config), "medium");
-        assert_eq!(supported_effort("off", &config), "medium");
+    fn unsupported_effort_never_falls_back_to_a_nearby_level() {
+        let boolean = json!({"configOptions": [{"id": "thinking", "options": [{"value":"off"}, {"value":"on"}]}]});
+        assert!(supported_effort("high", &boolean).is_err());
+        assert_eq!(supported_effort("off", &boolean).unwrap(), "off");
+        let levels = json!({"configOptions": [{"id": "thinking", "options": [{"value":"medium"}, {"value":"high"}]}]});
+        assert!(supported_effort("ultra", &levels).is_err());
+        assert!(supported_effort("low", &levels).is_err());
+        assert_eq!(supported_effort("high", &levels).unwrap(), "high");
     }
 
     #[test]

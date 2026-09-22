@@ -134,16 +134,24 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
     let capture = Arc::new(Capture(Mutex::new(Vec::new())));
     let emitter = Arc::clone(&capture) as Arc<dyn Emit>;
     let sink = EventSink::new(Arc::clone(&emitter));
+    let db = Arc::new(Db::open_at(&home.join("app.db")).unwrap());
+    let emitters = BroadcastEmit::new(Arc::clone(&emitter));
+    let cli = Arc::new(ccgui_next_lib::cli::CliState::new(db.clone(), emitters.clone()).unwrap());
     let state = AppState {
-        db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
+        db,
+        cli,
         sink,
         terminal_sink: EventSink::with_name(
             Arc::clone(&emitter),
             ccgui_next_lib::terminal::TERMINAL_OUTPUT_EVENT,
         ),
+        plugin_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
-        emitters: BroadcastEmit::new(emitter),
+        emitters,
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),

@@ -266,7 +266,7 @@ impl Engine for PiFamilyEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         // pi 与 omp 都走 rpc:提问对话框以 extension_ui_request 帧到达、应答
         // 写回 stdin。omp 用 rpc-ui(hasUI 打开 CLI 内置 ask);pi 用 rpc 加
         // 自带的 ask 桥扩展(pi 没有内置提问工具)。
@@ -287,9 +287,9 @@ impl Engine for PiFamilyEngine {
             cmd.arg("--mode");
             cmd.arg("json");
         }
-        if let Some(model) = req.model.as_deref() {
-            cmd.arg("--model");
-            cmd.arg(model);
+        // Registration happens after native restoration; RPC confirms it before prompt.
+        if req.execution.is_none() {
+            if let Some(model) = req.model.as_deref() { cmd.arg("--model").arg(model); }
         }
         // Only explicit OpenAI-Codex selectors opt into this per-app preference.
         // Never leak it to pi, another provider or an unknown CLI default.
@@ -1510,19 +1510,17 @@ mod tests {
     #[test]
     fn build_command_passes_effort_through() {
         let engine = omp();
-        let req = SendRequest {
-            session_id: None,
-            prompt: "hi".into(),
-            images: vec![],
-            workspace: std::path::PathBuf::from("/tmp"),
-            model: None,
-            effort: Some("ultra".into()),
-            service_tier: None,
-            permission: None,
-            additional_dirs: vec![],
-            provider_id: None,
-            computer_use: None,
-        };
+        let req = SendRequest { execution: None, selection: None, session_id: None,
+        prompt: "hi".into(),
+        images: vec![],
+        workspace: std::path::PathBuf::from("/tmp"),
+        model: None,
+        effort: Some("ultra".into()),
+        service_tier: None,
+        permission: None,
+        additional_dirs: vec![],
+        provider_id: None,
+        computer_use: None, };
         let built = engine.build_command(&req, "omp").unwrap();
         let args: Vec<String> = built
             .command
@@ -1540,19 +1538,17 @@ mod tests {
     #[test]
     fn build_command_injects_set_thinking_level_in_rpc_mode() {
         let engine = omp();
-        let req = SendRequest {
-            session_id: Some("s1".into()),
-            prompt: "hi".into(),
-            images: vec![],
-            workspace: std::path::PathBuf::from("/tmp"),
-            model: None,
-            effort: Some("high".into()),
-            service_tier: None,
-            permission: None,
-            additional_dirs: vec![],
-            provider_id: None,
-            computer_use: None,
-        };
+        let req = SendRequest { execution: None, selection: None, session_id: Some("s1".into()),
+        prompt: "hi".into(),
+        images: vec![],
+        workspace: std::path::PathBuf::from("/tmp"),
+        model: None,
+        effort: Some("high".into()),
+        service_tier: None,
+        permission: None,
+        additional_dirs: vec![],
+        provider_id: None,
+        computer_use: None, };
         let built = engine.build_command(&req, "omp").unwrap();
         let payload = built.stdin_payload.expect("rpc stdin payload");
         let commands: Vec<serde_json::Value> = payload
@@ -1585,19 +1581,17 @@ mod tests {
     #[test]
     fn omp_build_command_includes_bridge_extension() {
         let engine = omp();
-        let req = SendRequest {
-            session_id: None,
-            prompt: "hi".into(),
-            images: vec![],
-            workspace: std::path::PathBuf::from("/tmp"),
-            model: None,
-            effort: Some("high".into()),
-            service_tier: None,
-            permission: None,
-            additional_dirs: vec![],
-            provider_id: None,
-            computer_use: None,
-        };
+        let req = SendRequest { execution: None, selection: None, session_id: None,
+        prompt: "hi".into(),
+        images: vec![],
+        workspace: std::path::PathBuf::from("/tmp"),
+        model: None,
+        effort: Some("high".into()),
+        service_tier: None,
+        permission: None,
+        additional_dirs: vec![],
+        provider_id: None,
+        computer_use: None, };
         let built = engine.build_command(&req, "omp").unwrap();
         let args: Vec<String> = built
             .command

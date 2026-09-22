@@ -11,7 +11,8 @@
 //! user's own `opencode serve`) is never touched.
 
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use std::collections::HashMap;
 
 use serde_json::Value;
 use tokio::process::Child;
@@ -32,6 +33,9 @@ pub struct OpencodeServerState {
     spawned: Mutex<Option<Child>>,
     /// Serializes ensure so concurrent sends never spawn twice.
     ensure: tokio::sync::Mutex<()>,
+    managed: Mutex<HashMap<String, Weak<ManagedServer>>>,
+    #[cfg(windows)]
+    native_job: Mutex<Option<Arc<super::job::KillOnCloseJob>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -41,6 +45,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl OpencodeServerState {
     /// Kill only the server we spawned (app exit). Adopted servers survive.
     pub fn kill_spawned(&self) {
+        for server in lock(&self.managed).values().filter_map(Weak::upgrade) { server.stop(); }
+        lock(&self.managed).clear();
         let child = lock(&self.spawned).take();
         if let Some(mut child) = child {
             if let Some(pid) = child.id() {
@@ -49,6 +55,70 @@ impl OpencodeServerState {
             let _ = child.start_kill();
         }
         *lock(&self.origin) = None;
+    }
+}
+
+pub(crate) struct ManagedServer {
+    pub(crate) origin: String,
+    child: Mutex<Option<Child>>,
+    #[cfg(windows)]
+    _job: Option<Arc<super::job::KillOnCloseJob>>,
+}
+
+impl ManagedServer {
+    fn stop(&self) {
+        if let Some(mut child) = lock(&self.child).take() {
+            if let Some(pid) = child.id() { super::kill_process_group(pid); }
+            let _ = child.start_kill();
+        }
+    }
+}
+impl Drop for ManagedServer { fn drop(&mut self) { self.stop(); } }
+
+pub(crate) fn pool_key(fingerprint: &str, workspace: &std::path::Path, binary: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for value in [fingerprint.as_bytes(), workspace.as_os_str().as_encoded_bytes(), binary.as_bytes()] {
+        hash.update((value.len() as u64).to_le_bytes()); hash.update(value);
+    }
+    format!("{:x}", hash.finalize())
+}
+
+/// Strong leases live only for active turns; the pool keeps weak references,
+/// so credentials and owned processes are released on settle/abort, not app exit.
+pub(crate) async fn ensure_managed_server(state: &OpencodeServerState, req: &super::SendRequest, bin: &str) -> Result<Arc<ManagedServer>, String> {
+    let profile = req.execution.as_ref().ok_or("Missing OpenCode execution profile")?;
+    let resolved_bin = resolve::resolve_launchable_cli_binary(bin);
+    let key = pool_key(&profile.fingerprint, &req.workspace, &resolved_bin);
+    let _serialize = state.ensure.lock().await;
+    let existing = { lock(&state.managed).get(&key).and_then(Weak::upgrade) };
+    if let Some(server) = existing {
+        if healthy(&server.origin).await { return Ok(server); }
+        server.stop();
+    }
+    let port = free_port()?;
+    let origin = format!("http://127.0.0.1:{port}");
+    let mut command = command_for_binary(&resolved_bin);
+    command.args(["serve", "--hostname", "127.0.0.1", "--port"]).arg(port.to_string());
+    super::contribution::configure_opencode(&mut command, req)?;
+    command.current_dir(&req.workspace).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+    #[cfg(unix)] command.process_group(0);
+    #[cfg(windows)] super::hide_console(&mut command);
+    let child = command.spawn().map_err(|_| "Cannot launch isolated OpenCode serve")?;
+    #[cfg(windows)] let job = super::job::assign_kill_on_close(&child);
+    let server = Arc::new(ManagedServer {origin, child:Mutex::new(Some(child)), #[cfg(windows)] _job:job});
+    let deadline = Instant::now() + SPAWN_READY_TIMEOUT;
+    loop {
+        if healthy(&server.origin).await {
+            let mut pool = lock(&state.managed);
+            pool.retain(|_, child| child.strong_count()>0);
+            pool.insert(key, Arc::downgrade(&server));
+            return Ok(server);
+        }
+        let exited = lock(&server.child).as_mut().ok_or("OpenCode server stopped")?.try_wait().map_err(|_| "Cannot inspect OpenCode server")?.is_some();
+        if exited { return Err("Isolated OpenCode server exited during startup".into()); }
+        if Instant::now() >= deadline { return Err("Isolated OpenCode server startup timed out".into()); }
+        sleep(SPAWN_POLL_INTERVAL).await;
     }
 }
 
@@ -127,12 +197,13 @@ pub(crate) async fn ensure_server(
         format!("无法启动 opencode serve（{resolved}）：{e}。请确认已安装 opencode。")
     })?;
     #[cfg(windows)]
-    let _tree_guard = crate::engine::job::assign_kill_on_close(&child);
+    let tree_guard = crate::engine::job::assign_kill_on_close(&child);
 
     let deadline = Instant::now() + SPAWN_READY_TIMEOUT;
     loop {
         if healthy(&origin).await {
             *lock(&state.spawned) = Some(child);
+            #[cfg(windows)] { *lock(&state.native_job) = tree_guard; }
             *lock(&state.origin) = Some(origin.clone());
             return Ok(origin);
         }
@@ -188,4 +259,18 @@ pub(crate) async fn post(
         .take(200)
         .collect::<String>();
     Err(format!("opencode {path} 失败（{status}）: {detail}"))
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    #[test]
+    fn server_identity_includes_key_generation_workspace_and_cli() {
+        let workspace = std::path::Path::new("workspace-a");
+        let first = pool_key("provider-a-key-1", workspace, "opencode-a");
+        assert_ne!(first, pool_key("provider-a-key-2", workspace, "opencode-a"));
+        assert_ne!(first, pool_key("provider-b-key-1", workspace, "opencode-a"));
+        assert_ne!(first, pool_key("provider-a-key-1", std::path::Path::new("workspace-b"), "opencode-a"));
+        assert_ne!(first, pool_key("provider-a-key-1", workspace, "opencode-b"));
+    }
 }

@@ -1,4 +1,5 @@
 import type { Message, TodosPayload } from "@/lib/ipc";
+import type { SessionExecutionSelection, TokenPolicy } from "@ccgui/plugin-sdk";
 
 /**
  * Streaming buffers and bySession write helpers. Leaf module: functions are
@@ -14,6 +15,12 @@ export interface QueuedMessage {
 }
 
 export interface SessionState {
+  executionSelection: SessionExecutionSelection | null;
+  preparing?: boolean;
+  pendingId?: string;
+  selectionUnavailableReason: string | null;
+  /** Immutable policy for the currently running turn. */
+  runTokenPolicy?: TokenPolicy;
   messages: Message[];
   /** Older delegation metadata kept outside the paginated message window. */
   subagentHistory: Message[];
@@ -53,6 +60,8 @@ export interface SessionState {
 }
 
 export const EMPTY_SESSION: SessionState = {
+  executionSelection: null,
+  selectionUnavailableReason: null,
   messages: [],
   subagentHistory: [],
   nextBefore: null,
@@ -71,71 +80,6 @@ export const EMPTY_SESSION: SessionState = {
   interrupted: false,
 };
 
-/** The model one session runs with, most specific first:
- *
- *  1. the tab's own pick (an explicit choice for this session),
- *  2. what the engine reported running for this session,
- *  3. the model this session's history was written with,
- *  4. the engine default (new chats, sessions with no history yet).
- *
- * Per session on purpose: two omp sessions may run different models, so the
- * picker, the send, and the stamped rows must all read the session's model —
- * an engine-wide default would make one session's pick leak into the other.
- */
-export function resolveSessionModel(
-  tab: { engine: string; model?: string } | null | undefined,
-  session: Pick<SessionState, "activeModel" | "messages"> | undefined,
-  engineDefault?: string,
-): string | undefined {
-  if (!tab) return engineDefault;
-  if (tab.model) return tab.model;
-  if (session?.activeModel) return session.activeModel;
-  const messages = session?.messages;
-  if (messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const model = messages[i].model;
-      if (model) return model;
-    }
-  }
-  return engineDefault;
-}
-
-/** The reasoning level one session runs with. A native session owns its level
- * in SessionState/database; only a not-yet-created tab may carry a starting
- * override. This prevents stale persisted tab fields from shadowing a newer
- * level recorded by another client. */
-export function resolveSessionEffort(
-  tab: { engine: string; sessionId?: string | null; effort?: string | null } | null | undefined,
-  session: Pick<SessionState, "activeEffort" | "messages"> | undefined,
-  engineDefault?: string,
-): string | undefined {
-  if (!tab) return engineDefault;
-  if (tab.sessionId === null && tab.effort) return tab.effort;
-  if (session?.activeEffort) return session.activeEffort;
-  const messages = session?.messages;
-  if (messages) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const effort = messages[i].effort;
-      if (effort) return effort;
-    }
-  }
-  return engineDefault;
-}
-
-/** The in-app channel one session runs with. A native session owns it in
- * SessionState / session_providers; only a not-yet-created tab may carry a
- * starting override. There is no message-history scan: the transcript does
- * not record the channel. */
-export function resolveSessionProvider(
-  tab: { engine: string; sessionId?: string | null; provider?: string | null } | null | undefined,
-  session: Pick<SessionState, "activeProvider"> | undefined,
-  engineDefault?: string,
-): string | undefined {
-  if (!tab) return engineDefault;
-  if (tab.sessionId === null && tab.provider) return tab.provider;
-  if (session?.activeProvider) return session.activeProvider;
-  return engineDefault;
-}
 
 /** Minimal store shape these helpers touch. */
 export interface BySessionSlice {

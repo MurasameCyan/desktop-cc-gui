@@ -79,7 +79,7 @@ pub(super) fn build_channel_command(req: &SendRequest, bin: &str) -> Result<Buil
 }
 
 fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<BuiltCommand, String> {
-    let mut cmd = command_for_binary(bin);
+    let mut cmd = super::command_for_request(req, bin);
     cmd.arg("--output-format");
     cmd.arg("stream-json");
     if KimiEngine.resolve_permission(req.permission.as_deref()) == "plan" {
@@ -217,19 +217,17 @@ mod channel_tests {
     fn kimi_uses_interactive_transport_locally_and_preserves_remote_fallback() {
         assert!(KimiEngine.transport_for(false) == super::super::Transport::Own);
         assert!(KimiEngine.transport_for(true) == super::super::Transport::Child);
-        let req = SendRequest {
-            session_id: None,
-            workspace: std::env::temp_dir(),
-            prompt: "ask".into(),
-            images: vec![],
-            model: Some("native-model".into()),
-            effort: Some("medium".into()),
-            service_tier: None,
-            permission: Some("auto".into()),
-            additional_dirs: vec![],
-            provider_id: None,
-            computer_use: None,
-        };
+        let req = SendRequest { execution: None, selection: None, session_id: None,
+        workspace: std::env::temp_dir(),
+        prompt: "ask".into(),
+        images: vec![],
+        model: Some("native-model".into()),
+        effort: Some("medium".into()),
+        service_tier: None,
+        permission: Some("auto".into()),
+        additional_dirs: vec![],
+        provider_id: None,
+        computer_use: None, };
         let built = KimiEngine.host_command(&req, "kimi").unwrap();
         let args: Vec<_> = built.command.as_std().get_args().collect();
         assert_eq!(args, ["acp"]);
@@ -238,19 +236,17 @@ mod channel_tests {
 
     #[test]
     fn independent_channel_uses_ephemeral_model_instead_of_native_alias() {
-        let mut req = SendRequest {
-            session_id: Some("existing-session".into()),
-            workspace: std::env::temp_dir(),
-            prompt: "routing probe".into(),
-            images: vec![],
-            model: Some("selected-model".into()),
-            effort: None,
-            service_tier: None,
-            permission: Some("auto".into()),
-            additional_dirs: vec![],
-            provider_id: Some("plugin_model-switcher_probe".into()),
-            computer_use: None,
-        };
+        let mut req = SendRequest { execution: None, selection: None, session_id: Some("existing-session".into()),
+        workspace: std::env::temp_dir(),
+        prompt: "routing probe".into(),
+        images: vec![],
+        model: Some("selected-model".into()),
+        effort: None,
+        service_tier: None,
+        permission: Some("auto".into()),
+        additional_dirs: vec![],
+        provider_id: Some("plugin_model-switcher_probe".into()),
+        computer_use: None, };
         let mut env = HashMap::from([
             ("KIMI_BASE_URL".into(), "https://selected.invalid/v1".into()),
             ("KIMI_API_KEY".into(), "test-selected".into()),

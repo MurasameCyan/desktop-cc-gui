@@ -8,12 +8,12 @@ import { ipc, type AgentConfig } from "@/lib/ipc";
  * session error banner, and still sends the bare text.
  */
 
-vi.mock("@/lib/ipc", () => ({
+// IPC is hoisted ahead of store imports; load the fixture inside its factory.
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     interruptSession: vi.fn(async () => true),
-    rememberSessionModel: vi.fn(async () => {}),
-    rememberSessionEffort: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     loadRemoteSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),

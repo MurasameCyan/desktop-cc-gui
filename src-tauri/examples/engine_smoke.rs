@@ -29,19 +29,17 @@ async fn main() {
 
 async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
     let engine = engine_by_id(engine_id).ok_or("unknown engine")?;
-    let req = SendRequest {
-        session_id: None,
-        workspace: workspace.clone(),
-        prompt: "Reply with exactly: ok".to_string(),
-        images: Vec::new(),
-        model: None,
-        effort: None,
-        service_tier: None,
-        permission: None,
-        additional_dirs: Vec::new(),
-        provider_id: None,
-        computer_use: None,
-    };
+    let req = SendRequest { execution: None, selection: None, session_id: None,
+    workspace: workspace.clone(),
+    prompt: "Reply with exactly: ok".to_string(),
+    images: Vec::new(),
+    model: None,
+    effort: None,
+    service_tier: None,
+    permission: None,
+    additional_dirs: Vec::new(),
+    provider_id: None,
+    computer_use: None, };
     let bin = which::which(engine_id)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| engine_id.to_string());

@@ -34,6 +34,8 @@ import { EmptyState } from "@/components/base/empty-state";
 import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
+import { useExecutionChoices } from "./use-execution-choices";
+import { ModelEntry } from "@/features/plugins/boundary/model-entry";
 
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -245,10 +247,10 @@ export const ChatConversation = memo(function ChatConversation({
   // array is subscribed inside SessionTimeline so stream deltas re-render
   // only that subtree — never the composer, queue bar, or status bar here.
   const streaming = useChatStore((s) =>
-    key ? (s.bySession[key]?.streaming ?? false) : false,
+    key ? Boolean(s.bySession[key]?.streaming || s.bySession[key]?.preparing) : false,
   );
   const sessionError = useChatStore((s) =>
-    key ? (s.bySession[key]?.error ?? null) : null,
+    key ? (s.bySession[key]?.error ?? s.bySession[key]?.selectionUnavailableReason ?? null) : null,
   );
   const dismissSessionError = useChatStore((s) => s.dismissSessionError);
   const queue = useChatStore((s) =>
@@ -257,11 +259,11 @@ export const ChatConversation = memo(function ChatConversation({
   const sessionUsage = useChatStore((s) =>
     key ? s.bySession[key]?.usage : undefined,
   );
-  const hasSession = useChatStore((s) => key in s.bySession);
+  const hasSession = useChatStore((s) => Boolean(active?.sessionId || s.bySession[key]?.messages.length || s.bySession[key]?.loading || s.bySession[key]?.streaming));
   const draft = useChatStore((s) => s.drafts[key] ?? "");
   const sendShortcut = useChatStore((s) => s.sendShortcut);
   // Engine/effort/model prefs: low-frequency, grouped into one shallow watch.
-  const { activeEngine, efforts, models, providers, ompServiceTier, codexServiceTier } = useChatStore(
+  const { activeEngine: preferredEngine, efforts, models, providers, ompServiceTier, codexServiceTier } = useChatStore(
     useShallow((s) => ({
       activeEngine: s.activeEngine,
       efforts: s.efforts,
@@ -271,6 +273,7 @@ export const ChatConversation = memo(function ChatConversation({
       providers: s.providers,
     })),
   );
+  const activeEngine = active?.engine ?? preferredEngine;
   const {
     setActiveEngine,
     setEffort,
@@ -343,26 +346,29 @@ export const ChatConversation = memo(function ChatConversation({
     () => Object.keys(pendingEngines),
     [pendingEngines],
   );
+  const { entryProps, tokenPolicy } = useExecutionChoices(active, engines, catalogs, modelsByEngine, channelsByEngine, refreshModels);
+  const runTokenPolicy = useChatStore((s) => s.bySession[key]?.runTokenPolicy);
+  const runModel = useChatStore((s) => s.bySession[key]?.activeModel ?? undefined);
 
   const displayModel = displayModels[activeEngine];
   // Conversation-reported window (Codex token_count, Claude's modelUsage)
   // wins; a fresh session starts from the last window this engine+model was
   // seen reporting; the model catalog is the fallback for engines that never
   // report one, and the shared constant is the last resort.
-  const contextMax = resolveContextMax({
+  const contextMax = (streaming ? runTokenPolicy : tokenPolicy)?.contextWindowTokens ?? resolveContextMax({
     usage: sessionUsage,
     engine: activeEngine,
-    model: displayModel,
+    model: streaming ? runModel : displayModel,
     catalogWindow: (catalogs[activeEngine]?.models ?? []).find(
-      (m) => m.id === displayModel,
+      (m) => m.id === (streaming ? runModel : displayModel),
     )?.contextWindow,
   });
   const observedWindow = parseUsage(sessionUsage)?.contextWindow;
   useEffect(() => {
     if (observedWindow) {
-      rememberContextWindow(activeEngine, displayModel, observedWindow);
+      rememberContextWindow(activeEngine, runModel, observedWindow);
     }
-  }, [observedWindow, activeEngine, displayModel]);
+  }, [observedWindow, activeEngine, runModel]);
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;
@@ -423,11 +429,10 @@ export const ChatConversation = memo(function ChatConversation({
       refreshModels,
       loadingEngines,
     });
+  const modelMenu = !noEnabledEngines && entryProps ? <ModelEntry {...entryProps} fallback={cliMenu} /> : cliMenu;
 
   return (
     <>
-      {active && hasSession ? (
-        <>
           {sessionError && (
             <ErrorBanner
               className="mx-4 mt-3"
@@ -435,6 +440,8 @@ export const ChatConversation = memo(function ChatConversation({
               onDismiss={() => dismissSessionError(key)}
             />
           )}
+      {active && hasSession ? (
+        <>
           <SessionTimeline
             sessionKey={key}
             workspacePath={active.workspacePath}
@@ -470,7 +477,7 @@ export const ChatConversation = memo(function ChatConversation({
         noEnabledEngines={noEnabledEngines}
         composerInputRef={composerInputRef}
         addMenu={addMenu}
-        cliMenu={cliMenu}
+        cliMenu={modelMenu}
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}

@@ -1,6 +1,7 @@
 import type * as Pub from "../plugin";
 import type {
   ComposerSlotId,
+  ModelEntryProps,
   Disposer,
   JsonSchemaObject,
   JsonSchemaProperty,
@@ -44,6 +45,7 @@ type _ComposerSlotId = Assert<Mutual<ComposerSlotId, Pub.ComposerSlotId>>;
 type _SessionMenuTarget = Assert<Mutual<SessionMenuTarget, Pub.SessionMenuTarget>>;
 type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
 type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
+type _ModelEntryProps = Assert<Mutual<ModelEntryProps, Pub.ModelEntryProps>>;
 
 // --- PluginContext：顶层与各能力组 key 完全对齐 ------------------------------
 
@@ -52,6 +54,8 @@ type _UiKeys = Assert<KeyParity<PluginContext["ui"], Pub.PluginContext["ui"]>>;
 type _ThemeKeys = Assert<KeyParity<PluginContext["theme"], Pub.PluginContext["theme"]>>;
 type _I18nKeys = Assert<KeyParity<PluginContext["i18n"], Pub.PluginContext["i18n"]>>;
 type _StorageKeys = Assert<KeyParity<PluginContext["storage"], Pub.PluginContext["storage"]>>;
+type _DocumentKeys = Assert<KeyParity<PluginContext["documentStorage"], Pub.PluginContext["documentStorage"]>>;
+type _CliKeys = Assert<KeyParity<PluginContext["cli"], Pub.PluginContext["cli"]>>;
 type _EventsKeys = Assert<KeyParity<PluginContext["events"], Pub.PluginContext["events"]>>;
 type _ComposerKeys = Assert<KeyParity<PluginContext["composer"], Pub.PluginContext["composer"]>>;
 type _WorkspacesKeys = Assert<KeyParity<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;
@@ -64,6 +68,8 @@ type _HostKeys = Assert<KeyParity<PluginContext["host"], Pub.PluginContext["host
 type _ThemeShape = Assert<Mutual<PluginContext["theme"], Pub.PluginContext["theme"]>>;
 type _I18nShape = Assert<Mutual<PluginContext["i18n"], Pub.PluginContext["i18n"]>>;
 type _StorageShape = Assert<Mutual<PluginContext["storage"], Pub.PluginContext["storage"]>>;
+type _DocumentShape = Assert<Mutual<PluginContext["documentStorage"], Pub.PluginContext["documentStorage"]>>;
+type _CliShape = Assert<Mutual<PluginContext["cli"], Pub.PluginContext["cli"]>>;
 type _EventsShape = Assert<Mutual<PluginContext["events"], Pub.PluginContext["events"]>>;
 type _ComposerShape = Assert<Mutual<PluginContext["composer"], Pub.PluginContext["composer"]>>;
 type _WorkspacesShape = Assert<Mutual<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;

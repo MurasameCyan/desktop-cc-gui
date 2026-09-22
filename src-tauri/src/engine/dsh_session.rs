@@ -195,23 +195,17 @@ async fn turn_inner(
         .ok_or("session/create 未返回 sessionId")?;
     core.dispatch_event(state, EngineEvent::SessionId(session_id.clone()));
 
-    // Model: the picker's ids are `provider/model` selector ids (models.rs).
-    if let Some(model) = req.model.as_deref().filter(|m| m.contains('/')) {
-        let (provider, model) = model.split_once('/').unwrap_or(("", model));
-        if !provider.is_empty() && !model.is_empty() {
-            let mut select_args = json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } });
-            if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
-                select_args["request"]["effort"] = json!(effort);
-                select_args["request"]["reasoningEffort"] = json!(effort);
-            }
-            let selected = host_call(&origin, "session/selectModel", select_args).await;
-            if selected.is_err() {
-                core.dispatch_event(
-                    state,
-                    EngineEvent::Warn(format!("模型切换未生效，继续使用会话当前模型：{model}")),
-                );
-            }
+    // A failed selection must never send the prompt to the session's previous model.
+    if let Some(selector) = req.model.as_deref() {
+        let (provider, model) = selector.split_once('/').filter(|(p, m)| !p.is_empty() && !m.is_empty())
+            .ok_or("DSH requires a provider/model selector")?;
+        let mut select_args = json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } });
+        if let Some(effort) = req.effort.as_deref() {
+            select_args["request"]["effort"] = json!(effort);
+            select_args["request"]["reasoningEffort"] = json!(effort);
         }
+        host_call(&origin, "session/selectModel", select_args).await
+            .map_err(|_| "DSH model selection failed; prompt was not sent")?;
     }
 
     // Attachments: load through the shared image pipeline, then make sure
@@ -851,25 +845,21 @@ mod tests {
     async fn streams_a_live_host_turn() {
         let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
         let sink = EventSink::new(emitter.clone());
-        let core = TurnCore {
-            sink,
-            registry: Arc::new(ProcessRegistry::default()),
-            engine_id: "dsh".to_string(),
-            run_id: "test-run".to_string(),
-        };
-        let req = SendRequest {
-            session_id: None,
-            workspace: PathBuf::from("/tmp"),
-            prompt: "用一句话回答：1+1等于几？".to_string(),
-            images: Vec::new(),
-            model: None,
-            effort: None,
-            service_tier: None,
-            permission: None,
-            additional_dirs: Vec::new(),
-            provider_id: None,
-            computer_use: None,
-        };
+        let core = TurnCore { execution: None, sink,
+        registry: Arc::new(ProcessRegistry::default()),
+        engine_id: "dsh".to_string(),
+        run_id: "test-run".to_string(), };
+        let req = SendRequest { execution: None, selection: None, session_id: None,
+        workspace: PathBuf::from("/tmp"),
+        prompt: "用一句话回答：1+1等于几？".to_string(),
+        images: Vec::new(),
+        model: None,
+        effort: None,
+        service_tier: None,
+        permission: None,
+        additional_dirs: Vec::new(),
+        provider_id: None,
+        computer_use: None, };
         run_host_turn(
             core,
             req,
@@ -928,25 +918,21 @@ mod tests {
             let prompt = prompt.to_string();
             async move {
                 let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
-                let core = TurnCore {
-                    sink: EventSink::new(emitter.clone()),
-                    registry: Arc::new(ProcessRegistry::default()),
-                    engine_id: "dsh".to_string(),
-                    run_id: "test-run".to_string(),
-                };
-                let req = SendRequest {
-                    session_id,
-                    workspace: PathBuf::from("/tmp"),
-                    prompt,
-                    images: Vec::new(),
-                    model: None,
-                    effort: None,
-                    service_tier: None,
-                    permission: None,
-                    additional_dirs: Vec::new(),
-                    provider_id: None,
-                    computer_use: None,
-                };
+                let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+                registry: Arc::new(ProcessRegistry::default()),
+                engine_id: "dsh".to_string(),
+                run_id: "test-run".to_string(), };
+                let req = SendRequest { execution: None, selection: None, session_id,
+                workspace: PathBuf::from("/tmp"),
+                prompt,
+                images: Vec::new(),
+                model: None,
+                effort: None,
+                service_tier: None,
+                permission: None,
+                additional_dirs: Vec::new(),
+                provider_id: None,
+                computer_use: None, };
                 run_host_turn(
                     core,
                     req,
@@ -1015,12 +1001,10 @@ mod tests {
                 questions: Arc::new(StdMutex::new(HashMap::new())),
             },
         );
-        let core = TurnCore {
-            sink: EventSink::new(emitter.clone()),
-            registry: Arc::clone(&registry),
-            engine_id: "dsh".to_string(),
-            run_id: "test-run".to_string(),
-        };
+        let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+        registry: Arc::clone(&registry),
+        engine_id: "dsh".to_string(),
+        run_id: "test-run".to_string(), };
         (core, registry, emitter)
     }
 

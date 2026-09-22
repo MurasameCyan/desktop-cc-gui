@@ -45,8 +45,14 @@ fn build_app(
     let app = tauri::test::mock_builder()
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
+    let db = Arc::new(Db::open_at(&home.join("app.db")).unwrap());
+    let emitters = ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone()));
+    let cli = Arc::new(
+        ccgui_next_lib::cli::CliState::new(db.clone(), emitters.clone()).unwrap(),
+    );
     let state = AppState {
-        db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
+        db,
+        cli,
         sink: EventSink::new(Arc::new(app.handle().clone())),
         terminal_sink: EventSink::with_name(
             Arc::new(app.handle().clone()),
@@ -58,7 +64,7 @@ fn build_app(
         ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
-        emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
+        emitters,
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
@@ -96,8 +102,8 @@ async fn send_message_streams_events_end_to_end() {
     let (app, events) = build_app(&home);
     let state = app.state::<AppState>();
 
-    let result = engine::send_message(
-        state,
+    let result = engine::send_message_inner(
+        &state,
         "claude".to_string(),
         workspace.to_string_lossy().to_string(),
         None,
@@ -205,8 +211,8 @@ sleep 60
 
     let (app, events) = build_app(&home);
     let state = app.state::<AppState>();
-    engine::send_message(
-        state,
+    engine::send_message_inner(
+        &state,
         "claude".to_string(),
         workspace.to_string_lossy().to_string(),
         None,
@@ -266,9 +272,12 @@ sleep 60
     }
 }
 
-/// The JS side invokes with camelCase args (`workspacePath`, `sessionId`,
-/// `imagePaths`) against snake_case Rust params; this drives the real IPC
-/// router to prove that contract plus the command's presence in the handler.
+/// The JS side invokes with a nested camelCase `SendMessageRequest`
+/// (`{request: {schemaVersion, target, selectionVersion, prompt, …}}`) against
+/// the snake_case Rust command; this drives the real IPC router to prove that
+/// contract plus the command's presence in the handler. With no persisted
+/// selection for the target the command rejects the send — reaching that
+/// specific error (not a serde failure) is what proves the DTO deserialized.
 #[test]
 fn ipc_send_message_accepts_camel_case_args() {
     let _env_guard = ENV_LOCK.lock().unwrap();
@@ -285,8 +294,14 @@ fn ipc_send_message_accepts_camel_case_args() {
         .invoke_handler(tauri::generate_handler![engine::send_message])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
+    let db = Arc::new(Db::open_at(&home.join("app.db")).unwrap());
+    let emitters = ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone()));
+    let cli = Arc::new(
+        ccgui_next_lib::cli::CliState::new(db.clone(), emitters.clone()).unwrap(),
+    );
     app.manage(AppState {
-        db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
+        db,
+        cli,
         sink: EventSink::new(Arc::new(app.handle().clone())),
         terminal_sink: EventSink::with_name(
             Arc::new(app.handle().clone()),
@@ -298,7 +313,7 @@ fn ipc_send_message_accepts_camel_case_args() {
         ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
-        emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
+        emitters,
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
@@ -319,21 +334,33 @@ fn ipc_send_message_accepts_camel_case_args() {
             error: tauri::ipc::CallbackFn(1),
             url: "tauri://localhost".parse().unwrap(),
             body: tauri::ipc::InvokeBody::Json(serde_json::json!({
-                "engine": "claude",
-                "workspacePath": workspace.to_string_lossy(),
-                "sessionId": null,
-                "prompt": "hi",
-                "imagePaths": null,
-                "model": null,
+                "request": {
+                    "schemaVersion": 1,
+                    "target": {
+                        "engineId": "claude",
+                        "workspacePath": workspace.to_string_lossy(),
+                        "sessionId": null,
+                        "pendingId": "ipc-pending",
+                        "executionTarget": { "kind": "local" }
+                    },
+                    "selectionVersion": 1,
+                    "prompt": "hi",
+                    "imagePaths": null,
+                    "permission": null,
+                    "runId": null,
+                    "computerUse": null
+                }
             })),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),
         },
     );
-    let body = res.unwrap_or_else(|e| panic!("IPC send_message failed: {e}"));
-    let value = body.deserialize::<Value>().unwrap();
-    let run_id = value.get("runId").and_then(Value::as_str).unwrap_or("");
-    assert!(!run_id.is_empty(), "expected runId in response: {value}");
+    // No selection was persisted for this target, so the command must reject
+    // the send. Reaching that specific error (rather than a serde failure)
+    // proves the camelCase SendMessageRequest deserialized and dispatched.
+    let err = res.expect_err("send without a persisted selection must be rejected");
+    let message = err.as_str().map(str::to_string).unwrap_or_else(|| err.to_string());
+    assert!(message.contains("selection"), "expected the missing-selection error, got: {message}");
 }
 
 #[tokio::test]
@@ -378,8 +405,9 @@ echo '{"type":"agent_end"}'
         ccgui_next_lib::settings::update_app_settings(app.handle().clone(), settings.clone())
             .unwrap();
         events.lock().unwrap().clear();
-        engine::send_message(
-            app.state(),
+        let state = app.state::<AppState>();
+        engine::send_message_inner(
+            &state,
             "omp".into(),
             workspace.to_string_lossy().into(),
             None,

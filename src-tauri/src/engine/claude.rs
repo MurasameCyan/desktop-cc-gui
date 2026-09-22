@@ -59,7 +59,7 @@ impl Engine for ClaudeEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("-p");
         cmd.arg("--input-format");
         cmd.arg("stream-json");
@@ -1433,19 +1433,17 @@ mod tests {
     #[test]
     fn build_command_passes_effort_flag() {
         let engine = ClaudeEngine::new();
-        let mut request = SendRequest {
-            session_id: None,
-            prompt: "hi".into(),
-            images: vec![],
-            workspace: std::path::PathBuf::from("/tmp"),
-            model: None,
-            effort: Some("xhigh".into()),
-            service_tier: None,
-            permission: None,
-            additional_dirs: vec![],
-            provider_id: None,
-            computer_use: None,
-        };
+        let mut request = SendRequest { execution: None, selection: None, session_id: None,
+        prompt: "hi".into(),
+        images: vec![],
+        workspace: std::path::PathBuf::from("/tmp"),
+        model: None,
+        effort: Some("xhigh".into()),
+        service_tier: None,
+        permission: None,
+        additional_dirs: vec![],
+        provider_id: None,
+        computer_use: None, };
         let built = engine.build_command(&request, "claude").unwrap();
         let args: Vec<String> = built
             .command

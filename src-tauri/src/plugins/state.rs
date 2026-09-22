@@ -3,21 +3,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-
-use parking_lot::Mutex;
 
 /// Uninstalled-plugin KV retention window (plan §9.1: 保留 30 天).
 pub const KV_TOMBSTONE_TTL_SECS: i64 = 30 * 24 * 3600;
 
-/// Serializes every plugins.json read→mutate→write critical section so
-/// concurrent commands (install/uninstall/enable/quarantine/list) can't
-/// interleave into a lost update. Take it once per public operation, around
-/// the state mutation only — never across install_from's file-copy phase.
-/// Pure reads (plugin_enabled_permissions) stay lock-free: they re-read the
-/// file fresh on every call, and a read racing a write simply resolves as
-/// the pre- or post-write value.
-pub(crate) static STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+/// Lock order: plugin state, physical document roots, CLI state, database.
+/// Persistent sidecars coordinate threads and independent host processes.
+pub(super) fn lock_state(path: &Path) -> Result<super::file_lock::FileLock, String> {
+    let mut name = path.file_name().ok_or_else(|| format!("state has no filename: {}", path.display()))?.to_os_string();
+    name.push(".lock");
+    super::file_lock::exclusive(&path.with_file_name(name))
+}
 
 /// Installed plugin as the frontend sees it. Manifest-derived fields fall
 /// back to the state record (or empty) when the plugin directory is gone —
@@ -47,6 +43,14 @@ pub struct PluginInfo {
 pub struct PluginsState {
     pub plugins: HashMap<String, PluginRecord>,
     pub kv_tombstones: HashMap<String, i64>,
+    pub(crate) document_storage: HashMap<String, DocumentStorageSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DocumentStorageSelection {
+    pub(crate) kind: String,
+    pub(crate) custom_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,11 +114,11 @@ pub(crate) fn write_state(path: &Path, state: &PluginsState) -> Result<(), Strin
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let content = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
-    crate::settings::atomic_write(path, &content)
+    super::storage::private_write(path, content.as_bytes())
 }
 
 /// Mutate (or create) a record in an already-loaded state; the caller holds
-/// STATE_LOCK and writes the state back. Returns the updated record clone.
+/// the state lock and writes the state back. Returns the updated record clone.
 pub(crate) fn mutate_record(
     state: &mut PluginsState,
     id: &str,
@@ -125,8 +129,23 @@ pub(crate) fn mutate_record(
         .plugins
         .entry(id.to_string())
         .or_insert_with(|| PluginRecord::fresh(fresh_source, now_secs()));
+    let previous_permissions = record.permissions.clone();
     mutate(record);
+    // Installing new code must not silently turn a newly declared sensitive
+    // capability into an approved one. Explicit enable has no permission delta.
+    if record.permissions.iter().any(|permission| {
+        is_sensitive_permission(permission) && !previous_permissions.contains(permission)
+    }) {
+        record.enabled = false;
+        record.last_error = Some("New sensitive permissions require approval before enabling this plugin".into());
+    }
     record.clone()
+}
+
+fn is_sensitive_permission(permission: &str) -> bool {
+    matches!(permission,
+        "cli.contributions.write" | "cli.runtime.sensitive" | "network.targets.request"
+        | "cli.config.read" | "cli.config.apply")
 }
 
 /// Upsert helper shared by enable/quarantine: one locked
@@ -137,7 +156,7 @@ pub(crate) fn update_record(
     id: &str,
     mutate: impl FnOnce(&mut PluginRecord),
 ) -> Result<PluginRecord, String> {
-    let _guard = STATE_LOCK.lock();
+    let _guard = lock_state(state_path)?;
     let mut state = read_state(state_path)?;
     let record = mutate_record(&mut state, id, "builtin", mutate);
     write_state(state_path, &state)?;
@@ -160,7 +179,7 @@ pub(crate) fn record_enabled_permissions(
         .plugins
         .get(id)
         .ok_or_else(|| format!("{id}: plugin is not installed"))?;
-    Ok((record.enabled, record.permissions.clone()))
+    Ok((record.enabled && !record.quarantined, record.permissions.clone()))
 }
 
 pub(crate) fn list_plugins(
@@ -168,10 +187,10 @@ pub(crate) fn list_plugins(
     plugins_dir: &Path,
     state_path: &Path,
 ) -> Result<Vec<PluginInfo>, String> {
-    // The tombstone purge is a read→mutate→write section: hold STATE_LOCK so
-    // a concurrent install/enable/uninstall can't lose it (or be lost to it).
+    // Retention mutations coordinate with installs and storage location changes
+    // in every host process using this state file.
     let state = {
-        let _guard = STATE_LOCK.lock();
+        let _guard = lock_state(state_path)?;
         let mut state = read_state(state_path)?;
 
         // Retention sweep: tombstoned KV older than the window is gone for good.
@@ -259,5 +278,41 @@ mod tests {
             record_enabled_permissions(&state_path, "usage-stats").unwrap();
         assert!(!enabled);
         assert_eq!(permissions, vec!["network:127.0.0.1:7680-7690"]);
+    }
+
+    #[test]
+    fn quarantined_plugins_cannot_use_enabled_permissions() {
+        let scratch = Scratch::new();
+        let path = scratch.path("plugins.json");
+        update_record(&path, "quarantined.plugin", |record| {
+            record.enabled = true;
+            record.quarantined = true;
+            record.permissions = vec!["host:session".into()];
+        }).unwrap();
+        let (enabled, permissions) = record_enabled_permissions(&path, "quarantined.plugin").unwrap();
+        assert!(!enabled);
+        assert_eq!(permissions, ["host:session"]);
+    }
+
+    #[test]
+    fn new_sensitive_permissions_require_reapproval_but_existing_grants_do_not() {
+        let mut state = PluginsState::default();
+        let mut old = PluginRecord::fresh("local", 1);
+        old.permissions = vec!["storage".into()];
+        state.plugins.insert("approval.plugin".into(), old);
+        let updated = mutate_record(&mut state, "approval.plugin", "local", |record| {
+            record.permissions.push("cli.runtime.sensitive".into());
+        });
+        assert!(!updated.enabled);
+        assert!(updated.last_error.is_some());
+        let approved = mutate_record(&mut state, "approval.plugin", "local", |record| {
+            record.enabled = true;
+            record.last_error = None;
+        });
+        assert!(approved.enabled);
+        let upgraded = mutate_record(&mut state, "approval.plugin", "local", |record| record.version = "2.0.0".into());
+        assert!(upgraded.enabled);
+        let expanded = mutate_record(&mut state, "approval.plugin", "local", |record| record.permissions.push("cli.config.apply".into()));
+        assert!(!expanded.enabled);
     }
 }

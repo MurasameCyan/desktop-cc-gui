@@ -6,6 +6,7 @@ import {
   addMenuRegistry,
   commandRegistry,
   composerSlotRegistry,
+  modelEntryRegistry,
   execGrantAllows,
   markdownRegistry,
   networkGrantAllows,
@@ -25,6 +26,7 @@ import type {
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
+  SessionExecutionContext,
 } from "@ccgui/plugin-sdk";
 import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
@@ -32,6 +34,9 @@ import { addPluginWorkspace, openPluginSession } from "./workspace-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
 import { runAsPlugin } from "./hardening";
+import { createCliCapabilities } from "./cli-capabilities";
+import { createDocumentStorage } from "./document-storage";
+import { subscribeCapabilityEvent } from "./capability-events";
 
 /** Storage transport the context talks to; the loader binds the IPC-backed
  *  implementation, tests bind fakes. */
@@ -177,6 +182,19 @@ export function createPluginContext(
             order: def.order,
           }),
         );
+      },
+      registerModelEntry(def) {
+        requirePermission("ui:model-entry");
+        if (!Array.isArray(def.engineIds) || def.engineIds.length === 0 ||
+            def.engineIds.some((engine) => typeof engine !== "string" || !engine.trim())) {
+          throw new Error("registerModelEntry requires non-empty engineIds");
+        }
+        return track(modelEntryRegistry.register({
+          id: scopedPluginId(id, def.key),
+          engineIds: [...new Set(def.engineIds)],
+          component: def.component,
+          order: def.order,
+        }));
       },
       registerPanelTab(def) {
         requirePermission("ui:panel-tab");
@@ -339,6 +357,8 @@ export function createPluginContext(
         await backend.delete(id, key);
       },
     },
+    documentStorage: createDocumentStorage(id, backend, requirePermission),
+    cli: createCliCapabilities(id, backend, requirePermission, track),
     events: {
       on(topic, cb) {
         requirePermission("events");
@@ -375,6 +395,22 @@ export function createPluginContext(
           openPluginSession(id, engine, sessionId, workspacePath),
         );
       },
+      async getContext() {
+        requirePermission("host:session");
+        // Defer the chat-store dependency, as selectSession/setEffort do:
+        // plugin bootstrap can precede session-store initialization.
+        const bridge = await import("./session-selection");
+        return bridge.getPluginSessionContext();
+      },
+      async setSelection(target, selection, expectedVersion) {
+        requirePermission("host:session");
+        const bridge = await import("./session-selection");
+        return bridge.setPluginSessionSelection(target, selection, expectedVersion);
+      },
+      onSelectionChanged(callback) {
+        requirePermission("host:session");
+        return track(subscribeCapabilityEvent<SessionExecutionContext>("session://selection-changed", callback));
+      },
       refresh() {
         requirePermission("host:session");
         // 插件直写会话数据后的可见性补偿：走与宿主自身重命名/置顶一致的
@@ -389,7 +425,7 @@ export function createPluginContext(
         // 校验失败走 rejection（与 selectSession 一致）。store 侧拒绝未知
         // 会话键——错误的 workspacePath 不得经 patchSession 造出幽灵条目。
         return Promise.resolve().then(() =>
-          import("@/features/chat/store").then((m) =>
+          import("./session-selection").then((m) =>
             m.setPluginSessionEffort(engine, sessionId, workspacePath, effort),
           ),
         );

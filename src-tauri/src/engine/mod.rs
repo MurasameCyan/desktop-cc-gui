@@ -28,6 +28,7 @@ pub mod resolve;
 mod events;
 mod reader;
 mod registry;
+pub(crate) mod contribution;
 
 pub(crate) use resolve::command_for_binary;
 
@@ -43,19 +44,26 @@ pub(crate) use registry::{kill_process_group, next_virtual_pid};
 // Stdout reader / per-turn streaming plumbing (reader.rs).
 pub use reader::sweep_staging_dirs;
 pub(crate) use reader::{
-    LineRead, MAX_LINE_BYTES, RunContext, TurnCore, TurnState, VirtualRunGuard,
+    AcceptedExecution, LineRead, MAX_LINE_BYTES, RunContext, TurnCore, TurnState, VirtualRunGuard,
     cleanup_staged_files, read_line_capped, run_reader, spawn_stderr_capture,
     spawn_stdin_writer,
 };
 
 use crate::event_sink;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use crate::cli::{ResolvedContribution, types::{ExecutionSelectionInput, ExecutionTarget, ModelSelection, ModelSelector, SelectionSendRequest, SessionExecutionContext, SessionExecutionTarget}};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::Mutex as TokioMutex;
+
+pub(crate) fn command_for_request(req: &SendRequest, bin: &str) -> Command {
+    if req.selection.as_ref().is_some_and(|context| matches!(context.target.execution_target, ExecutionTarget::Wsl { .. })) {
+        Command::new(bin)
+    } else { command_for_binary(bin) }
+}
 
 /// Windows pops a visible console window for every console-subsystem child a
 /// GUI process spawns (engine CLIs are node/.cmd shims, so every probe and
@@ -95,6 +103,9 @@ pub struct SendRequest {
     /// as an MCP server (see computer_use.rs). Engines without an
     /// MCP-config launch flag ignore it.
     pub computer_use: Option<bool>,
+    /// Immutable source, credential generation and policy snapshot for this accepted turn.
+    pub execution: Option<Arc<ResolvedContribution>>,
+    pub selection: Option<SessionExecutionContext>,
 }
 pub struct BuiltCommand {
     pub command: Command,
@@ -379,6 +390,46 @@ struct Launch {
     built: BuiltCommand,
     engine_impl: Box<dyn Engine>,
 }
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SendMessageRequest {
+    pub schema_version: u32,
+    pub target: SessionExecutionTarget,
+    pub selection_version: u64,
+    pub prompt: String,
+    pub image_paths: Option<Vec<String>>,
+    pub permission: Option<String>,
+    pub run_id: Option<String>,
+    pub computer_use: Option<bool>,
+}
+
+pub async fn send_selected_message(state: &crate::AppState, request: SendMessageRequest) -> Result<SendResult, String> {
+    contribution::validate_target(state, &request.target)?;
+    let selected = crate::session_selection::selection_for_send(state, &SelectionSendRequest {
+        schema_version: request.schema_version,
+        target: request.target.clone(),
+        selection_version: request.selection_version,
+    })?;
+    let input = ExecutionSelectionInput {
+        model_selection: selected.model_selection.clone(), effort: selected.effort.clone(),
+    };
+    let (model, provider_id, execution) = match &selected.model_selection {
+        ModelSelection::Native { model_id, channel_id, .. } => (model_id.clone(), Some(channel_id.clone().unwrap_or_else(|| "official".into())), None),
+        ModelSelection::Contribution { .. } => {
+            let resolved = Arc::new(crate::cli::resolve_contribution(state, &request.target, &input)?);
+            let model = match &resolved.choice.selector {
+                ModelSelector::Wire { model_id } | ModelSelector::Alias { model_id, .. } => model_id.clone(),
+            };
+            (Some(model), None, Some(resolved))
+        }
+    };
+    let context = SessionExecutionContext { target: request.target.clone(), selection: Some(selected), unavailable_reason: None };
+    send_message_inner_with_sink(state, Arc::clone(&state.sink), request.target.engine_id.clone(),
+        request.target.workspace_path.clone(), request.target.session_id.clone(), request.prompt,
+        request.image_paths, model, input.effort, request.permission, provider_id, request.run_id,
+        request.computer_use, execution, Some(context)).await
+}
 fn prepare_launch(
     engine: &str,
     workspace_path: &str,
@@ -392,13 +443,16 @@ fn prepare_launch(
     provider_id: Option<String>,
     computer_use: Option<bool>,
     wsl: bool,
+    execution: Option<Arc<ResolvedContribution>>,
+    selection: Option<SessionExecutionContext>,
 ) -> Result<Launch, String> {
     let engine_impl = engine_by_id(engine).ok_or_else(|| format!("unknown engine: {engine}"))?;
+    if wsl && computer_use == Some(true) { return Err("Computer use is not supported for a remote execution target".into()); }
     // 停用 still gates sending. Channel settings apply to this child below;
     // native CLI files remain the official configuration.
     crate::config::ensure_engine_enabled(engine)?;
     let provider_id = provider_id.filter(|s| !s.trim().is_empty());
-    let provider = crate::config::resolve_provider(engine, provider_id.as_deref())?;
+    let provider = if execution.is_some() { None } else { crate::config::resolve_provider(engine, provider_id.as_deref())? };
     let channel_env = provider
         .as_ref()
         .map(|p| crate::provider_files::channel_env(engine, p))
@@ -407,16 +461,16 @@ fn prepare_launch(
     let settings = crate::settings::read_settings().unwrap_or_default();
     let model = model
         .filter(|m| !m.trim().is_empty())
-        .or_else(|| settings.default_models.get(engine).cloned())
+        .or_else(|| selection.is_none().then(|| settings.default_models.get(engine).cloned()).flatten())
         .filter(|m| !m.trim().is_empty());
-    let model = if engine == "claude" {
+    let model = if engine == "claude" && execution.is_none() && !wsl {
         claude_channel::resolve_model(model.as_deref(), provider.as_ref(), &channel_env)
     } else {
         model
     };
     let effort = effort
         .filter(|e| !e.trim().is_empty())
-        .or_else(|| settings.default_efforts.get(engine).cloned())
+        .or_else(|| selection.is_none().then(|| settings.default_efforts.get(engine).cloned()).flatten())
         .filter(|e| !e.trim().is_empty());
     let req = SendRequest {
         session_id: session_id.filter(|s| !s.trim().is_empty()),
@@ -425,11 +479,16 @@ fn prepare_launch(
         images: image_paths.unwrap_or_default(),
         model,
         effort,
-        service_tier: match engine {
+        service_tier: if let Some(resolved) = &execution {
+            resolved.profile.options.as_ref().and_then(|options| options.service_tier.as_ref()).map(|tier| match tier {
+                crate::cli::types::ServiceTier::Default => "default".into(),
+                crate::cli::types::ServiceTier::Priority => "priority".into(),
+            })
+        } else { match engine {
             "omp" => settings.omp_openai_service_tier.clone(),
             "codex" => settings.codex_service_tier.clone(),
             _ => None,
-        },
+        } },
         permission: permission.filter(|p| !p.trim().is_empty()),
         // Cap defensively: the list lands on a command line, and a
         // hand-edited db should not produce an argv bomb.
@@ -442,8 +501,11 @@ fn prepare_launch(
         provider_id,
         // Only honored by engines that can actually mount the driver.
         computer_use: computer_use.filter(|on| *on && engine_impl.supports_computer_use()),
+        execution,
+        selection,
     };
-    let bin = engine_bin(&settings, engine);
+    contribution::validate_request(engine, &req)?;
+    let bin = if wsl { cli_binary_name(engine).to_string() } else { engine_bin(&settings, engine) };
     // Host-transport engines spawn through their driver instead: codex/grok
     // hand back the real app-server / ACP command the driver spawns verbatim
     // (channel flags and env land on it below, as for any child), while the
@@ -453,7 +515,7 @@ fn prepare_launch(
         // The driver spawns this command with the workspace as its cwd.
         own.command.current_dir(&req.workspace);
         own
-    } else if engine == "kimi" && provider.is_some() {
+    } else if engine == "kimi" && (provider.is_some() || req.execution.is_some()) {
         kimi::build_channel_command(&req, &bin)?
     } else {
         engine_impl.build_command(&req, &bin)?
@@ -461,13 +523,13 @@ fn prepare_launch(
     for (key, value) in &channel_env {
         built.command.env(key, value);
     }
-    let configured = match (engine, provider.as_ref()) {
+    let configured = if req.execution.is_some() { contribution::apply(engine, &mut built, &req) } else { match (engine, provider.as_ref()) {
         ("claude", Some(provider)) => claude_channel::apply(&mut built, provider, &channel_env, &req),
         ("kimi", Some(_)) => kimi::apply_channel(&mut built.command, &channel_env, &req),
         ("codex", Some(provider)) => codex::apply_channel(&mut built.command, provider, &channel_env, &req),
         ("grok", Some(provider)) => grok::isolate_channel(&mut built, provider, &req),
         _ => Ok(()),
-    };
+    } };
     if let Err(error) = configured {
         cleanup_staged_files(&built.cleanup_files);
         if let Some(restore) = &built.mcp_restore {
@@ -486,33 +548,9 @@ fn prepare_launch(
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, crate::AppState>,
-    engine: String,
-    workspace_path: String,
-    session_id: Option<String>,
-    prompt: String,
-    image_paths: Option<Vec<String>>,
-    model: Option<String>,
-    effort: Option<String>,
-    permission: Option<String>,
-    provider_id: Option<String>,
-    run_id: Option<String>,
-    computer_use: Option<bool>,
+    request: SendMessageRequest,
 ) -> Result<SendResult, String> {
-    send_message_inner(
-        &state,
-        engine,
-        workspace_path,
-        session_id,
-        prompt,
-        image_paths,
-        model,
-        effort,
-        permission,
-        provider_id,
-        run_id,
-        computer_use,
-    )
-    .await
+    send_selected_message(&state, request).await
 }
 /// Body of the `send_message` command, taking the state directly: integration
 /// tests drive the real spawn/read pipeline without a Tauri app (the mock
@@ -548,6 +586,8 @@ pub(crate) async fn plugin_agent_send(
         provider_id,
         Some(run_id),
         None,
+        None,
+        None,
     )
     .await
 }
@@ -581,6 +621,8 @@ pub async fn send_message_inner(
         provider_id,
         run_id,
         computer_use,
+        None,
+        None,
     )
     .await
 }
@@ -600,6 +642,8 @@ async fn send_message_inner_with_sink(
     provider_id: Option<String>,
     run_id: Option<String>,
     computer_use: Option<bool>,
+    execution: Option<Arc<ResolvedContribution>>,
+    selection: Option<SessionExecutionContext>,
 ) -> Result<SendResult, String> {
     let run_id = run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if run_id.is_empty() || run_id.len() > 128
@@ -657,6 +701,8 @@ async fn send_message_inner_with_sink(
         killed,
         reader_abort,
         computer_use,
+        execution,
+        selection,
     )
     .await;
     if result.is_err() {
@@ -685,6 +731,8 @@ async fn send_reserved(
     killed: Arc<std::sync::atomic::AtomicBool>,
     reader_abort: Arc<std::sync::OnceLock<tokio::task::AbortHandle>>,
     computer_use: Option<bool>,
+    execution: Option<Arc<ResolvedContribution>>,
+    selection: Option<SessionExecutionContext>,
 ) -> Result<SendResult, String> {
     // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
     let wsl_tp = wsl_transport::transport_for_workspace(&state.db, &workspace_path);
@@ -704,7 +752,15 @@ async fn send_reserved(
         provider_id,
         computer_use,
         wsl_tp.is_some(),
+        execution,
+        selection,
     )?;
+    let deferred_prompt = if matches!(engine.as_str(), "pi" | "omp") && launch.req.execution.is_some() {
+        launch.built.stdin_payload.take().and_then(|payload| payload.lines().find_map(|line| {
+            let value: Value = serde_json::from_str(line).ok()?;
+            (value.get("type").and_then(Value::as_str) == Some("prompt")).then(|| line.to_string())
+        }))
+    } else { None };
     // Host-stream engines drive their own transport: no child process — the
     // registry entry only routes interrupts to the transport task. Their
     // drivers spawn locally, so a remote workspace either keeps the CLI
@@ -717,7 +773,7 @@ async fn send_reserved(
         }
         // The child path resolves codex's provider credentials further down;
         // the app-server driver owns its own process, so it needs them here.
-        if engine == "codex" {
+        if engine == "codex" && launch.req.execution.is_none() {
             codex_provider_env::apply(&mut launch.built.command).await;
         }
         return send_host_stream(state, launch, engine, run_id, killed, reader_abort).await;
@@ -730,26 +786,13 @@ async fn send_reserved(
                 restore.restore();
                 return Err("操作电脑不支持远程工作区(WSL):注入的是本机驱动".into());
             }
-            // 依赖本机 staging 文件的引擎(grok 等 cleanup_files 非空):
-            // 远端 CLI 读不到本机文件,直接拒绝而非跑出莫名其妙的失败;
-            // 已写盘的 staging 文件顺手清掉,不 strand。
-            if !launch.built.cleanup_files.is_empty() {
-                for path in &launch.built.cleanup_files {
-                    let _ = std::fs::remove_file(path);
+            match wsl_transport::wrap_private(launch.built.command, tp, &launch.built.cleanup_files) {
+                Ok((wrapped, mut packet)) => {
+                    if let Some(payload) = launch.built.stdin_payload.take() { packet.push_str(&payload); }
+                    launch.built.stdin_payload = Some(packet);
+                    (wrapped.command, wrapped.cleanup_files, wrapped.skip_local_cwd)
                 }
-                return Err(format!(
-                    "引擎 {engine} 不支持远程工作区(WSL):依赖本机临时文件"
-                ));
-            }
-            match wsl_transport::wrap(launch.built.command, tp).await {
-                Ok(wrapped) => (wrapped.command, wrapped.cleanup_files, wrapped.skip_local_cwd),
-                Err(error) => {
-                    // wrap 失败(ssh 上传失败等)同样不许 strand staging 文件。
-                    for path in &launch.built.cleanup_files {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    return Err(error);
-                }
+                Err(error) => { cleanup_staged_files(&launch.built.cleanup_files); return Err(error); }
             }
         }
         None => (launch.built.command, Vec::new(), false),
@@ -763,7 +806,7 @@ async fn send_reserved(
         // the exec transport exits 1 before any event, surfacing as a bare
         // "exit code: 1" banner. Fail fast with an actionable message.
         codex::check_exec_support(&launch.bin, launch.req.session_id.is_some()).await?;
-        codex_provider_env::apply(&mut command).await;
+        if launch.req.execution.is_none() { codex_provider_env::apply(&mut command).await; }
     }
     command
         .stdin(if launch.built.stdin_payload.is_some() || launch.built.keep_stdin_open {
@@ -860,7 +903,7 @@ async fn send_reserved(
     }
 
     let stderr_buf = spawn_stderr_capture(stderr);
-    let initial_model = if engine == "claude" {
+    let initial_model = if engine == "claude" && launch.req.selection.is_none() && wsl_tp.is_none() {
         launch
             .req
             .model
@@ -877,6 +920,7 @@ async fn send_reserved(
             registry: Arc::clone(&state.processes),
             engine_id: engine.clone(),
             run_id: run_id.clone(),
+            execution: Some(AcceptedExecution { selection: launch.req.selection.clone(), contribution: launch.req.execution.clone(), db: Arc::clone(&state.db), emitters: Arc::clone(&state.emitters) }),
         },
         engine_impl: launch.engine_impl,
         pid,
@@ -888,6 +932,7 @@ async fn send_reserved(
         cleanup_files,
         mcp_restore: launch.built.mcp_restore,
         stderr_buf,
+        deferred_prompt,
         stdout_plain_buf: Arc::new(Mutex::new(String::new())),
         #[cfg(windows)]
         _tree_guard: tree_guard,
@@ -937,6 +982,7 @@ async fn send_host_stream(
         registry: Arc::clone(&state.processes),
         engine_id: engine.clone(),
         run_id: run_id.clone(),
+        execution: Some(AcceptedExecution { selection: launch.req.selection.clone(), contribution: launch.req.execution.clone(), db: Arc::clone(&state.db), emitters: Arc::clone(&state.emitters) }),
     };
     let resume_session_id = launch.req.session_id.clone();
     let task = match engine.as_str() {
@@ -1208,6 +1254,8 @@ mod permission_tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
         }
     }
 
@@ -1598,6 +1646,7 @@ mod retry_lifecycle_tests {
             registry: Arc::new(ProcessRegistry::default()),
             engine_id: "omp".to_string(),
             run_id: "settled-run".to_string(),
+            execution: None,
         };
         let mut state = TurnState::new(Some("session".to_string()));
         for event in [
@@ -1635,6 +1684,7 @@ mod retry_lifecycle_tests {
                 registry: Arc::new(ProcessRegistry::default()),
                 engine_id: "omp".to_string(),
                 run_id: "pipe-retry-run".to_string(),
+                execution: None,
             },
             engine_impl: Box::new(pi_family::omp()),
             pid: child.id().unwrap(),
@@ -1647,6 +1697,7 @@ mod retry_lifecycle_tests {
             mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+            deferred_prompt: None,
             // Windows-only guard field the production constructor fills; this
             // test spawns a plain child, so there is no job object to hold.
             #[cfg(windows)]
@@ -1684,6 +1735,7 @@ mod retry_lifecycle_tests {
                 registry: Arc::new(ProcessRegistry::default()),
                 engine_id: "codex".to_string(),
                 run_id: "plain-stdout-run".to_string(),
+                execution: None,
             },
             engine_impl: Box::new(codex::CodexEngine),
             pid: child.id().unwrap(),
@@ -1696,6 +1748,7 @@ mod retry_lifecycle_tests {
             mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+            deferred_prompt: None,
             // See the pipe-retry constructor above.
             #[cfg(windows)]
             _tree_guard: None,
@@ -1794,6 +1847,7 @@ mod retry_lifecycle_tests {
                 registry: Arc::clone(&registry),
                 engine_id: "omp".to_string(),
                 run_id: "pipe-held-run".to_string(),
+                execution: None,
             },
             engine_impl: Box::new(pi_family::omp()),
             pid,
@@ -1806,6 +1860,7 @@ mod retry_lifecycle_tests {
             mcp_restore: None,
             stderr_buf: Arc::new(Mutex::new(String::new())),
             stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+            deferred_prompt: None,
             // See the pipe-retry constructor above.
             #[cfg(windows)]
             _tree_guard: None,

@@ -80,7 +80,7 @@ pub(super) async fn run_acp_turn(
         ..
     } = built;
     if core.engine_id == "kimi" {
-        req.model = super::kimi_acp::selected_model(req.model.as_deref(), &command);
+        req.model = if req.execution.is_some() { Some("ccgui-bound".into()) } else { super::kimi_acp::selected_model(req.model.as_deref(), &command) };
     }
     let mut state = TurnState::new(req.session_id.clone());
     let mut view = TurnView::default();
@@ -560,12 +560,10 @@ mod tests {
                 questions: Arc::new(StdMutex::new(HashMap::new())),
             },
         );
-        let core = TurnCore {
-            sink: EventSink::new(emitter.clone()),
-            registry: Arc::clone(&registry),
-            engine_id: "grok".to_string(),
-            run_id: "test-run".to_string(),
-        };
+        let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+        registry: Arc::clone(&registry),
+        engine_id: "grok".to_string(),
+        run_id: "test-run".to_string(), };
         (core, registry, emitter)
     }
 

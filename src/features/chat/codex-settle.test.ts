@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineEventPayload } from "@/lib/events";
 
-vi.mock("@/lib/ipc", () => ({
+// IPC is hoisted ahead of store imports; load the fixture inside its factory.
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     sendMessage: vi.fn(async () => ({ runId, sessionId: null })),
     interruptSession: vi.fn(async () => true),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
@@ -124,6 +126,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: null }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     const runId = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].runId!;
     await useChatStore.getState().interrupt();
     handleEngineEvents([{ ...ev("session", 1, "tid-1"), runId }], deps());
@@ -139,6 +142,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: string }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     const runId = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].runId!;
     await useChatStore.getState().interrupt();
     response.resolve({ runId, sessionId: "tid-1" });
@@ -177,6 +181,7 @@ describe("codex turn settling", () => {
     );
 
     const inflight = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
 
     // The engine can start streaming before the invoke promise resolves.
     handleEngineEvents(
@@ -205,6 +210,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: null }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     handleEngineEvents([
       ev("session", 1, "tid-1"),
       ev("message", 2, { role: "assistant", text: "complete" }),

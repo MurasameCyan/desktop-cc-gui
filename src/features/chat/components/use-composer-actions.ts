@@ -68,7 +68,7 @@ export function useComposerActions({
           return;
         }
         if (command === "compact" && active.sessionId && !streaming) {
-          void compactContext();
+          void compactContext(sessionKey).catch(() => {}); // Failure is shown by the owning session's error banner.
           return;
         }
       }

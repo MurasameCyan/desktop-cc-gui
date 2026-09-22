@@ -1114,12 +1114,10 @@ mod tests {
                 questions: Arc::new(Mutex::new(HashMap::new())),
             },
         );
-        let core = TurnCore {
-            sink: EventSink::new(emitter.clone()),
-            registry: Arc::clone(&registry),
-            engine_id: "codex".to_string(),
-            run_id: "test-run".to_string(),
-        };
+        let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+        registry: Arc::clone(&registry),
+        engine_id: "codex".to_string(),
+        run_id: "test-run".to_string(), };
         (core, registry, emitter)
     }
 

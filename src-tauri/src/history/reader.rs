@@ -49,7 +49,7 @@ fn mutate_sessions(
 
 #[tauri::command]
 pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<SessionMeta>, String> {
-    query_rows(
+    let mut sessions = query_rows(
         &state,
         "SELECT s.engine, s.session_id, s.workspace_path, s.file_path, s.file_size, s.file_mtime_ms,
                 s.title, s.preview, s.created_at, s.updated_at, s.message_count, s.pinned, s.custom_title,
@@ -81,11 +81,43 @@ pub fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Ses
                 model: r.get(13)?,
                 effort: r.get(14)?,
                 provider: r.get(15)?,
+                execution_selection: None,
+                observed_model: None,
+                observed_effort: None,
                 remote: None,
                 remote_path: None,
             })
         },
-    )
+    )?;
+    hydrate_execution_selections(&state.db, &mut sessions)?;
+    Ok(sessions)
+}
+
+/// Local history rows have an explicit workspace and local transport. Remote
+/// sessions obtain their authoritative context through their full WSL target.
+fn hydrate_execution_selections(db: &crate::db::Db, sessions: &mut [SessionMeta]) -> Result<(), String> {
+    use crate::cli::types::{ExecutionTarget, SessionExecutionTarget};
+    for session in sessions {
+        if session.remote == Some(true) { continue; }
+        let target = SessionExecutionTarget {
+            engine_id: session.engine.clone(), workspace_path: session.workspace_path.clone(),
+            session_id: Some(session.session_id.clone()), pending_id: None,
+            execution_target: ExecutionTarget::Local,
+        };
+        session.execution_selection = crate::session_selection::get_context_from(db, &target)?.selection;
+        if session.execution_selection.is_some() {
+            session.model = None;
+            session.effort = None;
+            session.provider = None;
+        }
+        let observations: Option<(Option<String>, Option<String>)> = db.0.lock().query_row(
+            "SELECT observed_model,observed_effort FROM session_observations WHERE execution_target=?1 AND workspace_path=?2 AND engine=?3 AND session_id=?4",
+            rusqlite::params![serde_json::to_string(&target.execution_target).map_err(|e| e.to_string())?, target.workspace_path, target.engine_id, target.session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        (session.observed_model, session.observed_effort) = observations.unwrap_or((None, None));
+    }
+    Ok(())
 }
 
 fn list_archived_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, String> {
@@ -113,7 +145,9 @@ fn list_archived_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, S
 pub fn list_archived_sessions(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<SessionMeta>, String> {
-    list_archived_sessions_from(&state.db)
+    let mut sessions = list_archived_sessions_from(&state.db)?;
+    hydrate_execution_selections(&state.db, &mut sessions)?;
+    Ok(sessions)
 }
 
 fn archive_session_in(db: &crate::db::Db, session: &SessionMeta) -> Result<(), String> {
@@ -800,6 +834,25 @@ pub(super) fn delete_session_blocking(
     // Model and effort can already exist even when no transcript was created.
     let mut conn = db.0.lock();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let local_target = serde_json::to_string(&crate::cli::types::ExecutionTarget::Local).map_err(|e| e.to_string())?;
+    let workspace: Option<String> = tx.query_row(
+        "SELECT workspace_path FROM sessions WHERE engine=?1 AND session_id=?2",
+        rusqlite::params![engine, session_id], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(workspace) = workspace {
+        tx.execute(
+            "DELETE FROM session_execution_selections WHERE execution_target=?1 AND workspace_path=?2 AND engine=?3 AND identity_kind='native' AND identity=?4",
+            rusqlite::params![local_target, workspace, engine, session_id],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM session_pending_adoptions WHERE execution_target=?1 AND workspace_path=?2 AND engine=?3 AND native_id=?4",
+            rusqlite::params![local_target, workspace, engine, session_id],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM session_observations WHERE execution_target=?1 AND workspace_path=?2 AND engine=?3 AND session_id=?4",
+            rusqlite::params![local_target, workspace, engine, session_id],
+        ).map_err(|e| e.to_string())?;
+    }
     for table in [
         "sessions",
         "session_models",
@@ -1130,6 +1183,9 @@ mod tests {
             model: Some("provider/model".into()),
             effort: Some("high".into()),
             provider: Some("provider".into()),
+            execution_selection: None,
+            observed_model: None,
+            observed_effort: None,
             remote: None,
             remote_path: None,
         }
@@ -1186,6 +1242,36 @@ mod tests {
         restore_session_in(&db, "codex", "archived-1").unwrap();
         assert_eq!(visible_session_count(&db), 1);
         assert!(list_archived_sessions_from(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn archive_restore_reads_current_selection_not_legacy_snapshot_fields() {
+        use crate::cli::types::{ExecutionSelectionInput, ExecutionTarget, ModelSelection, SessionExecutionTarget};
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let session = archived_fixture();
+        archive_session_in(&db, &session).unwrap();
+        let input = ExecutionSelectionInput {
+            model_selection: ModelSelection::Native { engine_id: session.engine.clone(), model_id: Some("next-model".into()), channel_id: None },
+            effort: None,
+        };
+        db.0.lock().execute(
+            "INSERT INTO session_execution_selections(execution_target,workspace_path,engine,identity_kind,identity,selection_json,version) VALUES(?1,?2,?3,'native',?4,?5,2)",
+            rusqlite::params![serde_json::to_string(&ExecutionTarget::Local).unwrap(), session.workspace_path, session.engine, session.session_id, serde_json::to_string(&input).unwrap()],
+        ).unwrap();
+        let target = SessionExecutionTarget {
+            engine_id: session.engine.clone(), workspace_path: session.workspace_path.clone(), session_id: Some(session.session_id.clone()),
+            pending_id: None, execution_target: ExecutionTarget::Local,
+        };
+        crate::session_selection::record_observed(&db, &target, Some("previous-model"), Some("high")).unwrap();
+        let mut restored = list_archived_sessions_from(&db).unwrap();
+        hydrate_execution_selections(&db, &mut restored).unwrap();
+        let restored = &restored[0];
+        let selected = restored.execution_selection.as_ref().unwrap();
+        assert_eq!(selected.model_selection, input.model_selection);
+        assert_eq!(selected.effort, None);
+        assert_eq!((&restored.model, &restored.effort, &restored.provider), (&None, &None, &None));
+        assert_eq!(restored.observed_model.as_deref(), Some("previous-model"));
+        assert_eq!(restored.observed_effort.as_deref(), Some("high"));
     }
 
     #[test]

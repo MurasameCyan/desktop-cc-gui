@@ -11,8 +11,6 @@ import {
   migratePendingStream,
   moveStreamingFlag,
   patchSession,
-  resolveSessionEffort,
-  resolveSessionModel,
   rememberSettledRun,
   routeRun,
   runRouting,
@@ -108,36 +106,17 @@ export function upsertSessionMetaInto(
   });
 }
 
-/** Effective model for event-stamped rows: the session's activeModel wins,
- * followed by the owning tab's per-tab override, then the session's own
- * history, then the engine default — the same resolveSessionModel the send
- * path uses, so a row can never claim a model the turn did not run. */
-function stampedModel(
-  deps: EngineEventDeps,
-  engine: string,
-  key: string,
-): string | null {
-  const s = deps.get();
-  const tab = s.openTabs.find(
-    (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
-  );
-  return (
-    resolveSessionModel(tab, s.bySession[key], s.models[engine]) || null
-  );
+/** Turn reports describe what ran, not the newer selection for the next send. */
+function stampedModel(deps: EngineEventDeps, key: string): string | null {
+  const session = deps.get().bySession[key];
+  if (session?.streaming || session?.activeModel) return session.activeModel ?? null;
+  return session?.messages.findLast((message) => message.model)?.model ?? null;
 }
 
-/** Effective reasoning effort for event-stamped rows. Native-session state
- * wins; a tab override is only valid before that session receives its id. */
-function stampedEffort(
-  deps: EngineEventDeps,
-  engine: string,
-  key: string,
-): string | null {
-  const s = deps.get();
-  const tab = s.openTabs.find(
-    (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
-  );
-  return resolveSessionEffort(tab, s.bySession[key], s.efforts[engine]) || null;
+function stampedEffort(deps: EngineEventDeps, key: string): string | null {
+  const session = deps.get().bySession[key];
+  if (session?.streaming || session?.activeEffort) return session.activeEffort ?? null;
+  return session?.messages.findLast((message) => message.effort)?.effort ?? null;
 }
 
 function onModel(
@@ -148,7 +127,7 @@ function onModel(
   const reported = typeof event.data === "string" ? event.data.trim() : "";
   if (!reported) return;
   // The engine reports the bare model name; our own record spells it
-  // "provider/model" (see ipc.rememberSessionModel). Same model, more
+  // "provider/model" from the resolved run snapshot. Same model, more
   // context — keep the qualified one instead of dropping the provider.
   const current = deps.get().bySession[key]?.activeModel ?? "";
   const model =
@@ -211,8 +190,8 @@ function onDelta(
     key,
     "delta",
     event.data as string,
-    stampedModel(deps, event.engine, key),
-    stampedEffort(deps, event.engine, key),
+    stampedModel(deps, key),
+    stampedEffort(deps, key),
   );
   scheduleDeltaFlush(deps.set);
 }
@@ -228,8 +207,8 @@ function onThinking(
     key,
     "thinking",
     event.data as string,
-    stampedModel(deps, event.engine, key),
-    stampedEffort(deps, event.engine, key),
+    stampedModel(deps, key),
+    stampedEffort(deps, key),
   );
   scheduleDeltaFlush(deps.set);
 }
@@ -255,7 +234,7 @@ function onMessage(
       deps.set,
       key,
       data.text,
-      stampedModel(deps, event.engine, key),
+      stampedModel(deps, key),
       data.path ?? null,
       data.todos ?? null,
       data.args,
@@ -285,8 +264,8 @@ function onMessage(
               role: "assistant",
               text: data.text,
               ts: new Date().toISOString(),
-              model: stampedModel(deps, event.engine, key),
-              effort: stampedEffort(deps, event.engine, key),
+              model: stampedModel(deps, key),
+              effort: stampedEffort(deps, key),
               durationMs,
               seq,
             },
@@ -297,40 +276,6 @@ function onMessage(
   });
 }
 
-/** Model a local send resolved for a session key, held until the run reports
- *  the native session id (`session` event) so the two can be remembered
- *  together — the engine transcript only carries the bare model name, and the
- *  new session's id is not known before that event. Only local sends fill
- *  this: an observer must never write its own (bare) reading of a run. */
-const pendingSessionModels = new Map<string, string>();
-/** Same hand-off for the reasoning level: it is chosen before the first send
- *  of a new session and can only be filed under the id the `session` event
- *  carries. */
-const pendingSessionEfforts = new Map<string, string>();
-/** Same hand-off for the in-app channel: spawn injects env from this id, and
- *  a brand-new session only learns its native id from the `session` event. */
-const pendingSessionProviders = new Map<string, string>();
-
-export function rememberModelForRun(
-  key: string,
-  model: string | null | undefined,
-) {
-  if (model) pendingSessionModels.set(key, model);
-}
-
-export function rememberEffortForRun(
-  key: string,
-  effort: string | null | undefined,
-) {
-  if (effort) pendingSessionEfforts.set(key, effort);
-}
-
-export function rememberProviderForRun(
-  key: string,
-  provider: string | null | undefined,
-) {
-  if (provider) pendingSessionProviders.set(key, provider);
-}
 
 function onSession(
   event: EngineEventPayload,
@@ -352,13 +297,11 @@ function onSession(
       state.bySession[sessionKey(t.engine, null, t.workspacePath)] !==
         undefined,
   );
-  // With several pending tabs of one engine, guessing would pin the session
-  // onto an unrelated tab's workspace. Adopt only a unique candidate;
-  // otherwise fall back to the active tab's workspace.
+  // Never borrow a foreground workspace when several pending owners exist.
   const tab =
     owner ?? (pendingCandidates.length === 1 ? pendingCandidates[0] : undefined);
   const workspacePath =
-    tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
+    tab?.workspacePath ?? state.sessions.find((s) => s.engine === event.engine && s.sessionId === nativeId)?.workspacePath ?? "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
   // The event can resolve straight to the native key when it beat the send
   // response (the run had no routing entry yet). The turn rows and streaming
@@ -366,37 +309,10 @@ function onSession(
   // orphaning them on a key nothing renders.
   const pendingKey = sessionKey(event.engine, null, workspacePath);
   const fromKey =
-    pendingKey !== newKey && deps.get().bySession[pendingKey]
+    tab?.sessionId === null && pendingKey !== newKey && deps.get().bySession[pendingKey]
       ? pendingKey
       : key;
 
-  const sentModel =
-    pendingSessionModels.get(fromKey) ?? pendingSessionModels.get(key);
-  if (sentModel) {
-    pendingSessionModels.delete(fromKey);
-    pendingSessionModels.delete(key);
-    void ipc
-      .rememberSessionModel?.(event.engine, nativeId, sentModel)
-      ?.catch(() => {});
-  }
-  const sentEffort =
-    pendingSessionEfforts.get(fromKey) ?? pendingSessionEfforts.get(key);
-  if (sentEffort) {
-    pendingSessionEfforts.delete(fromKey);
-    pendingSessionEfforts.delete(key);
-    void ipc
-      .rememberSessionEffort?.(event.engine, nativeId, sentEffort)
-      ?.catch(() => {});
-  }
-  const sentProvider =
-    pendingSessionProviders.get(fromKey) ?? pendingSessionProviders.get(key);
-  if (sentProvider) {
-    pendingSessionProviders.delete(fromKey);
-    pendingSessionProviders.delete(key);
-    void ipc
-      .rememberSessionProvider?.(event.engine, nativeId, sentProvider)
-      ?.catch(() => {});
-  }
 
   settleOrphanedRuns(deps.set, routeRun(event.runId, newKey));
   // Unflushed stream chunks sit under the pre-migration key; move them too.
@@ -421,6 +337,8 @@ function onSession(
       [newKey]: {
         ...cur,
         ...prev,
+        executionSelection: (cur?.executionSelection?.version ?? -1) > (prev.executionSelection?.version ?? -1) ? cur!.executionSelection : prev.executionSelection,
+        selectionUnavailableReason: (cur?.executionSelection?.version ?? -1) > (prev.executionSelection?.version ?? -1) ? cur!.selectionUnavailableReason : prev.selectionUnavailableReason,
         messages,
         usage: cur?.usage ?? prev.usage,
         turnUsage: cur?.turnUsage ?? prev.turnUsage,
@@ -439,38 +357,14 @@ function onSession(
       delete drafts[fromKey];
     }
     const streamingByKey = moveStreamingFlag(s.streamingByKey, fromKey, newKey);
-    const activeNext =
-      s.active &&
-      s.active.engine === event.engine &&
-      s.active.sessionId === null &&
-      s.active.workspacePath === workspacePath
-        ? { ...s.active, sessionId: nativeId, effort: undefined, provider: undefined }
-        : s.active;
-    return { bySession, drafts, streamingByKey, active: activeNext };
-  });
-  // The pending tab owning this run adopts the native id. Stamp only the
-  // first match: blanketing every pending tab of this engine+workspace
-  // would turn a second "new chat" tab into a duplicate of this session
-  // (identical React keys break the tab strip). Match by the resolved
-  // workspace, so a background tab updates itself, not the foreground tab.
-  deps.set((s) => {
-    let stamped = false;
-    const openTabs = dedupeTabs(
-      s.openTabs.map((t) => {
-        if (
-          stamped ||
-          t.engine !== event.engine ||
-          t.sessionId !== null ||
-          t.workspacePath !== workspacePath
-        ) {
-          return t;
-        }
-        stamped = true;
-        return { ...t, sessionId: nativeId, effort: undefined, provider: undefined };
-      }),
-    );
-    persistTabs(openTabs, s.active);
-    return { openTabs };
+    const openTabs = dedupeTabs(s.openTabs.map((candidate) =>
+      candidate === tab && candidate.sessionId === null
+        ? { ...candidate, sessionId: nativeId, pendingId: undefined, model: undefined, effort: undefined, provider: undefined }
+        : candidate));
+    const activeNext = s.active && tab && s.active.engine === tab.engine && s.active.sessionId === null && s.active.workspacePath === workspacePath && s.active.pendingId === tab.pendingId
+      ? { ...s.active, sessionId: nativeId, pendingId: undefined, model: undefined, effort: undefined, provider: undefined } : s.active;
+    persistTabs(openTabs, activeNext);
+    return { bySession, drafts, streamingByKey, active: activeNext, openTabs };
   });
   // The pinned agent followed the draft key; move it onto the native id so
   // the next send in this tab injects it again.
@@ -607,9 +501,9 @@ function writeUsageRow(
     .usageRecord({
       ts: Date.now(),
       engine: event.engine,
-      model: stampedModel(deps, event.engine, key),
+      model: stampedModel(deps, key),
       sessionId: event.sessionId ?? tab?.sessionId ?? null,
-      workspacePath: tab?.workspacePath ?? state.active?.workspacePath ?? null,
+      workspacePath: tab?.workspacePath ?? state.sessions.find((session) => session.engine === event.engine && session.sessionId === event.sessionId)?.workspacePath ?? null,
       input: parsed.input,
       output: parsed.output,
       cacheRead: parsed.cacheRead,
@@ -641,8 +535,8 @@ function onError(
         ? applyStreamParts(
             cur.messages,
             pending.parts,
-            pending.model ?? (deps.get().models[event.engine] || null),
-            pending.effort ?? stampedEffort(deps, event.engine, key),
+            pending.model ?? stampedModel(deps, key),
+            pending.effort ?? stampedEffort(deps, key),
           )
         : cur.messages,
     );
@@ -1050,15 +944,15 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
       ? applyStreamParts(
           cur.messages,
           pending.parts,
-          pending.model ?? (deps.get().models[event.engine] || null),
-          pending.effort ?? stampedEffort(deps, event.engine, key),
+          pending.model ?? stampedModel(deps, key),
+          pending.effort ?? stampedEffort(deps, key),
         )
       : cur.messages;
     messages = settleLiveRows(messages);
     const turnStart = cur.turnStartedAt ?? prev.turnStartedAt;
     const durationMs = turnStart ? Math.max(0, Date.now() - turnStart) : null;
-    const model = stampedModel(deps, event.engine, key);
-    const effort = stampedEffort(deps, event.engine, key);
+    const model = stampedModel(deps, key);
+    const effort = stampedEffort(deps, key);
     // Stamp usage, durationMs, effort, and model onto the turn's last assistant message.
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant") {

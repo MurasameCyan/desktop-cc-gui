@@ -58,8 +58,12 @@ fn build_app(
     let app = tauri::test::mock_builder()
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
+    let db = Arc::new(Db::open_at(&home.join("app.db")).unwrap());
+    let emitters = ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone()));
+    let cli = Arc::new(ccgui_next_lib::cli::CliState::new(db.clone(), emitters.clone()).unwrap());
     let state = AppState {
-        db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
+        db,
+        cli,
         sink: EventSink::new(Arc::new(app.handle().clone())),
         terminal_sink: EventSink::with_name(
             Arc::new(app.handle().clone()),
@@ -71,7 +75,7 @@ fn build_app(
         ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
-        emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
+        emitters,
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
@@ -162,8 +166,8 @@ async fn send(
     run_id: &str,
     prompt: &str,
 ) {
-    engine::send_message(
-        app.state::<AppState>(),
+    engine::send_message_inner(
+        &app.state::<AppState>(),
         engine_id.to_string(),
         workspace.to_string_lossy().to_string(),
         session_id,
@@ -395,8 +399,8 @@ async fn send_with_images(
     prompt: &str,
     images: Vec<String>,
 ) {
-    engine::send_message(
-        app.state::<AppState>(),
+    engine::send_message_inner(
+        &app.state::<AppState>(),
         engine_id.to_string(),
         workspace.to_string_lossy().to_string(),
         None,
@@ -473,8 +477,8 @@ async fn kimi_explicit_k3_256k_medium_official_channel() {
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let (app, events) = build_app(&home);
-    engine::send_message(
-        app.state::<AppState>(),
+    engine::send_message_inner(
+        &app.state::<AppState>(),
         "kimi".into(),
         workspace.to_string_lossy().into(),
         None,
@@ -552,7 +556,7 @@ async fn kimi_invalid_model_exposes_the_setup_error() {
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let (app, events) = build_app(&home);
-    engine::send_message(app.state::<AppState>(), "kimi".into(), workspace.to_string_lossy().into(),
+    engine::send_message_inner(&app.state::<AppState>(), "kimi".into(), workspace.to_string_lossy().into(),
         None, "do not run".into(), None, Some("ccgui-nonexistent-model".into()), None,
         Some("auto".into()), Some("__local_settings_json__".into()), Some("run-kimi-invalid-model".into()), None,
     ).await.unwrap();

@@ -77,7 +77,7 @@ fn push_model_id(models: &mut Vec<String>, value: &Value) {
 
 /// Model ids out of the OpenAI (`data`), bare-array, and Anthropic (`models`)
 /// response shapes.
-fn extract_model_ids(value: &Value) -> Vec<String> {
+pub(crate) fn extract_model_ids(value: &Value) -> Vec<String> {
     let mut models = Vec::new();
 
     if let Some(data) = value.get("data").and_then(Value::as_array) {

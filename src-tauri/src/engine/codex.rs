@@ -184,7 +184,7 @@ impl Engine for CodexEngine {
     /// from [`apply_channel`] like any child; only the switch that enables the
     /// question tool has to be here.
     fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("app-server");
         // Without this the model never asks: it emits a plain agent message
         // (plus a sleep item) instead of a client request.
@@ -223,7 +223,7 @@ impl Engine for CodexEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("exec");
         let mut preassigned = None;
         if let Some(session_id) = req.session_id.as_deref() {
@@ -509,19 +509,17 @@ mod tests {
     }
 
     fn base_req() -> SendRequest {
-        SendRequest {
-            session_id: None,
-            workspace: std::path::PathBuf::from("/tmp"),
-            prompt: "hi".into(),
-            images: Vec::new(),
-            model: Some("gpt-6-astra".into()),
-            effort: None,
-            service_tier: None,
-            permission: Some("auto".into()),
-            additional_dirs: Vec::new(),
-            provider_id: None,
-            computer_use: None,
-        }
+        SendRequest { execution: None, selection: None, session_id: None,
+        workspace: std::path::PathBuf::from("/tmp"),
+        prompt: "hi".into(),
+        images: Vec::new(),
+        model: Some("gpt-6-astra".into()),
+        effort: None,
+        service_tier: None,
+        permission: Some("auto".into()),
+        additional_dirs: Vec::new(),
+        provider_id: None,
+        computer_use: None, }
     }
 
     fn channel_command(provider: &Value, req: &SendRequest) -> tokio::process::Command {

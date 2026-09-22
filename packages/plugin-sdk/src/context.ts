@@ -2,6 +2,8 @@ import type { ComponentType } from "react";
 import type * as React from "react";
 import type { Disposer } from "./manifest";
 import type { ComposerSlotId, SessionMenuTarget } from "./registry";
+import type { CliCapabilities, ExecutionSelectionInput, ModelEntryProps, SessionExecutionContext, SessionExecutionTarget } from "./cli";
+import type { DocumentStorage } from "./document-storage";
 
 /**
  * PluginContext（plan §5.2）：插件唯一能力门面。宿主 runtime/context.ts
@@ -54,6 +56,14 @@ export interface PluginContext {
       slot: ComposerSlotId;
       key?: string;
       component: ComponentType;
+      order?: number;
+    }): Disposer;
+    /** Replace the builtin model entry for these engines. Permission
+     * ui:model-entry; unregister/crash restores the builtin entry. */
+    registerModelEntry(def: {
+      key?: string;
+      engineIds: string[];
+      component: ComponentType<ModelEntryProps>;
       order?: number;
     }): Disposer;
     /** Chat right-panel tab; renders with the active workspace path
@@ -165,6 +175,10 @@ export interface PluginContext {
     set(key: string, value: unknown): Promise<void>;
     delete(key: string): Promise<void>;
   };
+  /** Private plugin documents, CAS-protected; permission plugin.storage. */
+  documentStorage: DocumentStorage;
+  /** Typed execution contributions, grants and native configuration operations. */
+  cli: CliCapabilities;
   events: {
     on(topic: string, cb: (data: unknown) => void): Disposer;
     emit(topic: string, data: unknown): void;
@@ -194,6 +208,11 @@ export interface PluginContext {
    *  行被丢弃。返回 Disposer,插件卸载时自动注销。 */
   sessions: {
     selectSession(engine: string, sessionId: string, workspacePath: string): Promise<void>;
+    /** Complete active target/selection; null when no composer target exists. */
+    getContext(): Promise<SessionExecutionContext | null>;
+    /** Atomically change this target only. Stale expectedVersion rejects. */
+    setSelection(target: SessionExecutionTarget, selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+    onSelectionChanged(callback: (context: SessionExecutionContext) => void): Disposer;
     /** 请求宿主立即刷新会话目录（侧栏/标签页），0.3.7 起。
      *  插件绕过宿主直写会话数据（如 sqlite custom_title、转录 title 行）后
      *  调用——否则变更要等用户手动同步或下次常规刷新才可见。 */

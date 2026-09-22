@@ -1,11 +1,10 @@
 //! Phase-1 plugin host: local-path install/uninstall/enable/disable, plugin
-//! file reads confined to the plugin directory, and per-plugin KV storage
-//! (db.rs `plugin_kv`). State lives in `~/.ccgui-next/plugins.json`; the
+//! file reads confined to the plugin directory, per-plugin KV storage and
+//! private document storage. State lives in `~/.ccgui-next/plugins.json`; the
 //! plugins themselves in `~/.ccgui-next/plugins/<id>/`.
 //!
-//! Uninstall data policy (plan §9.1): `delete_data=false` keeps the KV rows
-//! and records a tombstone; `plugin_list` purges rows whose tombstone is
-//! older than KV_TOMBSTONE_TTL_SECS.
+//! Uninstall keeps documents and their selected location unless delete_data is
+//! explicit. Retained KV rows expire after KV_TOMBSTONE_TTL_SECS; documents do not.
 //!
 //! Install is a staging/backup rename transaction (fs::install_from); a
 //! crash mid-swap leaves at worst a stale `.staging-`/`.backup-` dir, and
@@ -13,13 +12,15 @@
 //! back into place before proceeding.
 //!
 //! Layout: manifest.rs = manifest parse + permission whitelist; state.rs =
-//! plugins.json records + STATE_LOCK; fs.rs = source-tree walk, the install
+//! plugins.json records + cross-process state lock; fs.rs = source-tree walk, the install
 //! transaction, and the manifest/record merge.
 
+mod file_lock;
 mod fs;
 mod manifest;
 pub mod market;
 mod state;
+pub(crate) mod storage;
 
 pub use state::{KV_TOMBSTONE_TTL_SECS, PluginInfo, PluginRecord, PluginsState};
 pub(crate) use state::plugin_enabled_permissions;
@@ -63,20 +64,44 @@ fn uninstall_at(
     id: &str,
     delete_data: bool,
 ) -> Result<(), String> {
+    uninstall_with_storage_at(db, plugins_dir, state_path, id, delete_data, None)
+}
+
+fn uninstall_with_storage_at(
+    db: &crate::db::Db,
+    plugins_dir: &Path,
+    state_path: &Path,
+    id: &str,
+    delete_data: bool,
+    storage_roots: Option<&storage::StorageRoots>,
+) -> Result<(), String> {
     manifest::require_valid_id(id)?;
     let dir = plugins_dir.join(id);
     {
         // One locked read→mutate→write: the not-installed check, the record
         // removal, and the tombstone write-back must not interleave with a
         // concurrent install/enable of the same id.
-        let _guard = state::STATE_LOCK.lock();
+        let _guard = state::lock_state(state_path)?;
         let mut state = state::read_state(state_path)?;
         if !dir.exists() && !state.plugins.contains_key(id) {
             return Err(format!("{id}: plugin not installed"));
         }
+        let document_guard = if delete_data {
+            let guard = storage::lock_documents_at(state_path, id, storage_roots)?;
+            // Keep the physical root locked through preflight, removal and
+            // state persistence, even against another host's storage selection.
+            storage::assert_documents_deletable(&guard)?;
+            Some(guard)
+        } else {
+            None
+        };
         fs::remove_dir_if_exists(&dir)?;
         state.plugins.remove(id);
-        if delete_data {
+        if let Some(guard) = &document_guard {
+            // Preserve document files and their selected location unless the
+            // user explicitly requests whole-plugin data deletion.
+            storage::delete_plugin_documents(guard)?;
+            state.document_storage.remove(id);
             db.plugin_kv_delete_all(id)?;
             state.kv_tombstones.remove(id);
         } else {
@@ -84,8 +109,9 @@ fn uninstall_at(
         }
         state::write_state(state_path, &state)?;
     }
-    // Services this plugin spawned with lifecycle="plugin" must not outlive
-    // the plugin itself.
+    // Revoke future CLI use, never accepted chat snapshots. Only separately
+    // tracked lifecycle="plugin" services are stopped by the existing hook.
+    crate::cli::invalidate_plugin(id);
     crate::plugin_caps::kill_tracked_children(id);
     Ok(())
 }
@@ -116,6 +142,7 @@ fn set_enabled_at(
         }
     })?;
     if !enabled {
+        crate::cli::invalidate_plugin(id);
         // Disabling takes effect immediately for lifecycle="plugin"
         // children too — they belong to the enabled plugin's runtime.
         crate::plugin_caps::kill_tracked_children(id);
@@ -135,6 +162,7 @@ pub fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, String
         record.quarantined = true;
         record.last_error = Some(error.clone());
     })?;
+    crate::cli::invalidate_plugin(&id);
     // Quarantine takes effect immediately for lifecycle="plugin" children
     // too — they belong to the quarantined plugin's runtime.
     crate::plugin_caps::kill_tracked_children(&id);
@@ -218,6 +246,27 @@ pub(crate) mod test_support {
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
     }
 
+    /// Create a directory link (junction on Windows, symlink elsewhere) so
+    /// reparse-point hardening can be exercised on both platforms.
+    pub(crate) fn create_dir_link(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+    }
+
     pub(crate) fn valid_manifest(id: &str) -> String {
         format!(
             r#"{{"id":"{id}","name":"Test","version":"1.2.3","tier":"declarative",
@@ -236,6 +285,8 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{valid_manifest, write_plugin, Scratch};
     use super::{fs, set_enabled_at, uninstall_at};
+    use super::uninstall_with_storage_at;
+    use super::storage::{select_location_at, write_text_at, StorageLocationKind, StorageLocationSelection, StorageRoots};
 
     #[tokio::test]
     async fn disable_and_uninstall_kill_lifecycle_plugin_children() {
@@ -266,5 +317,101 @@ mod tests {
         uninstall_at(&db, &plugins_dir, &state_path, "life-plugin", false).unwrap();
         // Same for uninstall: nothing left for a later kill to find.
         assert_eq!(crate::plugin_caps::kill_tracked_children("life-plugin"), 0);
+    }
+
+    #[test]
+    fn uninstall_refuses_a_reparse_point_document_tree_before_removing_the_plugin() {
+        use super::test_support::create_dir_link;
+        let scratch = Scratch::new();
+        let plugins_dir = scratch.path("plugins");
+        let state_path = scratch.path("plugins.json");
+        let source = scratch.path("source");
+        write_plugin(
+            &source,
+            r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
+        );
+        fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
+        set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
+        let roots = StorageRoots {
+            data: scratch.path("data"),
+            program: scratch.path("program"),
+        };
+        let custom = scratch.path("custom");
+        select_location_at(
+            &state_path,
+            &roots,
+            "docs.plugin",
+            StorageLocationSelection {
+                kind: StorageLocationKind::Custom,
+                path: Some(custom.to_string_lossy().into_owned()),
+            },
+        )
+        .unwrap();
+        write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
+        let outside = scratch.path("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "keep").unwrap();
+        let root = custom.join("plugin-data").join("docs.plugin");
+        assert!(create_dir_link(&root.join("escape"), &outside), "could not create a directory link");
+
+        let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
+        let error =
+            uninstall_with_storage_at(&db, &plugins_dir, &state_path, "docs.plugin", true, Some(&roots))
+                .unwrap_err();
+        assert!(error.contains("reparse point"), "unexpected: {error}");
+        // Nothing was shed: the install, its record, and the outside data survive.
+        assert!(plugins_dir.join("docs.plugin").is_dir(), "plugin directory was removed anyway");
+        assert!(crate::plugins::state::read_state(&state_path)
+            .unwrap()
+            .plugins
+            .contains_key("docs.plugin"));
+        assert!(root.join("state").exists());
+        assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn uninstall_preserves_or_deletes_document_storage_by_policy() {
+        for delete_data in [false, true] {
+            let scratch = Scratch::new();
+            let plugins_dir = scratch.path("plugins");
+            let state_path = scratch.path("plugins.json");
+            let source = scratch.path("source");
+            write_plugin(
+                &source,
+                r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
+            );
+            fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
+            set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
+            let roots = StorageRoots {
+                data: scratch.path("data"),
+                program: scratch.path("program"),
+            };
+            let custom = scratch.path("custom");
+            select_location_at(
+                &state_path,
+                &roots,
+                "docs.plugin",
+                StorageLocationSelection {
+                    kind: StorageLocationKind::Custom,
+                    path: Some(custom.to_string_lossy().into_owned()),
+                },
+            )
+            .unwrap();
+            write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
+            let document = custom.join("plugin-data/docs.plugin/state");
+            let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
+            uninstall_with_storage_at(
+                &db,
+                &plugins_dir,
+                &state_path,
+                "docs.plugin",
+                delete_data,
+                Some(&roots),
+            )
+            .unwrap();
+            assert_eq!(document.exists(), !delete_data);
+            let state = super::state::read_state(&state_path).unwrap();
+            assert_eq!(state.document_storage.contains_key("docs.plugin"), !delete_data);
+        }
     }
 }

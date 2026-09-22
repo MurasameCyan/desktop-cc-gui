@@ -245,7 +245,8 @@ export function useEngineModels(
       const customs = providerEntries(
         engine.id as EngineId,
         cliConfig?.[engine.id as EngineId],
-      ).map((entry) => ({ id: entry.id, label: entry.name }));
+      ).filter((entry) => !(entry.raw && typeof entry.raw === "object" && "readOnly" in entry.raw && entry.raw.readOnly === true))
+        .map((entry) => ({ id: entry.id, label: entry.name }));
       result[engine.id] = customs.length > 0 ? [official, ...customs] : [];
     }
     return result;

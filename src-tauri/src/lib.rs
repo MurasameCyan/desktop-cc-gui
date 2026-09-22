@@ -4,6 +4,7 @@ pub mod baidu_tongji;
 pub mod browser;
 pub mod cc_switch;
 pub mod cli_lifecycle;
+pub mod cli;
 pub mod config;
 pub mod computer_use;
 pub mod computer_use_ax;
@@ -25,6 +26,7 @@ pub mod proxy;
 pub mod provider_files;
 pub mod provider_models;
 pub mod settings;
+pub mod session_selection;
 pub mod usage;
 pub mod slash_commands;
 pub mod terminal;
@@ -38,6 +40,7 @@ use tauri::Emitter;
 
 pub struct AppState {
     pub db: Arc<db::Db>,
+    pub cli: Arc<cli::CliState>,
     pub sink: Arc<event_sink::EventSink>,
     pub terminal_sink: Arc<event_sink::EventSink>,
     /// 插件 agent 轮次（plugin_agent_start）的独立事件流：与聊天引擎流
@@ -133,8 +136,11 @@ pub fn run() {
             // confinement, so the Arc itself must be managed alongside.
             app.manage(Arc::clone(&db));
             let emitters = event_sink::BroadcastEmit::new(Arc::new(app.handle().clone()));
+            let cli = Arc::new(cli::CliState::new(db.clone(), emitters.clone())
+                .map_err(std::io::Error::other)?);
             let state = AppState {
                 db,
+                cli,
                 sink: event_sink::EventSink::new(emitters.clone()),
                 terminal_sink: event_sink::EventSink::with_name(
                     emitters.clone(),
@@ -321,6 +327,32 @@ pub fn run() {
             plugins::plugin_storage_get,
             plugins::plugin_storage_set,
             plugins::plugin_storage_delete,
+            plugins::storage::plugin_document_storage_get_location,
+            plugins::storage::plugin_document_storage_select_location,
+            plugins::storage::plugin_document_storage_read_text,
+            plugins::storage::plugin_document_storage_write_text_atomic,
+            plugins::storage::plugin_document_storage_remove,
+            plugins::storage::plugin_document_storage_list,
+            cli::cli_list_sources,
+            cli::plugin_cli_publish_source,
+            cli::plugin_cli_get_source,
+            cli::plugin_cli_unpublish_source,
+            cli::plugin_cli_list_sources,
+            cli::grants::plugin_cli_request_target_grant,
+            cli::grants::plugin_cli_list_target_grants,
+            cli::grants::plugin_cli_revoke_target_grant,
+            cli::runtime::plugin_cli_register_runtime_material,
+            cli::runtime::plugin_cli_get_credential_uses,
+            cli::discovery::plugin_cli_list_models,
+            cli::native_config::plugin_cli_list_config_targets,
+            cli::native_config::plugin_cli_preview_config_import,
+            cli::native_config::plugin_cli_confirm_config_import,
+            cli::native_config::plugin_cli_preview_config_patch,
+            cli::native_config::plugin_cli_apply_config_patch,
+            cli::native_config::plugin_cli_restore_config_patch,
+            session_selection::get_session_selection,
+            session_selection::set_session_selection,
+            session_selection::set_session_effort,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,
