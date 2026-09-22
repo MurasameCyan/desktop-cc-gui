@@ -222,9 +222,13 @@ export async function collectBeforeTurnContributions(
   const work = Promise.allSettled(
     registrations.map(async (registration, index) => {
       const { pluginId, hooks } = registration;
-      if (!registration.active || !hooks.beforeTurn) return;
+      // Bind before the closure: TS drops property narrowing across a closure
+      // boundary, so `hooks.beforeTurn` inside the arrow reads as possibly
+      // undefined (dispatchNonBlocking binds its hook for the same reason).
+      const beforeTurn = hooks.beforeTurn;
+      if (!registration.active || !beforeTurn) return;
       try {
-        results[index].result = await runAsPlugin(() => hooks.beforeTurn(event));
+        results[index].result = await runAsPlugin(() => beforeTurn(event));
       } catch (error) {
         reportHookError(pluginId, "beforeTurn", error);
       }
@@ -342,9 +346,11 @@ export async function runBeforeSwitch(
   const work = Promise.all(
     [...switchRegistrations].map(async (registration) => {
       const { pluginId, hooks } = registration;
-      if (!registration.active || !hooks.beforeSwitch) return;
+      // Same closure-narrowing bind as collectBeforeTurnContributions above.
+      const beforeSwitch = hooks.beforeSwitch;
+      if (!registration.active || !beforeSwitch) return;
       try {
-        await runAsPlugin(() => hooks.beforeSwitch(event));
+        await runAsPlugin(() => beforeSwitch(event));
       } catch (error) {
         reportHookError(pluginId, "beforeSwitch", error);
       }
