@@ -16,9 +16,9 @@
 //! plugins.json records + state lock; fs.rs = source-tree walk, the install
 //! transaction, and the manifest/record merge.
 
-mod file_lock;
 pub(crate) mod asset_protocol;
 pub(crate) mod assets;
+mod file_lock;
 mod fs;
 mod manifest;
 pub mod market;
@@ -103,7 +103,8 @@ fn uninstall_with_storage_at(
         };
         fs::remove_dir_if_exists(&dir)?;
         state.plugins.remove(id);
-        // Directory grants are capabilities, never retained user data.
+        // Directory grants are capabilities, never retained user data: they go
+        // regardless of delete_data, so a reinstall starts with no access.
         state.asset_directories.remove(id);
         if let Some(guard) = &document_guard {
             // Preserve document files and their selected location unless the
@@ -489,10 +490,13 @@ mod tests {
             .unwrap();
             write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
             let mut state = super::state::read_state(&state_path).unwrap();
-            state.asset_directories.insert("docs.plugin".into(), vec![super::assets::AssetDirectoryGrant {
-                grant_id: "old-capability".into(),
-                path: custom.to_string_lossy().into_owned(),
-            }]);
+            state.asset_directories.insert(
+                "docs.plugin".into(),
+                vec![super::assets::AssetDirectoryGrant {
+                    grant_id: "old-capability".into(),
+                    path: custom.to_string_lossy().into_owned(),
+                }],
+            );
             super::state::write_state(&state_path, &state).unwrap();
             let document = custom.join("plugin-data/docs.plugin/state");
             let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
@@ -508,6 +512,7 @@ mod tests {
             assert_eq!(document.exists(), !delete_data);
             let state = super::state::read_state(&state_path).unwrap();
             assert_eq!(state.document_storage.contains_key("docs.plugin"), !delete_data);
+            // Grants are capabilities: cleared either way, unlike documents.
             assert!(!state.asset_directories.contains_key("docs.plugin"));
         }
     }

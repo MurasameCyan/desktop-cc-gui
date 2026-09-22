@@ -15,7 +15,7 @@ import { supportsOmpFastMode, type OmpServiceTier } from "@/lib/omp-service-tier
 import { cx } from "@/utils/cx";
 import { OmpSpeedSection } from "./omp-speed-section";
 import { filterModels, groupModelsByProvider, type ModelGroup } from "./model-list";
-import { EFFORT_LABEL_KEYS, type EffortLevel } from "./effort-levels";
+import { EFFORT_LABEL_KEYS, supportsEffort, type EffortLevel } from "./effort-levels";
 import { EffortSlider } from "./effort-slider";
 import type { MenuOption, ModelOption } from "./cli-menu";
 
@@ -599,16 +599,18 @@ export function EngineModelPanel({
         engineId={option.id}
         onPickModel={onPickModel}
       />
-      <EffortFooter
-        engineId={option.id}
-        selectedModelId={selectedModelId}
-        effort={effort}
-        onEffortChange={onEffortChange}
-        ompServiceTier={ompServiceTier}
-        onOmpServiceTierChange={onOmpServiceTierChange}
-        codexServiceTier={codexServiceTier}
-        onCodexServiceTierChange={onCodexServiceTierChange}
-      />
+      {supportsEffort(option.id) && (
+        <EffortFooter
+          engineId={option.id}
+          selectedModelId={selectedModelId}
+          effort={effort}
+          onEffortChange={onEffortChange}
+          ompServiceTier={ompServiceTier}
+          onOmpServiceTierChange={onOmpServiceTierChange}
+          codexServiceTier={codexServiceTier}
+          onCodexServiceTierChange={onCodexServiceTierChange}
+        />
+      )}
     </div>
   );
 }

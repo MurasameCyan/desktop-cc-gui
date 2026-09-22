@@ -42,6 +42,7 @@ import {
   settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./engine-events";
+import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
 import { effectivePermission } from "./permissions";
 import {
   buildAgentBlock,
@@ -67,6 +68,7 @@ import {
   confirmPromptContributions,
   dispatchAfterSwitch,
   dispatchSessionCreated,
+  dispatchTurnStarted,
   isInternalMessageCaptureActive,
   runBeforeSwitch,
 } from "@/features/plugins/runtime/hooks";
@@ -93,6 +95,13 @@ export interface MessagingDeps {
   subscribe: StoreSubscribe;
 }
 
+/** The one answer value a question card sends. A multi-select pick arrives as
+ * labels and travels as the text the CLI's free-form editor would have given. */
+function answerText(answers: Record<string, string | string[]>): string {
+  const value = Object.values(answers)[0];
+  return Array.isArray(value) ? value.join(", ") : value ?? "";
+}
+
 export function createMessagingActions(
   deps: MessagingDeps,
 ): Pick<
@@ -115,6 +124,9 @@ export function createMessagingActions(
   markUnseenIfBackground: (key: string) => void;
 } {
   const { set, get, loadHistoryPage, subscribe } = deps;
+  // A replacement turn can reset the session's shared interrupted flag.
+  // Keep cancellation attached to the send waiting on hooks or its ACK.
+  const pendingSends = new Map<string, { cancelled: boolean }>();
 
   /**
    * Send a prompt to a specific tab. Unlike the public `send` action this is
@@ -217,6 +229,10 @@ export function createMessagingActions(
     // Optimistic user message.
     const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
     const hookRunId = newId();
+    const previousSend = pendingSends.get(key);
+    if (previousSend) previousSend.cancelled = true;
+    const pendingSend = { cancelled: false };
+    pendingSends.set(key, pendingSend);
     // Optimistic user message, right away: the hooks below can take up to
     // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
@@ -265,6 +281,7 @@ export function createMessagingActions(
         occurredAt: new Date().toISOString(),
       };
       await runBeforeSwitch(switchEvent);
+      if (pendingSend.cancelled) return;
     }
     const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
     const beforeTurn = await collectBeforeTurnContributions({
@@ -275,6 +292,7 @@ export function createMessagingActions(
       workspace,
       occurredAt: new Date().toISOString(),
     });
+    if (pendingSend.cancelled) return;
     // Retire old owners and withdraw their native-history instructions once.
     const prepared = prepareSessionContributions(
       get().sessionContributions,
@@ -303,6 +321,18 @@ export function createMessagingActions(
       patchSession(set, key, { error: agentResolveError });
     }
     try {
+      // Read-only launch observation, after the lifecycle registration so a
+      // fast engine's events cannot precede it, and before the send so the
+      // hook sees the turn start rather than its result. Same turnId as
+      // beforeTurn/afterTurn.
+      dispatchTurnStarted({
+        runId: hookRunId,
+        turnId: hookRunId,
+        engine,
+        sessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      });
       const result = await ipc.sendMessage({
         runId: requestedRunId,
         engine,
@@ -451,29 +481,22 @@ export function createMessagingActions(
         upsertSessionMeta: (meta) => upsertSessionMetaInto(set, meta),
         refreshSessionUsage: (sessionKey) => get().refreshSessionUsage(sessionKey),
       });
-      // Stop pressed while this send was still in flight: interrupt() ran
-      // before runRouting had this run (it is written above, after the
-      // await), so it settled the UI and killed nothing — the CLI kept
-      // streaming. Now that the ids exist, kill it. A native id adopted
       // Stop can precede native spawn while invoke is still in flight; retry
       // the interrupt now that the backend has registered the child.
-      // just above moved the state to a new key, so read the key the turn
-      // actually lives under.
+      // Session adoption may have moved the state, so read the live key.
       const liveKey = runRouting.get(result.runId) ?? knownKey ?? (
         result.sessionId && !tab.sessionId
           ? sessionKey(engine, result.sessionId, tab.workspacePath)
           : key);
-      if (get().bySession[liveKey]?.interrupted) {
+      if (pendingSend.cancelled || get().bySession[liveKey]?.interrupted) {
+        finishRunLifecycle(result.runId, "cancelled");
         patchSession(set, liveKey, { settledRunIds: rememberSettledRun(get().bySession[liveKey], result.runId) });
         runRouting.delete(result.runId);
         untrackRun(result.runId);
         dropRunUsage(result.runId);
-        await Promise.all([
-          ipc.interruptSession(result.runId).catch(() => false),
-          ...(result.sessionId
-            ? [ipc.interruptSession(result.sessionId).catch(() => false)]
-            : []),
-        ]);
+        // A replacement may already own the same native session. Only the
+        // immutable run id belongs to this late acknowledgement.
+        await ipc.interruptSession(result.runId).catch(() => false);
       }
     } catch (error) {
       finishRunLifecycle(hookRunId, "failed", String(error));
@@ -496,6 +519,8 @@ export function createMessagingActions(
       // the queue instead of looping.
       void get().refreshSessionUsage(failedKey);
       if (!get().bySession[failedKey]?.interrupted) drainQueue(failedKey);
+    } finally {
+      if (pendingSends.get(key) === pendingSend) pendingSends.delete(key);
     }
   }
 
@@ -571,16 +596,27 @@ export function createMessagingActions(
       ) {
         return;
       }
+      // A multi-select round is answered through the CLI's free-form row, whose
+      // editor then carries the picked labels: replying to the select frame with
+      // a label only toggles the CLI's own set and re-asks the same question.
+      const loop = answers ? beginAskSubmit(key, seq, answerText(answers)) : undefined;
       try {
-        await ipc.answerQuestion(question.runId, question.requestId, answers);
+        await ipc.answerQuestion(
+          question.runId,
+          question.requestId,
+          loop ? { [loop.base]: ASK_OTHER_OPTION } : answers,
+        );
         patchQuestionByRequestId(set, key, question.requestId, (cur) => ({
           ...cur,
           status: answers ? ("answered" as const) : ("dismissed" as const),
           ...(answers ? { answers } : {}),
         }));
+        // Skipping abandons the round: the CLI settles it as cancelled.
+        if (!answers) askLoops.delete(key);
       } catch (error) {
         // The answer never reached the process (the run is gone): surface it;
         // a later question_settled event resolves the still-pending card.
+        if (loop) revertAskSubmit(key, seq);
         patchSession(set, key, { error: errorText(error) });
       }
     },
@@ -707,6 +743,11 @@ export function createMessagingActions(
         active.sessionId,
         active.workspacePath,
       );
+      const pendingSend = pendingSends.get(key);
+      if (pendingSend) {
+        pendingSend.cancelled = true;
+        pendingSends.delete(key);
+      }
       // Settle locally FIRST: the killed run's done event can arrive while
       // the kill IPCs below are still in flight, and onDone drains the queue
       // whenever interrupted is still false — that would fire the next

@@ -6,7 +6,7 @@
  * 插件仓用法（包未发布 npm 前的过渡方案）：复制本文件为插件仓的
  * `src/ccgui-plugin.d.ts`，首行版本戳必须与所用宿主 SDK 一致。
  *
- * @ccgui/plugin-sdk v0.4.3
+ * @ccgui/plugin-sdk v0.3.12
  */
 
 /** 宿主实现的 SDK 契约版本。 */
@@ -269,7 +269,8 @@ export interface SessionHooks {
 }
 export interface TurnHooks {
   beforeTurn?(event: BeforeTurnEvent): BeforeTurnResult | void | Promise<BeforeTurnResult | void>;
-  /** Pure observation; runtime.events.read only. turnId correlates start/end. */
+  /** Read-only launch observation; requires runtime.events.read, not prompt
+   * contribution permission. Correlate start and finish using turnId. */
   onTurnStarted?(event: BeforeTurnEvent): void | Promise<void>;
   onRuntimeEvent?(event: NormalizedRuntimeEvent): void;
   afterTurn?(event: AfterTurnEvent): void | Promise<void>;

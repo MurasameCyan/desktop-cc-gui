@@ -3,7 +3,10 @@
 
 use super::events::EngineEvent;
 use super::codex_usage;
-use super::registry::{ProcessRegistry, kill_process_group};
+use super::registry::ProcessRegistry;
+// Group sweeps are the unix mirror of the Windows kill-on-close job.
+#[cfg(unix)]
+use super::registry::kill_process_group;
 use super::Engine;
 #[cfg(windows)]
 use super::job;
@@ -110,7 +113,7 @@ pub(crate) fn spawn_stderr_capture(stderr: ChildStderr) -> Arc<Mutex<String>> {
 
 /// Engine stderr can echo the channel credentials from the CLI's own config files; redact credential
 /// shapes before the tail is shown to the user in an error banner.
-fn redact_secrets(text: &str) -> String {
+pub(super) fn redact_secrets(text: &str) -> String {
     use std::sync::LazyLock;
     static PATTERNS: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
         [
@@ -243,6 +246,7 @@ impl TurnCore {
                 result,
                 tool_call_id,
                 patch,
+                tool_call_id,
             } => {
                 let mut payload = serde_json::json!({ "role": role, "text": text });
                 if let Some(path) = path {
@@ -259,6 +263,9 @@ impl TurnCore {
                 if let Some(result) = result {
                     payload["result"] = result;
                 }
+                // The engine's own call id, when it reported one: the
+                // frontend pairs a result with its call on this rather than
+                // on the tool name, which collides across parallel calls.
                 if let Some(tool_call_id) = tool_call_id {
                     payload["toolCallId"] = Value::String(tool_call_id);
                 }

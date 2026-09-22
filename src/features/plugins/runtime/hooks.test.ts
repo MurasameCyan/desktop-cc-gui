@@ -93,8 +93,8 @@ describe("plugin hook runtime", () => {
     dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" });
     dispose();
     await Promise.resolve();
-    expect(afterTurn).not.toHaveBeenCalled();
     expect(onTurnStarted).not.toHaveBeenCalled();
+    expect(afterTurn).not.toHaveBeenCalled();
   });
 
   it("discards a before-turn result that resolves after its owner is disposed", async () => {
@@ -392,6 +392,17 @@ describe("plugin hook runtime", () => {
     slow.resolve();
     await expect(first).resolves.toBeUndefined();
   });
+  it("keeps same-target switches independent by switchId", async () => {
+    const slow = Promise.withResolvers<void>();
+    disposers.push(registerRuntimeSwitchHooks("plugin", {
+      beforeSwitch: (event) => event.switchId === "switch-slow" ? slow.promise : undefined,
+    }));
+    const first = runBeforeSwitch({ ...switchEvent, switchId: "switch-slow" }, { timeoutMs: 100 });
+    const second = runBeforeSwitch({ ...switchEvent, switchId: "switch-fast" }, { timeoutMs: 100 });
+    await expect(second).resolves.toBeUndefined();
+    slow.resolve();
+    await expect(first).resolves.toBeUndefined();
+  });
 
   it("caps before-switch waiting and fails open when a plugin rejects", async () => {
     vi.useFakeTimers();
@@ -419,32 +430,41 @@ describe("plugin hook runtime", () => {
     expect(reached).toEqual(["runs"]);
   });
 
-  it("schedules turn observers in order without waiting for them to settle", async () => {
+  it("schedules turn observers in order without blocking their callers, isolating failures", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const seen: string[] = [];
     const pending = Promise.withResolvers<void>();
     disposers.push(
       registerTurnHooks("throws", {
-        onTurnStarted: () => { throw new Error("broken start observer"); },
+        onTurnStarted: () => {
+          throw new Error("broken start observer");
+        },
       }),
       registerTurnHooks("rejects", {
-        onTurnStarted: async () => { throw new Error("rejected start observer"); },
+        onTurnStarted: async () => {
+          throw new Error("rejected start observer");
+        },
       }),
       registerTurnHooks("plugin", {
         onTurnStarted: async () => {
           seen.push("started");
           await pending.promise;
         },
-        onRuntimeEvent: () => { seen.push("runtime"); },
-        afterTurn: () => { seen.push("after"); },
+        onRuntimeEvent: () => {
+          seen.push("runtime");
+        },
+        afterTurn: () => {
+          seen.push("after");
+        },
       }),
     );
 
-    dispatchTurnStarted(beforeTurnEvent);
-    dispatchRuntimeEvent({ kind: "assistant-completed" } as never);
-    dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" });
+    expect(dispatchTurnStarted(beforeTurnEvent)).toBeUndefined();
+    expect(dispatchRuntimeEvent({ kind: "assistant-completed" } as never)).toBeUndefined();
+    expect(dispatchAfterTurn({ ...beforeTurnEvent, status: "completed" })).toBeUndefined();
     expect(seen).toEqual([]);
     await Promise.resolve();
+    // A throwing/rejecting observer must not stop the later registration.
     expect(seen).toEqual(["started", "runtime", "after"]);
     pending.resolve();
     await Promise.resolve();

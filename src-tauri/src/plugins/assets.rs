@@ -13,13 +13,16 @@ use serde::{Deserialize, Serialize};
 
 use super::{state, storage};
 
-/// Remote proxy cap: mirrors `plugin_http_request` (documented in the SDK
-/// guide as the network-request limit).
+/// Remote proxy cap: applies only to `remote` sources, mirroring
+/// `plugin_http_request` (documented in the SDK guide as the network-request
+/// limit). Never used for on-disk reads.
 pub(super) const MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
-/// Local (bundle/document/granted-directory) reads stream from disk, so the
-/// cap only guards against absurd files. Live2D texture sets routinely exceed
-/// the network limit (a 10 MB `texture_00.png` is normal), and rejecting them
-/// surfaced as an unloadable model rather than a size complaint.
+/// Local cap: applies to `bundle`, `doc` and granted-directory reads, which
+/// stream from disk instead of the network, so it only guards against absurd
+/// files. Large texture atlases routinely exceed the remote cap (a 10 MB PNG
+/// is ordinary), and rejecting them surfaced as an unloadable resource rather
+/// than a size complaint. Deliberately a separate constant from
+/// `MAX_ASSET_BYTES`: the two limits must never be shared.
 const MAX_LOCAL_ASSET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DIRECTORIES: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -440,7 +443,8 @@ async fn read_remote_at(
         let target = url.join(location).map_err(|_| AssetError::BadGateway)?;
         authorize_remote(state_path, id, &target)?;
         // The protocol layer rewrites Location back through this proxy. Letting
-        // the browser follow that URL also fixes the base for relative textures.
+        // the browser follow that URL also fixes the base for relative
+        // dependencies of the redirected resource.
         return Ok(AssetContent::Redirect(target));
     }
     if status == StatusCode::NOT_FOUND {
@@ -813,9 +817,10 @@ mod tests {
     }
 
     #[test]
-    fn local_reads_serve_textures_above_the_remote_limit() {
-        // Live2D texture atlases routinely exceed the 8 MB network cap
-        // (a 10 MB texture_00.png is normal); local reads must serve them.
+    fn local_reads_serve_files_above_the_remote_limit() {
+        // The local and remote caps are separate on purpose: large texture
+        // atlases routinely exceed the 8 MB network cap, and local reads must
+        // still serve them.
         let scratch = Scratch::new();
         let path = fixture(&scratch);
         let plugins = scratch.path("plugins");

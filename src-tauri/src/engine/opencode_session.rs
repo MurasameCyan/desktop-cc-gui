@@ -250,6 +250,9 @@ async fn prompt(
     if req.permission.as_deref() == Some("plan") {
         body["agent"] = json!("plan");
     }
+    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        body["variant"] = json!(effort);
+    }
     let response = reqwest::Client::new()
         .post(format!("{origin}/session/{session_id}/prompt_async"))
         .query(&[("directory", directory)])

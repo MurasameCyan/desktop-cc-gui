@@ -171,6 +171,31 @@ export default function ccguiAskBridge(pi: ExtensionAPI) {
 			};
 		},
 	});
+	pi.on("before_provider_request", (event, ctx) => {
+		const payload = event.payload;
+		if (!payload || typeof payload !== "object") return;
+		const rawLevel = (typeof process !== "undefined" && process.env?.CCGUI_REQUESTED_EFFORT) || ctx?.thinkingLevel || pi.getThinkingLevel?.();
+		if (!rawLevel || rawLevel === "off") return;
+		const effort = rawLevel;
+		const p = payload as Record<string, any>;
+		// 1. Anthropic messages format: output_config.effort for adaptive thinking (recognized by NewAPI/OneAPI)
+		if (!p.output_config || typeof p.output_config !== "object") {
+			p.output_config = { effort };
+		} else if (!p.output_config.effort) {
+			p.output_config.effort = effort;
+		}
+		// 2. OpenAI completions format: top-level reasoning_effort
+		if (!p.reasoning_effort) {
+			p.reasoning_effort = effort;
+		}
+		// 3. OpenRouter / vLLM format: reasoning.effort
+		if (!p.reasoning) {
+			p.reasoning = { effort };
+		} else if (typeof p.reasoning === "object" && !p.reasoning.effort) {
+			p.reasoning.effort = effort;
+		}
+		return p;
+	});
 }
 "#;
 
@@ -214,6 +239,9 @@ impl Engine for PiFamilyEngine {
     fn supports_images(&self) -> bool {
         true
     }
+    fn supports_effort(&self) -> bool {
+        true
+    }
 
     /// omp reads `.omp/mcp.json` from the workspace, which the send injects;
     /// pi's MCP discovery differs and is not wired up (honest no).
@@ -247,6 +275,8 @@ impl Engine for PiFamilyEngine {
         if rpc_ui {
             cmd.arg("--mode");
             cmd.arg("rpc-ui");
+            cmd.arg("--extension");
+            cmd.arg(ensure_pi_ask_bridge()?);
         } else if rpc_mode {
             cmd.arg("--mode");
             cmd.arg("rpc");
@@ -276,10 +306,11 @@ impl Engine for PiFamilyEngine {
                 cmd.args(["--service-tier", tier]);
             }
         }
-        // Both accept the full level vocabulary: low…max.
+        // Pass the requested level through unchanged.
         if let Some(effort) = req.effort.as_deref() {
             cmd.arg("--thinking");
             cmd.arg(effort);
+            cmd.env("CCGUI_REQUESTED_EFFORT", effort);
         }
         match self.resolve_permission(req.permission.as_deref()) {
             // Skips every approval tier for this run, and also sets the
@@ -358,6 +389,9 @@ impl Engine for PiFamilyEngine {
             let mut lines = Vec::new();
             if rpc_ui {
                 lines.push(serde_json::json!({"id": "ccgui-negotiate", "type": "negotiate_protocol", "protocolVersion": 2}).to_string());
+            }
+            if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                lines.push(serde_json::json!({"id": "ccgui-effort", "type": "set_thinking_level", "level": effort}).to_string());
             }
             lines.push(serde_json::json!({"id": "ccgui-state", "type": "get_state"}).to_string());
             lines.push(prompt.to_string());
@@ -543,6 +577,7 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             | "response"
             | "extension_ui_request"
             | "rpc_frame_error"
+            | "thinking_level_changed"
     ) {
         return;
     }
@@ -552,6 +587,14 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
     match event_type {
         "session" => {
             push_session_id(&value, "id", out);
+        }
+        "thinking_level_changed" => {
+            if let Some(level) = value.get("thinkingLevel").and_then(Value::as_str) {
+                let trimmed = level.trim();
+                if !trimmed.is_empty() {
+                    out.push(EngineEvent::Effort(trimmed.to_string()));
+                }
+            }
         }
         // omp rpc-ui 的命令响应:get_state 带回 sessionId(json 模式的
         // session 头帧在 rpc 模式没有等价物);prompt 下发失败是致命的,其余
@@ -1499,5 +1542,109 @@ mod tests {
         }
         assert!(matches!(out.last(), Some(EngineEvent::Error(text)) if text == "socket closed unexpectedly"), "final failure was lost: {out:?}");
         assert!(!out.iter().any(|event| matches!(event, EngineEvent::Done { .. })));
+    }
+
+    #[test]
+    fn build_command_passes_effort_through() {
+        let engine = omp();
+        let req = SendRequest {
+            session_id: None,
+            prompt: "hi".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            workspace: std::path::PathBuf::from("/tmp"),
+            model: None,
+            effort: Some("ultra".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = engine.build_command(&req, "omp").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--thinking", "ultra"]));
+        assert_eq!(
+            built.command.as_std().get_envs().find(|(k, _)| *k == "CCGUI_REQUESTED_EFFORT").and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("ultra"))
+        );
+    }
+
+    #[test]
+    fn build_command_injects_set_thinking_level_in_rpc_mode() {
+        let engine = omp();
+        let req = SendRequest {
+            session_id: Some("s1".into()),
+            prompt: "hi".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            workspace: std::path::PathBuf::from("/tmp"),
+            model: None,
+            effort: Some("high".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = engine.build_command(&req, "omp").unwrap();
+        let payload = built.stdin_payload.expect("rpc stdin payload");
+        let commands: Vec<serde_json::Value> = payload
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid RPC command JSON"))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                serde_json::json!({"id": "ccgui-negotiate", "type": "negotiate_protocol", "protocolVersion": 2}),
+                serde_json::json!({"id": "ccgui-effort", "type": "set_thinking_level", "level": "high"}),
+                serde_json::json!({"id": "ccgui-state", "type": "get_state"}),
+                serde_json::json!({"id": "ccgui-prompt", "type": "prompt", "message": "hi"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_thinking_level_changed_event() {
+        let mut out = Vec::new();
+        let line = serde_json::json!({
+            "type": "thinking_level_changed",
+            "thinkingLevel": "high"
+        })
+        .to_string();
+        parse_pi_family_line(&line, &mut out);
+        assert!(out.iter().any(|e| matches!(e, EngineEvent::Effort(l) if l == "high")));
+    }
+
+    #[test]
+    fn omp_build_command_includes_bridge_extension() {
+        let engine = omp();
+        let req = SendRequest {
+            session_id: None,
+            prompt: "hi".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            workspace: std::path::PathBuf::from("/tmp"),
+            model: None,
+            effort: Some("high".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = engine.build_command(&req, "omp").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w[0] == "--extension" && w[1].ends_with("ccgui-ask-bridge.ts")));
     }
 }

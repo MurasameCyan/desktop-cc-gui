@@ -107,9 +107,9 @@ describe("queued messages after a turn settles", () => {
     await settle("done");
 
     expect(deliver, "engine listener registered").not.toBeNull();
-    expect(ipc.sendMessage).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "继续" }),
-    );
+    ));
     expect(queueOf()).toHaveLength(0);
   });
 
@@ -119,9 +119,9 @@ describe("queued messages after a turn settles", () => {
     await settle("error");
 
     expect(deliver, "engine listener registered").not.toBeNull();
-    expect(ipc.sendMessage).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "继续" }),
-    );
+    ));
     expect(queueOf()).toHaveLength(0);
   });
 
@@ -152,9 +152,9 @@ describe("queued messages after a turn settles", () => {
     await flushDrain();
 
     expect(ipc.interruptSession).toHaveBeenCalled();
-    expect(ipc.sendMessage).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "再看一遍" }),
-    );
+    ));
     expect(queueOf().map((item) => item.text)).toEqual(["继续"]);
   });
 
@@ -167,9 +167,9 @@ describe("queued messages after a turn settles", () => {
     await flushDrain();
 
     expect(ipc.interruptSession).not.toHaveBeenCalled();
-    expect(ipc.sendMessage).toHaveBeenCalledWith(
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "继续" }),
-    );
+    ));
   });
 
   /** A send that never becomes a turn reports no engine event, so the queue
@@ -191,7 +191,7 @@ describe("queued messages after a turn settles", () => {
 
     await settle("error");
 
-    expect(ipc.sendMessage).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(2));
     expect(ipc.sendMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ prompt: "再看一遍" }),
     );

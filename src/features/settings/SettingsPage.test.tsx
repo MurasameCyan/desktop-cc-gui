@@ -101,19 +101,26 @@ describe("SettingsPage CLI rail", () => {
       engine("agy", false, false),
     ]);
 
-    // Main rail: the installed+enabled CLI; 未安装 starts expanded (it's the
-    // install entry point), 未启用 starts collapsed.
+    // Main rail: only the installed+enabled CLI; 未安装 and 未启用 both
+    // start collapsed to keep the rail quiet.
     let labels = navLabels();
     expect(labels).toContain("Claude Code");
     expect(labels).not.toContain("Codex CLI");
-    expect(labels).toContain("Qoder CLI");
-    expect(labels).toContain("Antigravity CLI");
+    expect(labels).not.toContain("Qoder CLI");
+    expect(labels).not.toContain("Antigravity CLI");
 
     // 未安装 sorts before 未启用 in the rail.
     const missingAt = labels.indexOf(i18n.t("settings.cliNotInstalledGroup"));
     const disabledAt = labels.indexOf(i18n.t("settings.cliDisabledGroup"));
     expect(missingAt).toBeGreaterThan(-1);
     expect(disabledAt).toBeGreaterThan(missingAt);
+
+    // Expanding 未安装 reveals the uninstalled CLIs.
+    await expandBucket("settings.cliNotInstalledGroup");
+    labels = navLabels();
+    expect(labels).toContain("Qoder CLI");
+    expect(labels).toContain("Antigravity CLI");
+    expect(labels).not.toContain("Codex CLI");
 
     // 未启用 holds the installed disabled CLI — and nothing uninstalled.
     await expandBucket("settings.cliDisabledGroup");

@@ -8,7 +8,7 @@ import Bot from "lucide-react/dist/esm/icons/bot";
 import Smartphone from "lucide-react/dist/esm/icons/smartphone";
 import ChartColumn from "lucide-react/dist/esm/icons/chart-column";
 import i18n from "@/lib/i18n";
-import type { SettingsNavItem } from "@/components/application/settings/settings-modal";
+import type { SettingsNavItem } from "@/components/application/settings/settings-shell";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import { CLI_DISPLAY_NAMES } from "@/components/foundations/icons/engine-brands";
 import { settingsRegistry } from "@ccgui/plugin-sdk";
@@ -83,15 +83,6 @@ settingsRegistry.register({
   component: ArchivedSessionsSection,
 });
 settingsRegistry.register({
-  id: "shortcuts",
-  key: "shortcuts",
-  label: () => i18n.t("shortcuts.sectionTitle"),
-  icon: Keyboard,
-  group: "misc",
-  order: 2,
-  component: ShortcutsSection,
-});
-settingsRegistry.register({
   id: "agentsPrompts",
   key: "agentsPrompts",
   label: () => i18n.t("settings.agentsPrompts"),
@@ -108,6 +99,15 @@ settingsRegistry.register({
   group: "system",
   order: 1,
   component: WebAccessSection,
+});
+settingsRegistry.register({
+  id: "shortcuts",
+  key: "shortcuts",
+  label: () => i18n.t("shortcuts.sectionTitle"),
+  icon: Keyboard,
+  group: "system",
+  order: 2,
+  component: ShortcutsSection,
 });
 settingsRegistry.register({
   id: "usage",

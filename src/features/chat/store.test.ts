@@ -198,8 +198,7 @@ describe("stop during an in-flight send", () => {
     const tab = { engine: "omp", sessionId: "sess-42", workspacePath: WS };
     useChatStore.setState({ activeEngine: "omp", openTabs: [tab], active: tab });
 
-    // Hold sendMessage open so Stop lands while the invoke is still pending —
-    // exactly the window where runRouting has no entry for this run yet.
+    // Hold the actual launch open so Stop precedes its acknowledgement.
     const { promise, resolve: resolveSend } = Promise.withResolvers<{
       runId: string;
       sessionId: string | null;
@@ -207,6 +206,7 @@ describe("stop during an in-flight send", () => {
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(promise);
 
     const sending = useChatStore.getState().send("hello", []);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
     // User presses Stop mid-flight.
     await useChatStore.getState().interrupt();
     expect(useChatStore.getState().bySession["omp/sess-42"]?.interrupted).toBe(

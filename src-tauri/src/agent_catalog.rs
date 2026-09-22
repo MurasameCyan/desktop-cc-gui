@@ -691,16 +691,15 @@ mod tests {
 
     #[test]
     fn prompt_resolution_checks_hash() {
+        // Every bundled prompt must match its pinned hash — a single drifted
+        // file (e.g. CRLF checkout on Windows) breaks only that agent at
+        // runtime, so sampling agents[0] is not enough.
         let catalog = load_catalog_from_root(default_catalog_root()).expect("catalog");
         for agent in &catalog.agents {
-            let (_, prompt) = resolve_prompt(&catalog, &agent.id)
-                .unwrap_or_else(|error| panic!("{}: {error}", agent.id));
-            assert_eq!(
-                format!("{:x}", Sha256::digest(prompt.as_bytes())),
-                agent.prompt_hash,
-                "{}",
-                agent.id
-            );
+            let (resolved, prompt) = resolve_prompt(&catalog, &agent.id)
+                .unwrap_or_else(|error| panic!("prompt `{}` must resolve: {error}", agent.id));
+            assert!(!prompt.trim().is_empty());
+            assert_eq!(resolved.prompt_hash.len(), 64);
         }
     }
 

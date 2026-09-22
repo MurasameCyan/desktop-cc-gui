@@ -18,6 +18,7 @@ import {
   settingsRegistry,
   statusBarRegistry,
   composerStatusRegistry,
+  overlayRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -87,40 +88,103 @@ function manifest(permissions: string[]): PluginManifest {
 }
 
 describe("createPluginContext", () => {
-  it("denies overlay and resource access without their source permissions", async () => {
+  it("mounts overlays only with ui:overlay and removes them on dispose", () => {
+    const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => denied.ctx.ui.registerOverlay({ component: () => null })).toThrow(/ui:overlay/);
+    const { ctx } = createPluginContext(manifest(["ui:overlay"]), fakeStorage(), {
+      appVersion: "1.0.0",
+    });
+    const dispose = ctx.ui.registerOverlay({ key: "pet", component: () => null, order: 5 });
+    expect(overlayRegistry.get("plugin:test-plugin:pet")?.order).toBe(5);
+    dispose();
+    expect(overlayRegistry.get("plugin:test-plugin:pet")).toBeUndefined();
+  });
+
+  it("denies resource and reveal access without their source permissions", async () => {
     const { ctx } = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
-    expect(() => ctx.ui.registerOverlay({ component: () => null })).toThrow(/ui:overlay/);
     expect(() => ctx.assets.bundleUrl("assets/icon.png")).toThrow(/assets:bundle/);
     expect(() => ctx.assets.documentUrl("settings.jsonc")).toThrow(/plugin\.storage/);
     expect(() => ctx.assets.directoryUrl("grant-one", "model.json")).toThrow(/assets:directory/);
     await expect(ctx.assets.grantDirectory()).rejects.toThrow(/assets:directory/);
     await expect(ctx.assets.listDirectories()).rejects.toThrow(/assets:directory/);
     await expect(ctx.assets.revokeDirectory("grant-one")).rejects.toThrow(/assets:directory/);
-    await expect(ctx.shell.revealPath("C:/private/file.txt")).rejects.toThrow(/plugin\.storage|assets:directory/);
+    await expect(ctx.shell.revealPath("C:/private/file.txt")).rejects.toThrow(
+      /plugin\.storage|assets:directory/,
+    );
+  });
+
+  it("routes granted resource operations through the bridge with the plugin identity", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(
+      manifest(["assets:bundle", "assets:directory", "plugin.storage"]),
+      backend,
+      { appVersion: "1.0.0" },
+    );
+    backend.bridgeInvoke.mockResolvedValueOnce({ grantId: "grant-one", path: "C:/chosen" });
+    await expect(ctx.assets.grantDirectory()).resolves.toEqual({
+      grantId: "grant-one",
+      path: "C:/chosen",
+    });
+    expect(backend.bridgeInvoke).toHaveBeenLastCalledWith("plugin_asset_grant_directory", {
+      pluginId: "test-plugin",
+      path: "C:/chosen",
+    });
+    await ctx.assets.revokeDirectory("grant-one");
+    expect(backend.bridgeInvoke).toHaveBeenLastCalledWith("plugin_asset_revoke_directory", {
+      pluginId: "test-plugin",
+      grantId: "grant-one",
+    });
+    await ctx.shell.revealPath("C:/chosen/model.json");
+    expect(backend.bridgeInvoke).toHaveBeenLastCalledWith("plugin_reveal_path", {
+      pluginId: "test-plugin",
+      path: "C:/chosen/model.json",
+    });
+    // A cancelled picker must not reach the backend as a grant.
+    backend.pickDirectory.mockResolvedValueOnce(null);
+    await expect(ctx.assets.grantDirectory()).rejects.toThrow(/cancel/i);
   });
 
   it("requires read permission for turn-start observers without granting prompt writes", () => {
     const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1.0.0" });
-    expect(() => denied.ctx.hooks.registerTurnHooks({ onTurnStarted: () => {} })).toThrow(/runtime\.events\.read/);
-    const observer = createPluginContext(manifest(["runtime.events.read"]), fakeStorage(), { appVersion: "1.0.0" });
+    expect(() => denied.ctx.hooks.registerTurnHooks({ onTurnStarted: () => {} })).toThrow(
+      /runtime\.events\.read/,
+    );
+    const observer = createPluginContext(manifest(["runtime.events.read"]), fakeStorage(), {
+      appVersion: "1.0.0",
+    });
     const dispose = observer.ctx.hooks.registerTurnHooks({ onTurnStarted: () => {} });
     try {
-      expect(() => observer.ctx.hooks.registerTurnHooks({ beforeTurn: () => undefined })).toThrow(/prompt\.contribute\.internal/);
+      expect(() => observer.ctx.hooks.registerTurnHooks({ beforeTurn: () => undefined })).toThrow(
+        /prompt\.contribute\.internal/,
+      );
     } finally {
       dispose();
     }
   });
 
   it("keeps remote resource URLs behind exact host and port grants", () => {
-    const { ctx } = createPluginContext(manifest(["network:assets.example:8443"]), fakeStorage(), { appVersion: "1.0.0" });
+    const { ctx } = createPluginContext(
+      manifest(["network:assets.example:8443"]),
+      fakeStorage(),
+      { appVersion: "1.0.0" },
+    );
     expect(() => ctx.assets.remoteUrl("https://assets.example/model.json")).toThrow(/network/);
-    expect(() => ctx.assets.remoteUrl("https://child.assets.example:8443/model.json")).toThrow(/network/);
+    expect(() => ctx.assets.remoteUrl("https://child.assets.example:8443/model.json")).toThrow(
+      /network/,
+    );
     expect(() => ctx.assets.remoteUrl("file:///C:/private/model.json")).toThrow(/http/i);
-    expect(() => ctx.assets.remoteUrl("https://user:secret@assets.example:8443/model.json")).toThrow(/credential|user|password/i);
-    const proxied = new URL(ctx.assets.remoteUrl("https://assets.example:8443/models/a/model.json?revision=2"), window.location.origin);
+    expect(() =>
+      ctx.assets.remoteUrl("https://user:secret@assets.example:8443/model.json"),
+    ).toThrow(/credential|user|password/i);
+    const proxied = new URL(
+      ctx.assets.remoteUrl("https://assets.example:8443/models/a/model.json?revision=2"),
+      window.location.origin,
+    );
     expect(proxied.hostname).not.toBe("assets.example");
     expect(proxied.pathname).toContain("/test-plugin/remote/");
-    expect(new URL("textures/texture.png", proxied).pathname).toBe(proxied.pathname.replace("model.json", "textures/texture.png"));
+    expect(new URL("textures/texture.png", proxied).pathname).toBe(
+      proxied.pathname.replace("model.json", "textures/texture.png"),
+    );
     expect(proxied.search).toBe("?revision=2");
   });
 
@@ -585,8 +649,9 @@ describe("createPluginContext", () => {
     injectBundleCss(handle, ".bundle { color: red; }");
     const css = document.head.querySelector('style[data-plugin="test-plugin"]')?.textContent ?? "";
     expect(css).toContain("color: red");
-    // Bundle CSS is wrapped in the ccgui-plugins layer (declared first in
-    // index.css) so it can never outrank host utilities on specificity ties.
+    // Bundle CSS is wrapped in the ccgui-plugins layer (declared between
+    // base and components in index.css) so it can never outrank host
+    // utilities on specificity ties.
     expect(css).toMatch(/^@layer ccgui-plugins \{/);
     expect(handle.disposers).toHaveLength(1);
     handle.disposers[0]();

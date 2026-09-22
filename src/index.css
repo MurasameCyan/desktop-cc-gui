@@ -2,12 +2,16 @@
  * JetBrains Mono for code. Exposed as --font-inter / --font-mono-source in
  * styles/theme.css. */
 /* Plugin bundle stylesheets (features/plugins/runtime/context.ts
- * injectBundleCss) mount wrapped in `@layer ccgui-plugins`. Declaring the
- * cascade-layer order here — legal before @import, and ahead of Tailwind's
- * own theme/base/components/utilities declaration in globals.css — makes
- * every host rule win specificity ties against plugin bundle CSS, so a
- * plugin shipping its own framework build can't silently restyle the host. */
-@layer ccgui-plugins, theme, base, components, utilities;
+ * injectBundleCss) mount wrapped in `@layer ccgui-plugins`. The layer sits
+ * AFTER Tailwind's base layer: preflight's `* { margin:0; padding:0;
+ * border:0 solid }` and `button/input/select { background:transparent }`
+ * are resets, and an earlier ccgui-plugins layer would let those resets
+ * erase every border/padding/background a plugin declares (all installed
+ * plugins lost their card borders this way). It stays ahead of
+ * components/utilities so host utilities still win specificity ties and a
+ * plugin shipping its own framework build can't silently restyle the host;
+ * the host's own global rules are unlayered and outrank every layer. */
+@layer theme, base, ccgui-plugins, components, utilities;
 
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/jetbrains-mono";

@@ -76,12 +76,13 @@ fn version_of(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub(crate) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
+pub(super) fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.contains('\\')
         || value.contains("//")
         || value.contains(':')
         || value.contains('\0')
+        || value.split('/').any(|part| matches!(part, "" | "." | ".."))
     {
         return Err(format!("unsafe relative path: {value:?}"));
     }
@@ -573,29 +574,29 @@ fn is_reparse_point(path: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
-/// TOCTOU-hardened confinement: walk every component of `root` and of the
-/// existing part of `target` below it, refusing reparse points
-/// (symlink/junction) and anything whose canonical form leaves the canonical
-/// root. The root's own chain is walked too: a granted directory that is
-/// itself replaced by a junction (or that sits under one) must not become a
-/// way out. This runs again right before each mutating operation, because a
-/// check performed once can be raced by swapping a directory for a junction.
-/// A residual race remains for the final component-to-syscall window;
-/// closing it needs handle-relative opens, out of scope here.
-pub(crate) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
+/// TOCTOU-hardened confinement: walk every existing component of `target`
+/// under `root`, refusing reparse points (symlink/junction) and anything
+/// whose canonical form leaves the canonical root. This runs again right
+/// before each mutating operation, because a check performed once can be
+/// raced by swapping a directory for a junction. A residual race remains for
+/// the final component-to-syscall window; closing it needs handle-relative
+/// opens, which is out of scope for this hardening pass.
+///
+/// `root` itself is not trusted either: the walk starts at the volume/share
+/// prefix and descends through every ancestor of `root` (the last of which is
+/// `root`), so a junction *above* the root cannot be followed before its
+/// reparse attribute is discovered. Asset grants rely on this: they call
+/// `confine_to_root(path, path)` to reject a path whose own ancestry leaves
+/// the namespace it appears to live in.
+pub(super) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| format!("path escapes plugin storage: {}", target.display()))?;
-    // Walk from the volume/share root down: probing a child first would follow
-    // a parent junction before discovering its reparse attribute.
     let mut cursor = PathBuf::with_capacity(target.as_os_str().len());
     for component in root.components() {
         cursor.push(component);
         if !matches!(component, Component::Prefix(_)) && is_reparse_point(&cursor)? {
-            return Err(format!(
-                "path crosses a reparse point: {}",
-                cursor.display()
-            ));
+            return Err(format!("path crosses a reparse point: {}", cursor.display()));
         }
     }
     let canonical_root =
@@ -603,10 +604,7 @@ pub(crate) fn confine_to_root(root: &Path, target: &Path) -> Result<(), String> 
     for component in relative.components() {
         cursor.push(component);
         if is_reparse_point(&cursor)? {
-            return Err(format!(
-                "path crosses a reparse point: {}",
-                cursor.display()
-            ));
+            return Err(format!("path crosses a reparse point: {}", cursor.display()));
         }
         if !cursor.exists() {
             return Ok(()); // the rest of the path does not exist yet
@@ -936,17 +934,11 @@ pub async fn plugin_document_storage_list(
     }).await.map_err(|e| e.to_string())?
 }
 
-/// Held by uninstall from its preflight through state persistence. The caller
-/// must acquire the state lock before this physical document-root lock.
-pub(crate) struct DocumentsGuard {
-    root: PathBuf,
-    _lock: super::file_lock::FileLock,
-}
-
-/// Physical document root of a plugin, without taking the root lock: reading
-/// its location and reading its files are different privileges, and the asset
-/// protocol resolves roots per request.
-pub(crate) fn document_root_at(
+/// The document root a plugin's resources resolve against, following the
+/// current location selection. Asset reads need the path without taking the
+/// uninstall document lock, so this is deliberately lock-free: callers
+/// re-resolve it after reading to detect a location switch mid-read.
+pub(super) fn document_root_at(
     state_path: &Path,
     id: &str,
     roots: Option<&StorageRoots>,
@@ -962,6 +954,13 @@ pub(crate) fn document_root_at(
     };
     let (_, base) = selected_base(state_path, roots, id)?;
     Ok(plugin_root(&base, id))
+}
+
+/// Held by uninstall from its preflight through state persistence. The caller
+/// must acquire the state lock before this physical document-root lock.
+pub(crate) struct DocumentsGuard {
+    root: PathBuf,
+    _lock: super::file_lock::FileLock,
 }
 
 pub(crate) fn lock_documents_at(
@@ -1043,7 +1042,7 @@ mod tests {
     #[test]
     fn path_table_rejects_escape_and_accepts_safe_nested_paths() {
         assert_eq!(safe_relative_path("one/two.txt").unwrap(), PathBuf::from("one/two.txt"));
-        for bad in ["", ".", "..", "../x", "x/../y", "/absolute", "x\\y", "x//y"] {
+        for bad in ["", ".", "..", "../x", "x/../y", "/absolute", "x\\y", "x//y", "x/./y", "x/"] {
             assert!(safe_relative_path(bad).is_err(), "accepted {bad:?}");
         }
     }

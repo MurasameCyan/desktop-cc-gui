@@ -26,6 +26,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{timeout, Instant};
 
 /// 提取并规范化上下文窗口字段
@@ -57,13 +58,13 @@ fn attach_context_window(mut usage: Value) -> Value {
 use super::{EngineEvent, SendRequest, TurnCore, TurnState, VirtualRunGuard};
 
 const ACP_PROTOCOL_VERSION: u32 = 1;
-const RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const RPC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// session/new scans the workspace on first contact (measured 30s+ in a
 /// large repo), so the setup call needs far more headroom than a plain RPC.
-const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const SESSION_NEW_TIMEOUT: Duration = Duration::from_secs(90);
 /// session/resume re-attaches without the workspace scan.
-const SESSION_RESUME_TIMEOUT: Duration = Duration::from_secs(30);
-const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 30);
+pub(crate) const SESSION_RESUME_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 /// qodercli interleaves the prompt response into the session/update stream:
 /// keep reading after it until the stream goes idle, else the tail is lost.
 const PROMPT_TRAILING_IDLE: Duration = Duration::from_millis(400);
@@ -72,21 +73,28 @@ const PROMPT_TRAILING_CAP: Duration = Duration::from_secs(2);
 /// child is killed anyway.
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Killed-flag poll cadence inside the read loop.
-const KILL_POLL: Duration = Duration::from_millis(150);
+pub(crate) const KILL_POLL: Duration = Duration::from_millis(150);
 const POST_TERMINAL_DRAIN: Duration = Duration::from_millis(250);
 /// Catalog probe budget: session/new in the temp dir skips the workspace
 /// scan, so the whole handshake fits in seconds.
 const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MODEL_PROBE_TOTAL: Duration = Duration::from_secs(20);
 
-const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
-const JSONRPC_INVALID_PARAMS: i64 = -32602;
-const JSONRPC_INTERNAL_ERROR: i64 = -32603;
+pub(crate) const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const JSONRPC_INVALID_PARAMS: i64 = -32602;
+pub(crate) const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 /// Terminal marker for a kill-interrupted request; the driver swallows it
 /// via the killed flag (interrupted runs settle as normal turn ends).
-const CANCELLED: &str = "qoder turn cancelled";
+pub(crate) const CANCELLED: &str = "qoder turn cancelled";
 
 // ==================== ACP framing ====================
+
+/// Routes the lines of one in-flight request that are not its response:
+/// `session/update` notifications and agent-initiated requests. Returning
+/// `Some` writes that frame back to the CLI; `None` means the driver has
+/// taken the line over — a question parked for the user must stay
+/// unanswered until the answer command posts its response.
+pub(crate) type LineRouter<'a> = dyn FnMut(&AcpLine) -> Option<Value> + Send + 'a;
 
 #[derive(Debug)]
 pub(crate) enum AcpLine {
@@ -113,7 +121,7 @@ pub(crate) struct AcpRpcError {
     pub message: String,
 }
 
-fn jsonrpc_id_key(id: &Value) -> Option<String> {
+pub(crate) fn jsonrpc_id_key(id: &Value) -> Option<String> {
     match id {
         Value::Number(n) => Some(n.to_string()),
         Value::String(s) => Some(s.clone()),
@@ -150,11 +158,22 @@ pub(crate) fn parse_acp_line(value: &Value) -> AcpLine {
                 .get("code")
                 .and_then(Value::as_i64)
                 .unwrap_or(JSONRPC_INTERNAL_ERROR);
-            let message = err
+            let mut message = err
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("JSON-RPC error")
                 .to_string();
+            if let Some(detail) = err.get("data")
+                .and_then(|data| data.get("details").or_else(|| data.get("message")))
+                .and_then(Value::as_str)
+                .and_then(|detail| detail.lines().next())
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty() && !message.contains(detail))
+            {
+                message.push_str(": ");
+                message.extend(detail.chars().take(512));
+            }
+            let message = super::reader::redact_secrets(&message);
             AcpRpcError { code, message }
         });
         return AcpLine::Response {
@@ -166,7 +185,7 @@ pub(crate) fn parse_acp_line(value: &Value) -> AcpLine {
     AcpLine::Other
 }
 
-fn jsonrpc_request(id: u64, method: &str, params: Value) -> Value {
+pub(crate) fn jsonrpc_request(id: u64, method: &str, params: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -175,7 +194,7 @@ fn jsonrpc_request(id: u64, method: &str, params: Value) -> Value {
     })
 }
 
-fn jsonrpc_notification(method: &str, params: Value) -> Value {
+pub(crate) fn jsonrpc_notification(method: &str, params: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -183,7 +202,7 @@ fn jsonrpc_notification(method: &str, params: Value) -> Value {
     })
 }
 
-fn jsonrpc_error_response(id: &Value, code: i64, message: &str) -> Value {
+pub(crate) fn jsonrpc_error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -191,7 +210,7 @@ fn jsonrpc_error_response(id: &Value, code: i64, message: &str) -> Value {
     })
 }
 
-fn jsonrpc_result_response(id: &Value, result: Value) -> Value {
+pub(crate) fn jsonrpc_result_response(id: &Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -199,7 +218,7 @@ fn jsonrpc_result_response(id: &Value, result: Value) -> Value {
     })
 }
 
-fn encode_ndjson(value: &Value) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_ndjson(value: &Value) -> Result<Vec<u8>, String> {
     let mut bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
     Ok(bytes)
@@ -415,7 +434,7 @@ pub(crate) fn session_update_from_notification(params: &Value) -> QoderSessionUp
 /// Headless permission policy: pick the first allow* option (bypassPermissions
 /// mode means the CLI should not ask; when it still does, blocking forever
 /// is worse than allowing).
-fn permission_auto_answer(params: &Value) -> Result<Value, String> {
+pub(crate) fn permission_auto_answer(params: &Value) -> Result<Value, String> {
     let options = params
         .get("options")
         .and_then(Value::as_array)
@@ -446,7 +465,7 @@ fn permission_auto_answer(params: &Value) -> Result<Value, String> {
 
 /// Confine an agent-requested path to the workspace root; the fs capability
 /// this client advertises must never read or write outside it.
-fn confine_path_to_workspace(
+pub(crate) fn confine_path_to_workspace(
     workspace_root: &Path,
     requested: &str,
     for_write: bool,
@@ -510,7 +529,7 @@ fn confine_path_to_workspace(
     }
 }
 
-fn handle_fs_read(workspace_root: &Path, params: &Value) -> Result<Value, String> {
+pub(crate) fn handle_fs_read(workspace_root: &Path, params: &Value) -> Result<Value, String> {
     let path = params
         .get("path")
         .and_then(Value::as_str)
@@ -520,7 +539,7 @@ fn handle_fs_read(workspace_root: &Path, params: &Value) -> Result<Value, String
     Ok(json!({ "content": content }))
 }
 
-fn handle_fs_write(workspace_root: &Path, params: &Value) -> Result<Value, String> {
+pub(crate) fn handle_fs_write(workspace_root: &Path, params: &Value) -> Result<Value, String> {
     let path = params
         .get("path")
         .and_then(Value::as_str)
@@ -537,7 +556,7 @@ fn handle_fs_write(workspace_root: &Path, params: &Value) -> Result<Value, Strin
     Ok(json!({}))
 }
 
-fn answer_agent_request(workspace_root: &Path, id: &Value, method: &str, params: &Value) -> Value {
+pub(crate) fn answer_agent_request(workspace_root: &Path, id: &Value, method: &str, params: &Value) -> Value {
     match method {
         "session/request_permission" => match permission_auto_answer(params) {
             Ok(result) => jsonrpc_result_response(id, result),
@@ -555,7 +574,7 @@ fn answer_agent_request(workspace_root: &Path, id: &Value, method: &str, params:
     }
 }
 
-fn initialize_params() -> Value {
+pub(crate) fn initialize_params() -> Value {
     json!({
         "protocolVersion": ACP_PROTOCOL_VERSION,
         "clientInfo": {
@@ -617,8 +636,10 @@ fn assemble_prompt_blocks(
 // ==================== ACP process ====================
 
 
-struct AcpProcess {
-    stdin: ChildStdin,
+pub(crate) struct AcpProcess {
+    /// Shared with the registry: a parked question is answered by writing
+    /// this child's stdin from `answer_question`, not from the read loop.
+    pub(crate) stdin: Arc<TokioMutex<Option<ChildStdin>>>,
     reader: BufReader<ChildStdout>,
     /// Partial-line bytes survive a cancelled read (KILL_POLL ticks land
     /// mid-line); read_line_capped only ever appends to it.
@@ -628,7 +649,7 @@ struct AcpProcess {
 }
 
 impl AcpProcess {
-    fn new(stdin: ChildStdin, stdout: ChildStdout, workspace_root: PathBuf) -> Self {
+    pub(crate) fn new(stdin: Arc<TokioMutex<Option<ChildStdin>>>, stdout: ChildStdout, workspace_root: PathBuf) -> Self {
         Self {
             stdin,
             reader: BufReader::new(stdout),
@@ -638,25 +659,26 @@ impl AcpProcess {
         }
     }
 
-    async fn write_line(&mut self, value: &Value) -> Result<(), String> {
+    pub(crate) async fn write_line(&mut self, value: &Value) -> Result<(), String> {
         let bytes = encode_ndjson(value)?;
-        self.stdin
+        let mut stdin = self.stdin.lock().await;
+        let handle = stdin
+            .as_mut()
+            .ok_or_else(|| "the ACP session's stdin is already closed".to_string())?;
+        handle
             .write_all(&bytes)
             .await
             .map_err(|error| format!("failed to write ACP request: {error}"))?;
-        self.stdin
+        handle
             .flush()
             .await
             .map_err(|error| format!("failed to flush ACP request: {error}"))?;
         Ok(())
     }
 
-    /// One JSON-RPC request → its result. session/update notifications
-    /// stream through `on_update`; agent-initiated requests are answered
-    /// inline. The read wait is capped at KILL_POLL so an interrupt lands
-    /// even mid-handshake: with a `cancel_session_id` (prompt phase) the
-    /// loop first sends session/cancel and grants the CLI CANCEL_SETTLE_TIMEOUT
-    /// to answer typed; without one the call aborts immediately.
+    /// One JSON-RPC request → its result, with agent-initiated requests
+    /// settled inline (the ACP permission and fs surface): the qoder CLI
+    /// never asks the user anything this client has to park.
     async fn request(
         &mut self,
         method: &str,
@@ -664,8 +686,40 @@ impl AcpProcess {
         timeout_dur: Duration,
         killed: &AtomicBool,
         cancel_session_id: Option<&str>,
+        on_update: &mut (dyn FnMut(&Value) + Send),
+    ) -> Result<Value, String> {
+        let workspace = self.workspace_root.clone();
+        let mut router = |line: &AcpLine| match line {
+            AcpLine::Notification { method, params } if method == "session/update" => {
+                on_update(params);
+                None
+            }
+            AcpLine::AgentRequest { id, method, params } => {
+                Some(answer_agent_request(&workspace, id, method, params))
+            }
+            _ => None,
+        };
+        self.routed(method, params, timeout_dur, killed, cancel_session_id, &mut router)
+            .await
+    }
 
-        on_update: &mut (dyn FnMut(Value) + Send),
+    /// The read loop behind [`AcpProcess::request`]: session/update
+    /// notifications stream through `router`, which answers an agent request
+    /// by returning the frame to write — or returns `None` when the driver
+    /// answers it out of band (a question parked for the user).
+    ///
+    /// The read wait is capped at KILL_POLL so an interrupt lands even
+    /// mid-handshake: with a `cancel_session_id` (prompt phase) the loop
+    /// first sends session/cancel and grants the CLI CANCEL_SETTLE_TIMEOUT to
+    /// answer typed; without one the call aborts immediately.
+    pub(crate) async fn routed(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout_dur: Duration,
+        killed: &AtomicBool,
+        cancel_session_id: Option<&str>,
+        router: &mut LineRouter<'_>,
     ) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
@@ -753,7 +807,8 @@ impl AcpProcess {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            match parse_acp_line(&value) {
+            let parsed = parse_acp_line(&value);
+            match parsed {
                 AcpLine::Response {
                     id: response_id,
                     result,
@@ -763,7 +818,7 @@ impl AcpProcess {
                         continue;
                     }
                     if let Some(error) = error {
-                        return Err(format!("rpc:{}:{}", error.code, error.message));
+                        return Err(format!("rpc:{}:{method}: {}", error.code, error.message));
                     }
                     let result = result.unwrap_or(Value::Null);
                     if !drain_trailing {
@@ -772,28 +827,11 @@ impl AcpProcess {
                     settled = Some(result);
                     drain_deadline = Some(Instant::now() + PROMPT_TRAILING_CAP);
                 }
-                AcpLine::Notification {
-                    method: notif_method,
-                    params,
-                } => {
-                    if notif_method == "session/update" {
-                        on_update(params);
+                other => {
+                    if let Some(response) = router(&other) {
+                        self.write_line(&response).await?;
                     }
                 }
-                AcpLine::AgentRequest {
-                    id: request_id,
-                    method: request_method,
-                    params,
-                } => {
-                    let response = answer_agent_request(
-                        &self.workspace_root,
-                        &request_id,
-                        &request_method,
-                        &params,
-                    );
-                    self.write_line(&response).await?;
-                }
-                AcpLine::Other => {}
             }
         }
     }
@@ -803,39 +841,37 @@ impl AcpProcess {
     }
 }
 
-fn spawn_acp_command(bin: &str, workspace: &Path) -> Command {
-    let mut cmd = super::command_for_binary(bin);
-    cmd.current_dir(workspace);
-    cmd.arg("--acp");
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    // Backstop for the interrupt abort path: a dropped driver future must
-    // never orphan the CLI.
-    cmd.kill_on_drop(true);
-    // Own process group so teardown can kill the whole tree (grandchildren
-    // inherit the stdout pipe and would otherwise block EOF forever).
-    #[cfg(unix)]
-    cmd.process_group(0);
-    #[cfg(windows)]
-    super::hide_console(&mut cmd);
-    cmd
-}
-
-struct SpawnedAcp {
-    child: Child,
-    acp: AcpProcess,
-    stderr_buf: Arc<Mutex<String>>,
+pub(crate) struct SpawnedAcp {
+    pub(crate) child: Child,
+    pub(crate) acp: AcpProcess,
+    pub(crate) stderr_buf: Arc<Mutex<String>>,
     /// Kill-on-close job guard (Windows): drops after teardown, sweeping any
     /// grandchild the CLI orphaned before `taskkill /T` could see a tree.
     #[cfg(windows)]
-    _tree_guard: Option<Arc<super::job::KillOnCloseJob>>,
+    pub(crate) _tree_guard: Option<Arc<super::job::KillOnCloseJob>>,
 }
 
-async fn spawn_acp(bin: &str, workspace: &Path) -> Result<SpawnedAcp, String> {
-    let mut child = spawn_acp_command(bin, workspace)
+/// Spawn a prepared ACP command as this driver's own child: piped stdio, own
+/// process group (so teardown sweeps the tree), and a drop backstop — a
+/// dropped driver future must never orphan the CLI.
+pub(crate) fn spawn_piped_acp(
+    command: &mut Command,
+    label: &str,
+    workspace: &Path,
+) -> Result<SpawnedAcp, String> {
+    command
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    super::hide_console(command);
+    let mut child = command
         .spawn()
-        .map_err(|error| format!("failed to spawn {bin}: {error}"))?;
+        .map_err(|error| format!("failed to spawn {label}: {error}"))?;
     #[cfg(windows)]
     let tree_guard = super::job::assign_kill_on_close(&child);
     let (stdin, stdout, stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -848,16 +884,26 @@ async fn spawn_acp(bin: &str, workspace: &Path) -> Result<SpawnedAcp, String> {
     };
     Ok(SpawnedAcp {
         child,
-        acp: AcpProcess::new(stdin, stdout, workspace.to_path_buf()),
+        acp: AcpProcess::new(
+            Arc::new(TokioMutex::new(Some(stdin))),
+            stdout,
+            workspace.to_path_buf(),
+        ),
         stderr_buf: super::spawn_stderr_capture(stderr),
         #[cfg(windows)]
         _tree_guard: tree_guard,
     })
 }
 
+async fn spawn_acp(bin: &str, workspace: &Path) -> Result<SpawnedAcp, String> {
+    let mut command = super::command_for_binary(bin);
+    command.arg("--acp");
+    spawn_piped_acp(&mut command, bin, workspace)
+}
+
 /// The CLI stays resident after the response (ACP is a session protocol);
 /// every exit path tears the tree down so no run orphans a qodercli.
-async fn teardown(child: &mut Child) {
+pub(crate) async fn teardown(child: &mut Child) {
     if let Some(pid) = child.id() {
         super::kill_process_group(pid);
     }
@@ -1049,7 +1095,7 @@ async fn handshake_and_prompt(
             PROMPT_TIMEOUT,
             killed,
             Some(&session_id),
-            &mut |params| handle_session_update(core, state, view, &params),
+            &mut |params| handle_session_update(core, state, view, params),
         )
         .await?;
     if let Some(usage) = result.get("usage").filter(|usage| !usage.is_null()) {
@@ -1356,6 +1402,23 @@ mod tests {
         let answer = permission_auto_answer(&params).unwrap();
         assert_eq!(answer["outcome"]["optionId"], json!("yes"));
         assert!(permission_auto_answer(&json!({"options":[]})).is_err());
+    }
+
+    #[test]
+    fn rpc_internal_error_retains_safe_details_instead_of_hiding_the_cause() {
+        let response = json!({"jsonrpc":"2.0", "id":4, "error": {
+            "code":-32603, "message":"Internal error", "data": {
+                "details":"Unknown model alias: missing-model; api_key=sk-private\nprivate stack trace",
+                "request": {"prompt":"private conversation"}
+            }
+        }});
+        let AcpLine::Response { error: Some(error), .. } = parse_acp_line(&response) else {
+            panic!("expected RPC error");
+        };
+        assert!(error.message.contains("Unknown model alias: missing-model"));
+        assert!(!error.message.contains("sk-private"));
+        assert!(!error.message.contains("private stack"));
+        assert!(!error.message.contains("private conversation"));
     }
 
     #[test]

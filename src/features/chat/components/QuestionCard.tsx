@@ -33,28 +33,47 @@ export function QuestionCard({ message }: { message: Message }) {
   if (!current) return null;
 
   const pick = (text: string, label: string, multi: boolean) => {
+    const now = picked[text];
+    const at = Array.isArray(now) ? now.indexOf(label) : -1;
+    // Re-picking a chosen option clears it: a pick must stay revocable, and
+    // submit is then disabled until another answer arrives.
+    const value: string | string[] = multi
+      ? at >= 0
+        ? (now as string[]).filter((item) => item !== label)
+        : [...(Array.isArray(now) ? now : []), label]
+      : now === label
+        ? ""
+        : label;
     // An option pick replaces any typed answer for that question.
     setOther((cur) => ({ ...cur, [text]: "" }));
-    setPicked((cur) => {
-      if (!multi) return { ...cur, [text]: label };
-      const list = Array.isArray(cur[text]) ? [...(cur[text] as string[])] : [];
-      const at = list.indexOf(label);
-      if (at >= 0) list.splice(at, 1);
-      else list.push(label);
-      return { ...cur, [text]: list };
-    });
+    setPicked((cur) => ({ ...cur, [text]: value }));
+    // Submit waits for every question, so the pick answering a single-select
+    // one walks the user on: leaving them to find the pager is a dead end.
+    if (!multi && typeof value === "string" && value) setPage(nextUnanswered());
   };
   /** Option pick, or the typed free-form answer when one is present. */
   const valueFor = (text: string): string | string[] => {
     const typed = (other[text] ?? "").trim();
     return typed ? typed : picked[text] ?? "";
   };
-  const complete = questions.every((q) => {
-    const value = valueFor(q.question);
-    return Array.isArray(value)
-      ? value.length > 0
-      : typeof value === "string" && value.length > 0;
-  });
+  /** Whether a question already has an answer (an option pick or typed text). */
+  const hasAnswer = (text: string) => {
+    const value = valueFor(text);
+    return Array.isArray(value) ? value.length > 0 : Boolean(value);
+  };
+  const openQuestions = questions.filter((q) => !hasAnswer(q.question)).length;
+  const complete = openQuestions === 0;
+  /** Index of the next question still without an answer, wrapping; the current
+   * page when none is open. */
+  const nextUnanswered = () => {
+    const from = Math.min(page, questions.length - 1);
+    for (let step = 1; step <= questions.length; step++) {
+      const at = (from + step) % questions.length;
+      const spec = questions[at];
+      if (spec && !hasAnswer(spec.question)) return at;
+    }
+    return from;
+  };
   const answer = () => {
     if (!key || !complete) return;
     const merged: Record<string, string | string[]> = {};
@@ -166,7 +185,7 @@ export function QuestionCard({ message }: { message: Message }) {
             </button>
           );
         })}
-        {!current.multiSelect && (
+        {!current.multiSelect && current.allowOther !== false && (
           <input
             data-q-row
             value={other[current.question] ?? ""}
@@ -181,7 +200,10 @@ export function QuestionCard({ message }: { message: Message }) {
               if (e.nativeEvent.isComposing) return;
               if (e.key === "Enter") {
                 e.preventDefault();
-                answer();
+                // Enter submits an answered card; while questions are still
+                // open it moves to the next one instead of doing nothing.
+                if (complete) answer();
+                else setPage(nextUnanswered());
               } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                 e.preventDefault();
                 focusRow(e.key === "ArrowDown" ? 1 : -1);
@@ -195,7 +217,9 @@ export function QuestionCard({ message }: { message: Message }) {
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-caption-1-regular text-text-tertiary">
-          {t("chat.questionKeyboardHint")}
+          {complete
+            ? t("chat.questionKeyboardHint")
+            : t("chat.questionRemaining", { count: openQuestions })}
         </span>
         <div className="ml-auto flex items-center gap-2">
           <button

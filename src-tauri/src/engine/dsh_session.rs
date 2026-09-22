@@ -199,12 +199,12 @@ async fn turn_inner(
     if let Some(model) = req.model.as_deref().filter(|m| m.contains('/')) {
         let (provider, model) = model.split_once('/').unwrap_or(("", model));
         if !provider.is_empty() && !model.is_empty() {
-            let selected = host_call(
-                &origin,
-                "session/selectModel",
-                json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } }),
-            )
-            .await;
+            let mut select_args = json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } });
+            if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                select_args["request"]["effort"] = json!(effort);
+                select_args["request"]["reasoningEffort"] = json!(effort);
+            }
+            let selected = host_call(&origin, "session/selectModel", select_args).await;
             if selected.is_err() {
                 core.dispatch_event(
                     state,
@@ -243,18 +243,21 @@ async fn turn_inner(
         );
     }
 
+    let mut prompt_request = json!({
+        "requestId": format!("codemoss-{}", uuid::Uuid::new_v4()),
+        "sessionId": session_id,
+        "mode": "queue",
+        "content": dsh_images::build_prompt_content(&req.prompt, &prompt_images),
+        "clientTimeZone": client_time_zone(),
+    });
+    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        prompt_request["effort"] = json!(effort);
+        prompt_request["reasoningEffort"] = json!(effort);
+    }
     let prompt = crate::dsh_host::host_call_rpc(
         &origin,
         "session/prompt",
-        json!({
-            "request": {
-                "requestId": format!("codemoss-{}", uuid::Uuid::new_v4()),
-                "sessionId": session_id,
-                "mode": "queue",
-                "content": dsh_images::build_prompt_content(&req.prompt, &prompt_images),
-                "clientTimeZone": client_time_zone(),
-            }
-        }),
+        json!({ "request": prompt_request }),
     )
     .await;
     if let Err(error) = prompt {

@@ -346,6 +346,31 @@ mod tests {
     }
 
     #[test]
+    fn local_media_paths_keep_their_mime_in_asset_responses() {
+        for (path, expected) in [
+            ("sound.mp3", "audio/mpeg"),
+            ("sound.wav", "audio/wav"),
+            ("sound.ogg", "audio/ogg"),
+            ("sound.m4a", "audio/mp4"),
+            ("clip.mp4", "video/mp4"),
+            ("clip.webm", "video/webm"),
+        ] {
+            let response = asset_response(
+                Ok(AssetContent::Bytes(AssetBytes {
+                    body: vec![0, 255],
+                    mime: crate::web::content_type(path).into(),
+                    bundle: false,
+                })),
+                "",
+                "vendor.one",
+            );
+            assert_eq!(response.headers()["content-type"], expected, "{path}");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(response.body(), &[0, 255]);
+        }
+    }
+
+    #[test]
     fn only_bundle_responses_have_executable_mime_and_all_have_security_headers() {
         for mime in [
             "application/javascript",

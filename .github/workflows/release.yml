@@ -207,7 +207,7 @@ jobs:
       - name: Install dependencies (linux only)
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 xdg-utils libasound2-dev
+          sudo apt-get install -y cmake libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2 xdg-utils libasound2-dev libpipewire-0.3-dev libgbm-dev
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -352,6 +352,14 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Fail the release instead of shipping a broken installer: the built-in
+      # agent catalog hash check (agent_catalog::resolve_prompt) rejects any
+      # prompt whose bytes drifted — e.g. a CRLF checkout when .gitattributes
+      # is missing — and the user-facing fallback ("copy as custom") goes
+      # through the same check, so there is no runtime workaround.
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       # tauri.windows.conf.json merges in the embedded WebView2 bootstrapper,
       # matching what 0.9.x installers shipped. The NSIS upgrade code derives

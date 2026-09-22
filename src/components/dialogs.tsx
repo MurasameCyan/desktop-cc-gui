@@ -25,7 +25,7 @@ import {
  * (`isDismissable`), and portalling to document.body.
  *
  * z-110, not z-50: the portalled overlay is a document.body sibling of
- * SettingsModal's z-100 overlay, so dialogs opened from inside settings
+ * the settings shell's z-100 page, so dialogs opened from inside settings
  * (add/edit/delete channel) must outrank it to stay visible.
  */
 export function ModalShell({

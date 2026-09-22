@@ -53,14 +53,11 @@ pub(super) fn parse_agy_session(
                     let mut texts = proto_strings(&payload);
                     if !accepted_internal_frames.is_empty() {
                         for candidate in &mut texts {
-                            if candidate.depth == 1
-                                && candidate.field == 1
-                                && candidate.text.contains("<CCGUI_INTERNAL_")
-                            {
+                            if candidate.depth == 1 && candidate.field == 1 {
                                 // Strip before the prose filter: the frame's JSON
                                 // would otherwise discard the surrounding reply.
                                 candidate.text = super::extract::strip_recorded_internal_frames(
-                                    &candidate.text,
+                                    std::mem::take(&mut candidate.text),
                                     accepted_internal_frames,
                                 );
                             }

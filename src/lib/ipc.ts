@@ -54,6 +54,7 @@ export interface QuestionSpec {
   question: string;
   header: string;
   multiSelect?: boolean;
+  allowOther?: boolean;
   options: { label: string; description?: string; preview?: string }[];
 }
 
@@ -129,6 +130,7 @@ export interface EngineInfo {
    * picker and history lists; running sessions are unaffected. */
   enabled: boolean;
   supportsImages: boolean;
+  supportsEffort?: boolean;
   /** Permission modes the engine honors at spawn ("auto" | "manual" |
    * "plan" | "bypass"); the composer picker greys out the rest. */
   permissions: string[];
@@ -358,6 +360,7 @@ export interface FileIndexEntry {
   rel: string;
   isDir: boolean;
 }
+
 
 /** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
  *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
@@ -939,8 +942,15 @@ export const ipc = {
     invoke<void>("delete_session", { engine, sessionId }),
   /** Remote (plugin-fed, e.g. WSL distro) session delete: no local db row
    *  exists, so the host rm's the validated remotePath over the same remote
-   *  channel loadRemoteSessionPage reads through. */
-  deleteRemoteSession: (workspacePath: string, engine: string, sessionId: string, remotePath: string) =>
+   *  channel loadRemoteSessionPage reads through. The native id travels with
+   *  it because no local row can recover it, and the accepted-frame
+   *  identities recorded for this session are reclaimed with the transcript. */
+  deleteRemoteSession: (
+    workspacePath: string,
+    engine: string,
+    sessionId: string,
+    remotePath: string,
+  ) =>
     invoke<void>("delete_remote_session", { workspacePath, engine, sessionId, remotePath }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),

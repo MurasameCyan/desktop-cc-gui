@@ -72,6 +72,7 @@ export default function App() {
               underneath, same as the /settings overlay. */}
           <Route path="/p/:pageId" element={<PluginPageHost />} />
         </Routes>
+        {/* Non-modal plugin viewport mounts, independent of the route. */}
         <PluginOverlayHost />
       </HashRouter>
       <UpdateToast />

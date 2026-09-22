@@ -227,8 +227,9 @@ pub(crate) fn install_from(
 
     // Step 3: record. A reinstall keeps the original enabled flag and install
     // time; quarantine state and the stored error always reset on fresh bits.
-    // The state lock covers this read→mutate→write only; the copy phase above
-    // runs lock-free.
+    // The state lock covers this read→mutate→write only — the copy phase
+    // above runs lock-free. Cross-process (file lock), so a second host
+    // installing the same id cannot interleave its own record write.
     let record = {
         let _guard = lock_state(state_path)?;
         let mut state = read_state(state_path)?;

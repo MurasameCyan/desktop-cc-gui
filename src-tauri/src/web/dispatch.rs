@@ -61,6 +61,26 @@ struct PluginStorageGetArgs {
     id: String,
     key: String,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetIdArgs {
+    plugin_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetPathArgs {
+    plugin_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginAssetRevokeArgs {
+    plugin_id: String,
+    grant_id: String,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpsertProviderArgs {
@@ -1031,6 +1051,25 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         "plugin_storage_get" => {
             let a: PluginStorageGetArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_storage_get(app.state(), a.id, a.key))
+        }
+        // Asset capabilities use the same authenticated bridge and the same
+        // backend permission gates as desktop; they grant no general file
+        // access, so unlike document-storage writes they are routed here.
+        "plugin_asset_grant_directory" => {
+            let a: PluginAssetPathArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_grant_directory(a.plugin_id, a.path).await)
+        }
+        "plugin_asset_list_directories" => {
+            let a: PluginAssetIdArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_list_directories(a.plugin_id))
+        }
+        "plugin_asset_revoke_directory" => {
+            let a: PluginAssetRevokeArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_asset_revoke_directory(a.plugin_id, a.grant_id))
+        }
+        "plugin_reveal_path" => {
+            let a: PluginAssetPathArgs = parse_args(&raw)?;
+            ser(crate::plugins::assets::plugin_reveal_path(a.plugin_id, a.path).await)
         }
         // Marketplace browsing is read-only too, so the web client renders
         // the market page; plugin_install_from_marketplace stays desktop-only.

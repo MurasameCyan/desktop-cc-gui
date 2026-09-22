@@ -334,6 +334,7 @@ pub fn run() {
             plugins::assets::plugin_reveal_path,
             db::workspace_metadata,
             db::plugin_list_workspaces,
+            history::reader::record_accepted_internal_frame,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
             plugins::market::plugin_install_from_marketplace,

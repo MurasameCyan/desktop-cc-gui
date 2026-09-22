@@ -3,9 +3,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import {
-  SettingsModal,
+  SettingsShell,
   type SettingsNavGroup,
-} from "@/components/application/settings/settings-modal";
+} from "@/components/application/settings/settings-shell";
 import {
   pluginIdFromRegistryKey,
   settingsRegistry,
@@ -84,7 +84,7 @@ const renderHeaderActions = (key: string) => {
 };
 
 /**
- * Settings route: overlay for the BoardUI settings modal. ChatPage itself is mounted once
+ * Settings route: fullscreen settings shell. ChatPage itself is mounted once
  * by App on every route, so opening and closing settings never rebuilds
  * the chat tree.
  *
@@ -230,15 +230,14 @@ export default function SettingsPage() {
             dragHandleLabel: t("settings.cliDrag"),
           },
         ];
-        // Bucket order: 未安装 stays expanded (it's the install entry
-        // point); 未启用 starts collapsed to keep the rail quiet.
+        // Bucket order: 未安装 sorts before 未启用; both start collapsed to
+        // keep the rail quiet.
         if (uninstalledItems.length > 0) {
           rail.push({
             id: "cli-missing",
             label: t("settings.cliNotInstalledGroup"),
             order: order + 0.5,
             collapsible: true,
-            defaultExpanded: true,
             showCount: true,
             items: uninstalledItems,
           });
@@ -267,8 +266,7 @@ export default function SettingsPage() {
   }, [sections, i18n.language]);
 
   return (
-    <SettingsModal
-      isOpen
+    <SettingsShell
       onClose={() => navigate("/")}
       defaultPage={pageParam}
       ariaLabel={t("settings.title")}

@@ -18,8 +18,7 @@ import { EngineIcon } from "@/components/foundations/icons/engine-icon";
 import { MOBILE_MEDIA, useMediaQuery } from "@/hooks/use-media-query";
 import { cx } from "@/utils/cx";
 import { usePopoverState } from "@/utils/use-dismiss-on-outside-press";
-import { EFFORT_LEVELS } from "./effort-levels";
-import { EFFORT_LABEL_KEYS, type EffortLevel } from "./effort-levels";
+import { EFFORT_LEVELS, EFFORT_LABEL_KEYS, supportsEffort, type EffortLevel } from "./effort-levels";
 import { EngineFlyout, EngineModelPanel, type ChannelOption } from "./engine-model-panel";
 
 export type { EffortLevel } from "./effort-levels";
@@ -199,10 +198,11 @@ function CliMenuTrigger({
   // Snapshot width on open; clear on close. Shorter model labels then can't
   // shrink the trigger mid-session and slide the popover.
   const lockedMinWidth = useLockedMinWidth(isOpen, triggerRef);
+  const hasEffort = supportsEffort(engine);
   return (
     <AriaButton
       ref={triggerRef}
-      aria-label={`${engineName}${model ? ` / ${model.label}` : ""} · ${t(EFFORT_LABEL_KEYS[effort])}`}
+      aria-label={`${engineName}${model ? ` / ${model.label}` : ""}${hasEffort ? ` · ${t(EFFORT_LABEL_KEYS[effort])}` : ""}`}
       style={lockedMinWidth ? { minWidth: lockedMinWidth } : undefined}
       className="group flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-border-focus-ring"
     >
@@ -217,17 +217,21 @@ function CliMenuTrigger({
             <span className="max-w-44 truncate max-md:max-w-28">{model.label}</span>
           </>
         )}
-        <span aria-hidden className="shrink-0 text-text-tertiary max-md:hidden">
-          ·
-        </span>
-        {/* Reserve the widest localized level so the right-aligned popover stays put. */}
-        <span className="inline-grid shrink-0 max-md:hidden">
-          {EFFORT_LEVELS.map(level => (
-            <span key={level} aria-hidden={level !== effort} className={cx("col-start-1 row-start-1", level !== effort && "invisible")}>
-              {t(EFFORT_LABEL_KEYS[level])}
+        {hasEffort && (
+          <>
+            <span aria-hidden className="shrink-0 text-text-tertiary max-md:hidden">
+              ·
             </span>
-          ))}
-        </span>
+            {/* Reserve the widest localized level so the right-aligned popover stays put. */}
+            <span className="inline-grid shrink-0 max-md:hidden">
+              {EFFORT_LEVELS.map(level => (
+                <span key={level} aria-hidden={level !== effort} className={cx("col-start-1 row-start-1", level !== effort && "invisible")}>
+                  {t(EFFORT_LABEL_KEYS[level])}
+                </span>
+              ))}
+            </span>
+          </>
+        )}
         {(engine === "omp" && supportsOmpFastMode(modelId)) || engine === "codex" ? (
           <span aria-hidden={!showFast} className={cx("w-7 shrink-0 text-center text-text-primary", !showFast && "invisible")}>Fast</span>
         ) : null}

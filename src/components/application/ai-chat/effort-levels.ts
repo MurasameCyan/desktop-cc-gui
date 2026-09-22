@@ -19,3 +19,29 @@ export const EFFORT_LABEL_KEYS: Record<EffortLevel, string> = {
   max: "chat.effortMax",
   ultra: "chat.effortUltra",
 };
+
+/** Engines known to support reasoning effort configuration (all supported engines). */
+export const EFFORT_SUPPORTED_ENGINES: Record<string, true> = {
+  claude: true,
+  codex: true,
+  omp: true,
+  pi: true,
+  agy: true,
+  qoder: true,
+  "qoder-cn": true,
+  grok: true,
+  opencode: true,
+  kimi: true,
+  dsh: true,
+};
+
+export function supportsEffort(
+  engineId: string,
+  engines?: { id: string; supportsEffort?: boolean }[],
+): boolean {
+  const found = engines?.find((e) => e.id === engineId);
+  if (found && typeof found.supportsEffort === "boolean") {
+    return found.supportsEffort;
+  }
+  return Boolean(EFFORT_SUPPORTED_ENGINES[engineId] ?? true);
+}

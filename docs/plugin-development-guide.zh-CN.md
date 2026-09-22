@@ -41,7 +41,7 @@ CC GUI 插件是一个**托管在 GitHub 上的独立仓库**，通过 GitHub Re
 插件**不得**（由安装期评审 + 权限门面共同约束，见 §7）：
 
 - 直接调用 Tauri IPC（`window.__TAURI__` 在插件加载前已被移除——这是收敛面，不是不可绕过的沙箱，见 §7）
-- 绕过 `documentStorage` / `assets` 的路径范围访问文件，未经 `exec:` 授权启动进程，或访问其他插件的数据
+- 访问文件系统、终端、其他插件的数据
 - 未经 `network` 权限声明就发起网络请求
 - 新增 AI 引擎或 Rust 命令（编译期固化，不在插件能力面内）
 
@@ -188,6 +188,8 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 
 ### 6.2 PluginContext
 
+`PluginContext` 只暴露**通用**能力——会话/回合/切换生命周期、标准化运行时事实、内部提示贡献、受控文档存储、同源资源路由、悬浮层与工作区/会话扩展点。它不承载任何特定产品的领域概念（如某类协调器状态机、角色人设、渲染引擎对象或专有会话协议）；这类逻辑应完全由插件在自己的 bundle 内实现，宿主只提供上面这组与产品无关的原语。据此，同一份 SDK 契约可以同时承载能力取向迥异的插件，而互不感知对方引入的概念。
+
 ```ts
 interface PluginContext {
   readonly pluginId: string;
@@ -235,14 +237,16 @@ interface PluginContext {
 生命周期 hook 按插件注册顺序调用且逐插件隔离错误；`beforeTurn` 与 `beforeSwitch` 最多等待 2 秒，超时或异常均不阻断聊天或客户端切换。`beforeTurn` 可返回 `PromptContribution[]` 及内部消息捕获声明。内部提示不会进入 CCGUI 聊天画布、乐观用户消息或标题；当 CLI 无真正 system channel 时，`system-tail` 会降级为带清晰标记的 request tail，因此仍可能进入 CLI 自身原生历史。
 
 `turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用，并保证先于该回合的 `afterTurn`，即使终态事件先于启动响应到达；失败的发送不能据此登记为已消费。
+
+新增 `TurnHooks.onTurnStarted(event)`：只需 `runtime.events.read`，不要求 `prompt.contribute.internal`。它在 `beforeTurn` 收集完成、即将发送给引擎时派发；不等待观察者返回的 Promise，异常不会阻断发送。与 `afterTurn` 使用相同 `turnId`。开始后取消、发送拒绝和提前到达的终态均有对应结算。它不是可写提示钩子。
+
+`turnId` 在 `beforeTurn`、运行时事件和 `afterTurn` 之间保持稳定；`runId` 可能从启动前占位 ID 重绑定为引擎运行 ID。引擎启动失败也会派发一次 `afterTurn`，状态为 `failed`，尚无原生会话时 `sessionId` 为 `null`。插件应按 `turnId` 清理临时状态。`PromptContribution.onAccepted` 只在贡献通过预算且启动成功后调用，并保证先于该回合的 `afterTurn`，即使终态事件先于启动响应到达；失败的发送不能据此登记为已消费。
 | 事件 topic | 载荷 | 所需权限 |
 |---|---|---|
 | `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起） | `events` |
 | `usage://done`（SDK 0.3.8 起） | 同上形状，`kind: "done"`；`data.usage` 携带该轮最终用量——claude/grok 等不发独立 usage 事件的引擎只经此上报，其它引擎用作轮结束信号 | `events` |
 | `session://activated`（SDK 0.3.8 起） | `{ engine, sessionId }`；pending 标签 `sessionId` 为 null，无活动标签两者皆 null | `events` |
 | `composer://draft` | `{ text }`；草稿变化/清空/会话切换均发射 | `events` |
-
-SDK 0.4.3 新增 `TurnHooks.onTurnStarted(event)`：只需 `runtime.events.read`，不要求 `prompt.contribute.internal`。它在 `beforeTurn` 收集完成、即将发送给引擎时派发；不等待观察者返回的 Promise，异常不会阻断发送。与 `afterTurn` 使用相同 `turnId`。发送准备阶段已经取消的回合不发布开始事件；开始后取消、发送拒绝和提前到达的终态均有对应结算。它不是可写提示钩子。
 
 SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动的 `beforeSwitch` 与 `afterSwitch` 共享此身份。插件应同时核对切换身份与原生命周期，不能让停用前的迟到完成覆盖重新启用后的切换状态。
 
@@ -256,11 +260,17 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 
 `ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
 
+路径使用 `/` 分隔；检查原始输入中的空段、`.`、`..`，不接受 `a/./b`、`a//b` 或末尾 `/` 的别名写法。`list()` 的空前缀仍表示列出根目录。
+
+`documentStorage` 是内容寻址（CAS）文本存储：`readText` 返回 `{ content, version }`，`version` 是不透明比较令牌，仅用于回传，不要解析或据其推断顺序。`remove(path, expectedVersion?)` 与写入同样走 CAS——传入上一次读取到的 `version` 即为条件删除，若磁盘上的版本已被其它写入推进（stale），删除以 conflict 被拒绝并保留较新的文档；省略或传 `null` 为无条件删除。据此模式：读到版本 → 基于该版本删除，可保证「只删除我刚读到的那份内容」，避免误删他处并发写入的新版本。
+
 ### 6.3 标准化运行时事件（只读）
 
 `TurnHooks.onRuntimeEvent` 接收宿主可确定的 `NormalizedRuntimeEvent`：`file-changed`、`command-started`、`command-finished`、`tool-finished`、`permission-requested`、`assistant-completed`、`turn-cancelled`、`turn-failed`、`runtime-exited`。公共字段包括 `eventId/runId/turnId/engine/sessionId/workspaceId/workspacePath/occurredAt/kind`；只有 adapter 确定知道的命令、退出码、文件变化和状态才会出现，宿主不会从模型正文推断事实。
 
-`permission-requested`（SDK 0.4.3）来自引擎结构化 `permission_denied`，只携带 `tool: string | null` 与 `path: string | null`，不携带给用户展示的 message。缺失、空白或非字符串字段为 `null`，非对象载荷不发布事件。它表示宿主可以展示授权卡片，**不保证引擎仍在运行或正在暂停等待**；插件仍须用回合终态收敛状态。
+`beforeSwitch` / `beforeTurn` 准备期间被用户 Stop 的发送，不再触发 `onTurnStarted` 或启动后端回合。发送已经启动但响应迟到时，取消只清理该次发送的 `runId`；同一会话中后续启动的替代回合不受影响。
+
+`permission-requested` 来自引擎结构化 `permission_denied`，只携带 `tool: string | null` 与 `path: string | null`，不携带给用户展示的 message。缺失、空白或非字符串字段为 `null`，非对象载荷不发布事件。它表示宿主可以展示授权卡片，**不保证引擎仍在运行或正在暂停等待**；插件仍须用回合终态收敛状态。
 
 > 想消费这里没有的宿主事实？到索引仓开 issue 提议通用事件，不要绕过 SDK 抓 DOM/store。
 
@@ -270,9 +280,9 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 - 样式优先用 BoardUI 语义 token（`bg-background-*`、`text-text-*` 等），**禁止**写死 hex 颜色——深色模式靠 token 自动翻转。
 - 插件 UI 文本必须走 `ctx.i18n` 注册的资源，至少提供 `en` 与 `zh-CN`。
 
-### 6.5 常驻悬浮层与资源 URL（SDK 0.4.3）
+### 6.5 常驻悬浮层与资源 URL
 
-`ctx.ui.registerOverlay({ key?, component, order? })` 提供视口级非模态挂载点，与设置页、插件页面路由无关。宿主不管理位置、尺寸或拖动；挂载容器 `pointer-events: none`，交互子元素应显式设置 `pointer-events: auto`。返回的 Disposer 和插件卸载都会移除挂载，渲染错误由各自的 `PluginBoundary` 隔离。普通悬浮内容不应挡住宿主操作；确需浏览器顶层时由插件管理 Popover API，并在卸载时清理。
+`ctx.ui.registerOverlay({ key?, component, order? })` 提供视口级非模态挂载点，与设置页、插件页面路由无关。宿主不管理位置、尺寸或拖动；挂载容器 `pointer-events: none`，交互子元素应显式设置 `pointer-events: auto`。返回的 Disposer 和插件卸载都会移除挂载，渲染错误由各自的 `PluginBoundary` 隔离（悬浮层的 fallback 为空，不在视口里留下错误卡片）；注册表为空时宿主不渲染任何容器。普通悬浮内容不应挡住宿主操作；确需浏览器顶层时由插件管理 Popover API，并在卸载时清理。
 
 ```ts
 interface AssetDirectoryGrant { grantId: string; path: string }
@@ -295,7 +305,9 @@ interface PluginAssets {
 
 返回的 URL 可用于 `fetch`、图片、音频及描述文件的相对依赖加载；资源内容按字节传递，不经文本或 base64 转换。桌面使用 `pluginasset` 协议，Web 使用带鉴权路径前缀的宿主路由，因此相对资源请求仍携带凭据；这些 URL 是临时能力地址，不应记录到日志或分享给外部站点。
 
-单个资源上限 8 MiB；远程单次代理请求限时 30 秒。每次读取都重新检查插件是否安装、启用、未隔离以及对应权限，响应禁止缓存；目录撤权、插件禁用/隔离/卸载后，旧 URL 不能继续读取资源。卸载始终清除目录授权；documentStorage 文件和位置选择则沿用 `delete_data` 策略，不会因新增资源能力而自动删除用户保留的数据。
+本地 MP3、WAV、OGG、M4A、MP4、WebM 按对应的 `audio/*` / `video/*` MIME 返回；未知扩展名仍为 `application/octet-stream`，非包内主动内容仍受下述 MIME 降级规则约束。
+
+本地来源（包内、documentStorage、已授权目录）单文件上限 64 MiB；远程代理单次上限 8 MiB 且限时 30 秒——两个上限语义不同，大贴图集走本地来源，不要指望远程代理放行同样体积。每次读取都重新检查插件是否安装、启用、未隔离以及对应权限，响应禁止缓存；目录撤权、插件禁用/隔离/卸载后，旧 URL 不能继续读取资源。卸载始终清除目录授权（能力，不是用户数据）；documentStorage 文件和位置选择则沿用 `delete_data` 策略，不会因新增资源能力而自动删除用户保留的数据。
 
 非包内 HTML、JS、SVG、XML、CSS、PDF、wasm 等主动内容按 `application/octet-stream` 返回并带 `nosniff` / sandbox CSP，不可借资源代理扩大脚本执行能力。插件仍运行在宿主同一 JS realm；overlay 与资源门面是可审计能力面，不是新的强制沙箱边界。
 
@@ -304,7 +316,7 @@ interface PluginAssets {
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
 | `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`openSettings` 复用 `ui:settings-section` | 低 |
+| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer-status`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`registerComposerSlot` 与 `registerComposerStatusItem` 共享 `ui:composer-status`，`openSettings` 复用 `ui:settings-section` | 低 |
 | `ui:overlay` | 常驻视口悬浮内容；不得遮挡宿主关键操作 | 中 |
 | `assets:bundle` | 读取本插件包内二进制资源和已审核脚本 | 中 |
 | `assets:directory` | 用户选择的每插件只读目录与范围内 reveal | 高（必须明确告知目录范围） |
@@ -321,7 +333,7 @@ interface PluginAssets {
 | `exec:<bin>` | 授权宿主执行精确裸命令名 | 高 |
 
 1. 未声明的权限调用会被门面拒绝并记录——这是**评审/DX 门**（拦截误用、给评审提供可审计面），不是技术强制边界；市场版本新增权限必须显著提示用户。
-2. 网络能力经 `ctx.bridge.invoke` 的宿主代理命令或 `ctx.assets.remoteUrl` 生成的资源 URL 使用；进程能力仅经已授权桥命令。不得绕过门面使用原始网络地址，`network`/`exec` 授权不接受通配符或路径。
+2. 网络和进程能力仅经 `ctx.bridge.invoke` 的宿主代理命令执行；插件没有原始 `fetch`，`network`/`exec` 授权不接受通配符或路径。
 3. `prompt.contribute.internal` 的内容对 CCGUI 用户界面不可见，必须按不可信数据处理；nonce 只做 turn 关联，不构成认证。
 4. 申请用不到的权限会被 CI 标记，审核员会要求删减。
 
@@ -472,6 +484,8 @@ App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三�
 
 - `minAppVersion` 决定哪些 App 版本能装。宿主 SDK 按 semver 演进，废弃 API 至少保留一个大版本并提前在索引仓公告。
 - 宿主升级后若插件 `minAppVersion` 不再满足，插件被**自动禁用**并在市场页提示「等待插件更新」——用户数据保留。
+- 插件用 manifest 的 `sdkVersion` range（如 `^0.4`）声明兼容的 SDK 契约区间，宿主加载时握手校验。range 必须是可解析的 semver 约束：只支持 `*`/缺省、精确 `x.y.z`、`^x.y.z`、`~x.y.z`、`>=x.y.z`，其余写法一律视为不满足。**`0.3.x` 这类占位写法不是合法值**——`x` 不是数字段，握手会判定不兼容；文档在能力条目里出现的 `0.3.5 起`、`0.4.2 起` 是能力**引入序标注**，不是可照抄进 manifest 的 range。
+- 共通兼容线目前处于施工版本，最终 SDK 版本号在冻结阶段才落定。请勿把开发期见到的临时版本戳硬写进插件；用 `^`/`~` 声明区间由宿主握手兜底，比钉死某个具体 patch 更稳。
 
 ### 12.3 配置迁移（`configVersion`）
 

@@ -36,4 +36,7 @@ impl Engine for DshEngine {
         // input modality on hand-declared llm-pi-ai routes first.
         true
     }
+    fn supports_effort(&self) -> bool {
+        true
+    }
 }

@@ -136,9 +136,9 @@ describe("compaction progress", () => {
     await vi.waitFor(() => {
       expect(useChatStore.getState().bySession[KEY]?.compaction).toMatchObject({ automatic: false });
     });
-    // The flag is patched before the send, and the send now awaits the
-    // beforeTurn plugin hooks first — wait for the call itself instead of
-    // reading it synchronously off the flag.
+    // compactContext sets the flag synchronously, then sendPrompt awaits plugin
+    // turn contributions before the send — /compact reaches ipc a few microtasks
+    // after the flag, so await the call rather than assuming it is synchronous.
     await vi.waitFor(() => {
       expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
         expect.objectContaining({ engine: "omp", sessionId: "s-1", prompt: "/compact" }),

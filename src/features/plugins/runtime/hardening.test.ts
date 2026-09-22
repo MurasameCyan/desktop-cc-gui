@@ -15,9 +15,9 @@ describe("hardening", () => {
     else delete window.__TAURI_INTERNALS__;
   });
 
-  // Production WebView2 defines `invoke` as a non-writable own property, so
-  // the wrapper assignment throws. Bootstrap must survive it: a throw here
-  // failed plugin bootstrap and silently disabled the guard module.
+  // Production WebView2 defines `invoke` as a non-writable own property, so the
+  // wrapper assignment throws. Bootstrap must survive it: the throw escaped into
+  // plugin bootstrap and surfaced as a failed first activation plus a retry.
   it("installs without throwing where invoke cannot be wrapped", async () => {
     vi.resetModules();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -26,8 +26,8 @@ describe("hardening", () => {
     window.__TAURI_INTERNALS__ = Object.freeze({ invoke: frozenInvoke });
     try {
       // Dynamic import on purpose: the module's `installed` flag is
-      // per-instance, so exercising installHardening a second time (and from
-      // this window state) requires a fresh module load.
+      // per-instance, so exercising installHardening against this window state
+      // requires a fresh module load.
       const fresh = await import("./hardening");
       expect(() => fresh.installHardening()).not.toThrow();
       expect(warn).toHaveBeenCalled();

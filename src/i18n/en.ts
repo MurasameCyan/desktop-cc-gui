@@ -139,6 +139,7 @@ export const en: Messages = {
     questionKeyboardHint: "Use Tab / arrows to pick, Enter or Space to select",
     questionPrev: "Previous question",
     questionNext: "Next question",
+    questionRemaining: "{{count}} left to answer",
     questionWaiting: "Waiting for your answer…",
     questionSkipped: "Skipped (no answer)",
     questionCancelled: "Question expired",
@@ -264,6 +265,9 @@ export const en: Messages = {
   },
   settings: {
     title: "Settings",
+    backToApp: "Back to App",
+    searchPlaceholder: "Search settings…",
+    searchEmpty: "No matching settings",
     general: "General",
     agentsPrompts: "Agents & Prompts",
     agentPromptTabAgents: "Agents",
@@ -901,7 +905,7 @@ export const en: Messages = {
     days: "{{count}}d",
   },
   plugins: {
-    managerTitle: "Plugins",
+    managerTitle: "Plugin Manager",
     menuGroup: "Plugins",
     installedLabel: "Installed",
     installFromDir: "Install from directory",
@@ -932,14 +936,14 @@ export const en: Messages = {
       searchPlaceholder: "Search plugins…",
       empty: "No plugins in the marketplace yet",
       noMatch: "No matching plugins",
-      hint: "Marketplace plugins come from the GitHub central index; every file is SHA-256 verified on install. Uninstall and enable/disable live in the Plugins page.",
+      hint: "Marketplace plugins come from the GitHub central index; every file is SHA-256 verified on install. Uninstall and enable/disable live in the Plugin Manager page.",
       developTitle: "Build & submit plugins",
       localTitle: "Build your own plugin locally",
       localSteps: [
         "Copy the plugin template (or clone the example repo) — declare permissions in manifest.json first, then write code",
         "Every capability goes through PluginContext: register panels/commands/status bar items, KV storage; network and processes use the granted egress",
         "pnpm validate && pnpm build produces the three files at the repo root: main.js / manifest.json / styles.css",
-        "Settings → Plugins → Install from directory, pick the repo root to load and debug; rebuild and reload after changes",
+        "Settings → Plugin Manager → Install from directory, pick the repo root to load and debug; rebuild and reload after changes",
       ],
       submitTitle: "Submit a plugin to the marketplace",
       submitSteps: [

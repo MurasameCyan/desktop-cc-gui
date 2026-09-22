@@ -223,12 +223,12 @@ pub fn generate_pair_key() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         let mut default_efforts = HashMap::new();
-        // 为支持推理强度的引擎设置默认值为 "medium"
-        default_efforts.insert("claude".to_string(), "medium".to_string());
-        default_efforts.insert("pi".to_string(), "medium".to_string());
-        default_efforts.insert("omp".to_string(), "medium".to_string());
-        default_efforts.insert("agy".to_string(), "medium".to_string());
-        default_efforts.insert("codex".to_string(), "medium".to_string());
+        // 为所有引擎设置默认推理强度为 "medium"
+        for engine in &[
+            "claude", "pi", "omp", "agy", "codex", "grok", "opencode", "kimi", "dsh", "qoder", "qoder-cn",
+        ] {
+            default_efforts.insert(engine.to_string(), "medium".to_string());
+        }
 
         Self {
             theme: default_theme(),

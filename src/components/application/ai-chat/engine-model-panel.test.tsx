@@ -160,4 +160,34 @@ describe("EngineModelPanel channel picker", () => {
     expect(filterInput()).toBeNull();
     expect(trigger()).toBeNull();
   });
+
+  it("renders effort slider for all supported CLI engines", () => {
+    // Supported engine: codex
+    render("p1");
+    expect(container.querySelector("[aria-label='推理强度']")).toBeTruthy();
+
+    // Supported engine: kimi
+    act(() => {
+      root.render(
+        <EngineModelPanel
+          option={{ id: "kimi", label: "Kimi" }}
+          models={[]}
+          selectedModelId=""
+          query=""
+          onQueryChange={() => {}}
+          effort="medium"
+          onPickModel={() => {}}
+          onEffortChange={() => {}}
+          channels={[]}
+          selectedChannelId=""
+          onPickChannel={onPickChannel}
+          ompServiceTier={null}
+          onOmpServiceTierChange={async () => {}}
+          codexServiceTier={null}
+          onCodexServiceTierChange={async () => {}}
+        />,
+      );
+    });
+    expect(container.querySelector("[aria-label='推理强度']")).toBeTruthy();
+  });
 });

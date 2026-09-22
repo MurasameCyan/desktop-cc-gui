@@ -46,6 +46,9 @@ impl Engine for AgyEngine {
     fn supports_images(&self) -> bool {
         false
     }
+    fn supports_effort(&self) -> bool {
+        true
+    }
 
     fn supported_permissions(&self) -> &'static [&'static str] {
         &["auto", "plan", "bypass"]
@@ -147,15 +150,10 @@ impl Engine for AgyEngine {
 }
 
 /// `--effort` only when the request names one and the model slug does not
-/// already encode it (`gemini-3.8-flash-high`). Narrower than the composer
-/// knob: agy accepts low|medium|high only.
-fn effort_flag(requested: Option<&str>, model: &str) -> Option<&'static str> {
-    let effort = match requested? {
-        "low" => "low",
-        "medium" => "medium",
-        "high" | "xhigh" | "max" | "ultra" => "high",
-        _ => return None,
-    };
+/// already encode it (`gemini-3.8-flash-high`). The requested string is passed
+/// through unchanged.
+fn effort_flag<'a>(requested: Option<&'a str>, model: &str) -> Option<&'a str> {
+    let effort = requested.map(str::trim).filter(|e| !e.is_empty())?;
     if model_encodes_effort(model) {
         return None;
     }
@@ -331,7 +329,7 @@ mod tests {
         request.model = Some("claude-sonnet-4-6".into());
         request.effort = Some("xhigh".into());
         let args = argv(&request);
-        assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
+        assert!(args.windows(2).any(|w| w == ["--effort", "xhigh"]));
     }
 
     #[test]

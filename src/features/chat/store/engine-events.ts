@@ -1,5 +1,6 @@
 import { ipc, type Message, type QuestionSpec, type SessionMeta, type TodosPayload } from "@/lib/ipc";
 import type { EngineEventPayload } from "@/lib/events";
+import { errorText } from "@/lib/errors";
 import { dedupeTabs, persistTabs, sessionKey } from "./persistence";
 import { migrateSessionContributions } from "./session-contributions";
 import {
@@ -26,6 +27,15 @@ import {
   updatePendingStreamModel,
 } from "./stream";
 import type { ChatStore } from "../store";
+import {
+  ASK_OTHER_OPTION,
+  askLoops,
+  declaredMulti,
+  openAskLoop,
+  parseAskFrame,
+  takeAskEditor,
+  type AskLoop,
+} from "./ask-loop";
 import { mergeUsage, parseUsage, reportedContextWindow, type ParsedUsage } from "../usage";
 import { usageTrackingEnabled } from "@/features/settings/usage-tracking";
 import type {
@@ -1081,6 +1091,8 @@ function onError(
     );
   }
   clearRetry(key, deps);
+  // A round cannot outlive its turn: the CLI's question died with it.
+  askLoops.delete(key);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   // Fold unflushed chunks into rows and settle them: the turn stops here,
   // and the scheduled flush must not write them in after the fact.
@@ -1191,6 +1203,28 @@ export function patchQuestionByRequestId(
   });
 }
 
+/** Patch a question card by its row seq: a multi-select round keeps one card
+ * across the fresh request ids the CLI re-asks it with. */
+export function patchQuestionBySeq(
+  set: (fn: (s: ChatStore) => Partial<ChatStore>) => void,
+  key: string,
+  seq: number,
+  patch: (question: NonNullable<Message["question"]>) => NonNullable<Message["question"]>,
+) {
+  set((s) => {
+    const cur = s.bySession[key];
+    if (!cur) return {};
+    let changed = false;
+    const messages = cur.messages.map((m) => {
+      if (m.seq !== seq || m.role !== "question" || !m.question) return m;
+      changed = true;
+      return { ...m, question: patch(m.question) };
+    });
+    if (!changed) return {};
+    return { bySession: { ...s.bySession, [key]: { ...cur, messages } } };
+  });
+}
+
 /** A permission denial arrives mid-turn (tool_result) and again in the
  * final result's permission_denials; one card per denied path. The card is
  * the actionable surface: grant → next launch gets --add-dir. */
@@ -1260,6 +1294,14 @@ function onPermissionDenied(
   }
 }
 
+/** End a multi-select round through the CLI's free-form row: the only answer
+ * that both stops the re-ask loop and reaches the formatted result. */
+function sendAskTerminator(loop: AskLoop, key: string, deps: EngineEventDeps) {
+  void ipc
+    .answerQuestion(loop.runId, loop.requestId, { [loop.base]: ASK_OTHER_OPTION })
+    .catch((error) => patchSession(deps.set, key, { error: errorText(error) }));
+}
+
 function onQuestion(
   event: EngineEventPayload,
   key: string,
@@ -1268,13 +1310,55 @@ function onQuestion(
   const data = event.data as {
     requestId?: string;
     toolUseId?: string | null;
-    input?: { questions?: QuestionSpec[] };
+    input?: { questions?: QuestionSpec[]; extui?: { method?: string } };
   };
   const requestId = data.requestId?.trim();
   const questions = data.input?.questions;
   if (!requestId || !Array.isArray(questions) || questions.length === 0) return;
+  const method = data.input?.extui?.method;
+  // The CLI's free-form editor, opened by a multi-select submit: the picked
+  // labels travel as its text, so it must not surface as another card.
+  const editing = method === "editor" || method === "input" ? takeAskEditor(key) : undefined;
+  if (editing) {
+    void ipc
+      .answerQuestion(editing.runId, requestId, { [editing.base]: editing.text })
+      .catch((error) => patchSession(deps.set, key, { error: errorText(error) }));
+    return;
+  }
+  const spec = questions[0];
+  if (!spec) return;
+  const frame = parseAskFrame(spec.question, spec.options ?? []);
+  // An rpc select frame carries no checkbox state: its question is multi-select
+  // when the ask tool declared it so, or once the CLI reports a selection.
+  const rpc = method === "select";
+  // The CLI re-asks a multi-select question with a fresh request id after every
+  // answer, so those frames resume the card the round already owns.
+  const loop = askLoops.get(key);
+  if (loop && loop.base === frame.base) {
+    if (loop.phase === "sent") {
+      // It re-asked because the editor answer was lost: re-arm and re-send.
+      loop.requestId = requestId;
+      sendAskTerminator(loop, key, deps);
+      return;
+    }
+    patchQuestionBySeq(deps.set, key, loop.seq, (question) => ({
+      ...question,
+      requestId,
+      // Same shape as a fresh card: the CLI's runtime rows are not options.
+      questions: rpc && questions.length === 1
+        ? [{ ...spec, multiSelect: true, options: frame.options }]
+        : questions,
+      ...(question.status === "pending" ? {} : { status: "pending" as const }),
+    }));
+    return;
+  }
+  const multi = rpc
+    ? frame.selectedCount !== null ||
+      declaredMulti(deps.get().bySession[key]?.messages ?? [], frame)
+    : spec.multiSelect === true;
   // Fold unflushed chunks first so the card lands after the streamed text.
   const pending = drainPending(key);
+  let rowSeq = -1;
   deps.set((s) => {
     const cur = s.bySession[key] ?? EMPTY_SESSION;
     const base = pending
@@ -1291,6 +1375,7 @@ function onQuestion(
     );
     if (dup) return {};
     const seq = messages.length ? messages[messages.length - 1].seq + 1 : 1;
+    rowSeq = seq;
     return {
       bySession: {
         ...s.bySession,
@@ -1307,7 +1392,12 @@ function onQuestion(
                 requestId,
                 runId: event.runId,
                 toolUseId: data.toolUseId ?? null,
-                questions,
+                // The CLI's runtime rows (free-form Other, done) are not the
+                // question's options: the card answers through the round.
+                questions:
+                  rpc && questions.length === 1
+                    ? [{ ...spec, multiSelect: multi, options: frame.options }]
+                    : questions,
                 status: "pending" as const,
               },
             },
@@ -1316,6 +1406,9 @@ function onQuestion(
       },
     };
   });
+  if (rowSeq > 0 && rpc && multi) {
+    openAskLoop(key, { base: frame.base, seq: rowSeq, requestId, runId: event.runId });
+  }
 }
 
 function onQuestionSettled(
@@ -1328,6 +1421,8 @@ function onQuestionSettled(
   patchQuestionByRequestId(deps.set, key, requestId, (question) =>
     question.status === "pending" ? { ...question, status: "cancelled" as const } : question,
   );
+  // A settled frame ends its round: whatever the CLI was waiting on is gone.
+  if (askLoops.get(key)?.requestId === requestId) askLoops.delete(key);
 }
 
 function onWarn(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
@@ -1399,6 +1494,7 @@ function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventD
 
 function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   clearRetry(key, deps);
+  askLoops.delete(key);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
   const prev = deps.get().bySession[key] ?? EMPTY_SESSION;
   const data = event.data as { usage: unknown };
