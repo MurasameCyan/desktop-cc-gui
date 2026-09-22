@@ -40,6 +40,9 @@ pub struct AppState {
     pub db: Arc<db::Db>,
     pub sink: Arc<event_sink::EventSink>,
     pub terminal_sink: Arc<event_sink::EventSink>,
+    /// 插件 agent 轮次（plugin_agent_start）的独立事件流：与聊天引擎流
+    /// 隔离，chat store 不会把插件 run 当孤儿会话收养。
+    pub plugin_sink: Arc<event_sink::EventSink>,
     /// Webview + any attached web-access broadcasters (web.rs).
     pub emitters: Arc<event_sink::BroadcastEmit>,
     pub terminals: terminal::TerminalRegistry,
@@ -137,6 +140,10 @@ pub fn run() {
                 terminal_sink: event_sink::EventSink::with_name(
                     emitters.clone(),
                     terminal::TERMINAL_OUTPUT_EVENT,
+                ),
+                plugin_sink: event_sink::EventSink::with_name(
+                    emitters.clone(),
+                    event_sink::PLUGIN_AGENT_EVENT_NAME,
                 ),
                 emitters,
                 terminals: terminal::TerminalRegistry::default(),
@@ -442,6 +449,8 @@ pub fn run() {
             plugin_caps::plugin_exec_run,
             plugin_caps::plugin_exec_spawn,
             plugin_caps::plugin_exec_kill,
+            plugin_caps::plugin_agent_start,
+            plugin_caps::plugin_agent_interrupt,
             // web access
             web::web_access_start,
             web::web_access_stop,

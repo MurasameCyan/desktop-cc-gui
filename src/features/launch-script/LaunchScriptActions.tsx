@@ -46,14 +46,9 @@ export function LaunchScriptActions({ workspacePath }: { workspacePath: string }
   const [newScript, setNewScript] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Workspace switch: load that workspace's scripts and drop any open dialog.
-  useEffect(() => {
-    setEntries(readLaunchScripts(workspacePath));
-    setEditIndex(false);
-    setShowNew(false);
-    setError(null);
-  }, [workspacePath]);
-
+  // Workspace switch resets this cluster wholesale: the header mounts it
+  // with key={workspacePath}, so the useState initializer above reloads
+  // that workspace's scripts with no open dialog.
   const persist = useCallback(
     (next: LaunchScriptEntry[]) => {
       setEntries(next);

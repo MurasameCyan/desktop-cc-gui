@@ -406,9 +406,9 @@ export interface PluginContext {
       title: () => string;
       component: ComponentType;
     }): Disposer;
-    /** Renderer for a plugin-defined chat timeline row kind (plan §4.2 #5).
-     *  The row payload is plugin-defined and typed loosely — blob bundles
-     *  can't share the host's TimelineRow type identity. */
+        /** Renderer for a plugin-defined chat timeline row kind (plan §4.2 #5).
+     * The row payload is plugin-defined and typed loosely — blob bundles
+     * can't share the host's TimelineRow type identity. */
     registerTimelineRowRenderer(def: {
       kind: string;
       key?: string;
@@ -423,6 +423,30 @@ export interface PluginContext {
       onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
       order?: number;
     }): Disposer;
+    /** Home sidebar nav entry under the builtin 自动化 row (permission
+     *  `ui:sidebar-entry`, 0.3.12). `onOpen` usually opens the plugin's
+     *  center tab via openCenterTab. */
+    registerSidebarNav(def: {
+      key?: string;
+      label: () => string;
+      icon?: ComponentType<{ className?: string }>;
+      order?: number;
+      onOpen: () => void;
+    }): Disposer;
+    /** Center-area tab definition (permission `ui:center-tab`, 0.3.12):
+     *  renders in the center tab strip like session/file/browser tabs.
+     *  Opening goes through openCenterTab; multiple keys = multiple tabs. */
+    registerCenterTab(def: {
+      key?: string;
+      title: () => string;
+      icon?: ComponentType<{ className?: string }>;
+      component: ComponentType;
+      order?: number;
+    }): Disposer;
+    /** Open (or focus) one of this plugin's registered center tabs
+     *  (permission `ui:center-tab`, 0.3.12). Throws when the tab was never
+     *  registered — open failures must be visible, not silent. */
+    openCenterTab(key?: string): void;
   };
   theme: {
     /** Inject a stylesheet scoped to this plugin; removed on unload.
@@ -485,6 +509,28 @@ export interface PluginContext {
       id: string;
       list: () => Promise<ExternalSessionRow[]>;
     }): Disposer;
+  };
+  /** Agent 轮次（权限 `agent`，0.3.13 起）：经宿主引擎管线拉起 agent
+   *  进程——渠道注入、进程注册与聊天发送同构。事件走独立的
+   *  `agent://<pluginId>` 总线话题（ctx.events.on 订阅；payload 为引擎
+   *  事件信封 { runId, sessionId, engine, seq, kind, data, ts }，kind ∈
+   *  delta | tool | usage | done | error …）。桌面专属（isWeb 下不可用的
+   *  插件要自呈现）。 */
+  agent: {
+    /** 启动一个 agent 轮次；返回的 runId 用于事件过滤与 interrupt。 */
+    start(def: {
+      engine: string;
+      prompt: string;
+      /** agent 进程的工作目录（绝对路径）。 */
+      workspacePath: string;
+      model?: string;
+      /** 缺省 = 引擎当前渠道（与聊天发送同一解析）。 */
+      providerId?: string;
+      /** 引擎相关的会话续接 id（如 pi 的 --session-id）：同一 id 续上轮。 */
+      sessionId?: string;
+    }): Promise<{ runId: string; sessionId: string | null }>;
+    /** 中断本插件启动的 run（run id 属主前缀由宿主强制）。 */
+    interrupt(runId: string): Promise<void>;
   };
   /** 通用能力出口（0.3.0 起；旧的 `cmd:<command>` 逐命令授权机制已删除）。
    *  仅四条命令，`pluginId` 由宿主自动注入（插件无需也不能传）：

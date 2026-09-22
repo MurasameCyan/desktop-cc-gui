@@ -46,8 +46,7 @@ export const TimelineSearchBar = memo(function TimelineSearchBar({
     "flex size-6 cursor-pointer items-center justify-center rounded-md text-foreground-icon-tertiary transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-foreground-icon-primary disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground-icon-tertiary";
 
   return (
-    <div
-      role="search"
+    <search
       onKeyDown={handleKeyDown}
       className="absolute top-2 right-4 z-20 flex items-center gap-1 rounded-lg border border-border-button-default bg-background-primary-default py-1 pr-1 pl-2 shadow-lg"
     >
@@ -96,6 +95,6 @@ export const TimelineSearchBar = memo(function TimelineSearchBar({
       >
         <X className="size-3.5" aria-hidden />
       </button>
-    </div>
+    </search>
   );
 });

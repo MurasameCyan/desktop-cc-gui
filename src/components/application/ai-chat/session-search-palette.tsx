@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import Search from "lucide-react/dist/esm/icons/search";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
@@ -135,12 +135,20 @@ export function SessionSearchPalette({
     if (!open && dialog.open) dialog.close();
   }, [open]);
 
-  // Fresh query + focus every time the palette opens.
+  // Fresh query + cursor every time the palette opens, adjusted during
+  // render (the React-docs pattern) so the first open paint already shows
+  // the cleared box — a reset effect would flash the previous query.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open) {
+      setQuery("");
+      setActiveIndex(0);
+    }
+  }
+  // Focus is a DOM side effect, so it stays in an effect.
   useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    setActiveIndex(0);
-    inputRef.current?.focus();
+    if (open) inputRef.current?.focus();
   }, [open]);
 
   const jump = (match: SessionMatch) => {
@@ -255,111 +263,152 @@ export function SessionSearchPalette({
             </div>
           )}
         </div>
-        <div ref={listRef} role="listbox" className="max-h-[320px] overflow-y-auto p-2">
-          {matches.length === 0 && content.length === 0 ? (
-            <div className="px-2 py-6 text-center text-body-medium text-text-secondary">
-              {t("chat.noSessions")}
-            </div>
-          ) : (
-            matches.map((match, index) => (
-              <button
-                key={match.id}
-                type="button"
-                role="option"
-                aria-selected={index === active}
-                onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => jump(match)}
-                className={cx(
-                  "flex w-full cursor-pointer items-center gap-2 rounded-2lg px-2 py-1.5 text-left outline-none transition-colors",
-                  index === active && "bg-dropdown-item-hover-background",
-                )}
-              >
-                {match.engine && (
-                  <EngineIcon
-                    engine={match.engine}
-                    size={12}
-                    className="size-3 shrink-0 text-foreground-icon-secondary"
-                  />
-                )}
-                <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
-                  {match.label}
-                </span>
-                {match.time && (
-                  <span className="shrink-0 text-caption-1-medium text-text-tertiary">
-                    {match.time}
-                  </span>
-                )}
-                <span className="shrink-0 text-caption-1-medium text-text-tertiary">
-                  {match.workspace}
-                </span>
-              </button>
-            ))
-          )}
-          {content.length > 0 && (
-            <div
-              aria-hidden
-              className="px-2 pt-2 pb-1 text-caption-1-medium text-text-tertiary"
-            >
-              {t("chat.searchMessageMatches")}
-            </div>
-          )}
-          {content.map((hit, i) => {
-            const index = matches.length + i;
-            return (
-              <button
-                key={`${hit.engine}/${hit.sessionId}`}
-                type="button"
-                role="option"
-                aria-selected={index === active}
-                onMouseEnter={() => setActiveIndex(index)}
-                onClick={() => jumpContent(hit)}
-                className={cx(
-                  "flex w-full cursor-pointer flex-col gap-0.5 rounded-2lg px-2 py-1.5 text-left outline-none transition-colors",
-                  index === active && "bg-dropdown-item-hover-background",
-                )}
-              >
-                <span className="flex w-full items-center gap-2">
-                  <EngineIcon
-                    engine={hit.engine}
-                    size={12}
-                    className="size-3 shrink-0 text-foreground-icon-secondary"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
-                    {hit.customTitle || hit.title || hit.sessionId.slice(0, 8)}
-                  </span>
-                  {hit.updatedAt ? (
-                    <span className="shrink-0 text-caption-1-medium text-text-tertiary">
-                      {relativeTime(hit.updatedAt)}
-                    </span>
-                  ) : null}
-                  <span className="shrink-0 text-caption-1-medium text-text-tertiary">
-                    {hit.workspaceName ?? hit.workspacePath}
-                  </span>
-                </span>
-                <span className="w-full truncate pl-5 text-caption-1-medium text-text-secondary">
-                  {hit.snippet.map((part, j) =>
-                    part.marked ? (
-                      <mark
-                        key={j}
-                        className="rounded-xs bg-background-tertiary-warning px-0.5 text-text-warning-primary"
-                      >
-                        {part.text}
-                      </mark>
-                    ) : (
-                      <span key={j}>{part.text}</span>
-                    ),
-                  )}
-                </span>
-              </button>
-            );
-          })}
-          {contentPending > 0 && trimmedQuery.length >= CONTENT_MIN_CHARS && (
-            <div aria-live="polite" className="px-2 pt-1 pb-1 text-caption-1-medium text-text-tertiary">
-              {t("chat.searchIndexing", { count: contentPending })}
-            </div>
-          )}
-        </div>
+        <PaletteResults
+          listRef={listRef}
+          matches={matches}
+          content={content}
+          contentPending={contentPending}
+          queryLongEnough={trimmedQuery.length >= CONTENT_MIN_CHARS}
+          active={active}
+          onHover={setActiveIndex}
+          onJump={jump}
+          onJumpContent={jumpContent}
+        />
       </div>
     </dialog>
+  );
+}
+
+/** Results listbox: title matches first, then the debounced FTS content
+ *  lane, then the indexing notice. Rows are buttons with option roles so
+ *  window-level arrow navigation can address them uniformly. */
+function PaletteResults({
+  listRef,
+  matches,
+  content,
+  contentPending,
+  queryLongEnough,
+  active,
+  onHover,
+  onJump,
+  onJumpContent,
+}: {
+  listRef: RefObject<HTMLDivElement>;
+  matches: SessionMatch[];
+  content: MessageSearchHit[];
+  contentPending: number;
+  /** Query meets CONTENT_MIN_CHARS: the content lane is live. */
+  queryLongEnough: boolean;
+  active: number;
+  onHover: (index: number) => void;
+  onJump: (match: SessionMatch) => void;
+  onJumpContent: (hit: MessageSearchHit) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div ref={listRef} role="listbox" className="max-h-[320px] overflow-y-auto p-2">
+      {matches.length === 0 && content.length === 0 ? (
+        <div className="px-2 py-6 text-center text-body-medium text-text-secondary">
+          {t("chat.noSessions")}
+        </div>
+      ) : (
+        matches.map((match, index) => (
+          <button
+            key={match.id}
+            type="button"
+            role="option"
+            aria-selected={index === active}
+            onMouseEnter={() => onHover(index)}
+            onClick={() => onJump(match)}
+            className={cx(
+              "flex w-full cursor-pointer items-center gap-2 rounded-2lg px-2 py-1.5 text-left outline-none transition-colors",
+              index === active && "bg-dropdown-item-hover-background",
+            )}
+          >
+            {match.engine && (
+              <EngineIcon
+                engine={match.engine}
+                size={12}
+                className="size-3 shrink-0 text-foreground-icon-secondary"
+              />
+            )}
+            <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
+              {match.label}
+            </span>
+            {match.time && (
+              <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                {match.time}
+              </span>
+            )}
+            <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+              {match.workspace}
+            </span>
+          </button>
+        ))
+      )}
+      {content.length > 0 && (
+        <div
+          aria-hidden
+          className="px-2 pt-2 pb-1 text-caption-1-medium text-text-tertiary"
+        >
+          {t("chat.searchMessageMatches")}
+        </div>
+      )}
+      {content.map((hit, i) => {
+        const index = matches.length + i;
+        return (
+          <button
+            key={`${hit.engine}/${hit.sessionId}`}
+            type="button"
+            role="option"
+            aria-selected={index === active}
+            onMouseEnter={() => onHover(index)}
+            onClick={() => onJumpContent(hit)}
+            className={cx(
+              "flex w-full cursor-pointer flex-col gap-0.5 rounded-2lg px-2 py-1.5 text-left outline-none transition-colors",
+              index === active && "bg-dropdown-item-hover-background",
+            )}
+          >
+            <span className="flex w-full items-center gap-2">
+              <EngineIcon
+                engine={hit.engine}
+                size={12}
+                className="size-3 shrink-0 text-foreground-icon-secondary"
+              />
+              <span className="min-w-0 flex-1 truncate text-body-medium text-text-primary">
+                {hit.customTitle || hit.title || hit.sessionId.slice(0, 8)}
+              </span>
+              {hit.updatedAt ? (
+                <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                  {relativeTime(hit.updatedAt)}
+                </span>
+              ) : null}
+              <span className="shrink-0 text-caption-1-medium text-text-tertiary">
+                {hit.workspaceName ?? hit.workspacePath}
+              </span>
+            </span>
+            <span className="w-full truncate pl-5 text-caption-1-medium text-text-secondary">
+              {hit.snippet.map((part, j) =>
+                part.marked ? (
+                  <mark
+                    key={j}
+                    className="rounded-xs bg-background-tertiary-warning px-0.5 text-text-warning-primary"
+                  >
+                    {part.text}
+                  </mark>
+                ) : (
+                  <span key={j}>{part.text}</span>
+                ),
+              )}
+            </span>
+          </button>
+        );
+      })}
+      {contentPending > 0 && queryLongEnough && (
+        <div aria-live="polite" className="px-2 pt-1 pb-1 text-caption-1-medium text-text-tertiary">
+          {t("chat.searchIndexing", { count: contentPending })}
+        </div>
+      )}
+    </div>
   );
 }

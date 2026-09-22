@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Markdown from "./Markdown";
-import { isAlertClassName } from "./github-alerts";
+import { isAlertClassName } from "./remark-github-alerts";
 import type { AlertType } from "./remark-github-alerts";
 import i18n from "@/lib/i18n";
 

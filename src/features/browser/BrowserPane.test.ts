@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { browserTabLabel, normalizeAddress } from "./BrowserPane";
+import { browserTabLabel, normalizeAddress } from "./address";
 
 describe("normalizeAddress", () => {
   it("passes through values that already carry a scheme", () => {

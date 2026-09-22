@@ -9,6 +9,7 @@ import { openExternal } from "@/lib/platform";
 import { isWeb } from "@/lib/transport";
 import { cx } from "@/utils/cx";
 import { useBrowserStore, type BrowserTab } from "./store";
+import { normalizeAddress } from "./address";
 import { useBrowserOccluded } from "./occlusion";
 import {
   browserCurrentUrl,
@@ -27,30 +28,6 @@ import {
  * header buttons. */
 const TOOL_BUTTON =
   "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors duration-150 text-foreground-icon-secondary hover:bg-background-secondary-hover hover:text-foreground-icon-primary";
-
-/** Address-bar entry: an explicit scheme passes through; something that
- * looks like a host gets https://; anything else becomes a Bing search
- * (Google is unreachable for many users here). Exported for tests. */
-export function normalizeAddress(input: string): string {
-  const value = input.trim();
-  if (!value) return "";
-  // localhost/IPs first: "localhost:5173" would otherwise parse as a scheme.
-  if (/^(localhost|\d{1,3}(\.\d{1,3}){3})(:\d+)?(\/|$)/.test(value)) return `http://${value}`;
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return value;
-  if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/|$)/.test(value)) return `https://${value}`;
-  return `https://www.google.com/search?q=${encodeURIComponent(value)}`;
-}
-
-/** Display label for a browser tab: document title, else host, else the
- * generic new-tab label. */
-export function browserTabLabel(tab: BrowserTab, fallback: string): string {
-  if (tab.title) return tab.title;
-  try {
-    return new URL(tab.url).hostname || fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 /** App-level subscriptions forwarding native webview events into the store.
  * Mounted once by the center pane while any browser tab exists. */
@@ -84,8 +61,12 @@ function useWebviewSync(id: string, url: string, active: boolean, placeholderRef
   // an open overlay hides it like a tab switch would.
   const occluded = useBrowserOccluded();
   const visible = active && !occluded;
+  // Read by the async create-then-show chain below; written in an effect so
+  // render stays pure (React may discard render work before commit).
   const activeRef = useRef(visible);
-  activeRef.current = visible;
+  useEffect(() => {
+    activeRef.current = visible;
+  }, [visible]);
 
   useLayoutEffect(() => {
     if (isWeb) return;
@@ -217,6 +198,9 @@ export function BrowserPane({ tab, active }: { tab: BrowserTab; active: boolean 
           onFocus={() => setAddressFocused(true)}
           onBlur={() => setAddressFocused(false)}
           onKeyDown={(e) => {
+            // CJK users press Enter to confirm an IME candidate; that Enter
+            // must not submit the half-composed address.
+            if (e.nativeEvent.isComposing) return;
             if (e.key === "Enter") {
               e.preventDefault();
               submitAddress();

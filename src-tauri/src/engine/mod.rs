@@ -46,7 +46,6 @@ pub(crate) use reader::{
     spawn_stdin_writer,
 };
 
-#[cfg(test)]
 use crate::event_sink;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -519,6 +518,41 @@ pub async fn send_message(
 /// tests drive the real spawn/read pipeline without a Tauri app (the mock
 /// runtime links the GUI crates into the test exe, which then cannot load
 /// without a comctl32 v6 manifest).
+/// 插件 agent 轮次入口（plugin_caps::plugin_agent_start 调用）：与聊天发送
+/// 共用同一条 spawn/reader/registry 管线，但事件走独立的
+/// `plugin-agent://event` 流（绝不进 engine://event——chat store 会把未知
+/// runId 当孤儿会话收养）。effort/permission/computer_use/图片暂不开放，
+/// provider_id 缺省 = 引擎当前渠道（与聊天发送同一解析）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn plugin_agent_send(
+    state: &crate::AppState,
+    engine: String,
+    workspace_path: String,
+    session_id: Option<String>,
+    prompt: String,
+    model: Option<String>,
+    provider_id: Option<String>,
+    run_id: String,
+) -> Result<SendResult, String> {
+    send_message_inner_with_sink(
+        state,
+        Arc::clone(&state.plugin_sink),
+        engine,
+        workspace_path,
+        session_id,
+        prompt,
+        None,
+        model,
+        None,
+        None,
+        provider_id,
+        Some(run_id),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message_inner(
     state: &crate::AppState,
     engine: String,
@@ -526,6 +560,40 @@ pub async fn send_message_inner(
     session_id: Option<String>,
     prompt: String,
     prompt_contributions: Vec<PromptContribution>,
+    image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
+    permission: Option<String>,
+    provider_id: Option<String>,
+    run_id: Option<String>,
+    computer_use: Option<bool>,
+) -> Result<SendResult, String> {
+    send_message_inner_with_sink(
+        state,
+        Arc::clone(&state.sink),
+        engine,
+        workspace_path,
+        session_id,
+        prompt,
+        image_paths,
+        model,
+        effort,
+        permission,
+        provider_id,
+        run_id,
+        computer_use,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_message_inner_with_sink(
+    state: &crate::AppState,
+    sink: Arc<event_sink::EventSink>,
+    engine: String,
+    workspace_path: String,
+    session_id: Option<String>,
+    prompt: String,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
@@ -576,6 +644,7 @@ pub async fn send_message_inner(
     let reserved = run_id.clone();
     let result = send_reserved(
         state,
+        sink,
         engine,
         workspace_path,
         session_id,
@@ -604,6 +673,7 @@ pub async fn send_message_inner(
 #[allow(clippy::too_many_arguments)]
 async fn send_reserved(
     state: &crate::AppState,
+    sink: Arc<event_sink::EventSink>,
     engine: String,
     workspace_path: String,
     session_id: Option<String>,
@@ -799,7 +869,7 @@ async fn send_reserved(
     let initial_effort = launch.req.effort.clone().filter(|e| !e.trim().is_empty());
     let ctx = RunContext {
         core: TurnCore {
-            sink: Arc::clone(&state.sink),
+            sink: Arc::clone(&sink),
             registry: Arc::clone(&state.processes),
             engine_id: engine.clone(),
             run_id: run_id.clone(),

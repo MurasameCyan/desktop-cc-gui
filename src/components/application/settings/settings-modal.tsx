@@ -18,6 +18,19 @@ import {
 } from "@/components/application/ai-chat/workspace-sortable-list";
 import { cx } from "@/utils/cx";
 import { useBrowserOcclusion } from "@/features/browser/occlusion";
+import { readStoredJson, writeStored } from "@/lib/storage";
+
+/** localStorage key for the user's rail collapse choices (group id →
+ *  expanded). Only groups with a stable `id` persist; others are
+ *  session-local. */
+const RAIL_EXPANDED_KEY = "ccgui-next.settingsRailExpanded:v1";
+
+const readRailExpanded = (): Record<string, boolean> =>
+  readStoredJson(RAIL_EXPANDED_KEY, (value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, boolean>)
+      : null,
+  ) ?? {};
 
 /**
  * Figma sources: Board UI → "Settings/Profile" (node 4081:13943) and
@@ -59,12 +72,20 @@ export interface SettingsNavItem {
 }
 
 export interface SettingsNavGroup {
+  /** Stable id used as the rail key and for persisted collapse state;
+   *  falls back to the label (localized — unstable across languages). */
+  id?: string;
   /** Muted group heading; omit for an unlabeled group. */
   label?: string;
-  /** Collapsible rail section (the 未启用 CLI bucket): the heading becomes a
-   *  chevron toggle, items stay hidden until expanded, and a selected page
-   *  inside force-expands the group. Starts collapsed. */
+  /** Collapsible rail section: the heading becomes a chevron toggle and a
+   *  selected page inside force-expands the group. */
   collapsible?: boolean;
+  /** Initial expanded state for a collapsible group the user has never
+   *  toggled (default: collapsed). Once toggled, the user's choice wins and
+   *  persists across sessions when the group has an `id`. */
+  defaultExpanded?: boolean;
+  /** Show an item-count pill next to the heading (the CLI rails). */
+  showCount?: boolean;
   /** When set, the group's items render as a drag-sortable list (the item
    *  icon becomes the grip, md+ vertical rail only) and a drop reports the
    *  new key order. */
@@ -245,10 +266,10 @@ export function SettingsModal({
   // Top fade over the scrolling page so rows dissolve under the title row
   // instead of cutting sharply (same recipe as the medical alerts feed).
   const [contentScrolled, setContentScrolled] = useState(false);
-  /** Collapsed state per collapsible group (keyed by its rail key); absent =
-   *  collapsed, which is the default for those groups. */
+  /** Expanded state per collapsible group (keyed by group id); seeded from
+   *  localStorage so the user's collapse choices survive reopening. */
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(
-    {},
+    readRailExpanded,
   );
 
   // Reset to the default page each time the modal opens. defaultPage/firstKey
@@ -306,17 +327,28 @@ export function SettingsModal({
           >
             {groups.map((group, groupIndex) => (
               <div
-                key={group.label ?? groupIndex}
+                key={group.id ?? group.label ?? groupIndex}
                 className="flex w-auto shrink-0 flex-row gap-1.5 pt-1 md:w-full md:flex-col"
               >
                 {(() => {
-                  const groupKey = group.label ?? String(groupIndex);
+                  const groupKey = group.id ?? group.label ?? String(groupIndex);
                   // A selected page inside a collapsed group force-expands it
                   // so the current row never hides under the chevron.
                   const expanded =
                     !group.collapsible ||
-                    (expandedGroups[groupKey] ?? false) ||
+                    (expandedGroups[groupKey] ?? group.defaultExpanded ?? false) ||
                     group.items.some((item) => item.key === page);
+                  const toggleGroup = () =>
+                    setExpandedGroups((prev) => {
+                      const next = {
+                        ...prev,
+                        [groupKey]: !(
+                          prev[groupKey] ?? group.defaultExpanded ?? false
+                        ),
+                      };
+                      if (group.id) writeStored(RAIL_EXPANDED_KEY, JSON.stringify(next));
+                      return next;
+                    });
                   return (
                     <>
                       {group.label &&
@@ -324,14 +356,7 @@ export function SettingsModal({
                           <button
                             type="button"
                             aria-expanded={expanded}
-                            onClick={() =>
-                              setExpandedGroups((prev) => ({
-                                ...prev,
-                                [groupKey]: !(
-                                  expandedGroups[groupKey] ?? false
-                                ),
-                              }))
-                            }
+                            onClick={toggleGroup}
                             className={cx(
                               "flex w-auto shrink-0 cursor-pointer items-center gap-1.5 rounded-2lg p-1.5 text-left md:w-full md:gap-1 md:px-2 md:py-1.5",
                               "outline-none transition-colors duration-150 ease hover:bg-background-secondary-hover/60 focus-visible:ring-2 focus-visible:ring-border-focus-ring",
@@ -347,10 +372,20 @@ export function SettingsModal({
                             <span className="truncate text-body-medium text-text-secondary">
                               {group.label}
                             </span>
+                            {group.showCount && (
+                              <span className="ml-auto hidden rounded-full bg-background-secondary-hover px-1.5 text-[11px] leading-4 text-text-tertiary md:block">
+                                {group.items.length}
+                              </span>
+                            )}
                           </button>
                         ) : (
                           <span className="hidden pl-2 text-body-medium text-text-secondary md:block">
                             {group.label}
+                            {group.showCount && (
+                              <span className="ml-1.5 rounded-full bg-background-secondary-hover px-1.5 text-[11px] leading-4 text-text-tertiary">
+                                {group.items.length}
+                              </span>
+                            )}
                           </span>
                         ))}
                       {expanded &&

@@ -76,6 +76,8 @@ export function QuestionCard({ message }: { message: Message }) {
   };
 
   const value = picked[current.question];
+  // Constant-time membership checks across the options list below.
+  const selectedLabels = Array.isArray(value) ? new Set(value) : null;
   const btn =
     "inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-caption-1-medium transition-colors";
   const rowClass = (selected: boolean) =>
@@ -123,8 +125,8 @@ export function QuestionCard({ message }: { message: Message }) {
       </div>
       <div className="flex flex-col gap-1">
         {current.options.map((opt) => {
-          const selected = Array.isArray(value)
-            ? value.includes(opt.label)
+          const selected = selectedLabels
+            ? selectedLabels.has(opt.label)
             : value === opt.label;
           return (
             <button
@@ -174,6 +176,9 @@ export function QuestionCard({ message }: { message: Message }) {
               setPicked((cur) => ({ ...cur, [current.question]: "" }));
             }}
             onKeyDown={(e) => {
+              // Enter that confirms an IME candidate must not submit the
+              // half-composed answer.
+              if (e.nativeEvent.isComposing) return;
               if (e.key === "Enter") {
                 e.preventDefault();
                 answer();

@@ -1,5 +1,5 @@
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from "react";
+import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
 import Copy from "lucide-react/dist/esm/icons/copy";
 import Check from "lucide-react/dist/esm/icons/check";
@@ -301,32 +301,31 @@ export const MessageRow = memo(function MessageRow({
   );
 });
 
-export const MessageTimeline = memo(function MessageTimeline({
-  session,
-  streaming,
-  onLoadEarlier,
-  workspacePath,
+/** 对话内搜索（⌘F / Ctrl+F）：匹配走数据层（全量行，含未挂载的），
+ * 高亮走 DOM（Custom Highlight API，仅已挂载行），互不改渲染管线。 */
+function useTimelineSearch({
+  rows,
+  scrollRef,
+  virtualizer,
+  atBottomRef,
+  userPausedRef,
 }: {
-  session: SessionState;
-  streaming: boolean;
-  onLoadEarlier: () => void;
-  workspacePath: string;
+  rows: TimelineRow[];
+  scrollRef: RefObject<HTMLDivElement | null>;
+  virtualizer: Virtualizer<HTMLDivElement, Element>;
+  atBottomRef: MutableRefObject<boolean>;
+  userPausedRef: MutableRefObject<boolean>;
 }) {
-
-  const { t } = useTranslation();
-  const thinkingAutoCollapse = useChatStore((s) => s.thinkingAutoCollapse);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const items = session.messages;
-  const rows = useMemo(() => buildRows(items), [items]);
-  // 对话内搜索（⌘F / Ctrl+F）：匹配走数据层（全量行，含未挂载的），
-  // 高亮走 DOM（Custom Highlight API，仅已挂载行），互不改渲染管线。
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchCursor, setSearchCursor] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  // 快捷键是开关：再按一次关闭（而不是浏览器式的重新聚焦）。
+  // 快捷键是开关：再按一次关闭（而不是浏览器式的重新聚焦）。Ref written
+  // in an effect so render stays pure; the shortcut only fires post-commit.
   const searchOpenRef = useRef(false);
-  searchOpenRef.current = searchOpen;
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+  }, [searchOpen]);
   useEffect(
     () =>
       registerShortcutHandler("chatSearch", () => {
@@ -367,6 +366,69 @@ export const MessageTimeline = memo(function MessageTimeline({
         (safeCursor - 1 + searchMatches.length) % searchMatches.length,
       );
   };
+  // 搜索跳转即用户阅读意图：暂停尾部跟随，流式追加不再把视口拽回底部
+  // （回到底部按钮/向下滚到底会恢复跟随）。
+  useEffect(() => {
+    if (currentSearchRow == null) return;
+    userPausedRef.current = true;
+    atBottomRef.current = false;
+    virtualizer.scrollToIndex(currentSearchRow, { align: "auto" });
+  }, [currentSearchRow, virtualizer, userPausedRef, atBottomRef]);
+  // 命中底色：虚拟列表挂载/卸载与流式增改都会触发重绘；rAF 合帧。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!searchOpen || !el || !searchHighlightSupported()) return;
+    let raf = 0;
+    const paint = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() =>
+        paintSearchHighlights(el, searchQuery, currentSearchRow),
+      );
+    };
+    paint();
+    const observer = new MutationObserver(paint);
+    observer.observe(el, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      clearSearchHighlights();
+    };
+  }, [searchOpen, searchQuery, currentSearchRow, scrollRef]);
+  return {
+    searchOpen,
+    setSearchOpen,
+    searchQuery,
+    handleSearchQuery,
+    safeCursor,
+    matchCount: searchMatches.length,
+    currentSearchRow,
+    gotoNextMatch,
+    gotoPrevMatch,
+    searchInputRef,
+  };
+}
+
+export const MessageTimeline = memo(function MessageTimeline({
+  session,
+  streaming,
+  onLoadEarlier,
+  workspacePath,
+}: {
+  session: SessionState;
+  streaming: boolean;
+  onLoadEarlier: () => void;
+  workspacePath: string;
+}) {
+
+  const { t } = useTranslation();
+  const thinkingAutoCollapse = useChatStore((s) => s.thinkingAutoCollapse);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const items = session.messages;
+  const rows = useMemo(() => buildRows(items), [items]);
   // Anchor rail: one dash per user message (reference: messageAnchors).
   const buildAnchorRows = useMemo(createAnchorRowsBuilder, []);
   const anchors = useMemo(() => buildAnchorRows(rows), [buildAnchorRows, rows]);
@@ -411,38 +473,18 @@ export const MessageTimeline = memo(function MessageTimeline({
   });
 
   const { atBottomRef, userPausedRef, isFollowing, scrollToBottom, resumeFollow } = useScrollFollow({ scrollRef });
-  // 搜索跳转即用户阅读意图：暂停尾部跟随，流式追加不再把视口拽回底部
-  // （回到底部按钮/向下滚到底会恢复跟随）。
-  useEffect(() => {
-    if (currentSearchRow == null) return;
-    userPausedRef.current = true;
-    atBottomRef.current = false;
-    virtualizer.scrollToIndex(currentSearchRow, { align: "auto" });
-  }, [currentSearchRow, virtualizer, userPausedRef, atBottomRef]);
-  // 命中底色：虚拟列表挂载/卸载与流式增改都会触发重绘；rAF 合帧。
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!searchOpen || !el || !searchHighlightSupported()) return;
-    let raf = 0;
-    const paint = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() =>
-        paintSearchHighlights(el, searchQuery, currentSearchRow),
-      );
-    };
-    paint();
-    const observer = new MutationObserver(paint);
-    observer.observe(el, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-    return () => {
-      cancelAnimationFrame(raf);
-      observer.disconnect();
-      clearSearchHighlights();
-    };
-  }, [searchOpen, searchQuery, currentSearchRow]);
+  const {
+    searchOpen,
+    setSearchOpen,
+    searchQuery,
+    handleSearchQuery,
+    safeCursor,
+    matchCount,
+    currentSearchRow,
+    gotoNextMatch,
+    gotoPrevMatch,
+    searchInputRef,
+  } = useTimelineSearch({ rows, scrollRef, virtualizer, atBottomRef, userPausedRef });
   const { activeAnchorId, handleScrollToAnchor } = useAnchorRailScroll({
     scrollRef,
     anchors,
@@ -514,7 +556,7 @@ export const MessageTimeline = memo(function MessageTimeline({
           query={searchQuery}
           onQueryChange={handleSearchQuery}
           current={safeCursor}
-          total={searchMatches.length}
+          total={matchCount}
           onPrev={gotoPrevMatch}
           onNext={gotoNextMatch}
           onClose={() => setSearchOpen(false)}

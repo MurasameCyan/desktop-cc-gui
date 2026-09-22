@@ -179,7 +179,7 @@ interface ConfirmPopoverProps extends ConfirmDialogProps {
 export function ConfirmPopover({ message, danger = false, anchor, onConfirm, onCancel }: ConfirmPopoverProps) {
   const { t } = useTranslation();
   useBrowserOcclusion(true);
-  const popoverRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDialogElement>(null);
   const [pos, setPos] = useState(anchor);
   // Latest-handler ref so the global dismissal listeners below subscribe
   // once yet always invoke the current onCancel.
@@ -223,11 +223,12 @@ export function ConfirmPopover({ message, danger = false, anchor, onConfirm, onC
   }, []);
 
   return createPortal(
-    <div
+    <dialog
+      open
       ref={popoverRef}
       role="alertdialog"
       aria-label={message}
-      className="fixed z-120 w-72 rounded-2lg border border-border-button-default bg-background-primary-default p-3 shadow-xl"
+      className="fixed z-120 m-0 w-72 rounded-2lg border border-border-button-default bg-background-primary-default p-3 shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -241,7 +242,7 @@ export function ConfirmPopover({ message, danger = false, anchor, onConfirm, onC
           {t("common.confirm")}
         </Button>
       </div>
-    </div>,
+    </dialog>,
     document.body,
   );
 }

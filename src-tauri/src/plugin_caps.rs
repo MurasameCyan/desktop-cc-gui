@@ -37,6 +37,7 @@
 //! (lib.rs window-destroyed hook).
 
 use serde::Serialize;
+use tauri::Manager;
 use std::collections::HashMap;
 #[cfg(windows)]
 use std::sync::Arc;
@@ -194,6 +195,70 @@ fn require_exec_grant(grants: &[String], plugin_id: &str, bin: &str) -> Result<(
     } else {
         Err(format!("{plugin_id}: missing exec grant exec:{bin}"))
     }
+}
+
+fn require_agent_grant(grants: &[String], plugin_id: &str) -> Result<(), String> {
+    if grants.iter().any(|g| g == "agent") {
+        Ok(())
+    } else {
+        Err(format!("{plugin_id}: missing agent grant"))
+    }
+}
+
+/// 插件只能中断自己启动的 run：run id 内嵌属主前缀（见 plugin_agent_start）。
+fn plugin_owns_run_id(plugin_id: &str, run_id: &str) -> bool {
+    run_id.starts_with(&format!("pa-{plugin_id}-"))
+}
+
+/// 插件 agent 轮次（manifest 权限 `agent`）：经宿主引擎管线拉起一个 agent
+/// 进程——渠道注入、事件流、进程注册与聊天发送完全同构。事件走独立的
+/// `plugin-agent://event` 流；桌面专属，与 exec 系列一样不进 web dispatch。
+#[tauri::command]
+pub(crate) async fn plugin_agent_start(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    engine: String,
+    prompt: String,
+    workspace_path: String,
+    model: Option<String>,
+    provider_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<crate::engine::SendResult, String> {
+    let grants = load_grants(&plugin_id)?;
+    require_agent_grant(&grants, &plugin_id)?;
+    let state = app.state::<crate::AppState>();
+    // run id 内嵌插件 id（pa-<id>-<32hex>）：前端按此前缀把事件路由回
+    // 属主插件；字符集 [A-Za-z0-9-_]、长度 ≤128 由插件 id 自身约束保证。
+    let run_id = format!("pa-{plugin_id}-{}", uuid::Uuid::new_v4().simple());
+    crate::engine::plugin_agent_send(
+        state.inner(),
+        engine,
+        workspace_path,
+        session_id,
+        prompt,
+        model,
+        provider_id,
+        run_id,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn plugin_agent_interrupt(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    run_id: String,
+) -> Result<bool, String> {
+    let grants = load_grants(&plugin_id)?;
+    require_agent_grant(&grants, &plugin_id)?;
+    if !plugin_owns_run_id(&plugin_id, &run_id) {
+        return Err(format!("{plugin_id}: run id {run_id:?} not owned by this plugin"));
+    }
+    let state = app.state::<crate::AppState>();
+    let registry = std::sync::Arc::clone(&state.processes);
+    tauri::async_runtime::spawn_blocking(move || registry.kill(&run_id))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Shared gate for all three commands: the plugin must be installed and
@@ -857,6 +922,9 @@ mod tests {
 
     #[test]
     fn exec_grant_shape_validation() {
+        assert!(plugin_owns_run_id("release-poster", "pa-release-poster-abc123"));
+        assert!(!plugin_owns_run_id("release-poster", "pa-other-plugin-abc123"));
+        assert!(!plugin_owns_run_id("release-poster", "run-abc123"));
         assert!(is_valid_exec_grant("exec:npm"));
         assert!(is_valid_exec_grant("exec:tokentracker-cli"));
         assert!(is_valid_exec_grant("exec:tool_v2.1"));

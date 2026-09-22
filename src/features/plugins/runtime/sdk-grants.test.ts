@@ -13,6 +13,7 @@ describe("isKnownPermission", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
+    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(32);
   });
   it("accepts the six lifecycle, prompt, workspace, and document-storage grants", () => {
     expect([
@@ -22,6 +23,13 @@ describe("isKnownPermission", () => {
       "prompt.contribute.internal",
       "workspace.metadata.read",
       "plugin.storage",
+    ].every(isKnownPermission)).toBe(true);
+  });
+  it("accepts the upstream sidebar-entry, center-tab, and agent grants", () => {
+    expect([
+      "ui:sidebar-entry",
+      "ui:center-tab",
+      "agent",
     ].every(isKnownPermission)).toBe(true);
   });
 

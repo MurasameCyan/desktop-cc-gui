@@ -71,7 +71,7 @@ export function TerminalContextMenu({
     return () => {
       cancelled = true;
     };
-  }, [resolved]);
+  }, [resolved, cwd]);
 
   const entries: ContextMenuEntry[] = [
     {

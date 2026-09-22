@@ -1,4 +1,5 @@
-import { listenEngineEvents } from "@/lib/events";
+import { listen } from "@/lib/transport";
+import { listenEngineEvents, type EngineEventPayload } from "@/lib/events";
 import type { Disposer } from "@ccgui/plugin-sdk";
 
 /**
@@ -100,6 +101,32 @@ export function assertPluginEmitTopic(pluginId: string, topic: string): void {
 }
 
 let bridged = false;
+let agentBridged = false;
+
+/** 插件 agent 事件话题前缀：agent://<pluginId>，payload 为引擎事件信封。 */
+export const AGENT_EVENT_TOPIC_PREFIX = "agent://";
+
+/** run id 内嵌属主（Rust plugin_agent_start: pa-<pluginId>-<32hex>）。 */
+export function pluginIdFromAgentRunId(runId: string): string | null {
+  if (!runId.startsWith("pa-") || runId.length <= 36) return null;
+  return runId.slice(3, -33);
+}
+
+/**
+ * 把插件 agent 轮次的独立事件流（plugin-agent://event）按 run id 前缀
+ * 路由回属主插件的总线话题。与聊天引擎流隔离：插件 run 不会进 chat
+ * store，chat store 也不会收养这些事件。
+ */
+export function bridgePluginAgentEvents(): void {
+  if (agentBridged) return;
+  agentBridged = true;
+  void listen<EngineEventPayload[]>("plugin-agent://event", (e) => {
+    for (const event of e.payload) {
+      const pluginId = pluginIdFromAgentRunId(event.runId);
+      if (pluginId) pluginBus.emit(`${AGENT_EVENT_TOPIC_PREFIX}${pluginId}`, event);
+    }
+  });
+}
 
 /**
  * Re-emit engine `usage` events onto the plugin bus. Bound once at plugin

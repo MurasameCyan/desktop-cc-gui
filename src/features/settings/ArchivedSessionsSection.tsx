@@ -55,6 +55,15 @@ export function ArchivedSessionsSection() {
     };
   }, [refresh]);
 
+  // Building an Intl formatter is slow; do it once per locale, not per row.
+  const dateFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.language, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    [i18n.language],
+  );
   const workspaceLabels = useMemo(
     () => new Map(workspaces.map((workspace) => [workspace.path, workspace.name])),
     [workspaces],
@@ -164,10 +173,7 @@ export function ArchivedSessionsSection() {
                 const key = `${session.engine}/${session.sessionId}`;
                 const busy = busyKey === key;
                 const when = session.updatedAt
-                  ? new Intl.DateTimeFormat(i18n.language, {
-                      dateStyle: "medium",
-                      timeStyle: "short",
-                    }).format(new Date(session.updatedAt))
+                  ? dateFormatter.format(new Date(session.updatedAt))
                   : "";
                 return (
                   <div

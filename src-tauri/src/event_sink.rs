@@ -11,6 +11,10 @@ const CHAT_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 const FLUSH_BYTES: usize = 64 * 1024;
 
 pub const ENGINE_EVENT_NAME: &str = "engine://event";
+
+/// 插件 agent 轮次的事件流名（plugin_caps::plugin_agent_start）：独立于
+/// 聊天引擎流，前端插件运行时监听此名并路由回属主插件。
+pub const PLUGIN_AGENT_EVENT_NAME: &str = "plugin-agent://event";
 pub const SESSIONS_CHANGED_EVENT: &str = "sessions://changed";
 pub const SCAN_PROGRESS_EVENT: &str = "scan://progress";
 pub const INSTALL_PROGRESS_EVENT: &str = "plugin://install-progress";

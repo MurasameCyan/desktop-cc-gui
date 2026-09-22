@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import Globe from "lucide-react/dist/esm/icons/globe";
 import MessageSquarePlus from "lucide-react/dist/esm/icons/message-square-plus";
 import PanelLeft from "lucide-react/dist/esm/icons/panel-left";
+import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import ScanSearch from "lucide-react/dist/esm/icons/scan-search";
 import Settings from "lucide-react/dist/esm/icons/settings";
 import Workflow from "lucide-react/dist/esm/icons/workflow";
@@ -25,6 +26,7 @@ import { cx } from "@/utils/cx";
 import { needsWindowControls, useTitlebarStyle } from "@/features/settings/titlebar";
 import { WindowControls } from "@/components/application/window-controls";
 import { useRemoteControl } from "@/hooks/use-remote-control";
+import { compareByOrder, sidebarNavRegistry, useRegistry } from "@ccgui/plugin-sdk";
 
 type IconComponent = ComponentType<{
   className?: string;
@@ -188,7 +190,8 @@ export function SidebarBrandRow({ onOpenSearch }: { onOpenSearch?: () => void })
   );
 }
 
-/** Primary actions: 新建会话/浏览器 (会话搜索在顶栏图标 + ⌘L 弹窗). */
+/** Primary actions: 新建会话/浏览器 (会话搜索在顶栏图标 + ⌘L 弹窗),
+ *  其后是插件注册的导航项（SDK 0.3.12 ui:sidebar-entry）。 */
 export function SidebarPrimaryNav({
   onNewSession,
   onNewBrowser,
@@ -197,6 +200,7 @@ export function SidebarPrimaryNav({
   onNewBrowser?: () => void;
 }) {
   const { t } = useTranslation();
+  const pluginEntries = [...useRegistry(sidebarNavRegistry)].sort(compareByOrder);
   return (
     <nav className="flex w-full shrink-0 flex-col gap-1">
       <NavItem icon={MessageSquarePlus} label={t("chat.newSession")} onClick={onNewSession} />
@@ -208,6 +212,14 @@ export function SidebarPrimaryNav({
         label={t("chat.automation")}
         tip={t("chat.automationComingSoon")}
       />
+      {pluginEntries.map((entry) => (
+        <NavItem
+          key={entry.id}
+          icon={(entry.icon ?? Puzzle) as IconComponent}
+          label={entry.label()}
+          onClick={entry.onOpen}
+        />
+      ))}
     </nav>
   );
 }
