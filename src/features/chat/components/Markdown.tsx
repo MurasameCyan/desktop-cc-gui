@@ -5,8 +5,8 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkDisplayMath } from "./remark-display-math";
-import { remarkGithubAlerts } from "./remark-github-alerts";
-import { AlertTitle, isAlertClassName } from "./github-alerts";
+import { isAlertClassName, remarkGithubAlerts } from "./remark-github-alerts";
+import { AlertTitle } from "./github-alerts";
 import {
   prepareMathText,
   restoreMathDollars,

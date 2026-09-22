@@ -62,6 +62,25 @@
 - `plugin_exec_spawn` 桥命令成功时 resolve 为 void（Rust 返回 ()），文档同步更正。
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
+## 0.3.13 — 2026-09-21
+- **新增能力 `agent`**：`ctx.agent.start/interrupt` 让插件经宿主引擎管线
+  运行 agent 轮次——与聊天发送共用 spawn/reader/registry（渠道注入、进程
+  注册、中断），事件走独立的 `plugin-agent://event` 流，前端按 run id
+  属主前缀路由到 `agent://<pluginId>` 总线话题。插件 run 不会进 chat
+  store，也不被 chat 的 Stop 误杀。桌面专属。
+- 权限单一事实源新增 `agent`；通用 bridge 白名单同步放开
+  `plugin_agent_start` / `plugin_agent_interrupt`。
+
+## 0.3.12 — 2026-09-21
+- **新增扩展点 `ui:sidebar-entry`**：`ctx.ui.registerSidebarNav` 在首页侧栏
+  内建「自动化」入口之下注册导航项（label/icon/order/onOpen），经宿主
+  `sidebarNavRegistry` 渲染，与内建导航同一 chrome。
+- **新增扩展点 `ui:center-tab`**：`ctx.ui.registerCenterTab` 注册中心页签
+  定义（title/icon/component），`ctx.ui.openCenterTab(key?)` 打开或聚焦——
+  页签与会话/文件/浏览器共享中部页签条，组件渲染在 PluginBoundary 内。
+  打开未注册的页签会抛错（失败必须可见）。
+- 权限单一事实源 `spec/permissions.json` 新增上述两项；TS/Rust/模板校验
+  全部自动派生。
 
 ## 0.3.11 — 2026-09-18
 - **修复权限漂移**：`registerComposerSlot` 运行时一直校验 `ui:composer`，

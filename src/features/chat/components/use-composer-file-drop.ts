@@ -29,12 +29,16 @@ export function useComposerFileDrop({
   const [isDragOver, setIsDragOver] = useState(false);
 
   // Latest-callback refs keep the window subscription stable across renders.
+  // Written in an effect (not during render) so discarded render work
+  // cannot leak stale callbacks into the event subscriptions below.
   const disabledRef = useRef(disabled);
-  disabledRef.current = disabled;
   const pathsRef = useRef(onDropPaths);
-  pathsRef.current = onDropPaths;
   const filesRef = useRef(onDropFiles);
-  filesRef.current = onDropFiles;
+  useEffect(() => {
+    disabledRef.current = disabled;
+    pathsRef.current = onDropPaths;
+    filesRef.current = onDropFiles;
+  });
 
   useEffect(() => {
     if (disabled || isWeb) return;

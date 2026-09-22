@@ -36,6 +36,24 @@ const ALERT_TYPES: readonly AlertType[] = [
 ];
 
 const ALERT_RE = /^\[!(note|tip|important|warning|caution)\]\s*$/i;
+
+/** Reads the className this plugin stamped onto the blockquote (hast
+ *  `properties.className`, or the space-separated React `className` string)
+ *  back into the alert type, for the component override in Markdown.tsx. */
+export function isAlertClassName(className: unknown): AlertType | null {
+  const names = Array.isArray(className)
+    ? className.flatMap((item) => String(item).split(/\s+/))
+    : typeof className === "string"
+      ? className.split(/\s+/)
+      : [];
+  for (const name of names) {
+    if (!name) continue;
+    const match = /^md-alert-(note|tip|important|warning|caution)$/.exec(name);
+    if (match) return match[1] as AlertType;
+  }
+  return null;
+}
+
 const LEFTOVER_LINE_RE =
   /^\s*>\s*\[!(note|tip|important|warning|caution)\]\s*(.*)$/i;
 const LEFTOVER_INLINE_RE =

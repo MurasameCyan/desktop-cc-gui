@@ -1,6 +1,7 @@
 import type {
   ButtonHTMLAttributes,
   ComponentType,
+  ReactNode,
   Ref,
 } from "react";
 import { cx, sortCx } from "@/utils/cx";
@@ -31,6 +32,9 @@ export interface IconButtonProps
   extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   icon: IconComponent;
   size?: IconButtonSize;
+  /** Custom content replacing the default icon render — for composite or
+   *  animated icons that need a stable component identity across renders. */
+  children?: ReactNode;
   /** Accessible name — required since there is no visible label. */
   "aria-label": string;
   ref?: Ref<HTMLButtonElement>;
@@ -63,6 +67,7 @@ export function IconButton({
   size = "medium",
   className,
   type = "button",
+  children,
   ref,
   ...props
 }: IconButtonProps) {
@@ -73,7 +78,7 @@ export function IconButton({
       className={cx(styles.base, styles.size[size], className)}
       {...props}
     >
-      <Icon className={styles.icon[size]} aria-hidden />
+      {children ?? <Icon className={styles.icon[size]} aria-hidden />}
     </button>
   );
 }

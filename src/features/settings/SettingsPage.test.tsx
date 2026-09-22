@@ -78,11 +78,14 @@ async function render(engines: EngineInfo[]) {
   });
 }
 
-/** Click one collapsed bucket's toggle by its label. */
+/** Click one collapsed bucket's toggle by its label. The heading button also
+ *  carries the count pill, so match its first span instead of the whole
+ *  textContent. */
 async function expandBucket(labelKey: string) {
+  const label = i18n.t(labelKey);
   const toggle = [
     ...document.querySelectorAll<HTMLButtonElement>("nav button"),
-  ].find((b) => b.textContent?.trim() === i18n.t(labelKey));
+  ].find((b) => b.querySelector("span")?.textContent?.trim() === label);
   if (!toggle) throw new Error(`bucket toggle not rendered: ${labelKey}`);
   await act(async () => {
     toggle.click();
@@ -98,25 +101,40 @@ describe("SettingsPage CLI rail", () => {
       engine("agy", false, false),
     ]);
 
-    // Main rail: only the installed+enabled CLI; both buckets start collapsed.
+    // Main rail: only the installed+enabled CLI; 未安装 and 未启用 both
+    // start collapsed to keep the rail quiet.
     let labels = navLabels();
     expect(labels).toContain("Claude Code");
     expect(labels).not.toContain("Codex CLI");
     expect(labels).not.toContain("Qoder CLI");
     expect(labels).not.toContain("Antigravity CLI");
 
-    // 未启用 holds the installed disabled CLI — and nothing uninstalled.
-    await expandBucket("settings.cliDisabledGroup");
-    labels = navLabels();
-    expect(labels).toContain("Codex CLI");
-    expect(labels).not.toContain("Qoder CLI");
-    expect(labels).not.toContain("Antigravity CLI");
+    // 未安装 sorts before 未启用 in the rail.
+    const missingAt = labels.indexOf(i18n.t("settings.cliNotInstalledGroup"));
+    const disabledAt = labels.indexOf(i18n.t("settings.cliDisabledGroup"));
+    expect(missingAt).toBeGreaterThan(-1);
+    expect(disabledAt).toBeGreaterThan(missingAt);
 
-    // 未安装 holds the uninstalled CLIs regardless of their enable flag.
+    // Expanding 未安装 reveals the uninstalled CLIs.
     await expandBucket("settings.cliNotInstalledGroup");
     labels = navLabels();
     expect(labels).toContain("Qoder CLI");
     expect(labels).toContain("Antigravity CLI");
+    expect(labels).not.toContain("Codex CLI");
+
+    // 未启用 holds the installed disabled CLI — and nothing uninstalled.
+    await expandBucket("settings.cliDisabledGroup");
+    labels = navLabels();
+    expect(labels).toContain("Codex CLI");
+    expect(labels).toContain("Qoder CLI");
+    expect(labels).toContain("Antigravity CLI");
+
+    // Collapsing 未安装 hides the uninstalled CLIs again.
+    await expandBucket("settings.cliNotInstalledGroup");
+    labels = navLabels();
+    expect(labels).not.toContain("Qoder CLI");
+    expect(labels).not.toContain("Antigravity CLI");
+    expect(labels).toContain("Codex CLI");
   });
 
   it("keeps every CLI while the engine probe is out (empty list = unknown)", async () => {

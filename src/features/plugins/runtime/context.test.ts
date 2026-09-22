@@ -649,8 +649,9 @@ describe("createPluginContext", () => {
     injectBundleCss(handle, ".bundle { color: red; }");
     const css = document.head.querySelector('style[data-plugin="test-plugin"]')?.textContent ?? "";
     expect(css).toContain("color: red");
-    // Bundle CSS is wrapped in the ccgui-plugins layer (declared first in
-    // index.css) so it can never outrank host utilities on specificity ties.
+    // Bundle CSS is wrapped in the ccgui-plugins layer (declared between
+    // base and components in index.css) so it can never outrank host
+    // utilities on specificity ties.
     expect(css).toMatch(/^@layer ccgui-plugins \{/);
     expect(handle.disposers).toHaveLength(1);
     handle.disposers[0]();

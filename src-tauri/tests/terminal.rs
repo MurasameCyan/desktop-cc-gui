@@ -39,12 +39,19 @@ fn build_app(home: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
         db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
         sink: EventSink::new(Arc::new(app.handle().clone())),
         terminal_sink: EventSink::with_name(Arc::new(app.handle().clone()), TERMINAL_OUTPUT_EVENT),
+        plugin_sink: EventSink::with_name(
+            Arc::new(app.handle().clone()),
+            ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
+        ),
         terminals: terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
+        opencode_server: std::sync::Arc::new(
+            ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
+        ),
     });
     app.manage(ConfigStore::default());
     app

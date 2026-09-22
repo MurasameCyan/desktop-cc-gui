@@ -14,6 +14,11 @@
 //! crates into the test exe, which then fails to load on Windows without a
 //! comctl32 v6 manifest (0xc0000139) - the app exe gets one from tauri-build,
 //! a bare `cargo test` binary does not.
+//!
+//! Windows-only: the fake CLI is a .cmd shim resolved via the %APPDATA%\npm
+//! probe path, which does not exist on unix — there the real codex install
+//! would be spawned instead. The whole target is gated accordingly.
+#![cfg(target_os = "windows")]
 
 use ccgui_next_lib::db::Db;
 use ccgui_next_lib::engine::{self, ProcessRegistry};
@@ -142,6 +147,9 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),
+        opencode_server: std::sync::Arc::new(
+            ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
+        ),
     };
     (state, capture)
 }
@@ -161,6 +169,7 @@ async fn send_codex_and_wait(state: &AppState, events: &Arc<Capture>, deadline_m
         None,
         None,
         Some("run-client-probe".into()),
+        None,
     )
     .await
     .expect("send_message must succeed");

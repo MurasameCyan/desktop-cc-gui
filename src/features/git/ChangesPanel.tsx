@@ -1,39 +1,62 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import Minus from "lucide-react/dist/esm/icons/minus";
+import Undo2 from "lucide-react/dist/esm/icons/undo-2";
 import { Focusable } from "react-aria-components";
 import { Tooltip, TooltipContent } from "@/components/base/tooltip/tooltip";
+import { ConfirmDialog } from "@/components/dialogs";
 import { type GitFileEntry, type GitStatus } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { cx } from "@/utils/cx";
+import { useFilesStore } from "@/features/files/store";
+import { resolveWorkspaceRepository } from "@/features/files/repositorySelection";
 import { useGitStore } from "./store";
 import { ChangesPanelHeader } from "./ChangesPanelHeader";
 import { CommitFooter } from "./CommitFooter";
 
 export function ChangesPanel({
   workspacePath,
+  repoPath,
   className,
 }: {
   workspacePath: string;
+  /** Pin the panel to this repository instead of following the file tree's
+   *  selection — for callers that render the panel outside the files
+   *  context, where a global selectedPath would silently steer it. */
+  repoPath?: string;
   className?: string;
 }) {
   const { t } = useTranslation();
-  const status = useGitStore((s) => s.statusByWorkspace[workspacePath]);
-  const notRepo = useGitStore((s) => s.notRepoByWorkspace[workspacePath]);
-  const refreshError = useGitStore((s) => s.errorByWorkspace[workspacePath]);
-  const branches = useGitStore((s) => s.branchesByWorkspace[workspacePath]);
+  const selectedPath = useFilesStore((s) => s.selectedPath);
+  const repositories = useFilesStore((s) => s.repositories);
+  const gitWorkspacePath = useMemo(
+    () =>
+      repoPath ??
+      resolveWorkspaceRepository({
+        selectedPath,
+        repositoryRoots: Object.keys(repositories),
+        workspacePath,
+      }),
+    [repositories, selectedPath, workspacePath, repoPath],
+  );
+  const status = useGitStore((s) => s.statusByWorkspace[gitWorkspacePath]);
+  const notRepo = useGitStore((s) => s.notRepoByWorkspace[gitWorkspacePath]);
+  const refreshError = useGitStore((s) => s.errorByWorkspace[gitWorkspacePath]);
+  const branches = useGitStore((s) => s.branchesByWorkspace[gitWorkspacePath]);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, true>>({});
   const [commitMsg, setCommitMsg] = useState("");
+  /** Paths awaiting discard confirmation (one row or a whole group). */
+  const [discardTarget, setDiscardTarget] = useState<string[] | null>(null);
 
   useEffect(() => {
-    void useGitStore.getState().refresh(workspacePath);
-    void useGitStore.getState().loadBranches(workspacePath);
-  }, [workspacePath]);
+    void useGitStore.getState().refresh(gitWorkspacePath);
+    void useGitStore.getState().loadBranches(gitWorkspacePath);
+  }, [gitWorkspacePath]);
 
   /** Runs a mutating action: tracks busy state, surfaces errors inline. */
   const run = useCallback((key: string, action: () => Promise<unknown>) => {
@@ -53,36 +76,55 @@ export function ChangesPanel({
    * last refresh failure. */
   const dismissError = useCallback(() => {
     setActionError(null);
-    useGitStore.getState().clearError(workspacePath);
-  }, [workspacePath]);
+    useGitStore.getState().clearError(gitWorkspacePath);
+  }, [gitWorkspacePath]);
 
   const stage = useCallback(
     (files: string[]) =>
-      run("stage", () => useGitStore.getState().stage(workspacePath, files)),
-    [run, workspacePath],
+      run("stage", () => useGitStore.getState().stage(gitWorkspacePath, files)),
+    [run, gitWorkspacePath],
   );
   const unstage = useCallback(
     (files: string[]) =>
-      run("unstage", () => useGitStore.getState().unstage(workspacePath, files)),
-    [run, workspacePath],
+      run("unstage", () => useGitStore.getState().unstage(gitWorkspacePath, files)),
+    [run, gitWorkspacePath],
   );
   const stageOne = useCallback((file: string) => stage([file]), [stage]);
   const unstageOne = useCallback((file: string) => unstage([file]), [unstage]);
+  const discard = useCallback(
+    (files: string[]) =>
+      run("discard", () => useGitStore.getState().discard(gitWorkspacePath, files)),
+    [run, gitWorkspacePath],
+  );
+  const discardRow = useCallback((file: string) => setDiscardTarget([file]), []);
+  const confirmDiscard = useCallback(() => {
+    if (discardTarget === null) return;
+    discard(discardTarget);
+    setDiscardTarget(null);
+  }, [discard, discardTarget]);
   // File rows open the diff in the center area, where it has room.
   const openStagedDiff = useCallback(
     (file: string) =>
-      useGitStore.getState().openDiff(workspacePath, { file, staged: true }),
-    [workspacePath],
+      useGitStore.getState().openDiff(gitWorkspacePath, { file, staged: true }),
+    [gitWorkspacePath],
   );
   const openUnstagedDiff = useCallback(
     (file: string) =>
-      useGitStore.getState().openDiff(workspacePath, { file, staged: false }),
-    [workspacePath],
+      useGitStore.getState().openDiff(gitWorkspacePath, { file, staged: false }),
+    [gitWorkspacePath],
   );
 
   const header = (
     <ChangesPanelHeader
-      workspacePath={workspacePath}
+      workspacePath={gitWorkspacePath}
+      // Name the repository when the panel followed the file tree's
+      // selection into a nested repo — otherwise a commit there looks
+      // identical to one against the workspace root.
+      followedRepoPath={
+        repoPath === undefined && gitWorkspacePath !== workspacePath
+          ? gitWorkspacePath
+          : undefined
+      }
       notRepo={notRepo}
       branch={status?.branch}
       ahead={status?.ahead}
@@ -142,6 +184,10 @@ export function ChangesPanel({
               rowActionLabel={t("git.stage")}
               rowActionKind="stage"
               onRowAction={stageOne}
+              rowDiscardLabel={t("git.discard")}
+              onRowDiscard={discardRow}
+              groupDiscardLabel={t("git.discardAll")}
+              onGroupDiscard={setDiscardTarget}
               onOpen={openUnstagedDiff}
               actionBusy={pending.stage === true}
             />
@@ -153,6 +199,10 @@ export function ChangesPanel({
               rowActionLabel={t("git.stage")}
               rowActionKind="stage"
               onRowAction={stageOne}
+              rowDiscardLabel={t("git.discard")}
+              onRowDiscard={discardRow}
+              groupDiscardLabel={t("git.discardAll")}
+              onGroupDiscard={setDiscardTarget}
               onOpen={openUnstagedDiff}
               actionBusy={pending.stage === true}
               isNew
@@ -161,13 +211,25 @@ export function ChangesPanel({
         )}
       </div>
       <CommitFooter
-        workspacePath={workspacePath}
+        workspacePath={gitWorkspacePath}
         stagedCount={status?.staged.length ?? 0}
         busy={pending.commit === true}
         commitMsg={commitMsg}
         onCommitMsgChange={setCommitMsg}
         run={run}
       />
+      {discardTarget !== null && (
+        <ConfirmDialog
+          danger
+          message={
+            discardTarget.length === 1
+              ? t("git.discardConfirm", { path: discardTarget[0] })
+              : t("git.discardAllConfirm", { count: discardTarget.length })
+          }
+          onConfirm={confirmDiscard}
+          onCancel={() => setDiscardTarget(null)}
+        />
+      )}
     </aside>
   );
 }
@@ -206,6 +268,13 @@ interface GroupSectionProps {
   rowActionLabel: string;
   rowActionKind: "stage" | "unstage";
   onRowAction: (file: string) => void;
+  /** Discard is destructive and only meaningful for worktree-side groups
+   *  (unstaged/untracked); staged rows get no discard button. */
+  rowDiscardLabel?: string;
+  onRowDiscard?: (file: string) => void;
+  /** Red group-level discard next to the stage-all action, same groups. */
+  groupDiscardLabel?: string;
+  onGroupDiscard?: (files: string[]) => void;
   onOpen: (file: string) => void;
   actionBusy: boolean;
   isNew?: boolean;
@@ -219,6 +288,10 @@ const GroupSection = memo(function GroupSection({
   rowActionLabel,
   rowActionKind,
   onRowAction,
+  rowDiscardLabel,
+  onRowDiscard,
+  groupDiscardLabel,
+  onGroupDiscard,
   onOpen,
   actionBusy,
   isNew = false,
@@ -247,6 +320,19 @@ const GroupSection = memo(function GroupSection({
           <span className="text-body-medium text-text-secondary">{title}</span>
           <span className="text-xs text-text-tertiary">{entries.length}</span>
         </button>
+        {groupDiscardLabel !== undefined && onGroupDiscard !== undefined && (
+          <button
+            type="button"
+            disabled={actionBusy}
+            onClick={() => onGroupDiscard(entries.map((f) => f.path))}
+            className={cx(
+              "shrink-0 rounded px-1.5 py-0.5 text-xs text-text-error-primary",
+              "hover:bg-background-tertiary-hover disabled:text-text-disabled",
+            )}
+          >
+            {groupDiscardLabel}
+          </button>
+        )}
         <button
           type="button"
           disabled={actionBusy}
@@ -268,6 +354,8 @@ const GroupSection = memo(function GroupSection({
               actionLabel={rowActionLabel}
               actionKind={rowActionKind}
               onAction={onRowAction}
+              discardLabel={rowDiscardLabel}
+              onDiscard={onRowDiscard}
               onOpen={onOpen}
               actionBusy={actionBusy}
               isNew={isNew}
@@ -285,6 +373,9 @@ interface FileRowProps {
   actionKind: "stage" | "unstage";
   /** Untracked group: show the "New" badge like the template panel. */
   isNew?: boolean;
+  /** Present only on worktree-side rows; opens the discard confirmation. */
+  discardLabel?: string;
+  onDiscard?: (path: string) => void;
   onAction: (path: string) => void;
   onOpen: (path: string) => void;
   actionBusy: boolean;
@@ -295,6 +386,8 @@ const FileRow = memo(function FileRow({
   actionLabel,
   actionKind,
   isNew = false,
+  discardLabel,
+  onDiscard,
   onAction,
   onOpen,
   actionBusy,
@@ -306,7 +399,7 @@ const FileRow = memo(function FileRow({
   const dirPart = sepIdx > 0 ? entry.path.slice(0, sepIdx + 1) : "";
   const filePart = sepIdx >= 0 ? entry.path.slice(sepIdx + 1) : entry.path;
   return (
-    <li className="group flex items-center gap-2 px-3 py-1 hover:bg-background-secondary-hover">
+    <li className="group relative grid min-h-8 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-1.5 px-3 hover:bg-background-secondary-hover">
       <span
         className={cx(
           "w-4 shrink-0 text-center font-mono text-xs",
@@ -320,52 +413,90 @@ const FileRow = memo(function FileRow({
           <button
             type="button"
             onClick={() => onOpen(entry.path)}
-            className="flex min-w-0 flex-1 items-baseline text-left font-mono text-xs"
+            aria-label={isNew ? `${entry.path} (${t("git.newFile")})` : undefined}
+            className="flex min-w-0 items-baseline overflow-hidden text-left font-mono text-xs"
           >
             {/* Directory truncates from the left (…/foo/bar) so the filename
-                — the most important part — is always fully visible; the tooltip
+                — the most important part — stays visible as long as possible;
+                it right-truncates only when it alone overflows. The tooltip
                 below shows the full path on hover. */}
             {dirPart && (
               <span dir="rtl" className="min-w-0 truncate text-left text-text-tertiary">
                 <bdo dir="ltr">{dirPart}</bdo>
               </span>
             )}
-            <span className="shrink-0 text-text-primary">{filePart}</span>
+            <span className="min-w-0 truncate text-text-primary">{filePart}</span>
           </button>
         </Focusable>
         <TooltipContent className="break-all font-mono">{entry.path}</TooltipContent>
       </Tooltip>
-      {entry.additions !== undefined && (
-        <span className="shrink-0 text-xs text-state-success-text">+{entry.additions}</span>
-      )}
-      {entry.deletions !== undefined && entry.deletions > 0 && (
-        <span className="shrink-0 text-xs text-text-error-primary">−{entry.deletions}</span>
-      )}
-      {isNew && (
-        <span className="shrink-0 rounded-sm bg-background-tertiary-default px-1 py-px text-caption-1-medium text-text-secondary">
-          {t("git.newFile")}
-        </span>
-      )}
-      <button
-        type="button"
-        disabled={actionBusy}
-        onClick={() => onAction(entry.path)}
-        aria-label={actionLabel}
-        title={actionLabel}
+      <span className="flex min-w-0 items-center justify-end gap-1 font-mono text-xs tabular-nums">
+        {isNew && (
+          <Tooltip>
+            <Focusable>
+              <span
+                role="img"
+                aria-label={t("git.newFile")}
+                className="size-1.5 shrink-0 rounded-full bg-notification-success-foreground"
+              />
+            </Focusable>
+            <TooltipContent>{t("git.newFile")}</TooltipContent>
+          </Tooltip>
+        )}
+        {entry.additions !== undefined && (
+          <span className="truncate text-state-success-text">+{entry.additions}</span>
+        )}
+        {entry.deletions !== undefined && entry.deletions > 0 && (
+          <span className="truncate text-text-error-primary">−{entry.deletions}</span>
+        )}
+      </span>
+      <div
+        // Row actions overlay the trailing edge instead of reserving
+        // permanent columns, so path + stats use the full row width. The
+        // solid background (matching the row's own bg in each state) hides
+        // the text underneath; reveal happens on row hover or keyboard
+        // focus within the row.
         className={cx(
-          "shrink-0 rounded p-0.5 text-foreground-icon-secondary opacity-0",
-          // Reveal on row hover AND on keyboard focus (same contract as the
-          // file-tree mention button).
-          "group-hover:opacity-100 focus-visible:opacity-100 hover:bg-background-tertiary-hover",
-          "disabled:text-foreground-icon-disabled",
+          "absolute inset-y-0 right-1.5 flex items-center gap-0.5 pl-3",
+          "bg-background-primary-default group-hover:bg-background-secondary-hover",
+          "pointer-events-none opacity-0",
+          "group-hover:pointer-events-auto group-hover:opacity-100",
+          "focus-within:pointer-events-auto focus-within:opacity-100",
         )}
       >
-        {actionKind === "stage" ? (
-          <Plus aria-hidden className="size-4" />
-        ) : (
-          <Minus aria-hidden className="size-4" />
+        {discardLabel !== undefined && onDiscard !== undefined && (
+          <button
+            type="button"
+            disabled={actionBusy}
+            onClick={() => onDiscard(entry.path)}
+            aria-label={discardLabel}
+            title={discardLabel}
+            className={cx(
+              "rounded p-0.5 text-foreground-icon-secondary",
+              "hover:bg-background-tertiary-hover disabled:text-foreground-icon-disabled",
+            )}
+          >
+            <Undo2 aria-hidden className="size-4" />
+          </button>
         )}
-      </button>
+        <button
+          type="button"
+          disabled={actionBusy}
+          onClick={() => onAction(entry.path)}
+          aria-label={actionLabel}
+          title={actionLabel}
+          className={cx(
+            "rounded p-0.5 text-foreground-icon-secondary",
+            "hover:bg-background-tertiary-hover disabled:text-foreground-icon-disabled",
+          )}
+        >
+          {actionKind === "stage" ? (
+            <Plus aria-hidden className="size-4" />
+          ) : (
+            <Minus aria-hidden className="size-4" />
+          )}
+        </button>
+      </div>
     </li>
   );
 });

@@ -5,7 +5,11 @@ import { SlashCommandMenu, type SlashCommandMenuHandle } from "./slash-command-m
 import { useSlashCommandStore } from "./slash-commands";
 import { type SlashCommandEntry } from "@/lib/ipc";
 
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+  // lib/i18n (pulled in via app-commands) initializes i18next with this plugin.
+  initReactI18next: { type: "3rdParty", init: () => {} },
+}));
 // jsdom omits scrollIntoView; the menu calls it to keep the active row visible.
 Element.prototype.scrollIntoView ??= () => {};
 
@@ -42,16 +46,42 @@ describe("SlashCommandMenu", () => {
     );
     const headers = [...node.querySelectorAll('[role="listbox"] > div > div > div:first-child')]
       .map((el) => el.textContent)
-      .filter((text) => text === "chat.slashGroupCommands" || text === "chat.slashGroupSkills");
-    expect(headers).toEqual(["chat.slashGroupCommands", "chat.slashGroupSkills"]);
-    // Commands first (backend catalog order), skills after; each row ends
-    // with its kind badge.
+      .filter((text) => text?.startsWith("chat.slashGroup"));
+    expect(headers).toEqual(["chat.slashGroupApp", "chat.slashGroupCommands", "chat.slashGroupSkills"]);
+    // Built-in app rows lead, then commands (backend catalog order), then
+    // skills; each row ends with its kind badge.
     const rows = optionTexts(node);
-    expect(rows).toHaveLength(3);
-    expect(rows[0]).toContain("/commit");
-    expect(rows[0]).toContain("chat.slashKindCommand");
-    expect(rows[2]).toContain("/code-review");
-    expect(rows[2]).toContain("chat.slashKindSkill");
+    expect(rows).toHaveLength(6);
+    expect(rows[0]).toContain("/new");
+    expect(rows[0]).toContain("chat.slashKindApp");
+    expect(rows[1]).toContain("/clear");
+    expect(rows[3]).toContain("/commit");
+    expect(rows[3]).toContain("chat.slashKindCommand");
+    expect(rows[5]).toContain("/code-review");
+    expect(rows[5]).toContain("chat.slashKindSkill");
+  });
+
+  it("a catalog command named like an app command shadows the app row", async () => {
+    useSlashCommandStore.setState({
+      byRoot: {
+        "/ws": {
+          entries: [...ENTRIES, { name: "new", description: "用户自定义", source: "workspace", kind: "command" }],
+          status: "ready",
+          fetchedAt: Date.now(),
+        },
+      },
+    });
+    await act(async () =>
+      root.render(
+        <SlashCommandMenu root="/ws" query="" left={0} onSelect={vi.fn()} onClose={vi.fn()} />,
+      ),
+    );
+    const rows = optionTexts(node);
+    // /clear and /compact remain in the app group; the user's /new renders
+    // as a command row instead.
+    expect(rows.filter((text) => text?.includes("chat.slashKindApp"))).toHaveLength(2);
+    expect(rows.filter((text) => text?.includes("/new"))).toHaveLength(1);
+    expect(rows.find((text) => text?.includes("/new"))).toContain("chat.slashKindCommand");
   });
 
   it("keyboard navigation crosses the kind boundary and Enter selects", async () => {
@@ -70,13 +100,13 @@ describe("SlashCommandMenu", () => {
       ),
     );
     // The ref is re-registered as activeIndex changes; read it fresh per
-    // keypress (a cached handle closes over a stale `active`).
-    act(() => {
-      expect(menuRef.current!.handleKey("ArrowDown")).toBe(true);
-    });
-    act(() => {
-      expect(menuRef.current!.handleKey("ArrowDown")).toBe(true);
-    });
+    // keypress (a cached handle closes over a stale `active`). Rows: three
+    // app entries, then commands, then the skill — five downs reach it.
+    for (let i = 0; i < 5; i++) {
+      act(() => {
+        expect(menuRef.current!.handleKey("ArrowDown")).toBe(true);
+      });
+    }
     expect(node.querySelector('[data-active="true"]')?.textContent).toContain("/code-review");
     act(() => {
       expect(menuRef.current!.handleKey("Enter")).toBe(true);

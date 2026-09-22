@@ -138,6 +138,9 @@ struct SendMessageArgs {
     effort: Option<String>,
     permission: Option<String>,
     provider_id: Option<String>,
+    /// Desktop-only feature; default keeps older web clients compatible.
+    #[serde(default)]
+    computer_use: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -393,6 +396,14 @@ struct SearchTextArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchMessagesArgs {
+    query: String,
+    sort: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GitDiffArgs {
     path: String,
     file: String,
@@ -574,6 +585,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
                 a.permission,
                 a.provider_id,
                 a.run_id,
+                a.computer_use,
             )
             .await)
         }
@@ -811,6 +823,19 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
             let a: SearchTextArgs = parse_args(&raw)?;
             ser(crate::files::search_text(app.state(), a.path, a.query).await)
         }
+        "search_messages" => {
+            let a: SearchMessagesArgs = parse_args(&raw)?;
+            ser(
+                crate::history::search::search_messages(
+                    app.state(),
+                    a.query,
+                    a.sort,
+                    a.limit,
+                    a.offset,
+                )
+                .await,
+            )
+        }
         "list_file_index" => {
             let a: FileIndexArgs = parse_args(&raw)?;
             ser(
@@ -915,7 +940,7 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "git_diff" => {
             let a: GitDiffArgs = parse_args(&raw)?;
-            ser(crate::git::git_diff(a.path, a.file, a.staged))
+            ser(crate::git::git_diff(a.path, a.file, a.staged).await)
         }
         "git_stage" => {
             let a: GitFilesArgs = parse_args(&raw)?;

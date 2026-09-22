@@ -40,6 +40,7 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
         permission: None,
         additional_dirs: Vec::new(),
         provider_id: None,
+        computer_use: None,
     };
     let bin = which::which(engine_id)
         .map(|p| p.to_string_lossy().to_string())
@@ -143,6 +144,7 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
                     println!("  done (usage: {})", usage.is_some());
                     done = true;
                 }
+                _ => {}
             }
         }
     }

@@ -426,24 +426,73 @@ async fn host_post(origin: &str, method: &str, args: Value) -> Result<(u16, Valu
 
 /// One unary RPC round-trip, returning the server-response `result.value`.
 pub(crate) async fn host_call(origin: &str, method: &str, args: Value) -> Result<Value, String> {
-    let (status, envelope) = host_post(origin, method, args).await?;
+    host_call_rpc(origin, method, args)
+        .await
+        .map_err(|error| error.message)
+}
+
+/// RPC refusal with the gateway's structured error kept intact, so callers
+/// can classify on `code`/`details.reason` (e.g. the image-admission
+/// leftover refusal) instead of parsing a flattened message. `message`
+/// carries the same flattened text `host_call` reports; transport-level
+/// failures (401, non-envelope) use synthetic codes.
+pub(crate) struct HostRpcError {
+    pub code: String,
+    pub message: String,
+    pub details: Value,
+}
+
+/// One unary RPC round-trip, returning the server-response `result.value`.
+pub(crate) async fn host_call_rpc(
+    origin: &str,
+    method: &str,
+    args: Value,
+) -> Result<Value, HostRpcError> {
+    let flattened = match host_post(origin, method, args).await {
+        Ok(pair) => pair,
+        Err(message) => {
+            return Err(HostRpcError {
+                code: "transport".to_string(),
+                message,
+                details: Value::Null,
+            })
+        }
+    };
+    let (status, envelope) = flattened;
     if status == 401 {
-        return Err(format!(
-            "{method} 未授权（401）：host 凭据缺失或已失效，请在设置里重新启动 DSH host。"
-        ));
+        return Err(HostRpcError {
+            code: "unauthorized".to_string(),
+            message: format!(
+                "{method} 未授权（401）：host 凭据缺失或已失效，请在设置里重新启动 DSH host。"
+            ),
+            details: Value::Null,
+        });
     }
     if envelope.get("type").and_then(Value::as_str) != Some("server-response") {
-        return Err(format!("{method} 响应格式不正确（非 server-response）"));
+        return Err(HostRpcError {
+            code: "bad-envelope".to_string(),
+            message: format!("{method} 响应格式不正确（非 server-response）"),
+            details: Value::Null,
+        });
     }
     let result = envelope.get("result").cloned().unwrap_or(Value::Null);
     if result.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(result.get("value").cloned().unwrap_or(Value::Null));
     }
-    let message = result
-        .pointer("/error/message")
+    let error = result.get("error").cloned().unwrap_or(Value::Null);
+    let message = error
+        .get("message")
         .and_then(Value::as_str)
         .unwrap_or("未知错误");
-    Err(format!("{method} 被拒绝：{message}"))
+    Err(HostRpcError {
+        code: error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        message: format!("{method} 被拒绝：{message}"),
+        details: error.get("details").cloned().unwrap_or(Value::Null),
+    })
 }
 
 /// Liveness classification for the describe probe. `Unauthorized` means the

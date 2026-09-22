@@ -5,7 +5,9 @@
 //! - RPC is plain HTTP ([`crate::dsh_host::host_call`], cookie-authenticated):
 //!   `workspace/create` → `session/create` (resume passes the known
 //!   sessionId) → `session/selectModel`? → `session/prompt` (mode "queue");
-//!   interrupt sends `session/cancel`.
+//!   interrupt sends `session/cancel`. Attachments ride the prompt as base64
+//!   image content parts, after [`super::dsh_images`] declares the input
+//!   modality on hand-declared `llm-pi-ai` routes (`settings/mutate`).
 //! - Streams share one WebSocket, `ws://<origin>/api/remote.mux` with the
 //!   auth cookie: open `$events` (the ready frame yields the events clientId;
 //!   waterfall frames are approval/question calls, answered via
@@ -28,7 +30,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{EngineEvent, SendRequest, TurnCore, TurnState};
+use super::{dsh_images, EngineEvent, SendRequest, TurnCore, TurnState, VirtualRunGuard};
 use crate::dsh_host::host_call;
 
 /// 提取并规范化上下文窗口字段
@@ -99,7 +101,28 @@ pub(crate) async fn run_host_turn(
     let mut state = TurnState::new(req.session_id.clone());
     let mut view = TurnView::default();
     let preassigned_session_id = req.session_id.clone();
+    // Abort-safe backstop: the by-name removals below only run when the task
+    // finishes normally. An abort or a panic would otherwise leave this run's
+    // keys pinning a concurrency slot until app exit.
+    let _registry_guard =
+        VirtualRunGuard::new(Arc::clone(&core.registry), core.run_id.clone(), virtual_pid);
     let result = turn_inner(&core, &mut state, &mut view, &req, &host, &killed).await;
+    // Pending questions die with the turn: settle their cards BEFORE any
+    // terminal dispatch, or the monotonic saw_done/saw_error guard in
+    // dispatch_event would drop these and leave answerable cards pointing at
+    // a settled turn.
+    for key in [
+        state.native_session_id.clone(),
+        Some(core.run_id.clone()),
+        preassigned_session_id.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for request_id in core.registry.take_questions(&key) {
+            core.dispatch_event(&mut state, EngineEvent::QuestionSettled { request_id });
+        }
+    }
     if let Err(error) = result {
         core.dispatch_event(&mut state, EngineEvent::Error(error));
     }
@@ -176,12 +199,12 @@ async fn turn_inner(
     if let Some(model) = req.model.as_deref().filter(|m| m.contains('/')) {
         let (provider, model) = model.split_once('/').unwrap_or(("", model));
         if !provider.is_empty() && !model.is_empty() {
-            let selected = host_call(
-                &origin,
-                "session/selectModel",
-                json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } }),
-            )
-            .await;
+            let mut select_args = json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } });
+            if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                select_args["request"]["effort"] = json!(effort);
+                select_args["request"]["reasoningEffort"] = json!(effort);
+            }
+            let selected = host_call(&origin, "session/selectModel", select_args).await;
             if selected.is_err() {
                 core.dispatch_event(
                     state,
@@ -191,28 +214,58 @@ async fn turn_inner(
         }
     }
 
+    // Attachments: load through the shared image pipeline, then make sure
+    // the session's route actually admits images — hand-declared llm-pi-ai
+    // routes default to text-only until ccgui writes the modality claim.
+    let prompt_images = dsh_images::load_prompt_images(&req.images, &req.workspace)?;
+    if !prompt_images.is_empty() {
+        let Some((provider, model)) =
+            dsh_images::current_selection(&origin, req.model.as_deref()).await
+        else {
+            return Err(
+                "DSH 需要先选定模型才能发送图片：host 未报告当前 provider/model".to_string(),
+            );
+        };
+        dsh_images::ensure_image_admission(&origin, &provider, &model).await?;
+    }
+
     let mut ws = mux_connect(&origin, cookie.as_deref()).await?;
     // Streams must be live before the prompt so no turn event races the
-    // subscription; the follow snapshot proves the subscription landed.
-    ws_open_and_wait(&mut ws, &session_id).await;
+    // subscription: the follow snapshot proves the follow subscription landed,
+    // and the $events ready frame carries the clientId every question answer
+    // needs. Waiting for both kills the race where a waterfall frame arrived
+    // before the ready frame and the question was skipped as "未就绪".
+    view.events_client_id = ws_open_and_wait(&mut ws, &session_id).await;
+    if view.events_client_id.is_none() {
+        core.dispatch_event(
+            state,
+            EngineEvent::Warn("提问通道未就绪，本轮中的提问请求将被跳过".to_string()),
+        );
+    }
 
-    let prompt = host_call(
+    let mut prompt_request = json!({
+        "requestId": format!("codemoss-{}", uuid::Uuid::new_v4()),
+        "sessionId": session_id,
+        "mode": "queue",
+        "content": dsh_images::build_prompt_content(&req.prompt, &prompt_images),
+        "clientTimeZone": client_time_zone(),
+    });
+    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        prompt_request["effort"] = json!(effort);
+        prompt_request["reasoningEffort"] = json!(effort);
+    }
+    let prompt = crate::dsh_host::host_call_rpc(
         &origin,
         "session/prompt",
-        json!({
-            "request": {
-                "requestId": format!("codemoss-{}", uuid::Uuid::new_v4()),
-                "sessionId": session_id,
-                "mode": "queue",
-                "content": [{ "type": "text", "text": req.prompt }],
-                "clientTimeZone": client_time_zone(),
-            }
-        }),
+        json!({ "request": prompt_request }),
     )
     .await;
     if let Err(error) = prompt {
         let _ = ws.close(None).await;
-        return Err(format!("任务下发失败：{error}"));
+        return Err(format!(
+            "任务下发失败：{}",
+            dsh_images::format_prompt_refusal(&error)
+        ));
     }
 
     let (mut write, mut read) = ws.split();
@@ -444,10 +497,17 @@ async fn handle_events_frame(
                 );
                 return;
             };
+            // Questions park host-side until the user answers from the card
+            // (answer_question posts the outcome); approvals keep the v1
+            // auto-allow policy; unknown waterfall kinds reject as before.
+            if kind == "user-questions/request" {
+                park_question(core, state, value, origin, &client_id, event_id).await;
+                return;
+            }
             // v1 policy: approvals auto-allow — API-created sessions already
             // run tools without a permission flow (the headless engine had
             // the same implicit behavior), and codemoss has no approval UI
-            // for host sessions yet. Questions cancel with a surfaced notice.
+            // for host sessions yet.
             let (outcome, notice) = if kind == "approval/request" {
                 (
                     json!({ "kind": "result", "value": "allowed-once" }),
@@ -459,7 +519,7 @@ async fn handle_events_frame(
                         "kind": "rejected",
                         "error": { "code": "cancelled", "message": "the user cancelled ask_user_question" },
                     }),
-                    Some("已取消一个提问请求（host 会话暂无提问交互）".to_string()),
+                    Some("已取消一个未识别的交互请求".to_string()),
                 )
             };
             let answered = host_call(
@@ -479,8 +539,176 @@ async fn handle_events_frame(
                 (Ok(_), None) => {}
             }
         }
+        // Cancellation of a pending waterfall previously delivered under the
+        // same id: settle the card so it never stays answerable against a
+        // request the host already withdrew.
+        Some("cancel") => {
+            if let Some(event_id) = value.get("eventId").and_then(Value::as_str) {
+                core.dispatch_event(
+                    state,
+                    EngineEvent::QuestionSettled {
+                        request_id: event_id.to_string(),
+                    },
+                );
+            }
+        }
         _ => {}
     }
+}
+
+/// Park a `user-questions/request` waterfall: surface the question card and
+/// stash the answer context under the same request id. `$events/result` needs
+/// the origin + clientId + eventId triple plus the original request (question
+/// ids), none of which the UI projection carries — so the parked value is the
+/// answer context, not the render input.
+async fn park_question(
+    core: &TurnCore,
+    state: &mut TurnState,
+    value: &Value,
+    origin: &str,
+    client_id: &str,
+    event_id: &str,
+) {
+    let request = value.get("request").cloned().unwrap_or(Value::Null);
+    let questions = render_questions(&request);
+    if questions.is_empty() {
+        // A question nobody can see must not park the host forever: reject
+        // the waterfall and say so.
+        let _ = host_call(
+            origin,
+            "$events/result",
+            json!({
+                "clientId": client_id,
+                "eventId": event_id,
+                "outcome": {
+                    "kind": "rejected",
+                    "error": { "name": "UserQuestionError", "code": "cancelled", "message": "empty question request" },
+                },
+            }),
+        )
+        .await;
+        core.dispatch_event(
+            state,
+            EngineEvent::Warn("收到空的提问请求，已跳过".to_string()),
+        );
+        return;
+    }
+    core.dispatch_event(
+        state,
+        EngineEvent::Question {
+            request_id: event_id.to_string(),
+            tool_use_id: None,
+            input: json!({ "questions": questions }),
+        },
+    );
+    // dispatch_event parked the render input under this request id; overwrite
+    // it with the answer context the answer command actually needs.
+    if let Some(entry) = core.registry.get(&core.run_id) {
+        if let Ok(mut parked) = entry.questions.lock() {
+            parked.insert(
+                event_id.to_string(),
+                json!({
+                    "dsh": {
+                        "origin": origin,
+                        "clientId": client_id,
+                        "eventId": event_id,
+                        "request": request,
+                    }
+                }),
+            );
+        }
+    }
+}
+
+/// Project a dsh `user-questions/request` payload onto the QuestionSpec shape
+/// the UI renders (the claude control-protocol shape): `header` defaults,
+/// `detail` folds into the question text (the plan-review intent carries the
+/// plan markdown there), options pass through unchanged. The answer command
+/// re-derives answer keys from the parked original request through this same
+/// mapping, so the two must never drift apart.
+pub(crate) fn render_questions(request: &Value) -> Vec<Value> {
+    let Some(questions) = request.get("questions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    questions
+        .iter()
+        .map(|question| {
+            let mut text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(detail) = question
+                .get("detail")
+                .and_then(Value::as_str)
+                .filter(|detail| !detail.trim().is_empty())
+            {
+                text = format!("{text}\n\n{detail}");
+            }
+            json!({
+                "question": text,
+                "header": question.get("header").and_then(Value::as_str).unwrap_or("提问"),
+                "multiSelect": question.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+                "options": question.get("options").cloned().unwrap_or_else(|| json!([])),
+            })
+        })
+        .collect()
+}
+
+/// Build the `$events/result` outcome for a parked dsh question. `answers` is
+/// the UI's map (rendered question text → picked label(s)); a free-form
+/// string matching no option label travels as `custom`. `None` (or a
+/// non-object) means the user dismissed the card.
+pub(crate) fn question_outcome(request: &Value, answers: Option<&Value>) -> Value {
+    let Some(answers) = answers.and_then(Value::as_object) else {
+        return json!({
+            "kind": "rejected",
+            "error": { "name": "UserQuestionError", "code": "cancelled", "message": "the user cancelled ask_user_question" },
+        });
+    };
+    let rendered = render_questions(request);
+    let questions = request
+        .get("questions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut items = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let id = question
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        // Answers key on the rendered question text (detail folded in), so
+        // re-derive the same key rather than trusting the raw question.
+        let key = rendered
+            .get(index)
+            .and_then(|r| r.get("question"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let known_labels: Vec<&str> = question
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|o| o.get("label").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let item = match answers.get(key) {
+            Some(Value::Array(labels)) => json!({ "id": id, "selected": labels }),
+            Some(Value::String(text)) if known_labels.contains(&text.as_str()) => {
+                json!({ "id": id, "selected": [text] })
+            }
+            Some(Value::String(text)) => {
+                json!({ "id": id, "selected": [], "custom": text })
+            }
+            _ => json!({ "id": id, "selected": [] }),
+        };
+        items.push(item);
+    }
+    json!({ "kind": "result", "value": { "answers": items } })
 }
 
 // ==================== transport helpers ====================
@@ -511,9 +739,12 @@ async fn ws_send(ws: &mut Ws, payload: Value) -> Result<(), String> {
 }
 
 /// Open both logical streams and wait for the follow snapshot (proof the
-/// subscription is live) before the caller dispatches the prompt — with a
-/// bounded fallback so a gateway that skips snapshots cannot stall sends.
-async fn ws_open_and_wait(ws: &mut Ws, session_id: &str) {
+/// follow subscription is live) AND the `$events` ready frame (its clientId
+/// heads every `$events/result` answer) before the caller dispatches the
+/// prompt — with a bounded fallback so a gateway that skips either cannot
+/// stall sends. Returns the events clientId when the ready frame arrived in
+/// time; a late ready frame is still picked up by the main loop.
+async fn ws_open_and_wait(ws: &mut Ws, session_id: &str) -> Option<String> {
     let opened = async {
         ws_send(
             ws,
@@ -542,25 +773,45 @@ async fn ws_open_and_wait(ws: &mut Ws, session_id: &str) {
     };
     if let Err(error) = opened.await {
         eprintln!("[dsh] mux stream open failed: {error}");
-        return;
+        return None;
     }
+    let mut follow_ready = false;
+    let mut events_client_id: Option<String> = None;
     let started = tokio::time::Instant::now();
-    while started.elapsed() < FOLLOW_READY_TIMEOUT {
+    while started.elapsed() < FOLLOW_READY_TIMEOUT && !(follow_ready && events_client_id.is_some())
+    {
         let next = tokio::time::timeout(FOLLOW_READY_TIMEOUT - started.elapsed(), ws.next()).await;
         match next {
             Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(value) = serde_json::from_str::<Value>(text.as_str()) {
-                    if value.get("type").and_then(Value::as_str) == Some("item")
-                        && value.get("streamId").and_then(Value::as_str) == Some(STREAM_FOLLOW)
-                        && value.pointer("/value/type").and_then(Value::as_str) == Some("snapshot")
+                let Ok(value) = serde_json::from_str::<Value>(text.as_str()) else {
+                    continue;
+                };
+                if value.get("type").and_then(Value::as_str) != Some("item") {
+                    continue;
+                }
+                match value.get("streamId").and_then(Value::as_str) {
+                    Some(STREAM_FOLLOW)
+                        if value.pointer("/value/type").and_then(Value::as_str)
+                            == Some("snapshot") =>
                     {
-                        return;
+                        follow_ready = true;
                     }
+                    Some(STREAM_EVENTS)
+                        if value.pointer("/value/type").and_then(Value::as_str)
+                            == Some("ready") =>
+                    {
+                        events_client_id = value
+                            .pointer("/value/clientId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    _ => {}
                 }
             }
-            Ok(Some(Ok(_))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => return,
+            Ok(Some(Ok(_))) | Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
         }
     }
+    events_client_id
 }
 
 fn message_text(data: &Value) -> String {
@@ -677,6 +928,7 @@ mod tests {
             permission: None,
             additional_dirs: Vec::new(),
             provider_id: None,
+            computer_use: None,
         };
         run_host_turn(
             core,
@@ -754,6 +1006,7 @@ mod tests {
                     permission: None,
                     additional_dirs: Vec::new(),
                     provider_id: None,
+                    computer_use: None,
                 };
                 run_host_turn(
                     core,
@@ -803,6 +1056,191 @@ mod tests {
         assert!(
             !kinds2.iter().any(|(kind, _)| kind == "error"),
             "turn 2 errored: {kinds2:?}"
+        );
+    }
+
+    /// A TurnCore with a registry entry under its run id (so question parking
+    /// has somewhere to land) plus the collected flushes for assertions.
+    fn test_core() -> (TurnCore, Arc<ProcessRegistry>, Arc<CollectingEmitter>) {
+        let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
+        let registry = Arc::new(ProcessRegistry::default());
+        registry.insert(
+            "test-run".to_string(),
+            crate::engine::registry::ChildEntry {
+                child: None,
+                pid: 4_000_000_099,
+                run_id: "test-run".to_string(),
+                killed: Arc::new(AtomicBool::new(false)),
+                reader_abort: Arc::new(std::sync::OnceLock::new()),
+                stdin: None,
+                questions: Arc::new(StdMutex::new(HashMap::new())),
+            },
+        );
+        let core = TurnCore {
+            sink: EventSink::new(emitter.clone()),
+            registry: Arc::clone(&registry),
+            engine_id: "dsh".to_string(),
+            run_id: "test-run".to_string(),
+        };
+        (core, registry, emitter)
+    }
+
+    #[test]
+    fn render_questions_maps_the_dsh_shape_onto_the_card_spec() {
+        let request = json!({
+            "questions": [
+                {
+                    "id": "q1",
+                    "question": "选哪个？",
+                    "header": "方案",
+                    "multiSelect": true,
+                    "options": [{ "label": "A", "description": "a" }, { "label": "B" }],
+                },
+                {
+                    "id": "q2",
+                    "question": "approve this plan?",
+                    "detail": "# 计划\nstep 1",
+                    // no header / options: defaults kick in
+                },
+            ]
+        });
+        let rendered = render_questions(&request);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(rendered[0]["question"], "选哪个？");
+        assert_eq!(rendered[0]["header"], "方案");
+        assert_eq!(rendered[0]["multiSelect"], true);
+        assert_eq!(rendered[0]["options"][0]["label"], "A");
+        // detail folds into the question text (plan-review carries markdown).
+        assert_eq!(rendered[1]["question"], "approve this plan?\n\n# 计划\nstep 1");
+        assert_eq!(rendered[1]["header"], "提问");
+        assert_eq!(rendered[1]["multiSelect"], false);
+        assert_eq!(rendered[1]["options"], json!([]));
+        assert_eq!(render_questions(&json!({})), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn question_outcome_maps_labels_custom_and_dismiss() {
+        let request = json!({
+            "questions": [
+                { "id": "q1", "question": "单选", "options": [{ "label": "A" }, { "label": "B" }] },
+                { "id": "q2", "question": "多选", "multiSelect": true,
+                  "options": [{ "label": "x" }, { "label": "y" }] },
+                { "id": "q3", "question": "自由", "options": [{ "label": "A" }] },
+            ]
+        });
+        let answers = json!({ "单选": "A", "多选": ["x", "y"], "自由": "随便写写" });
+        let outcome = question_outcome(&request, Some(&answers));
+        assert_eq!(outcome["kind"], "result");
+        assert_eq!(outcome["value"]["answers"][0], json!({ "id": "q1", "selected": ["A"] }));
+        assert_eq!(outcome["value"]["answers"][1], json!({ "id": "q2", "selected": ["x", "y"] }));
+        // Free-form text matching no option label travels as custom.
+        assert_eq!(
+            outcome["value"]["answers"][2],
+            json!({ "id": "q3", "selected": [], "custom": "随便写写" })
+        );
+        // Dismissed card → cancelled rejection.
+        let dismissed = question_outcome(&request, None);
+        assert_eq!(dismissed["kind"], "rejected");
+        assert_eq!(dismissed["error"]["code"], "cancelled");
+        // An unanswered question still echoes its id with an empty selection.
+        let partial = question_outcome(&request, Some(&json!({})));
+        assert_eq!(partial["value"]["answers"][0], json!({ "id": "q1", "selected": [] }));
+    }
+
+    #[tokio::test]
+    async fn question_waterfall_emits_card_and_parks_answer_context() {
+        let (core, registry, emitter) = test_core();
+        let mut state = TurnState::new(None);
+        let mut view = TurnView {
+            events_client_id: Some("client-1".to_string()),
+            ..TurnView::default()
+        };
+        let frame = json!({
+            "type": "waterfall",
+            "event": "user-questions/request",
+            "eventId": "evt-1",
+            "agentId": "agent-1",
+            "request": {
+                "questions": [
+                    { "id": "q1", "question": "选哪个？", "options": [{ "label": "A" }, { "label": "B" }] }
+                ]
+            },
+        });
+        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        core.sink.flush();
+
+        // Card pushed to the UI…
+        let kinds = collect_kinds(&emitter.0.lock().unwrap());
+        let question = kinds
+            .iter()
+            .find(|(kind, _)| kind == "question")
+            .map(|(_, data)| data.clone())
+            .expect("no question event pushed");
+        assert_eq!(question["requestId"], "evt-1");
+        assert_eq!(question["input"]["questions"][0]["question"], "选哪个？");
+        // …and the answer context parked under the same request id.
+        let parked = registry
+            .get("test-run")
+            .and_then(|entry| entry.questions.lock().ok().and_then(|q| q.get("evt-1").cloned()))
+            .expect("answer context not parked");
+        assert_eq!(parked["dsh"]["origin"], "http://127.0.0.1:3080");
+        assert_eq!(parked["dsh"]["clientId"], "client-1");
+        assert_eq!(parked["dsh"]["eventId"], "evt-1");
+        assert_eq!(parked["dsh"]["request"]["questions"][0]["id"], "q1");
+    }
+
+    #[tokio::test]
+    async fn waterfall_without_events_channel_warns_and_parks_nothing() {
+        let (core, registry, emitter) = test_core();
+        let mut state = TurnState::new(None);
+        let mut view = TurnView::default(); // no events_client_id
+        let frame = json!({
+            "type": "waterfall",
+            "event": "user-questions/request",
+            "eventId": "evt-2",
+            "request": { "questions": [{ "id": "q1", "question": "x" }] },
+        });
+        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        core.sink.flush();
+        let kinds = collect_kinds(&emitter.0.lock().unwrap());
+        assert!(kinds.iter().any(|(kind, _)| kind == "warn"), "{kinds:?}");
+        assert!(!kinds.iter().any(|(kind, _)| kind == "question"), "{kinds:?}");
+        let empty = registry
+            .get("test-run")
+            .map(|entry| entry.questions.lock().map(|q| q.is_empty()).unwrap_or(true));
+        assert_eq!(empty, Some(true));
+    }
+
+    #[tokio::test]
+    async fn waterfall_cancel_frame_settles_the_card() {
+        let (core, _registry, emitter) = test_core();
+        let mut state = TurnState::new(None);
+        let mut view = TurnView {
+            events_client_id: Some("client-1".to_string()),
+            ..TurnView::default()
+        };
+        let frame = json!({
+            "type": "waterfall",
+            "event": "user-questions/request",
+            "eventId": "evt-3",
+            "request": { "questions": [{ "id": "q1", "question": "x", "options": [{ "label": "A" }] }] },
+        });
+        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        handle_events_frame(
+            &core,
+            &mut state,
+            &mut view,
+            &json!({ "type": "cancel", "eventId": "evt-3" }),
+            "http://127.0.0.1:3080",
+        )
+        .await;
+        core.sink.flush();
+        let kinds = collect_kinds(&emitter.0.lock().unwrap());
+        assert!(
+            kinds
+                .iter()
+                .any(|(kind, data)| kind == "question_settled" && data["requestId"] == "evt-3"),
+            "{kinds:?}"
         );
     }
 

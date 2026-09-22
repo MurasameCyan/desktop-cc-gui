@@ -1,7 +1,7 @@
 "use client";
 
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import FolderOpen from "lucide-react/dist/esm/icons/folder-open";
 import FolderSymlink from "lucide-react/dist/esm/icons/folder-symlink";
@@ -391,7 +391,7 @@ function RepoThreadList({
       <div className="min-h-0 overflow-hidden">
         {mounted ? (
           <PagedThreadList
-            expanded={expanded}
+            key={expanded ? "expanded" : "collapsed"}
             threads={threads}
             threadLimit={threadLimit}
             activeThreadId={activeThreadId}
@@ -406,10 +406,10 @@ function RepoThreadList({
 }
 
 /** Paged thread rows with the tree connector and the show-more/fewer
- *  pagination buttons. Stays mounted through the close animation; page
- *  resets on collapse so a remount or a quick re-expand both start at 0. */
+ *  pagination buttons. Stays mounted through the close animation; the
+ *  parent keys it by the expanded flag, so collapse and every re-expand
+ *  remount at page 0 — no reset effect needed. */
 function PagedThreadList({
-  expanded,
   threads,
   threadLimit,
   activeThreadId,
@@ -417,7 +417,6 @@ function PagedThreadList({
   onThreadAction,
   onThreadContextMenu,
 }: {
-  expanded: boolean;
   threads: AiChatThread[];
   threadLimit?: number;
   activeThreadId?: string;
@@ -428,11 +427,6 @@ function PagedThreadList({
   const { t } = useTranslation();
   // Pagination: 0 = 初始 limit 条, 1 = +50 条, 2 = 全部。
   const [page, setPage] = useState(0);
-  // Reset immediately on collapse so a quick re-expand (before unmount)
-  // still restarts as a short recent list.
-  useEffect(() => {
-    if (!expanded) setPage(0);
-  }, [expanded]);
   const { visibleThreads, hiddenCount } = paginateThreads(threads, threadLimit, page);
   const pageButtonClasses =
     "flex w-full cursor-pointer items-center rounded-2lg py-[5px] pr-2 pl-4 text-caption-1-medium text-text-tertiary transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-text-secondary";

@@ -7,6 +7,7 @@ import {
   CLI_CONFIG_CHANGED_EVENT,
   isPseudoProvider,
   providerEntries,
+  providerFamilyModels,
   providerModel,
   PSEUDO_LOCAL,
   type EngineId,
@@ -156,6 +157,10 @@ export function useEngineModels(
     const result: Record<string, ModelOption[]> = {};
     for (const engine of engines) {
       const configured = configuredModel(engine.id, cliConfig, providers[engine.id]);
+      const families = providerFamilyModels(
+        engine.id,
+        channelRaw(engine.id, cliConfig, providers[engine.id]),
+      );
       const providerModels = configured ? [configured] : [];
       const current = models[engine.id]?.trim();
       const catalog = catalogs[engine.id]?.models ?? [];
@@ -184,10 +189,22 @@ export function useEngineModels(
       const byId = new Map(catalog.map((m) => [m.id, m]));
       result[engine.id] = known.map((m) => {
         const entry = byId.get(m);
+        // The CLI's alias rows (Default/Opus/…) describe the CLI's OWN
+        // settings — the official channel's. Under another channel the alias
+        // runs that channel's mapped id (spawn injects its env), so the row
+        // has to name it; without this the list kept showing the official
+        // mapping after a channel switch.
+        const mapped = families[m];
         return {
           id: m,
-          label: entry?.name || m,
-          description: entry?.description ?? undefined,
+          label: mapped ?? (entry?.name || m),
+          description: mapped
+            ? // The CLI menu's own row shape ("Custom Opus model"): family is
+              // the alias id, capitalized the way the CLI displays it.
+              t("chat.customFamilyModel", {
+                family: m.charAt(0).toUpperCase() + m.slice(1),
+              })
+            : entry?.description ?? undefined,
           // Channel/override ids keep the "provider/model" shape, so the
           // prefix stands in when the catalog doesn't name the provider.
           provider: entry?.provider ?? (m.includes("/") ? m.slice(0, m.indexOf("/")) : undefined),
@@ -195,7 +212,7 @@ export function useEngineModels(
       });
     }
     return result;
-  }, [engines, cliConfig, catalogs, wsKey, models, customModels, providers]);
+  }, [engines, cliConfig, catalogs, wsKey, models, customModels, providers, t]);
   // Selectable ids WITHOUT the current-override append: what the channel,
   // the backend catalog, and the custom model list can actually serve.
   const knownIdsByEngine = useMemo(() => {

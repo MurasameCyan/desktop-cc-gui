@@ -7,6 +7,9 @@ import type { AiChatRepo } from "./ai-chat-sidebar";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({ t: (key: string) => key }),
+  // The palette's content-hit rows format relative time via the real i18n
+  // instance (time.ts), which initializes i18next with this plugin.
+  initReactI18next: { type: "3rdParty", init: () => {} },
 }));
 
 const KEY = "ccgui-next.sidebarExpandedWorkspaces:v1";

@@ -1,7 +1,6 @@
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { isWeb, serverVersion, webToken } from "./transport";
 
@@ -58,12 +57,6 @@ export function setWebviewZoom(fraction: number) {
       .setZoom(fraction)
       .catch(() => {});
   } catch {}
-}
-
-/** Titlebar drag is desktop-only. */
-export function startWindowDrag() {
-  if (isWeb) return;
-  void getCurrentWindow().startDragging();
 }
 
 /**

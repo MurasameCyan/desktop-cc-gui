@@ -454,12 +454,40 @@ export interface PluginContext {
       onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
       order?: number;
     }): Disposer;
+    /** 首页侧栏导航入口，位于内建「自动化」之下（权限 ui:sidebar-entry，
+     *  0.3.12 起）。onOpen 通常经 openCenterTab 打开本插件的中心页签。 */
+    registerSidebarNav(def: {
+      key?: string;
+      label: () => string;
+      icon?: ComponentLike<{ className?: string }>;
+      order?: number;
+      onOpen: () => void;
+    }): Disposer;
+    /** 中心页签定义（权限 ui:center-tab，0.3.12 起）：与会话/文件/浏览器
+     *  页签共享中部页签条；打开经 openCenterTab。 */
+    registerCenterTab(def: {
+      key?: string;
+      title: () => string;
+      icon?: ComponentLike<{ className?: string }>;
+      component: ComponentLike;
+      order?: number;
+    }): Disposer;
+    /** 打开（或聚焦）本插件已注册的中心页签（权限 ui:center-tab，
+     *  0.3.12 起）；页签未注册时抛错——打开失败必须可见。 */
+    openCenterTab(key?: string): void;
   };
   theme: {
     /** 注入样式表（权限 theme）；拒绝 @import/远程 url。 */
     injectCss(css: string): Disposer;
     /** BoardUI token 覆盖快捷方式；key 必须是 --* 自定义属性。 */
     setTokens(tokens: { light?: Record<string, string>; dark?: Record<string, string> }): Disposer;
+    /**
+     * 插件可消费的宿主 token 公开契约见 @ccgui/plugin-ui 的
+     * PLUGIN_UI_TOKEN_CONTRACT（packages/plugin-ui/src/tokens.ts）：清单内
+     * 的 --color-…、--gradient-… 等变量宿主承诺不重命名、不删除，插件样式
+     * 可安全 var() 引用（建议带 fallback）。做界面优先用 @ccgui/plugin-ui
+     * 组件包，而不是手搓样式或猜变量名。
+     */
   };
   i18n: {
     /** 注册语言包（权限 i18n）。 */
@@ -525,6 +553,20 @@ export interface PluginContext {
       id: string;
       list: () => Promise<ExternalSessionRow[]>;
     }): Disposer;
+  };
+  /** Agent 轮次（权限 `agent`，0.3.13 起）：经宿主引擎管线拉起 agent
+   *  进程——渠道注入、进程注册与聊天发送同构。事件经 `agent://<pluginId>`
+   *  总线话题推送（ctx.events.on 订阅）。桌面专属。 */
+  agent: {
+    start(def: {
+      engine: string;
+      prompt: string;
+      workspacePath: string;
+      model?: string;
+      providerId?: string;
+      sessionId?: string;
+    }): Promise<{ runId: string; sessionId: string | null }>;
+    interrupt(runId: string): Promise<void>;
   };
   bridge: {
     /** 通用能力出口（0.3.0 起；旧的 `cmd:<command>` 逐命令授权机制已删除）。

@@ -1,6 +1,6 @@
 [package]
 name = "ccgui-next"
-version = "1.0.6"
+version = "1.0.7"
 description = "CC GUI - multi-CLI AI chat desktop"
 edition = "2021"
 rust-version = "1.77.2"
@@ -13,7 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "unstable"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable", "macos-private-api"] }
+# macos-private-api: WebviewWindowBuilder::transparent on macOS (cursor
+# overlay window, src/cu_overlay.rs) is gated behind it.
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
@@ -44,6 +46,19 @@ zstd = "0.13"
 which = "7"
 # PTY for the integrated terminal panel.
 portable-pty = "0.8"
+# Computer use (src/computer_use.rs): xcap captures the screen, enigo injects
+# mouse/keyboard input; rmcp serves both as an stdio MCP server
+# (`--computer-use-mcp`) that engine CLIs spawn as a child process.
+xcap = "0.9"
+enigo = "0.6"
+image = "0.25"
+rmcp = { version = "3.4", features = ["server", "macros", "transport-io"] }
+# Drag the app bundle out of the window into System Settings' permission
+# lists (macOS Accessibility / Screen Recording accept drop-to-authorize).
+tauri-plugin-drag = "2.1"
+# Global Esc-to-stop while a computer-use run is active; registered only for
+# the run's lifetime so Esc is never stolen outside a session.
+tauri-plugin-global-shortcut = "2"
 sysinfo = "0.36.1"
 libc = "0.2"
 # LAN web access: serves the built frontend and bridges the command/event
@@ -56,7 +71,7 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["c
 serde_yaml = "0.9"
 # Linux-native Baidu Tongji transport: fixed hm.js fetch + hm.gif beacon with
 # rustls so it never touches the vendored-openssl stack or WebKit networking.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "json", "blocking"] }
 
 [target.'cfg(windows)'.dependencies]
 # Live User/Machine PATH for CLI discovery: a GUI process inherits the PATH

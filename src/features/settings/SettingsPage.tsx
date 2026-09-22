@@ -3,9 +3,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import {
-  SettingsModal,
+  SettingsShell,
   type SettingsNavGroup,
-} from "@/components/application/settings/settings-modal";
+} from "@/components/application/settings/settings-shell";
 import {
   pluginIdFromRegistryKey,
   settingsRegistry,
@@ -26,8 +26,11 @@ import "./sections";
 /** A nav group plus its rail order, sorted before handing to the modal. */
 type RailGroup = SettingsNavGroup & { order: number };
 const GROUP_META: Record<string, { labelKey: string; order: number }> = {
-  settings: { labelKey: "settings.title", order: 0 },
-  cli: { labelKey: "settings.cliManage", order: 1 },
+  system: { labelKey: "settings.groupSystem", order: 0 },
+  plugins: { labelKey: "settings.groupPlugins", order: 1 },
+  cli: { labelKey: "settings.cliManage", order: 2 },
+  workspace: { labelKey: "settings.groupWorkspace", order: 3 },
+  misc: { labelKey: "settings.groupMisc", order: 4 },
 };
 const KNOWN_GROUP_COUNT = Object.keys(GROUP_META).length;
 /** localStorage key for the user's CLI 管理 rail order (section keys). */
@@ -81,7 +84,7 @@ const renderHeaderActions = (key: string) => {
 };
 
 /**
- * Settings route: overlay for the BoardUI settings modal. ChatPage itself is mounted once
+ * Settings route: fullscreen settings shell. ChatPage itself is mounted once
  * by App on every route, so opening and closing settings never rebuilds
  * the chat tree.
  *
@@ -152,12 +155,23 @@ export default function SettingsPage() {
         const meta = GROUP_META[group];
         const order = meta?.order ?? KNOWN_GROUP_COUNT + index;
         if (group !== "cli") {
-          return [{ label: meta ? t(meta.labelKey) : group, order, items }];
+          // Every rail group collapses (chevron heading); the choice
+          // persists via the group id. All start expanded.
+          return [
+            {
+              id: group,
+              label: meta ? t(meta.labelKey) : group,
+              order,
+              collapsible: true,
+              defaultExpanded: true,
+              items,
+            },
+          ];
         }
         const ordered = orderByStoredKeys(items, orderedCliKeys);
-        // CLIs whose binary isn't installed drop into a collapsed 未安装
-        // bucket with grayed icons, CLIs the user turned off into the
-        // collapsed 未启用 bucket. Both buckets only exist once the engine
+        // CLIs whose binary isn't installed drop into a 未安装 bucket with
+        // grayed icons, CLIs the user turned off into the 未启用 bucket.
+        // Both buckets only exist once the engine
         // probe has landed and at least one CLI qualifies.
         // Plugin sections in this rail have no `cli:` key — no engine state,
         // they always stay in the main group.
@@ -193,8 +207,12 @@ export default function SettingsPage() {
             : installedItems;
         const rail: RailGroup[] = [
           {
+            id: "cli",
             label: meta ? t(meta.labelKey) : group,
             order,
+            collapsible: true,
+            defaultExpanded: true,
+            showCount: true,
             items: enabledItems,
             // The CLI 管理 rail is drag-sortable; the order persists across
             // sessions (localStorage) and new engines append at the end. A
@@ -212,20 +230,26 @@ export default function SettingsPage() {
             dragHandleLabel: t("settings.cliDrag"),
           },
         ];
-        if (disabledItems.length > 0) {
-          rail.push({
-            label: t("settings.cliDisabledGroup"),
-            order: order + 0.5,
-            collapsible: true,
-            items: disabledItems,
-          });
-        }
+        // Bucket order: 未安装 sorts before 未启用; both start collapsed to
+        // keep the rail quiet.
         if (uninstalledItems.length > 0) {
           rail.push({
+            id: "cli-missing",
             label: t("settings.cliNotInstalledGroup"),
+            order: order + 0.5,
+            collapsible: true,
+            showCount: true,
+            items: uninstalledItems,
+          });
+        }
+        if (disabledItems.length > 0) {
+          rail.push({
+            id: "cli-disabled",
+            label: t("settings.cliDisabledGroup"),
             order: order + 0.6,
             collapsible: true,
-            items: uninstalledItems,
+            showCount: true,
+            items: disabledItems,
           });
         }
         return rail;
@@ -242,8 +266,7 @@ export default function SettingsPage() {
   }, [sections, i18n.language]);
 
   return (
-    <SettingsModal
-      isOpen
+    <SettingsShell
       onClose={() => navigate("/")}
       defaultPage={pageParam}
       ariaLabel={t("settings.title")}

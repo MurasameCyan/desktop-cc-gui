@@ -74,7 +74,7 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
   const [savedText, setSavedText] = useState(content.text ?? "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [mdMode, setMdMode] = useState<"edit" | "preview">("edit");
+  const [mdMode, setMdMode] = useState<"edit" | "preview">(() => (MARKDOWN_RE.test(path) ? "preview" : "edit"));
   const [langExt, setLangExt] = useState<Extension[]>([]);
 
   const name = fileName(path);

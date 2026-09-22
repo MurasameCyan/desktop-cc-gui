@@ -21,10 +21,11 @@ describe("isKnownPermission", () => {
     }
   });
 
-  it("accepts every base permission (19 项)", () => {
+  it("accepts every base permission (32 项)", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
+    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(32);
   });
 
   it("accepts well-shaped network: grants (bare host / port / port range)", () => {

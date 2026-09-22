@@ -62,7 +62,7 @@ export function ChatPanelHeader({
   );
   return (
     <div className="flex h-full items-center">
-      <LaunchScriptActions workspacePath={workspacePath} />
+      <LaunchScriptActions key={workspacePath} workspacePath={workspacePath} />
       <HeaderOpenActions workspacePath={workspacePath} />
       {
         // Deliberately outside the xl-gated chrome below: that wrapper is

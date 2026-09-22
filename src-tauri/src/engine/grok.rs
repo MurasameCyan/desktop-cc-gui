@@ -1,5 +1,6 @@
 use super::{
     command_for_binary, images, safe_prompt_arg, BuiltCommand, Engine, EngineEvent, SendRequest,
+    Transport,
 };
 use serde_json::Value;
 
@@ -196,6 +197,7 @@ mod channel_tests {
             stdin_payload: None,
             keep_stdin_open: false,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         }
     }
@@ -466,7 +468,60 @@ impl Engine for GrokEngine {
         "grok"
     }
 
+    /// grok's native harness is ACP: `grok agent … stdio` speaks ndjson
+    /// JSON-RPC over the same pipes the app owns, so the model's question tool
+    /// has a channel (`_x.ai/ask_user_question`) that the one-shot headless
+    /// launch never had — there it answered the user's questions itself.
+    fn drives_own_transport(&self) -> bool {
+        true
+    }
+
+    /// A remote workspace keeps the CLI child path: the ACP driver spawns the
+    /// CLI locally and has no ssh path into the distro.
+    fn transport_for(&self, wsl: bool) -> Transport {
+        if wsl {
+            Transport::Child
+        } else {
+            Transport::Own
+        }
+    }
+
+    /// The command the ACP driver spawns, carrying the same model/effort and
+    /// auto-approval intent as the headless launch. The ACP session id comes
+    /// from the CLI (`session/new`), so there is nothing to preassign.
+    fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
+        let mut cmd = command_for_binary(bin);
+        cmd.arg("agent");
+        // Same reason as the headless launch: an approval prompt nobody can
+        // answer must never block the turn.
+        cmd.arg("--always-approve");
+        if let Some(model) = req.model.as_deref() {
+            cmd.arg("-m");
+            cmd.arg(model);
+        }
+        if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            cmd.arg("--effort");
+            cmd.arg(effort);
+        }
+        cmd.arg("stdio");
+        // Grok 0.2.x has no --no-auto-update flag; disable via env.
+        cmd.env("GROK_DISABLE_AUTOUPDATER", "1");
+        Ok(BuiltCommand {
+            command: cmd,
+            stdin_payload: None,
+            // The driver writes answers for parked questions to this pipe for
+            // the life of the session, so it stays open.
+            keep_stdin_open: true,
+            cleanup_files: Vec::new(),
+            mcp_restore: None,
+            preassigned_session_id: None,
+        })
+    }
+
     fn supports_images(&self) -> bool {
+        true
+    }
+    fn supports_effort(&self) -> bool {
         true
     }
     fn supported_permissions(&self) -> &'static [&'static str] {
@@ -483,6 +538,10 @@ impl Engine for GrokEngine {
         if let Some(model) = req.model.as_deref() {
             cmd.arg("-m");
             cmd.arg(model);
+        }
+        if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            cmd.arg("--effort");
+            cmd.arg(effort);
         }
         // `-s` creates a NEW session with a caller-chosen UUID and errors if it
         // already exists; `-r` resumes. Never both.
@@ -526,6 +585,7 @@ impl Engine for GrokEngine {
             stdin_payload: None,
             keep_stdin_open: false,
             cleanup_files,
+            mcp_restore: None,
             preassigned_session_id: preassigned,
         })
     }
@@ -572,5 +632,37 @@ impl Engine for GrokEngine {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn build_command_passes_effort_flag() {
+        let req = SendRequest {
+            session_id: Some("s1".into()),
+            prompt: "hi".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            workspace: PathBuf::from("/tmp"),
+            model: Some("grok-3".into()),
+            effort: Some("high".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = GrokEngine.build_command(&req, "grok").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
     }
 }

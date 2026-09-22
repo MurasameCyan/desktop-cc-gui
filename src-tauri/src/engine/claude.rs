@@ -49,6 +49,12 @@ impl Engine for ClaudeEngine {
     fn supports_images(&self) -> bool {
         true
     }
+    fn supports_computer_use(&self) -> bool {
+        true
+    }
+    fn supports_effort(&self) -> bool {
+        true
+    }
     fn supported_permissions(&self) -> &'static [&'static str] {
         &["auto", "manual", "plan", "bypass"]
     }
@@ -71,6 +77,10 @@ impl Engine for ClaudeEngine {
         // Headless -p cannot prompt mid-turn: "manual" maps onto claude's
         // default mode, where approval-needing tools are denied and the
         // agent is told to work around them (honest degrade, no fake ask).
+        // Tools pre-approved for this run, emitted as a single --allowedTools
+        // (headless -p cannot prompt mid-turn, so anything not listed here
+        // gets denied outright).
+        let mut preapproved: Vec<&str> = Vec::new();
         match self.resolve_permission(req.permission.as_deref()) {
             "bypass" => {
                 cmd.arg("--dangerously-skip-permissions");
@@ -87,10 +97,46 @@ impl Engine for ClaudeEngine {
                     // WebFetch still ask, and headless -p cannot prompt, so
                     // the CLI would deny every web call outright. Pre-approve
                     // the two read-only network tools in auto mode.
-                    cmd.arg("--allowedTools");
-                    cmd.arg("WebSearch");
-                    cmd.arg("WebFetch");
+                    preapproved.extend(["WebSearch", "WebFetch"]);
                 }
+            }
+        }
+        if req.computer_use == Some(true) {
+            // Computer use: expose this app's screenshot/input driver as an
+            // MCP child process (see computer_use.rs) and pre-approve its
+            // tools — a click-per-approval loop is unusable; the user opted
+            // in via the computer-use dialog and the driver itself fails
+            // closed on missing OS grants.
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("resolve own exe for computer use: {e}"))?;
+            let mut server = serde_json::json!({
+                "command": exe.to_string_lossy(),
+                "args": ["--computer-use-mcp"],
+            });
+            // Overlay control channel: the child reports action targets so
+            // the main app's virtual cursor can follow (absent in tests).
+            if let (Some(base), Some(token)) = (
+                crate::cu_overlay::control_base(),
+                crate::cu_overlay::control_token(),
+            ) {
+                server["env"] = serde_json::json!({
+                    "CCGUI_CU_CONTROL": base,
+                    "CCGUI_CU_TOKEN": token,
+                });
+            }
+            let config = serde_json::json!({
+                "mcpServers": {
+                    "ccgui-computer": server,
+                }
+            });
+            cmd.arg("--mcp-config");
+            cmd.arg(config.to_string());
+            preapproved.push("mcp__ccgui-computer");
+        }
+        if !preapproved.is_empty() {
+            cmd.arg("--allowedTools");
+            for tool in preapproved {
+                cmd.arg(tool);
             }
         }
         if let Some(model) = req.model.as_deref() {
@@ -99,22 +145,26 @@ impl Engine for ClaudeEngine {
             // reading native settings here would remap independent channels.
             cmd.arg(model);
         }
-        // Claude Code has no effort flag; the thinking budget env var is the
-        // effort knob. "low" stays at the CLI default (no forced thinking).
-        match req.effort.as_deref() {
-            Some("medium") => {
-                cmd.env("MAX_THINKING_TOKENS", "16384");
+        if let Some(effort) = req.effort.as_deref() {
+            cmd.arg("--effort");
+            cmd.arg(effort);
+            cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
+            // Token budget is a side channel for older CLIs; it must not rewrite the effort string.
+            match effort {
+                "medium" => {
+                    cmd.env("MAX_THINKING_TOKENS", "16384");
+                }
+                "high" => {
+                    cmd.env("MAX_THINKING_TOKENS", "65536");
+                }
+                "xhigh" => {
+                    cmd.env("MAX_THINKING_TOKENS", "131072");
+                }
+                "max" | "ultra" => {
+                    cmd.env("MAX_THINKING_TOKENS", "262144");
+                }
+                _ => {}
             }
-            Some("high") => {
-                cmd.env("MAX_THINKING_TOKENS", "65536");
-            }
-            Some("xhigh") => {
-                cmd.env("MAX_THINKING_TOKENS", "131072");
-            }
-            Some("max") => {
-                cmd.env("MAX_THINKING_TOKENS", "262144");
-            }
-            _ => {}
         }
         // Granted directories ride every launch: the CLI cannot expand its
         // allowed-dirs mid-process, and each send is a fresh process anyway,
@@ -138,6 +188,7 @@ impl Engine for ClaudeEngine {
             stdin_payload: Some(stdin_payload),
             keep_stdin_open: true,
             cleanup_files: Vec::new(),
+            mcp_restore: None,
             preassigned_session_id: None,
         })
     }
@@ -202,6 +253,16 @@ impl Engine for ClaudeEngine {
                     .filter(|s| !s.is_empty())
                 {
                     out.push(EngineEvent::Model(model.to_string()));
+                }
+                if let Some(effort) = value
+                    .get("message")
+                    .and_then(|m| m.get("thinking_effort"))
+                    .or_else(|| value.get("thinking_effort"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    out.push(EngineEvent::Effort(effort.to_string()));
                 }
             }
             "user" => {
@@ -708,6 +769,39 @@ fn parse_content_block_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_message_reports_actual_thinking_effort() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "session_id": "s-1",
+            "message": { "model": "claude-opus-4", "thinking_effort": "high" }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "high")),
+            "got {out:?}"
+        );
+
+        // Top-level fallback; blank values are ignored.
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({ "type": "assistant", "thinking_effort": " low " }).to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "low")),
+            "got {out:?}"
+        );
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({ "type": "assistant", "thinking_effort": "  " }).to_string(),
+            &mut out,
+        );
+        assert!(!out.iter().any(|e| matches!(e, EngineEvent::Effort(_))), "got {out:?}");
+    }
 
     #[test]
     fn ask_user_question_control_request_emits_question() {
@@ -1351,5 +1445,46 @@ mod tests {
             }
             _ => panic!("expected done event"),
         }
+    }
+
+    #[test]
+    fn build_command_passes_effort_flag() {
+        let engine = ClaudeEngine::new();
+        let mut request = SendRequest {
+            session_id: None,
+            prompt: "hi".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            workspace: std::path::PathBuf::from("/tmp"),
+            model: None,
+            effort: Some("xhigh".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = engine.build_command(&request, "claude").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--effort", "xhigh"]));
+
+        request.effort = Some("ultra".into());
+        let built = engine.build_command(&request, "claude").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--effort", "ultra"]));
+        assert_eq!(
+            built.command.as_std().get_envs().find(|(k, _)| *k == "CLAUDE_CODE_EFFORT_LEVEL").and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("ultra"))
+        );
     }
 }

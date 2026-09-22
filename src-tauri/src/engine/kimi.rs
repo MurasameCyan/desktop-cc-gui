@@ -1,6 +1,6 @@
 use super::{
     command_for_binary, images, push_session_id, safe_prompt_arg, BuiltCommand, Engine,
-    EngineEvent, SendRequest,
+    EngineEvent, SendRequest, Transport,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -66,6 +66,9 @@ pub(super) fn apply_channel(
     } else {
         command.env_remove("KIMI_MODEL_BASE_URL");
     }
+    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        command.env("KIMI_MODEL_THINKING_EFFORT", effort);
+    }
     Ok(())
 }
 
@@ -79,14 +82,8 @@ fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<Bui
     let mut cmd = command_for_binary(bin);
     cmd.arg("--output-format");
     cmd.arg("stream-json");
-    match KimiEngine.resolve_permission(req.permission.as_deref()) {
-        "plan" => {
-            cmd.arg("--plan");
-        }
-        "bypass" => {
-            cmd.arg("--yolo");
-        }
-        _ => {}
+    if KimiEngine.resolve_permission(req.permission.as_deref()) == "plan" {
+        return Err("Kimi plan mode requires the local ACP transport; prompt mode cannot enforce it".into());
     }
     if native_model {
         if let Some(model) = req.model.as_deref() {
@@ -101,11 +98,15 @@ fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<Bui
     let prompt_text = images::kimi_prompt_with_images(&req.prompt, &req.images, &req.workspace);
     cmd.arg("--prompt");
     cmd.arg(safe_prompt_arg(&prompt_text));
+    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        cmd.env("KIMI_MODEL_THINKING_EFFORT", effort);
+    }
     Ok(BuiltCommand {
         command: cmd,
         stdin_payload: None,
         keep_stdin_open: false,
         cleanup_files: Vec::new(),
+        mcp_restore: None,
         preassigned_session_id: None,
     })
 }
@@ -115,15 +116,40 @@ impl Engine for KimiEngine {
         "kimi"
     }
 
+    fn drives_own_transport(&self) -> bool {
+        true
+    }
+
+    fn transport_for(&self, wsl: bool) -> Transport {
+        if wsl {
+            Transport::Child
+        } else {
+            Transport::Own
+        }
+    }
+
+    fn host_command(&self, _req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
+        let mut command = command_for_binary(bin);
+        command.arg("acp");
+        Ok(BuiltCommand {
+            command,
+            stdin_payload: None,
+            keep_stdin_open: true,
+            cleanup_files: Vec::new(),
+            mcp_restore: None,
+            preassigned_session_id: None,
+        })
+    }
+
     fn supports_images(&self) -> bool {
         // build_command injects absolute image paths + a ReadMediaFile
         // instruction into the prompt; that IS the kimi image transport.
         true
     }
+    fn supports_effort(&self) -> bool {
+        true
+    }
     fn supported_permissions(&self) -> &'static [&'static str] {
-        // One-shot --prompt runs cannot ask mid-turn ("manual" out); kimi's
-        // non-interactive default policy already auto-approves ("auto" = no
-        // flag).
         &["auto", "plan", "bypass"]
     }
 
@@ -188,6 +214,30 @@ mod channel_tests {
     use super::*;
 
     #[test]
+    fn kimi_uses_interactive_transport_locally_and_preserves_remote_fallback() {
+        assert!(KimiEngine.transport_for(false) == super::super::Transport::Own);
+        assert!(KimiEngine.transport_for(true) == super::super::Transport::Child);
+        let req = SendRequest {
+            session_id: None,
+            workspace: std::env::temp_dir(),
+            prompt: "ask".into(),
+            prompt_contributions: vec![],
+            images: vec![],
+            model: Some("native-model".into()),
+            effort: Some("medium".into()),
+            service_tier: None,
+            permission: Some("auto".into()),
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+        };
+        let built = KimiEngine.host_command(&req, "kimi").unwrap();
+        let args: Vec<_> = built.command.as_std().get_args().collect();
+        assert_eq!(args, ["acp"]);
+        assert!(built.keep_stdin_open);
+    }
+
+    #[test]
     fn independent_channel_uses_ephemeral_model_instead_of_native_alias() {
         let mut req = SendRequest {
             session_id: Some("existing-session".into()),
@@ -198,9 +248,10 @@ mod channel_tests {
             model: Some("selected-model".into()),
             effort: None,
             service_tier: None,
-            permission: Some("plan".into()),
+            permission: Some("auto".into()),
             additional_dirs: vec![],
             provider_id: Some("plugin_model-switcher_probe".into()),
+            computer_use: None,
         };
         let mut env = HashMap::from([
             ("KIMI_BASE_URL".into(), "https://selected.invalid/v1".into()),
@@ -220,7 +271,7 @@ mod channel_tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--session", "existing-session"]));
-        assert!(args.iter().any(|s| s == "--plan"));
+        assert!(!args.iter().any(|s| matches!(s.as_str(), "--plan" | "--yolo" | "--auto")));
         let injected: HashMap<_, _> = built
             .command
             .as_std()

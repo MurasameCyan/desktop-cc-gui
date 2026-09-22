@@ -84,6 +84,9 @@ impl Engine for QoderEngine {
         // session/prompt carries image content blocks (base64).
         true
     }
+    fn supports_effort(&self) -> bool {
+        true
+    }
 
     fn supported_permissions(&self) -> &'static [&'static str] {
         // A headless ACP turn cannot honor an approval flow: the driver

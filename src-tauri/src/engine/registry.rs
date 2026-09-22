@@ -101,6 +101,26 @@ impl ProcessRegistry {
             *stdin.lock().await = None;
         });
     }
+    /// Hand a host-stream driver's interactive stdin to the registry. Those
+    /// drivers spawn their own child (the entry has `child: None`), but an
+    /// answer to a parked question still rides that child's stdin, so
+    /// `write_line` has to find it. One run is keyed twice (run id + session
+    /// alias) and the alias was cloned before the child existed: both copies
+    /// get the same handle or answering by session id would miss.
+    pub(crate) fn set_stdin(
+        &self,
+        key: &str,
+        stdin: Arc<TokioMutex<Option<tokio::process::ChildStdin>>>,
+    ) {
+        if let Ok(mut map) = self.0.lock() {
+            let Some(run_id) = map.get(key).map(|entry| entry.run_id.clone()) else {
+                return;
+            };
+            for entry in map.values_mut().filter(|entry| entry.run_id == run_id) {
+                entry.stdin = Some(Arc::clone(&stdin));
+            }
+        }
+    }
 
     /// Drain and return the request ids of a run's pending questions.
     pub(crate) fn take_questions(&self, key: &str) -> Vec<String> {

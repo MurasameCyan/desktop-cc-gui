@@ -45,8 +45,10 @@ interface SessionTabStripProps {
 
 /**
  * Conversation tab strip doubling as the window drag region (overlay
- * titlebar). Clicks land on tab elements; only the strip's own padding
- * starts a window drag. Tabs scroll horizontally without a scrollbar and
+ * titlebar). data-tauri-drag-region="deep" lets Tauri drag the window —
+ * and toggle maximize on double-click — from any non-interactive spot in
+ * the strip (its own padding, the scroll container's blank tail); tabs and
+ * buttons stay clickable. Tabs scroll horizontally without a scrollbar and
  * vertical wheel deltas translate to horizontal scroll, like VSCode.
  */
 export function SessionTabStrip({
@@ -65,7 +67,6 @@ export function SessionTabStrip({
   trafficLightInset = true,
 }: SessionTabStripProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const stripRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
   const { dropTarget, suppressClickRef, handleTabPointerDown } =
     useTabDragReorder(onReorder);
@@ -76,19 +77,15 @@ export function SessionTabStrip({
   // "+" button right-click menu (新建会话 / 新建浏览器), separate anchor
   // state from the tab menu.
   const [newMenu, setNewMenu] = useState<{ x: number; y: number } | null>(null);
-  const { handleStripDoubleClick, handleTabListKeyDown } = useTabStripChrome({
-    stripRef,
+  const { handleTabListKeyDown } = useTabStripChrome({
     scrollRef,
     activeKey,
     tabCount: tabs.length,
-    customControls,
   });
 
   return (
     <div
-      ref={stripRef}
-      data-tauri-drag-region
-      onDoubleClick={handleStripDoubleClick}
+      data-tauri-drag-region="deep"
       className={cx(
         "flex h-10 shrink-0 items-center border-b border-separator-border bg-background-primary-default select-none",
         (IS_MAC || customControls) && trafficLightInset && "pl-[80px]",

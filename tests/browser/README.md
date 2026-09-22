@@ -96,3 +96,28 @@ pointer-anchored popover (not the centered modal) next to the click point
 with 确认 focused; Escape and outside press cancel without deleting, 确认
 fires the store's deleteSession once. Real AiChatSidebar, ThreadContextMenu
 and ChatPageDialogs; only deleteSession is stubbed. No app, no backend.
+
+Open `/tests/browser/side-panel-overlay.html` to check the right-hand file
+panel on a narrow remote viewport, where it used to spill past the screen and
+only render half-visible. The real ChatSidePanel renders in overlay mode
+inside a 412px row (a stub panel tab stands in for files/changes, so no IPC):
+its right edge must sit on the row's right edge with its left edge inside the
+row, and the document must not scroll horizontally. No app, no backend.
+
+Open `/tests/browser/cli-channel-dropdown.html` to check the composer's
+provider picker with a dozen relays. The flyout must show the current channel
+as one dropdown row — no provider names in the DOM until it is opened — and
+the opened list must be height-capped (clientHeight ≤ 200 with a taller
+scrollHeight). The header's channel filter must narrow that list to the
+matching rows while holding it open, and a pick must clear the filter and
+close the list. The fixture drives the real CliMenu and reports PASS/FAIL
+with the measured heights. No app, no backend.
+
+Open `/tests/browser/branch-picker.html` to check the changes-panel branch
+dropdown: filtering to `1.0.6` and clicking the `v1.0.6` row must run the
+store's checkout for `v1.0.6` while the panel displays
+`fix/git-changes-preview-layout` as current. Regression for the stale
+`isCurrent` no-op: the cached branch list used to decide "current" from a
+snapshot that lagged behind external (CLI) checkouts, silently swallowing
+the click. Real ChangesPanelHeader; only the store's checkout is stubbed.
+No app, no backend.

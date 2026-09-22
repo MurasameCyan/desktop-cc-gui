@@ -27,8 +27,8 @@ export function startPluginSystem(): void {
     key: "plugins",
     label: () => i18n.t("plugins.managerTitle"),
     icon: Puzzle,
-    group: "settings",
-    order: 5,
+    group: "plugins",
+    order: 0,
     component: function PluginsManagerPage() {
       return createElement(Suspense, { fallback: null }, createElement(PluginsSection));
     },
@@ -38,8 +38,8 @@ export function startPluginSystem(): void {
     key: "marketplace",
     label: () => i18n.t("plugins.marketTitle"),
     icon: Store,
-    group: "settings",
-    order: 6,
+    group: "plugins",
+    order: 1,
     component: function MarketplacePage() {
       return createElement(Suspense, { fallback: null }, createElement(MarketplaceSection));
     },

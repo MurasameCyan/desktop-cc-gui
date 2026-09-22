@@ -9,6 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import Terminal from "lucide-react/dist/esm/icons/terminal";
 import Sparkles from "lucide-react/dist/esm/icons/sparkles";
+import Zap from "lucide-react/dist/esm/icons/zap";
 import {
   ComposerPickerMenu,
   PickerOption,
@@ -18,6 +19,7 @@ import {
   matchSlashCommands,
   useSlashCommandStore,
 } from "./slash-commands";
+import { matchAppCommands } from "./app-commands";
 import { type SlashCommandEntry } from "@/lib/ipc";
 
 /**
@@ -56,7 +58,8 @@ const Row = memo(function Row({
   onHover: (index: number) => void;
 }) {
   const description = entry.description ?? "";
-  const Icon = entry.kind === "skill" ? Sparkles : Terminal;
+  const Icon =
+    entry.kind === "skill" ? Sparkles : entry.kind === "app" ? Zap : Terminal;
   return (
     <PickerOption
       active={active}
@@ -106,7 +109,9 @@ export function SlashCommandMenu({
 
   const entries = catalog?.entries;
   const items = useMemo(
-    () => matchSlashCommands(entries ?? [], query),
+    // Built-in app commands lead the list; a catalog command of the same
+    // name shadows its app row (precedence parity with submit interception).
+    () => [...matchAppCommands(entries, query), ...matchSlashCommands(entries ?? [], query)],
     [entries, query],
   );
 
@@ -125,13 +130,15 @@ export function SlashCommandMenu({
       onClose={onClose}
       menuRef={menuRef}
       groupHeaderAt={(entry, i) =>
-        // Group header at each kind boundary (the catalog arrives
-        // commands-then-skills, so at most one boundary renders).
+        // Group header at each kind boundary (app rows lead, then the
+        // catalog's commands-then-skills).
         i === 0 || items[i - 1].kind !== entry.kind ? (
           <div className={GROUP_HEADER}>
-            {entry.kind === "skill"
-              ? t("chat.slashGroupSkills")
-              : t("chat.slashGroupCommands")}
+            {entry.kind === "app"
+              ? t("chat.slashGroupApp")
+              : entry.kind === "skill"
+                ? t("chat.slashGroupSkills")
+                : t("chat.slashGroupCommands")}
           </div>
         ) : null
       }
@@ -141,9 +148,11 @@ export function SlashCommandMenu({
           index={i}
           active={active}
           kindLabel={
-            entry.kind === "skill"
-              ? t("chat.slashKindSkill")
-              : t("chat.slashKindCommand")
+            entry.kind === "app"
+              ? t("chat.slashKindApp")
+              : entry.kind === "skill"
+                ? t("chat.slashKindSkill")
+                : t("chat.slashKindCommand")
           }
           onSelect={onSelect}
           onHover={onHover}

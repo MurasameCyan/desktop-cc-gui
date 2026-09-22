@@ -8,6 +8,7 @@ import { useChatStore } from "./store";
 import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
 import { sessionKey } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
+import { ASK_OTHER_OPTION, askLoops } from "./store/ask-loop";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
@@ -146,6 +147,159 @@ describe("ask-user-question flow", () => {
   });
 });
 
+const MULTI_TEXT = "你更关注哪个方向？（可多选）";
+const MULTI_TITLE = `${MULTI_TEXT} (3/3)`;
+const MULTI_OPTIONS = [
+  { label: "代码重构", description: "重构" },
+  { label: "前端体验", description: "体验" },
+  { label: "性能优化", description: "性能" },
+];
+
+/** The persisted ask tool row: the only place multi-select is declared. */
+const askToolRow = () => ({
+  seq: 2,
+  role: "tool",
+  text: "提问",
+  ts: null,
+  args: {
+    questions: [
+      { question: "先做哪一步？", header: "步", options: [{ label: "A" }], multi: false },
+      { question: "再做什么？", header: "步", options: [{ label: "B" }], multi: false },
+      { question: MULTI_TEXT, header: "方向", options: MULTI_OPTIONS, multi: true },
+    ],
+  },
+});
+
+const selectFrame = (requestId: string, title: string) => ({
+  runId: "run-1",
+  sessionId: "s-1",
+  engine: "claude",
+  seq: 3,
+  kind: "question" as const,
+  data: {
+    requestId,
+    toolUseId: "call_ask",
+    input: {
+      questions: [
+        { question: title, header: "提问", options: [...MULTI_OPTIONS, { label: ASK_OTHER_OPTION }] },
+      ],
+      extui: { method: "select" },
+    },
+  },
+});
+
+const editorFrame = (requestId: string) => ({
+  runId: "run-1",
+  sessionId: "s-1",
+  engine: "claude",
+  seq: 4,
+  kind: "question" as const,
+  data: {
+    requestId,
+    input: {
+      questions: [
+        {
+          question: `${MULTI_TEXT}\n\n☐ 代码重构\n☐ 性能优化`,
+          header: "提问",
+          options: [],
+        },
+      ],
+      extui: { method: "editor" },
+    },
+  },
+});
+
+describe("multi-select ask rounds over the extension bridge", () => {
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    askLoops.clear();
+    useChatStore.setState({
+      openTabs: [],
+      active: null,
+      bySession: {
+        [KEY]: {
+          ...EMPTY_SESSION,
+          messages: [{ seq: 1, role: "user", text: "帮我做", ts: null }, askToolRow() as never],
+        },
+      },
+      streamingByKey: {},
+    });
+  });
+
+  afterEach(() => {
+    askLoops.clear();
+    vi.clearAllMocks();
+  });
+
+  it("marks a frame the ask tool declared multi and hides the runtime rows", () => {
+    handleEngineEvents([selectFrame("q1", MULTI_TITLE)], deps());
+    const rows = cardRows();
+    expect(rows).toHaveLength(1);
+    const specs = rows[0].question?.questions ?? [];
+    expect(specs).toHaveLength(1);
+    expect(specs[0].multiSelect).toBe(true);
+    expect(specs[0].options.map((option) => option.label)).toEqual([
+      "代码重构",
+      "前端体验",
+      "性能优化",
+    ]);
+  });
+
+  it("one submit ends through the CLI's editor and never stacks a card", async () => {
+    handleEngineEvents([selectFrame("q1", MULTI_TITLE)], deps());
+    const seq = cardRows()[0].seq;
+    await useChatStore.getState().respondToQuestion(KEY, seq, {
+      [MULTI_TITLE]: ["代码重构", "性能优化"],
+    });
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-1", "q1", {
+      [MULTI_TEXT]: ASK_OTHER_OPTION,
+    });
+    expect(cardRows()[0].question?.status).toBe("answered");
+
+    handleEngineEvents([editorFrame("q2")], deps());
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-1", "q2", {
+      [MULTI_TEXT]: "代码重构, 性能优化",
+    });
+    const rows = cardRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].question?.status).toBe("answered");
+    expect(rows[0].question?.answers).toEqual({
+      [MULTI_TITLE]: ["代码重构", "性能优化"],
+    });
+  });
+
+  it("resumes the same card when the CLI re-asks an unanswered round", () => {
+    handleEngineEvents([selectFrame("q1", MULTI_TITLE)], deps());
+    handleEngineEvents([selectFrame("q1b", MULTI_TITLE)], deps());
+    const rows = cardRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].question?.status).toBe("pending");
+    expect(rows[0].question?.requestId).toBe("q1b");
+    const specs = rows[0].question?.questions ?? [];
+    expect(specs[0].multiSelect).toBe(true);
+    expect(specs[0].options.map((option) => option.label)).toEqual([
+      "代码重构",
+      "前端体验",
+      "性能优化",
+    ]);
+  });
+
+  it("re-sends the terminator when the CLI re-asks after a submit", async () => {
+    handleEngineEvents([selectFrame("q1", MULTI_TITLE)], deps());
+    await useChatStore.getState().respondToQuestion(KEY, cardRows()[0].seq, {
+      [MULTI_TITLE]: ["代码重构"],
+    });
+    vi.mocked(ipc.answerQuestion).mockClear();
+    handleEngineEvents([selectFrame("q2", `(1 selected) ${MULTI_TITLE}`)], deps());
+    expect(cardRows()).toHaveLength(1);
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-1", "q2", {
+      [MULTI_TEXT]: ASK_OTHER_OPTION,
+    });
+  });
+});
+
 describe("QuestionCard free-form Other", () => {
   const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
   actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
@@ -230,6 +384,14 @@ describe("QuestionCard free-form Other", () => {
     });
   });
 
+  it("does not offer free text when the protocol only accepts declared options", () => {
+    const message = cardMessage();
+    Object.assign(message.question.questions[0], { allowOther: false });
+    act(() => root.render(<QuestionCard message={message as never} />));
+    expect(container.querySelector("input")).toBeNull();
+    expect(buttonByText("A")).toBeTruthy();
+  });
+
   it("an option pick replaces the typed answer (single select)", async () => {
     act(() => root.render(<QuestionCard message={cardMessage() as never} />));
     await act(async () => {
@@ -240,6 +402,112 @@ describe("QuestionCard free-form Other", () => {
     });
     expect(vi.mocked(ipc.answerQuestion)).toHaveBeenCalledWith("run-9", "req-9", {
       [QUESTION_TEXT]: "A",
+    });
+  });
+
+  it("re-picking a chosen option deselects it and blocks submit", async () => {
+    act(() => root.render(<QuestionCard message={cardMessage() as never} />));
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(container.querySelector('[aria-checked="true"]')).toBeTruthy();
+    expect((buttonByText("提交") as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(container.querySelector('[aria-checked="true"]')).toBeFalsy();
+    expect((buttonByText("提交") as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      buttonByText("B")!.click();
+    });
+    await act(async () => {
+      buttonByText("提交")!.click();
+    });
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenCalledWith("run-9", "req-9", {
+      [QUESTION_TEXT]: "B",
+    });
+  });
+
+  it("a multi-select round picked on the card answers the CLI's editor", async () => {
+    askLoops.clear();
+    useChatStore.setState({
+      bySession: {
+        [KEY]: { ...EMPTY_SESSION, messages: [askToolRow() as never] },
+      },
+    });
+    handleEngineEvents([selectFrame("card-q1", MULTI_TITLE)], deps());
+    act(() => root.render(<QuestionCard message={cardRows()[0]} />));
+    await act(async () => {
+      buttonByText("代码重构")!.click();
+    });
+    await act(async () => {
+      buttonByText("性能优化")!.click();
+    });
+    await act(async () => {
+      buttonByText("提交")!.click();
+    });
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-1", "card-q1", {
+      [MULTI_TEXT]: ASK_OTHER_OPTION,
+    });
+    handleEngineEvents([editorFrame("card-q2")], deps());
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-1", "card-q2", {
+      [MULTI_TEXT]: "代码重构, 性能优化",
+    });
+    expect(cardRows()).toHaveLength(1);
+  });
+
+  it("answering a question walks to the next one, and submit waits for the rest", async () => {
+    const option = (label: string, description: string) => ({ label, description });
+    const message = {
+      seq: 7,
+      role: "question",
+      text: "Q1",
+      ts: null,
+      question: {
+        requestId: "req-3p",
+        runId: "run-3p",
+        toolUseId: null,
+        questions: [
+          { question: "Q1", header: "一", multiSelect: false, options: [option("A", "甲"), option("B", "乙")] },
+          { question: "Q2", header: "二", multiSelect: false, options: [option("A", "甲"), option("B", "乙")] },
+          { question: "Q3", header: "三", multiSelect: false, options: [option("A", "甲"), option("B", "乙")] },
+        ],
+        status: "pending" as const,
+      },
+    };
+    useChatStore.setState({
+      bySession: { [KEY]: { ...EMPTY_SESSION, messages: [message as never] } },
+    });
+    act(() => root.render(<QuestionCard message={message as never} />));
+    expect(container.textContent).toContain("1/3");
+    expect(container.textContent).toContain("还有 3 题未作答");
+    expect((buttonByText("提交") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(container.textContent).toContain("2/3");
+    expect(container.textContent).toContain("还有 2 题未作答");
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(container.textContent).toContain("3/3");
+    expect((buttonByText("提交") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      buttonByText("B")!.click();
+    });
+    // The last answer stays put: submit is one click away right there.
+    expect(container.textContent).toContain("3/3");
+    expect(container.textContent).toContain("使用 Tab / 上下键选择，回车或空格选中");
+    expect((buttonByText("提交") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      buttonByText("提交")!.click();
+    });
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-3p", "req-3p", {
+      Q1: "A",
+      Q2: "A",
+      Q3: "B",
     });
   });
 });

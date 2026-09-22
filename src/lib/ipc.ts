@@ -54,6 +54,7 @@ export interface QuestionSpec {
   question: string;
   header: string;
   multiSelect?: boolean;
+  allowOther?: boolean;
   options: { label: string; description?: string; preview?: string }[];
 }
 
@@ -129,6 +130,7 @@ export interface EngineInfo {
    * picker and history lists; running sessions are unaffected. */
   enabled: boolean;
   supportsImages: boolean;
+  supportsEffort?: boolean;
   /** Permission modes the engine honors at spawn ("auto" | "manual" |
    * "plan" | "bypass"); the composer picker greys out the rest. */
   permissions: string[];
@@ -262,6 +264,7 @@ export interface AppSettings {
   interruptShortcut?: string | null;
   commandPaletteShortcut?: string | null;
   sidebarSearchShortcut?: string | null;
+  chatSearchShortcut?: string | null;
   toggleTerminalShortcut?: string | null;
   toggleSidebarShortcut?: string | null;
   toggleSidePanelShortcut?: string | null;
@@ -324,6 +327,33 @@ export interface SearchHit {
   line: number;
   text: string;
 }
+/** One render-safe snippet segment (`search_messages`): `marked` spans are
+ *  the query match, everything else is plain message text. */
+export interface SnippetPart {
+  text: string;
+  marked: boolean;
+}
+
+/** One message-content search hit: the best-matching message of a session. */
+export interface MessageSearchHit {
+  engine: string;
+  sessionId: string;
+  workspacePath: string;
+  workspaceName: string | null;
+  title: string;
+  customTitle: string | null;
+  updatedAt: number | null;
+  role: string;
+  snippet: SnippetPart[];
+}
+
+export interface MessageSearchPage {
+  hits: MessageSearchHit[];
+  hasMore: boolean;
+  /** Sessions still awaiting (re)indexing at query time; >0 means the
+   *  hit list can grow without the query changing. */
+  pending: number;
+}
 /** One entry of the workspace file index (`list_file_index`). */
 export interface FileIndexEntry {
   /** Workspace-relative path, "/" separators. */
@@ -335,8 +365,10 @@ export interface FileIndexEntry {
 /** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
  *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
  *  distinct: the menu keys icons/badges/section grouping off this field,
- *  and per-kind merging lets a command and a skill share a name. */
-export type SlashEntryKind = "command" | "skill";
+ *  and per-kind merging lets a command and a skill share a name. "app" is
+ *  frontend-only: injected by the picker for ccgui's own intercepted
+ *  commands (/new, /compact), never emitted by the backend catalog. */
+export type SlashEntryKind = "command" | "skill" | "app";
 
 /** A `/` picker entry (`list_slash_commands`): workspace entries shadow
  *  global ones of the same name and kind. */
@@ -472,7 +504,6 @@ export type FileTreeColor = "modified" | "untracked" | "repository";
 
 export interface BranchInfo {
   name: string;
-  isCurrent: boolean;
 }
 export interface AppMetrics {
   /** Resident memory of the app process, bytes. */
@@ -880,6 +911,15 @@ export const ipc = {
     limit?: number,
     beforeSeq?: number | null,
   ) => invoke<SessionPage>("load_session_page", { engine, sessionId, limit, beforeSeq }),
+  /** Full-text search over message bodies (⌘L palette). FTS5 trigram when
+   *  every token is ≥3 chars, exact AND-substring LIKE otherwise. */
+  searchMessages: (
+    query: string,
+    sort?: "relevance" | "recency",
+    limit?: number,
+    offset?: number,
+  ) =>
+    invoke<MessageSearchPage>("search_messages", { query, sort, limit, offset }),
   /** Remote (WSL distro) transcript: host fetches the jsonl over the ssh
    *  channel, caches it locally, and parses with the same engine reader. */
   loadRemoteSessionPage: (
@@ -1066,6 +1106,8 @@ export const ipc = {
   gitStage: (path: string, files: string[]) => invoke<void>("git_stage", { path, files }),
   gitUnstage: (path: string, files: string[]) =>
     invoke<void>("git_unstage", { path, files }),
+  gitDiscard: (path: string, files: string[]) =>
+    invoke<void>("git_discard", { path, files }),
   gitCommit: (path: string, message: string) =>
     invoke<string>("git_commit", { path, message }),
   gitPush: (path: string) => invoke<void>("git_push", { path }),
