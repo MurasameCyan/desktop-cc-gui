@@ -246,7 +246,6 @@ impl TurnCore {
                 result,
                 tool_call_id,
                 patch,
-                tool_call_id,
             } => {
                 let mut payload = serde_json::json!({ "role": role, "text": text });
                 if let Some(path) = path {

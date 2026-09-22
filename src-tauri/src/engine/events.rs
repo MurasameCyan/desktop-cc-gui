@@ -25,13 +25,12 @@ pub enum EngineEvent {
         todos: Option<TodosPayload>,
         args: Option<Value>,
         result: Option<Value>,
-        /// Opaque adapter identity shared by the call and its result.
-        tool_call_id: Option<String>,
-        patch: bool,
         /// The engine's own id for this call, when it reports one. A result
         /// paired to its call by tool name alone mislabels parallel calls of
-        /// the same tool; this is the key the frontend correlates on.
+        /// the same tool; this is the key the frontend correlates on. Blank
+        /// ids normalize to None (see tool_call_identity).
         tool_call_id: Option<String>,
+        patch: bool,
     },
     /// Native session id became known.
     SessionId(String),
@@ -183,9 +182,8 @@ pub(crate) fn tool_call_message_with_id(
         todos,
         args,
         result: None,
-        tool_call_id: tool_call_id.map(str::to_string),
-        patch: false,
         tool_call_id: tool_call_identity(tool_call_id),
+        patch: false,
     }
 }
 /// Patches the matching in-flight tool row, carrying the engine's id for the
@@ -213,7 +211,6 @@ pub(crate) fn tool_call_patch_with_id(
             result: None,
             tool_call_id,
             patch: true,
-            tool_call_id,
         },
         other => other,
     }
@@ -283,9 +280,8 @@ pub(crate) fn tool_result_patch_with_id(
         todos,
         args: None,
         result: result.cloned(),
-        tool_call_id: tool_call_id.map(str::to_string),
-        patch: true,
         tool_call_id: tool_call_identity(tool_call_id),
+        patch: true,
     }
 }
 /// Assistant snapshot with no tool metadata.
@@ -299,7 +295,6 @@ pub(crate) fn assistant_message(text: String) -> EngineEvent {
         result: None,
         tool_call_id: None,
         patch: false,
-        tool_call_id: None,
     }
 }
 /// First path-like argument of a tool call (`read`/`edit`/`write` use
