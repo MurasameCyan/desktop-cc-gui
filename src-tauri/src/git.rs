@@ -874,6 +874,24 @@ mod tests {
             .unwrap();
     }
 
+    /// Clone with the initial checkout skipped, pin `core.autocrlf=false`, then
+    /// check out. The CI Windows runner's global `core.autocrlf=true` otherwise
+    /// rewrites the LF blobs to CRLF during clone, so a never-touched file reads
+    /// dirty against its LF blob — which blocks the fast-forward that must
+    /// preserve unrelated local edits.
+    fn clone_lf(origin_url: &str, into: &Path) -> Repository {
+        let mut builder = git2::build::RepoBuilder::new();
+        // Empty CheckoutBuilder = GIT_CHECKOUT_NONE: no worktree bytes are
+        // written until autocrlf is pinned off just below.
+        builder.with_checkout(git2::build::CheckoutBuilder::new());
+        let repo = builder.clone(origin_url, into).unwrap();
+        repo.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+        let mut checkout = git2::build::CheckoutBuilder::new();
+        checkout.force();
+        repo.checkout_head(Some(&mut checkout)).unwrap();
+        repo
+    }
+
     #[test]
     fn pull_conflict_preserves_head_index_and_worktree() {
         for staged in [false, true] {
@@ -882,8 +900,7 @@ mod tests {
             let origin = Repository::init(&origin_path).unwrap();
             commit_file(&origin, "shared.txt", "base\n");
             let local_path = scratch.0.join("local");
-            let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-            local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+            let local = clone_lf(origin_path.to_str().unwrap(), &local_path);
             let old_head = local.head().unwrap().target().unwrap();
             std::fs::write(local_path.join("shared.txt"), "local\n").unwrap();
             if staged {
@@ -909,8 +926,7 @@ mod tests {
         commit_file(&origin, "shared.txt", "base\n");
         commit_file(&origin, "local.txt", "base\n");
         let local_path = scratch.0.join("local");
-        let local = Repository::clone(origin_path.to_str().unwrap(), &local_path).unwrap();
-        local.config().unwrap().set_bool("core.autocrlf", false).unwrap();
+        let local = clone_lf(origin_path.to_str().unwrap(), &local_path);
         std::fs::write(local_path.join("local.txt"), "staged\n").unwrap();
         let mut index = local.index().unwrap();
         index.add_path(Path::new("local.txt")).unwrap();
