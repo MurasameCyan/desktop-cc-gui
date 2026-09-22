@@ -172,6 +172,7 @@ export interface WorkspaceMenuItemDef {
   /** Hidden when false; lets an owner scope its entry to some workspaces. */
   visible?: (ctx: { workspaceId: string; archived: boolean }) => boolean;
   onSelect: (ctx: { workspaceId: string; archived: boolean }) => void;
+}
 /** Home sidebar nav entry (0.3.12): one row under the builtin 自动化 entry,
  *  rendering through the same chrome as the builtin nav items. `onOpen`
  *  typically opens the plugin's center tab (ctx.ui.openCenterTab). */

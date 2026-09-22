@@ -43,7 +43,6 @@ import { registerSessionSource } from "./session-source";
 import { directoryAssetUrl, fileAssetUrl, remoteAssetUrl } from "./asset-url";
 import { runAsPlugin, withAuthorizedHostInvoke } from "./hardening";
 import { usePluginTabsStore } from "./center-tabs";
-import { runAsPlugin } from "./hardening";
 
 /** Storage transport the context talks to; the loader binds the IPC-backed
  *  implementation, tests bind fakes. */
@@ -488,6 +487,9 @@ export function createPluginContext(
             icon: def.icon,
             visible: visible && ((target) => runAsPlugin(() => visible(target))),
             onSelect: (target) => runAsPlugin(() => def.onSelect(target)),
+          }),
+        );
+      },
       registerSidebarNav(def) {
         requirePermission("ui:sidebar-entry");
         return track(
