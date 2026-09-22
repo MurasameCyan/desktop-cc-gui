@@ -332,9 +332,6 @@ export function createMessagingActions(
       // early event already bound it) and adopt the native session id.
       bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
       settleLaunch(result.sessionId ?? tab.sessionId);
-      // Arm Esc-to-stop for this run; the computer-use store disarms when
-      // the session's streaming flag clears.
-      if (computerUseOn) useComputerUseStore.getState().arm(key);
       // Older backends choose their own id. Retire the provisional route.
       if (result.runId !== requestedRunId) {
         runRouting.delete(requestedRunId);
