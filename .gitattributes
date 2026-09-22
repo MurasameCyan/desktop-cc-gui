@@ -1,0 +1,5 @@
+# Builtin agent-catalog prompts are verified by SHA-256 over their exact bytes
+# (agent_catalog::resolve_prompt). A CRLF checkout on Windows changes those
+# bytes and every prompt hash mismatches, so pin them to LF regardless of
+# core.autocrlf.
+src-tauri/resources/agent-catalogs/agency-agents/prompts/** text eol=lf
