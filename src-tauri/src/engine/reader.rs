@@ -3,7 +3,10 @@
 
 use super::events::EngineEvent;
 use super::codex_usage;
-use super::registry::{ProcessRegistry, kill_process_group};
+use super::registry::ProcessRegistry;
+// Group sweeps are the unix mirror of the Windows kill-on-close job.
+#[cfg(unix)]
+use super::registry::kill_process_group;
 use super::Engine;
 #[cfg(windows)]
 use super::job;
@@ -853,6 +856,8 @@ mod staging_tests {
                 child: Arc::new(TokioMutex::new(child)), killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 cleanup_files: vec![directory.clone()], stderr_buf: Arc::new(Mutex::new(String::new())),
                 stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+                #[cfg(windows)]
+                _tree_guard: None,
             };
             let task = tokio::spawn(async move {
                 if abort { std::future::pending::<()>().await; }

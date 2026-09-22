@@ -101,7 +101,7 @@ impl Db {
         drop(conn);
 
         if let Some(metadata) = metadata.as_mut() {
-            if let Some(vcs) = crate::git::workspace_vcs_metadata(&metadata.path) {
+            if let Some(vcs) = crate::git::workspace_vcs_metadata(std::path::Path::new(&metadata.path)) {
                 metadata.git_branch = vcs.git_branch;
                 metadata.git_head = vcs.git_head;
                 metadata.dirty = Some(vcs.dirty);
