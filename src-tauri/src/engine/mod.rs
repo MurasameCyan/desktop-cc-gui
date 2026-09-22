@@ -542,6 +542,7 @@ pub(crate) async fn plugin_agent_send(
         session_id,
         prompt,
         Vec::new(),
+        None,
         model,
         None,
         None,
