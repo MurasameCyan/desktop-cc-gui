@@ -1,4 +1,5 @@
 import type { ExecutionSelectionInput, SessionExecutionContext, SessionExecutionTarget } from "@ccgui/plugin-sdk";
+import type { ActiveSession } from "@/features/chat/store/persistence";
 import { useChatStore } from "@/features/chat/store";
 import { applyExecutionSelection, executionTargetForTab, refreshExecutionSelection } from "@/features/chat/store/execution-selection";
 
@@ -16,9 +17,11 @@ export async function setPluginSessionEffort(engine: string, sessionId: string, 
   if (!trimmed) throw new Error("sessions.setEffort: effort must be non-empty");
   if (!engine || !sessionId) throw new Error("sessions.setEffort: engine and sessionId are required");
   const state = useChatStore.getState();
-  const tab = state.openTabs.find((t) => t.engine === engine && t.sessionId === sessionId && t.workspacePath === workspacePath)
-    ?? state.sessions.find((t) => t.engine === engine && t.sessionId === sessionId && t.workspacePath === workspacePath);
-  if (!tab) throw new Error("sessions.setEffort: unknown session");
+  const known =
+    state.openTabs.some((t) => t.engine === engine && t.sessionId === sessionId && t.workspacePath === workspacePath) ||
+    state.sessions.some((t) => t.engine === engine && t.sessionId === sessionId && t.workspacePath === workspacePath);
+  if (!known) throw new Error("sessions.setEffort: unknown session");
+  const tab: ActiveSession = { engine, sessionId, workspacePath };
   const context = await refreshExecutionSelection({ set: useChatStore.setState, get: useChatStore.getState }, tab);
   if (!context.selection) throw new Error("Session has no execution selection");
   await setPluginSessionSelection(executionTargetForTab(tab, state.workspaces), {

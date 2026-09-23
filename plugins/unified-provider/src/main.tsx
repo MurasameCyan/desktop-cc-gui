@@ -30,7 +30,7 @@ function bridge<P extends object>(ctx: PluginContext, View: ComponentType<P>): C
       return () => { root.current = null; mount.remove(); queueMicrotask(() => mounted.unmount()); };
     }, []);
     ctx.react.useEffect(() => { root.current?.render(createElement(PluginRootBoundary, { onFailure: () => setFailed(true), children: createElement(View, props) })); });
-    if (failed) throw new Error("Unified Provider UI failed; restore the host model entry");
+    if (failed) throw new Error("统一供应商界面加载失败，恢复宿主模型入口");
     return ctx.react.createElement("div", { ref: container, className: "unified-provider-root" });
   };
 }
@@ -43,8 +43,8 @@ export default function activate(ctx: PluginContext): () => void {
   const SettingsEntry = bridge(ctx, () => createElement(Settings, { controller }));
   const disposers = [
     disposePicker,
-    ctx.ui.registerSettingsSection({ key: "providers", label: () => "Unified Providers", component: SettingsEntry }),
-    ctx.ui.registerCommand({ key: "manage-providers", title: () => "Manage unified Providers", keywords: () => ["provider", "model", "key", "native", "import"], run: () => ctx.ui.openSettings("providers") }),
+    ctx.ui.registerSettingsSection({ key: "providers", label: () => "统一供应商", component: SettingsEntry }),
+    ctx.ui.registerCommand({ key: "manage-providers", title: () => "管理统一供应商", keywords: () => ["供应商", "模型", "密钥", "原生", "导入", "provider", "model", "key", "native", "import"], run: () => ctx.ui.openSettings("providers") }),
   ];
   void controller.start();
   return () => { for (const dispose of disposers.reverse()) dispose(); controller.dispose(); };

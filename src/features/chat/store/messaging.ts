@@ -124,7 +124,10 @@ export function createMessagingActions(
     } finally {
       if (!isCompaction) {
         preparing.delete(key);
-        patchSession(set, settledKey, { preparing: false });
+        // Clear the flag only where the session still lives; a migrated or
+        // settled turn (older backend reassigns the run id) deleted the
+        // pending key, and patchSession would resurrect it from EMPTY_SESSION.
+        if (get().bySession[settledKey]) patchSession(set, settledKey, { preparing: false });
         queueMicrotask(() => drainQueue(settledKey));
       }
     }

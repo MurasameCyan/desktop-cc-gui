@@ -1,5 +1,14 @@
 # @ccgui/plugin-sdk changelog
 
+## 0.3.14 — 2026-09-23
+- **模型入口 CLI 切换**：`ModelEntryProps` 新增 `engines: EngineChoice[]` 与
+  `onSelectEngine(engineId)`。列表与宿主原入口同源；回调真正更换未开始会话的
+  执行目标，不是筛选模型。首轮请求准备中、运行中、已有会话以及过期上下文均拒绝切换。
+- 新版统一供应商插件声明 SDK `0.3.14`，旧宿主会在加载前被版本握手拦截，
+  不会因缺少上述参数而在渲染时崩溃。
+- `@ccgui/plugin-ui` 新增 `EffortSlider`：受控档位拉条，原生键盘/拖拽操作，
+  使用宿主主题 token；统一供应商入口显示的草稿档位与实际提交值保持一致。
+
 ## 0.3.13 — 2026-09-21
 - **新增能力 `agent`**：`ctx.agent.start/interrupt` 让插件经宿主引擎管线
   运行 agent 轮次——与聊天发送共用 spawn/reader/registry（渠道注入、进程
@@ -8,6 +17,38 @@
   store，也不被 chat 的 Stop 误杀。桌面专属。
 - 权限单一事实源新增 `agent`；通用 bridge 白名单同步放开
   `plugin_agent_start` / `plugin_agent_interrupt`。
+- **新增能力 `cli`**（桌面专属；权限分级 `cli.read` / `cli.contributions.write` /
+  `cli.runtime.sensitive` / `network.targets.request` / `cli.config.read` /
+  `cli.config.apply`）：通用「执行贡献」门面，供插件把自管的 Provider/Endpoint/
+  Model/Binding 投影成宿主可消费的**不可变、无密钥**执行契约。
+  - 发布目录：`publishSource` / `getSource` / `unpublishSource` / `listSources` /
+    `onChanged`——首发/更新走文档版本 CAS，profiles/choices 与只读索引同事务，
+    失败保持上一次发布。
+  - 目标授权：`requestTargetGrant` / `listTargetGrants` / `revokeTargetGrant`——
+    动态目标（base URL/origin/执行环境/Key 身份+代次）经桌面宿主 dialog 确认、
+    可撤回；static grant 或 UI 布尔不能冒充确认。
+  - 运行材料：`registerRuntimeMaterial` / `onMaterialRequested` /
+    `getCredentialUses`——明文 Key 只为已绑定/正在选择的凭据登记，仅存内存并注入
+    目标子进程；`setSelection` 缺材料时发 `cli://material-requested` 等待补登，
+    不在每次 send 回调 JS。
+  - 发现与原生配置：`listModels`（官方目录 / 授权端点发现，限大小/超时/重定向）、
+    `listConfigTargets` / `previewConfigImport` / `confirmConfigImport`（原生配置
+    导入，预览仅 metadata，确认后才交付勾选 Key）、`previewConfigPatch` /
+    `applyConfigPatch` / `restoreConfigPatch`（从已发布 selection 生成受控 patch，
+    保留未知字段/注释，原子写 + CAS 防覆盖外部改动）。
+- **新增扩展点 `ui:model-entry`**：`ctx.ui.registerModelEntry({ key?, engineIds,
+  component, order? })` 按 engine **替换**内建模型入口（不是并排新增槽位）；组件
+  只消费无密钥的 `ModelEntryProps`（`context` / `choices` /
+  `onApply(selection, expectedVersion)` / `onRefresh`）。注销/崩溃/禁用/卸载
+  回退内建入口。
+- **新增能力 `documentStorage`**（权限 `plugin.storage`）：CAS 保护的私有插件文档
+  存储——`getLocation` / `selectLocation` / `readText` /
+  `writeTextAtomic(path, content, expectedVersion)` / `remove` / `list`；自定义
+  位置经宿主选择器，禁越权路径，跨进程锁 + junction/reparse 防护。
+- **会话权威选择**（权限 `host:session`）：`ctx.sessions.getContext()` /
+  `setSelection(target, selection, expectedVersion)` / `onSelectionChanged(cb)`——
+  完整执行选择（native 渠道或插件贡献 + Key 身份 + effort）按执行目标 + workspace
+  + 会话身份单条版本 CAS；既有 `setEffort` 沿用签名，只改同一记录。
 
 ## 0.3.12 — 2026-09-21
 - **新增扩展点 `ui:sidebar-entry`**：`ctx.ui.registerSidebarNav` 在首页侧栏

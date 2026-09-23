@@ -264,3 +264,120 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ===== 推理强度拉条（与宿主 composer 档位条同构） ====================== */
+.pui-effort {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.pui-effort-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--color-text-secondary, #586574);
+  font-size: 13px;
+}
+.pui-effort-heading strong {
+  color: var(--color-text-primary, #0a0a0a);
+  font-weight: 600;
+}
+.pui-effort-track {
+  position: relative;
+  height: 27px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-2lg, 12px);
+  background: var(--color-background-secondary-default, #f5f6f8);
+}
+.pui-effort-fill {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  border-radius: var(--radius-2lg, 12px);
+  background: var(--color-background-tertiary-hover, #e9edf2);
+  transition: width 150ms ease-out;
+}
+.pui-effort-ticks {
+  position: absolute;
+  inset-inline: 9px;
+  top: 7px;
+  display: flex;
+  height: 13px;
+  align-items: center;
+  justify-content: space-between;
+}
+.pui-effort-tick {
+  height: 100%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--color-text-tertiary, #8b98a5);
+  transition: opacity 300ms ease-out;
+}
+.pui-effort-tick-dim {
+  opacity: 0.3;
+}
+/* 原生 range 铺满轨道：轨道本身透明，视觉由上面的填充/刻度承担，
+   拖拽与键盘行为交给浏览器。 */
+.pui-effort-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: grab;
+}
+.pui-effort-input:active {
+  cursor: grabbing;
+}
+.pui-effort-input:disabled {
+  cursor: not-allowed;
+}
+.pui-effort-input:focus-visible {
+  outline: 2px solid var(--color-border-focus-ring, #7266df);
+  outline-offset: 2px;
+}
+.pui-effort-input::-webkit-slider-runnable-track {
+  height: 27px;
+  background: transparent;
+}
+.pui-effort-input::-webkit-slider-thumb {
+  appearance: none;
+  height: 27px;
+  width: 21px;
+  border: 1px solid var(--color-border-button-default, #d7dce2);
+  border-radius: 7px;
+  background: var(--color-background-primary-default, #fff);
+  box-shadow: var(--shadow-card, 0 1px 2px #0000000d);
+}
+.pui-effort-input::-moz-range-track {
+  height: 27px;
+  background: transparent;
+}
+.pui-effort-input::-moz-range-thumb {
+  height: 27px;
+  width: 21px;
+  border: 1px solid var(--color-border-button-default, #d7dce2);
+  border-radius: 7px;
+  background: var(--color-background-primary-default, #fff);
+  box-shadow: var(--shadow-card, 0 1px 2px #0000000d);
+}
+.pui-effort-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--color-text-secondary, #586574);
+  font-size: 12px;
+}
+.pui-effort-disabled {
+  opacity: 0.6;
+}
+@media (forced-colors: active) {
+  .pui-effort-track {
+    border: 1px solid CanvasText;
+  }
+  .pui-effort-input::-webkit-slider-thumb {
+    border: 1px solid CanvasText;
+  }
+}

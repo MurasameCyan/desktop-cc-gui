@@ -276,12 +276,32 @@ export interface ExecutionChoice {
   unavailableReason?: string;
 }
 
+/** One installed CLI the composer can switch this conversation to. Mirrors the
+ * host's own engine picker rows: `available` is the local probe, `disabled`
+ * means the workspace forbids it. */
+export interface EngineChoice {
+  engineId: string;
+  label: string;
+  available: boolean;
+  disabled: boolean;
+  disabledReason?: string;
+}
+
 /** The complete, secret-free input to a replacement model picker. */
 export interface ModelEntryProps {
   context: SessionExecutionContext;
   choices: ExecutionChoice[];
+  /** Installed CLIs, in host picker order. A replacement entry owns the CLI
+   * switch too: it hides the builtin picker, so without this the composer
+   * would lose its only way to change CLI. */
+  engines: EngineChoice[];
   loading: boolean;
   onApply(selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+  /** Switch which CLI this conversation runs. Only a conversation that has not
+   * started yet can change engine; the host rejects anything else. Resolves
+   * after the switch, when the component re-renders with the new target and
+   * that target's own selection. */
+  onSelectEngine(engineId: string): Promise<void>;
   onRefresh(): Promise<void>;
 }
 

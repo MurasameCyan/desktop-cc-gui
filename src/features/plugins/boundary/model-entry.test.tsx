@@ -7,7 +7,8 @@ import { ModelEntry } from "./model-entry";
 vi.mock("../runtime/loader", () => ({ notePluginRenderOk: vi.fn(), reportPluginCrash: vi.fn() }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const props: ModelEntryProps = { context: { target: { engineId: "claude", workspacePath: "/work", sessionId: "a", executionTarget: { kind: "local" } }, selection: null },
-  choices: [], loading: false, onApply: vi.fn(), onRefresh: vi.fn() };
+  choices: [], engines: [{ engineId: "claude", label: "Claude Code", available: true, disabled: false }], loading: false,
+  onApply: vi.fn(), onSelectEngine: vi.fn(), onRefresh: vi.fn() };
 let root: Root;
 let container: HTMLDivElement;
 let dispose: Disposer | undefined;

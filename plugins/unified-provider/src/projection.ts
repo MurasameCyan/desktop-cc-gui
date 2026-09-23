@@ -16,7 +16,7 @@ export function credentialForBinding(r: Registry, binding: Binding, explicitId?:
   const provider = r.providers.find((p) => p.id === binding.providerId);
   const credentialId = explicitId ?? (binding.credential.kind === "explicit" ? binding.credential.credentialId : provider?.defaultCredentialId);
   const credential = r.credentials.find((c) => c.id === credentialId && c.providerId === binding.providerId && c.enabled);
-  if (!credential) throw new Error("The selected Key is missing or disabled. Explicitly choose a Key; no fallback is attempted.");
+  if (!credential) throw new Error("所选 Key 缺失或已禁用。请明确选择 Key，不会尝试替换。");
   return credential;
 }
 export function credentialIdentity(c: CredentialRef): CredentialIdentity {
@@ -47,9 +47,9 @@ export function projectRegistry(r: Registry, lookup: TemplateLookup): RegistryPr
     const provider = r.providers.find((p) => p.id === binding.providerId)!;
     const endpoint = r.endpoints.find((e) => e.id === binding.endpointId)!;
     if (!binding.enabled || !provider.enabled || !endpoint.enabled) continue;
-    if (!compatible(binding.engineId, endpoint.protocol)) throw new Error(`${binding.engineId} cannot consume ${endpoint.protocol}; disable or change this binding`);
-    if (binding.executionTarget.kind === "wsl" && ["grok", "opencode"].includes(binding.engineId)) throw new Error(`${binding.engineId} does not support managed WSL execution`);
-    if (!binding.targetGrantId) throw new Error(`Authorize the exact target for ${provider.name} / ${binding.engineId} before publishing`);
+    if (!compatible(binding.engineId, endpoint.protocol)) throw new Error(`${binding.engineId} 不支持 ${endpoint.protocol}，请禁用或修改此绑定`);
+    if (binding.executionTarget.kind === "wsl" && ["grok", "opencode"].includes(binding.engineId)) throw new Error(`${binding.engineId} 不支持受管 WSL 执行`);
+    if (!binding.targetGrantId) throw new Error(`发布前请为 ${provider.name} / ${binding.engineId} 的准确目标授权`);
     const credentials = endpoint.auth === "none" ? [] : r.credentials.filter((c) => c.providerId === provider.id && c.enabled).map(credentialIdentity);
     const defaultCredentialId = endpoint.auth === "none" ? undefined : credentialForBinding(r, binding).id;
     profiles.push({ profileKey: binding.id, engineId: binding.engineId, label: provider.name, group: provider.name, protocol: endpoint.protocol, baseUrl: endpoint.baseUrl, auth: endpoint.auth, executionTarget: binding.executionTarget, targetGrantId: binding.targetGrantId, credentialScope: provider.id, credentials, ...(defaultCredentialId ? { defaultCredentialId } : {}), options: binding.options });
@@ -59,22 +59,22 @@ export function projectRegistry(r: Registry, lookup: TemplateLookup): RegistryPr
     for (const mapping of mappings) {
       const model = r.models.find((m) => m.id === mapping.providerModelId)!;
       const wireId = model.wireIds[endpoint.id];
-      if (!wireId) throw new Error(`${model.name} has no wire model ID for ${endpoint.name}`);
+      if (!wireId) throw new Error(`${model.name} 未配置 ${endpoint.name} 对应的 wire 模型 ID`);
       const template = templates.find((t) => t.templateRef?.engineId === mapping.templateRef.engineId && t.templateRef.modelId === mapping.templateRef.modelId && t.templateRef.revision === mapping.templateRef.revision);
-      if (!template) throw new Error(`Official template for ${model.name} is unavailable or changed. Refresh templates and explicitly review the mapping.`);
-      if (template.protocol && !compatible(binding.engineId, template.protocol)) throw new Error("Official template protocol is incompatible with the CLI");
+      if (!template) throw new Error(`${model.name} 的官方模板不可用或已变化，请刷新模板并明确核对映射。`);
+      if (template.protocol && !compatible(binding.engineId, template.protocol)) throw new Error("官方模板的协议与该 CLI 不兼容");
       const capabilities = {
         images: model.capabilities.images === "unknown" ? template.capabilities.images : model.capabilities.images,
         tools: model.capabilities.tools === "unknown" ? template.capabilities.tools : model.capabilities.tools,
         effortLevels: model.capabilities.effortLevels.length ? model.capabilities.effortLevels : template.capabilities.effortLevels,
       };
-      if (template.capabilities.images === "unsupported" && capabilities.images === "supported") throw new Error("Official template does not support images");
-      if (template.capabilities.tools === "unsupported" && capabilities.tools === "supported") throw new Error("Official template does not support tools");
-      if (capabilities.effortLevels.some((level) => !template.capabilities.effortLevels.includes(level))) throw new Error("Model effort is not supported by the official CLI template");
+      if (template.capabilities.images === "unsupported" && capabilities.images === "supported") throw new Error("官方模板不支持图片");
+      if (template.capabilities.tools === "unsupported" && capabilities.tools === "supported") throw new Error("官方模板不支持工具");
+      if (capabilities.effortLevels.some((level) => !template.capabilities.effortLevels.includes(level))) throw new Error("官方 CLI 模板不支持所选推理强度");
       const policy = resolvePolicy(template.tokenPolicy, model.sharedPolicy, mapping.policy);
       const constraints = enginePolicies[binding.engineId];
-      for (const key of constraints?.unsupported ?? []) if (policy.tokenPolicy[key] !== undefined) throw new Error(`${binding.engineId} cannot apply ${key}; explicitly clear it in this CLI mapping`);
-      for (const key of constraints?.required ?? []) if (policy.tokenPolicy[key] === undefined) throw new Error(`${binding.engineId} requires a known ${key}; enter a reviewed shared or CLI value`);
+      for (const key of constraints?.unsupported ?? []) if (policy.tokenPolicy[key] !== undefined) throw new Error(`${binding.engineId} 无法应用 ${key}，请在此 CLI 映射中显式清空该字段`);
+      for (const key of constraints?.required ?? []) if (policy.tokenPolicy[key] === undefined) throw new Error(`${binding.engineId} 必须明确配置 ${key}，请填写经核对的共享策略或 CLI 覆盖值`);
       choices.push({ profileKey: binding.id, modelKey: mapping.id, label: model.name, selector: mapping.selector.kind === "alias" ? { kind: "alias", alias: mapping.selector.alias, modelId: wireId } : { kind: "wire", modelId: wireId }, templateRef: mapping.templateRef, ...policy, capabilities, managementKey: "providers" });
     }
   }

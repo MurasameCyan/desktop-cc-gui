@@ -328,10 +328,10 @@ mod tests {
         let source = scratch.path("source");
         write_plugin(
             &source,
-            r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
+            r#"{"id":"docs-plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
         );
         fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
-        set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
+        set_enabled_at(&plugins_dir, &state_path, "docs-plugin", true).unwrap();
         let roots = StorageRoots {
             data: scratch.path("data"),
             program: scratch.path("program"),
@@ -340,31 +340,31 @@ mod tests {
         select_location_at(
             &state_path,
             &roots,
-            "docs.plugin",
+            "docs-plugin",
             StorageLocationSelection {
                 kind: StorageLocationKind::Custom,
                 path: Some(custom.to_string_lossy().into_owned()),
             },
         )
         .unwrap();
-        write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
+        write_text_at(&state_path, &roots, "docs-plugin", "state", "saved", None).unwrap();
         let outside = scratch.path("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("keep"), "keep").unwrap();
-        let root = custom.join("plugin-data").join("docs.plugin");
+        let root = custom.join("plugin-data").join("docs-plugin");
         assert!(create_dir_link(&root.join("escape"), &outside), "could not create a directory link");
 
         let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
         let error =
-            uninstall_with_storage_at(&db, &plugins_dir, &state_path, "docs.plugin", true, Some(&roots))
+            uninstall_with_storage_at(&db, &plugins_dir, &state_path, "docs-plugin", true, Some(&roots))
                 .unwrap_err();
         assert!(error.contains("reparse point"), "unexpected: {error}");
         // Nothing was shed: the install, its record, and the outside data survive.
-        assert!(plugins_dir.join("docs.plugin").is_dir(), "plugin directory was removed anyway");
+        assert!(plugins_dir.join("docs-plugin").is_dir(), "plugin directory was removed anyway");
         assert!(crate::plugins::state::read_state(&state_path)
             .unwrap()
             .plugins
-            .contains_key("docs.plugin"));
+            .contains_key("docs-plugin"));
         assert!(root.join("state").exists());
         assert!(outside.join("keep").exists());
     }
@@ -378,10 +378,10 @@ mod tests {
             let source = scratch.path("source");
             write_plugin(
                 &source,
-                r#"{"id":"docs.plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
+                r#"{"id":"docs-plugin","name":"Test","version":"1.2.3","tier":"declarative","permissions":["plugin.storage"]}"#,
             );
             fs::install_from(&plugins_dir, &state_path, &source, "local", |_| {}).unwrap();
-            set_enabled_at(&plugins_dir, &state_path, "docs.plugin", true).unwrap();
+            set_enabled_at(&plugins_dir, &state_path, "docs-plugin", true).unwrap();
             let roots = StorageRoots {
                 data: scratch.path("data"),
                 program: scratch.path("program"),
@@ -390,28 +390,28 @@ mod tests {
             select_location_at(
                 &state_path,
                 &roots,
-                "docs.plugin",
+                "docs-plugin",
                 StorageLocationSelection {
                     kind: StorageLocationKind::Custom,
                     path: Some(custom.to_string_lossy().into_owned()),
                 },
             )
             .unwrap();
-            write_text_at(&state_path, &roots, "docs.plugin", "state", "saved", None).unwrap();
-            let document = custom.join("plugin-data/docs.plugin/state");
+            write_text_at(&state_path, &roots, "docs-plugin", "state", "saved", None).unwrap();
+            let document = custom.join("plugin-data/docs-plugin/state");
             let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
             uninstall_with_storage_at(
                 &db,
                 &plugins_dir,
                 &state_path,
-                "docs.plugin",
+                "docs-plugin",
                 delete_data,
                 Some(&roots),
             )
             .unwrap();
             assert_eq!(document.exists(), !delete_data);
             let state = super::state::read_state(&state_path).unwrap();
-            assert_eq!(state.document_storage.contains_key("docs.plugin"), !delete_data);
+            assert_eq!(state.document_storage.contains_key("docs-plugin"), !delete_data);
         }
     }
 }

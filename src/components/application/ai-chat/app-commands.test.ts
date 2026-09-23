@@ -7,12 +7,13 @@ import { sessionKey } from "@/features/chat/store/persistence";
 import { EMPTY_SESSION } from "@/features/chat/store/stream";
 import { useSlashCommandStore } from "./slash-commands";
 
-vi.mock("@/lib/ipc", () => ({
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
-    sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
+    ...(await import("@/features/chat/store/selection-test-backend")).createSelectionBackend(),
+    sendMessage: vi.fn(async (req: { runId: string }) => ({ runId: req.runId, sessionId: null })),
     rememberSessionModel: vi.fn(async () => {}),
     rememberSessionEffort: vi.fn(async () => {}),
-    loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
+    loadSessionPage: vi.fn(async () => ({ messages: [{ usage: { input_tokens: 1000, model_context_window: 200000 } }], nextBefore: null, subagentHistory: [] })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
@@ -133,12 +134,18 @@ describe("compaction progress", () => {
       openTabs: [{ engine: "omp", sessionId: "s-1", workspacePath: WS }],
     });
     const compacting = useChatStore.getState().compactContext();
+    // sendMessage runs one async hop (refreshExecutionSelection) after the
+    // flag is set synchronously, so wait on the call — not the flag — as the
+    // barrier; a satisfied call implies the flag is already set.
     await vi.waitFor(() => {
-      expect(useChatStore.getState().bySession[KEY]?.compaction).toMatchObject({ automatic: false });
+      expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ engineId: "omp", sessionId: "s-1", workspacePath: WS }),
+          prompt: "/compact",
+        }),
+      );
     });
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ engine: "omp", sessionId: "s-1", prompt: "/compact" }),
-    );
+    expect(useChatStore.getState().bySession[KEY]?.compaction).toMatchObject({ automatic: false });
     // The store routes events by its own requested run id, not the mocked
     // response — replay the id sendMessage actually received.
     const runId = vi.mocked(ipc.sendMessage).mock.calls[0][0].runId!;

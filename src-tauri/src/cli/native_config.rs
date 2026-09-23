@@ -110,10 +110,10 @@ fn config_targets() -> Result<Vec<NativeConfigTarget>, String> {
         let apply_supported = import_supported && matches!(engine, "claude" | "codex" | "kimi" | "grok");
         let unsupported_reason = match &paths {
             Err(reason) => Some(reason.clone()),
-            Ok(_) if !apply_supported => Some("Native export is not supported for this engine's layered config/auth store; import and session-scoped execution remain available".into()),
+            Ok(_) if !apply_supported => Some("该引擎使用分层配置或认证存储，暂不支持原生导出；仍可导入配置并按会话使用".into()),
             _ => None,
         };
-        result.push(NativeConfigTarget { target_id: format!("native:{engine}"), engine_id: engine.into(), label: format!("{engine} native configuration"),
+        result.push(NativeConfigTarget { target_id: format!("native:{engine}"), engine_id: engine.into(), label: format!("{engine} 原生配置"),
             paths: paths.unwrap_or_default().iter().map(|p| p.to_string_lossy().into_owned()).collect(), import_supported, apply_supported, unsupported_reason });
     }
     let config = crate::config::read_config()?;
@@ -122,7 +122,7 @@ fn config_targets() -> Result<Vec<NativeConfigTarget>, String> {
         for (id, provider) in &config.section(engine).ok_or("CLI_NATIVE_UNKNOWN_ENGINE")?.providers {
             if crate::config::is_managed_provider(provider) { continue; }
             result.push(NativeConfigTarget { target_id: legacy_id(engine, id), engine_id: engine.into(),
-                label: format!("{engine} legacy channel: {}", provider.get("name").and_then(Value::as_str).unwrap_or(id)),
+                label: format!("{engine} 已有渠道：{}", provider.get("name").and_then(Value::as_str).unwrap_or(id)),
                 paths: vec![crate::paths::config_path().to_string_lossy().into_owned()], import_supported: true, apply_supported: true, unsupported_reason: None });
         }
     }
@@ -160,9 +160,9 @@ fn protocol(value: &str) -> Option<CliProtocol> {
 }
 
 fn candidate(id: &str, url: &str, protocol: CliProtocol, auth: ProfileAuth, models: Vec<String>, key: Option<&str>, mut skipped: Vec<String>) -> NativeConfigCandidate {
-    if static_key(key).is_none() { skipped.push("No usable static key was copied; explicitly confirm authentication mode and supply a key before publication when required".into()); }
+    if static_key(key).is_none() { skipped.push("未复制到可用的静态 Key；请明确确认认证方式，并在需要时于发布前填写 Key".into()); }
     NativeConfigCandidate { candidate_id: id.into(), label: id.into(), base_url: url.into(), protocol, auth, models,
-        credential_name: static_key(key).map(|_| format!("{id} imported key")), has_static_key: static_key(key).is_some(), skipped_fields: skipped }
+        credential_name: static_key(key).map(|_| format!("{id} 导入的 Key")), has_static_key: static_key(key).is_some(), skipped_fields: skipped }
 }
 
 fn imported(id: &str, url: &str, protocol: CliProtocol, auth: ProfileAuth, models: Vec<String>, key: Option<&str>, skipped: &[&str]) -> Option<ImportedCandidate> {
@@ -823,7 +823,7 @@ pub fn plugin_cli_list_config_targets(plugin_id: String) -> Result<Vec<NativeCon
         if owners.iter().any(|owner| owner.target_id == target.target_id && owner.plugin_id != plugin_id) {
             target.import_supported = false;
             target.apply_supported = false;
-            target.unsupported_reason = Some("This target is owned by another plugin's active native patch; restore that patch first".into());
+            target.unsupported_reason = Some("该目标由其他插件的原生补丁占用，请先恢复该补丁".into());
         }
     }
     Ok(targets)
@@ -841,9 +841,9 @@ pub fn plugin_cli_preview_config_import(plugin_id: String, target_id: String) ->
     unchanged(&before)?;
     let metadata = candidates.iter().map(|candidate| candidate.metadata.clone()).collect();
     let fingerprint = fingerprint(&before);
-    let warnings = vec!["Only recognized static fields are offered. Unknown fields, OAuth, environment/file references, commands and hooks are retained and never evaluated.".into(),
-        if target.engine_id == "omp" { "OMP SQLite authentication is read immutably only without a live WAL; otherwise only inline models.yml keys are offered.".into() }
-        else { "Import copies selected static keys to the destination plugin only after host confirmation; source files are unchanged.".into() }];
+    let warnings = vec!["只提供已识别的静态字段。未知字段、OAuth、环境变量或文件引用、命令与 hooks 均保留在原处，且不会执行。".into(),
+        if target.engine_id == "omp" { "仅当不存在活动 WAL 时，才以不可变只读方式读取 OMP SQLite 认证；否则只提供 models.yml 内直接填写的 Key。".into() }
+        else { "经宿主确认后，才将所选静态 Key 复制给目标插件；来源文件不会改动。".into() }];
     let preview_id = remember(Pending { plugin_id, created: Instant::now(), target: target.clone(), before, kind: PendingKind::Import(candidates) })?;
     Ok(NativeConfigPreview { preview_id, target, fingerprint, candidates: metadata, warnings })
 }
@@ -857,9 +857,9 @@ pub async fn plugin_cli_confirm_config_import(app: tauri::AppHandle, plugin_id: 
     let selected = select_candidates(candidates, &candidate_ids)?;
     if selected.is_empty() { return Ok(NativeImportResult { candidates: vec![] }); }
     unchanged(&pending.before)?;
-    let message = format!("Source: {}\nFiles:\n{}\nDestination plugin: {}\nSelected candidates: {}\n\nCopy only these static keys to this plugin? The plugin may save them in plaintext registry.json, creating a second plaintext copy. Native files, OAuth and dynamic credentials will not be changed. This does NOT transfer ownership of legacy channels.",
-        pending.target.label, pending.target.paths.join("\n"), plugin_id, selected.iter().map(|candidate| candidate.candidate.label.as_str()).collect::<Vec<_>>().join(", "));
-    super::grants::confirm_desktop(&app, "Import native static credentials", &message).await?;
+    let message = format!("来源：{}\n文件：\n{}\n目标插件：{}\n所选候选项：{}\n\n是否仅将这些静态 Key 复制给此插件？插件可能将它们以明文保存在 registry.json 中，产生第二份明文副本。原生文件、OAuth 与动态凭据均不会改动，也不会转移已有渠道的所有权。",
+        pending.target.label, pending.target.paths.join("\n"), plugin_id, selected.iter().map(|candidate| candidate.candidate.label.as_str()).collect::<Vec<_>>().join("、"));
+    super::grants::confirm_desktop(&app, "导入原生静态凭据", &message).await?;
     super::require_permission(&plugin_id, "cli.config.read")?;
     super::require_permission(&plugin_id, "cli.runtime.sensitive")?;
     let _guard = NATIVE_WRITE.lock().map_err(|_| "CLI_NATIVE_LOCK_POISONED")?;
@@ -891,12 +891,12 @@ pub async fn plugin_cli_preview_config_patch(state: tauri::State<'_, crate::AppS
     unchanged(&before)?;
     let fingerprint = fingerprint(&before);
     let takeover = target.target_id.starts_with("legacy:");
-    let mut changes = if takeover { vec![format!("Transfer legacy channel ownership to published source {} ({})", resolved.source.source_id, resolved.source.publication_revision),
-        "Old channel editors and raw metadata become read-only and secret-free; existing native channel selections must be explicitly rebound. A private recovery backup retains the original legacy credentials.".into()] }
-        else { vec![format!("Set {} native provider endpoint to {}", target.engine_id, resolved.profile.base_url), format!("Set native model to {} with effort {}", model_id(&resolved.choice.selector), selection.effort.as_deref().unwrap_or("not applicable")),
-            "Write only controlled routing/authentication/policy fields; preserve unrelated fields and comments.".into(), "Store the selected key and recovery backup privately in plaintext; this is a second copy outside registry.json.".into()] };
-    changes.push(format!("Selection: {}", serde_json::to_string(&selection).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?));
-    changes.push(format!("Token policy: {}", serde_json::to_string(&resolved.choice.token_policy).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?));
+    let mut changes = if takeover { vec![format!("将已有渠道的所有权转移给已发布来源 {}（{}）", resolved.source.source_id, resolved.source.publication_revision),
+        "原渠道编辑器与原始元数据将变为只读且不再包含密钥；已有原生渠道选择必须明确重新绑定。私有恢复备份会保留原渠道凭据。".into()] }
+        else { vec![format!("将 {} 的原生供应商端点设为 {}", target.engine_id, resolved.profile.base_url), format!("将原生模型设为 {}，推理强度为 {}", model_id(&resolved.choice.selector), selection.effort.as_deref().unwrap_or("不适用")),
+            "只写入受控的路由、认证与策略字段；保留无关字段及注释。".into(), "所选 Key 与恢复备份将以明文私有保存，在 registry.json 之外产生另一份副本。".into()] };
+    changes.push(format!("完整选择：{}", serde_json::to_string(&selection).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?));
+    changes.push(format!("Token 策略：{}", serde_json::to_string(&resolved.choice.token_policy).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?));
     let contains_plaintext_key = resolved.material.is_some();
     let preview_id = remember(Pending { plugin_id, created: Instant::now(), target: target.clone(), before, kind: PendingKind::Patch {
         selection, source_revision: resolved.source.publication_revision.clone(), after, runtime_fingerprint: resolved.fingerprint } })?;
@@ -913,12 +913,12 @@ pub async fn plugin_cli_apply_config_patch(app: tauri::AppHandle, state: tauri::
     if &resolved.source.publication_revision != source_revision || &resolved.fingerprint != runtime_fingerprint || render_patch(&pending.target, &pending.before, &resolved, selection)? != *after {
         return Err("CLI_NATIVE_PUBLICATION_DRIFT: generate a new preview".into());
     }
-    let message = format!("Source plugin: {}\nPublished source: {}\nPublication: {}\nDestination: {}\nFiles:\n{}\nEndpoint: {}\nModel: {}\nEffort: {}\nSelection: {}\nToken policy: {}\nOptions: {}\n\n{}\n\nOnly this preview is authorized; external edits or publication changes cancel the operation.",
-        plugin_id, resolved.source.source_id, source_revision, pending.target.label, pending.target.paths.join("\n"), resolved.profile.base_url, model_id(&resolved.choice.selector), selection.effort.as_deref().unwrap_or("not applicable"),
+    let message = format!("来源插件：{}\n已发布来源：{}\n发布版本：{}\n目标：{}\n文件：\n{}\n端点：{}\n模型：{}\n推理强度：{}\n完整选择：{}\nToken 策略：{}\n选项：{}\n\n{}\n\n仅授权本次预览；外部文件修改或发布内容变化都会取消操作。",
+        plugin_id, resolved.source.source_id, source_revision, pending.target.label, pending.target.paths.join("\n"), resolved.profile.base_url, model_id(&resolved.choice.selector), selection.effort.as_deref().unwrap_or("不适用"),
         serde_json::to_string(selection).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?, serde_json::to_string(&resolved.choice.token_policy).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?, serde_json::to_string(&resolved.profile.options).map_err(|_| "CLI_NATIVE_SERIALIZE_FAILED")?,
-        if pending.target.target_id.starts_with("legacy:") { "Transfer this legacy channel to the published plugin source? Old channel controls will be read-only and no longer reveal credentials. Existing native selections require explicit rebinding. A private plaintext recovery backup will retain the old host configuration, including existing credentials." }
-        else { "Write this selection to native CLI configuration? The selected key and a recovery backup will be stored privately in plaintext, creating another copy outside the plugin registry. This changes future standalone CLI launches." });
-    super::grants::confirm_desktop(&app, "Apply native configuration", &message).await?;
+        if pending.target.target_id.starts_with("legacy:") { "是否将此已有渠道转交给已发布的插件来源？原渠道控件将变为只读，且不再显示凭据。已有原生选择需要明确重新绑定。私有明文恢复备份会保留原宿主配置，包括其中的凭据。" }
+        else { "是否将此选择写入原生 CLI 配置？所选 Key 与恢复备份将以明文私有保存，在插件 registry 之外产生另一份副本。这会改变之后独立启动 CLI 时使用的配置。" });
+    super::grants::confirm_desktop(&app, "写入原生配置", &message).await?;
     super::require_permission(&plugin_id, "cli.config.apply")?;
     let _native_guard = NATIVE_WRITE.lock().map_err(|_| "CLI_NATIVE_LOCK_POISONED")?;
     let _config_guard = store.0.lock().map_err(|_| "CLI_NATIVE_CONFIG_LOCK_POISONED")?;
@@ -945,8 +945,8 @@ pub async fn plugin_cli_restore_config_patch(app: tauri::AppHandle, store: tauri
     let directory = receipt_dir(&receipt_id)?;
     let owner: ReceiptOwner = load_json(&directory.join("owner.json"))?;
     if owner.plugin_id != plugin_id { return Err("CLI_NATIVE_RECEIPT_OWNERSHIP_REQUIRED".into()); }
-    let message = format!("Plugin: {}\nTarget: {}\nReceipt: {}\n\nRestore this exact native configuration backup? Restoration refuses any subsequent external edit and preserves the backup if recovery fails.", plugin_id, owner.target_id, receipt_id);
-    super::grants::confirm_desktop(&app, "Restore native configuration", &message).await?;
+    let message = format!("插件：{}\n目标：{}\n回执：{}\n\n是否恢复此原生配置备份？恢复操作会拒绝覆盖之后发生的外部修改；若恢复失败，备份会继续保留。", plugin_id, owner.target_id, receipt_id);
+    super::grants::confirm_desktop(&app, "恢复原生配置", &message).await?;
     super::require_permission(&plugin_id, "cli.config.apply")?;
     let _native_guard = NATIVE_WRITE.lock().map_err(|_| "CLI_NATIVE_LOCK_POISONED")?;
     let _config_guard = store.0.lock().map_err(|_| "CLI_NATIVE_CONFIG_LOCK_POISONED")?;

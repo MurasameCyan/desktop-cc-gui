@@ -1,9 +1,9 @@
 {
   "name": "@ccgui/plugin-unified-provider",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "Independent unified Provider registry, session model picker and explicit native CLI configuration operations",
+  "description": "独立的统一供应商管理、会话模型选择与显式原生 CLI 配置操作",
   "scripts": {
     "build": "node build.mjs",
     "test": "vitest run",

@@ -341,18 +341,30 @@ mod tests {
         assert!(expected.verify(&serde_json::json!({"model":{"provider":"ccgui-bound", "id":"same-wire-id"},"thinkingLevel":"high"})).is_ok());
     }
 
-    #[cfg(unix)]
+    /// Concurrent children each see only their own Key, and the parent process
+    /// never holds one — the isolation behind "same Provider, different Key" in
+    /// parallel sessions. Runs on both platforms: CI is Windows-only, so a
+    /// unix-gated version of this test would never execute there.
     #[tokio::test]
     async fn distinct_runtime_keys_remain_child_local() {
-        let mut first = tokio::process::Command::new("sh");
-        let mut second = tokio::process::Command::new("sh");
+        let mut first = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        let mut second = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
         for (child, key) in [(&mut first, "first-private"), (&mut second, "second-private")] {
             clear_auth(child);
-            child.env("CCGUI_PROVIDER_KEY", key).args(["-c", "printf '%s' \"$CCGUI_PROVIDER_KEY\""]);
+            child.env(KEY_ENV, key);
+            // Both shells expand the name from the child's own environment at
+            // run time; the value never appears in argv.
+            if cfg!(windows) {
+                child.args(["/d", "/c", "echo %CCGUI_PROVIDER_KEY%"]);
+            } else {
+                child.args(["-c", "printf '%s' \"$CCGUI_PROVIDER_KEY\""]);
+            }
         }
         let (a, b) = tokio::join!(first.output(), second.output());
-        assert_eq!(a.unwrap().stdout, b"first-private");
-        assert_eq!(b.unwrap().stdout, b"second-private");
-        assert_ne!(std::env::var("CCGUI_PROVIDER_KEY").ok().as_deref(), Some("second-private"));
+        // cmd's echo appends CRLF; compare the payload, not the line ending.
+        let printed = |output: std::process::Output| String::from_utf8(output.stdout).unwrap().trim().to_string();
+        assert_eq!(printed(a.unwrap()), "first-private");
+        assert_eq!(printed(b.unwrap()), "second-private");
+        assert_ne!(std::env::var(KEY_ENV).ok().as_deref(), Some("second-private"));
     }
 }

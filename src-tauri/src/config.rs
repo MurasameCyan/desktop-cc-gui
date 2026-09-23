@@ -513,6 +513,7 @@ mod tests {
     #[test]
     fn web_channel_projection_keeps_models_but_excludes_all_flexible_secret_fields() {
         let _scratch = Scratch::new();
+        crate::paths::ensure_dirs().unwrap();
         let mut config = CliConfig::default();
         config.extra.insert("unknownSecret".into(), json!("top-secret"));
         config.claude.providers.insert("channel".into(), json!({"name":"Relay", "apiKey":"key-secret", "unknown":"unknown-secret",
@@ -532,6 +533,7 @@ mod tests {
     #[test]
     fn managed_channels_are_secret_free_and_read_only_at_old_exits() {
         let _scratch = Scratch::new();
+        crate::paths::ensure_dirs().unwrap();
         let store = ConfigStore::default();
         let managed = json!({"name":"Imported", "apiKey":"secret", "env":{"KEY":"secret"},
             "__ccguiManagedBy":{"sourceId":"plugin:test:source","publicationRevision":"one"}});

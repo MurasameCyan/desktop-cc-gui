@@ -1154,7 +1154,7 @@ mod tests {
     fn gates_require_installed_enabled_clean_and_permissioned_plugin() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         assert!(authorize(&state_path, id).is_ok());
 
@@ -1178,27 +1178,27 @@ mod tests {
     fn roots_are_lazy_and_location_table_is_plugin_isolated() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.one");
+        enabled_state(&state_path, "vendor-one");
         let roots = roots(&scratch);
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.one").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(get_location_at(&state_path, &roots, "vendor-one").unwrap().kind, StorageLocationKind::Data);
         assert!(!roots.data.exists());
 
         let selected = select_location_at(
             &state_path,
             &roots,
-            "vendor.one",
+            "vendor-one",
             StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(scratch.path("chosen").to_string_lossy().into()) },
         ).unwrap();
-        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor.one"));
+        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor-one"));
         assert!(scratch.path("chosen").is_dir());
-        assert!(!scratch.path("chosen/plugin-data/vendor.one").exists());
+        assert!(!scratch.path("chosen/plugin-data/vendor-one").exists());
     }
 
     #[test]
     fn selecting_custom_moves_the_existing_document_tree() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "state/nested/doc.json", "document", None)
@@ -1227,7 +1227,7 @@ mod tests {
     fn non_identical_target_conflicts_without_mutating_either_root_or_selection() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "doc", "old", None).unwrap();
@@ -1258,7 +1258,7 @@ mod tests {
     fn identical_existing_target_is_accepted() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "nested/doc", "same", None).unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
         ] {
             let scratch = Scratch::new();
             let state_path = scratch.path("plugins.json");
-            let id = "vendor.plugin";
+            let id = "vendor-plugin";
             enabled_state(&state_path, id);
             let roots = roots(&scratch);
             let old_custom = scratch.path("old-custom");
@@ -1350,7 +1350,7 @@ mod tests {
 
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "remove", "old", None).unwrap();
@@ -1421,7 +1421,7 @@ mod tests {
 
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let old_root = plugin_root(&roots.data, id);
@@ -1452,7 +1452,7 @@ mod tests {
     fn atomic_write_is_cas_and_keeps_rolling_backup() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
 
@@ -1472,7 +1472,7 @@ mod tests {
     fn concurrent_writers_have_one_winner_and_one_conflict() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let WriteResult::Written { version: initial } = write_text_at(&state_path, &roots, id, "doc", "zero", None).unwrap() else { panic!("initial write conflicted") };
@@ -1493,37 +1493,37 @@ mod tests {
     fn custom_location_and_file_listing_are_plugin_isolated() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.one");
+        enabled_state(&state_path, "vendor-one");
         let mut state = crate::plugins::state::read_state(&state_path).unwrap();
         let mut second = crate::plugins::state::PluginRecord::fresh("test", 1);
         second.permissions = vec!["plugin.storage".into()];
-        state.plugins.insert("vendor.two".into(), second);
+        state.plugins.insert("vendor-two".into(), second);
         crate::plugins::state::write_state(&state_path, &state).unwrap();
         let roots = roots(&scratch);
         let custom = scratch.path("custom");
-        for id in ["vendor.one", "vendor.two"] {
+        for id in ["vendor-one", "vendor-two"] {
             select_location_at(&state_path, &roots, id, StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(custom.to_string_lossy().into()) }).unwrap();
         }
-        write_text_at(&state_path, &roots, "vendor.one", "shared/file", "one", None).unwrap();
-        write_text_at(&state_path, &roots, "vendor.two", "shared/file", "two", None).unwrap();
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().unwrap().content, "one");
-        assert_eq!(list_at(&state_path, &roots, "vendor.one", Some("shared")).unwrap(), vec!["shared/file"]);
-        remove_with_version_at(&state_path, &roots, "vendor.one", "shared/file", None).unwrap();
-        assert!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().is_none());
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.two", "shared/file").unwrap().unwrap().content, "two");
+        write_text_at(&state_path, &roots, "vendor-one", "shared/file", "one", None).unwrap();
+        write_text_at(&state_path, &roots, "vendor-two", "shared/file", "two", None).unwrap();
+        assert_eq!(read_text_at(&state_path, &roots, "vendor-one", "shared/file").unwrap().unwrap().content, "one");
+        assert_eq!(list_at(&state_path, &roots, "vendor-one", Some("shared")).unwrap(), vec!["shared/file"]);
+        remove_with_version_at(&state_path, &roots, "vendor-one", "shared/file", None).unwrap();
+        assert!(read_text_at(&state_path, &roots, "vendor-one", "shared/file").unwrap().is_none());
+        assert_eq!(read_text_at(&state_path, &roots, "vendor-two", "shared/file").unwrap().unwrap().content, "two");
     }
 
     #[test]
     fn invalid_or_unwritable_selection_never_falls_back() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.plugin");
+        enabled_state(&state_path, "vendor-plugin");
         let roots = roots(&scratch);
         let file = scratch.path("not-a-directory");
         std::fs::write(&file, "x").unwrap();
-        let result = select_location_at(&state_path, &roots, "vendor.plugin", StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(file.to_string_lossy().into()) });
+        let result = select_location_at(&state_path, &roots, "vendor-plugin", StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(file.to_string_lossy().into()) });
         assert!(result.is_err());
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.plugin").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(get_location_at(&state_path, &roots, "vendor-plugin").unwrap().kind, StorageLocationKind::Data);
         assert!(!roots.data.exists());
     }
 
@@ -1531,7 +1531,7 @@ mod tests {
     fn remove_honors_optional_cas() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let WriteResult::Written { version } = write_text_at(&state_path, &roots, id, "doc", "one", None).unwrap() else { panic!("initial write conflicted") };
@@ -1549,7 +1549,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1567,7 +1567,7 @@ mod tests {
     fn remove_also_deletes_the_rolling_backup() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1604,7 +1604,7 @@ mod tests {
         use crate::plugins::test_support::create_dir_link;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1633,7 +1633,7 @@ mod tests {
         use crate::plugins::test_support::create_dir_link;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1655,7 +1655,7 @@ mod tests {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
         let roots = roots(&scratch);
-        let id = "publication.test";
+        let id = "publication-test";
         enabled_state(&state_path, id);
         let WriteResult::Written { version: old } = write_text_at(&state_path, &roots, id, "registry.json", "old", None).unwrap() else { panic!("initial conflict") };
         let WriteResult::Written { version: current } = write_text_at(&state_path, &roots, id, "registry.json", "current", Some(old.clone())).unwrap() else { panic!("update conflict") };
@@ -1676,7 +1676,7 @@ mod tests {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
         let roots = roots(&scratch);
-        let id = "privacy.test";
+        let id = "privacy-test";
         enabled_state(&state_path, id);
         let WriteResult::Written { version } = write_text_at(&state_path, &roots, id, "nested/key", "secret", None).unwrap() else { panic!("initial conflict") };
         write_text_at(&state_path, &roots, id, "nested/key", "new secret", Some(version)).unwrap();
@@ -1696,7 +1696,7 @@ mod tests {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
         let roots = roots(&scratch);
-        let id = "ancestry.test";
+        let id = "ancestry-test";
         enabled_state(&state_path, id);
         let outside = scratch.path("outside");
         fs::create_dir_all(&outside).unwrap();

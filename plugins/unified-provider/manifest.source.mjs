@@ -3,10 +3,10 @@ export function manifest(sdkVersion) {
   if (!/^0\.3\.\d+$/.test(sdkVersion ?? "")) throw new Error("Set CCGUI_PLUGIN_SDK_VERSION to the exact approved SDK 0.3 patch before building");
   return {
     id: "unified-provider",
-    name: "Unified Providers",
-    version: "0.1.0",
+    name: "统一供应商",
+    version: "0.1.1",
     sdkVersion,
-    description: "One private Provider registry with per-session model, Key and effort selection",
+    description: "统一私有供应商配置，每个会话独立选择模型、Key 与推理强度",
     tier: "js",
     permissions: [
       "plugin.storage", "ui:settings-section", "ui:command", "ui:model-entry", "host:session",

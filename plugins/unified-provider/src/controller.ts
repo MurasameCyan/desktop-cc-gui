@@ -15,7 +15,7 @@ export class ProviderController {
   private registry = emptyRegistry();
   private version: string | null = null;
   private publication: PublishedSource | null = null;
-  private state: ControllerSnapshot = { registry: null, documentVersion: null, phase: "loading", message: "Loading registry…", publication: null };
+  private state: ControllerSnapshot = { registry: null, documentVersion: null, phase: "loading", message: "正在加载供应商配置…", publication: null };
   private listeners = new Set<() => void>();
   private cleanups: Array<() => void> = [];
   private active = true;
@@ -32,88 +32,88 @@ export class ProviderController {
   }
   async start(): Promise<void> {
     try {
-      this.cleanups.push(this.ctx.cli.onMaterialRequested((request) => { void this.supplyMaterial(request).catch(() => { this.emit(this.state.phase, "A bound Key is unavailable. Reconfirm its identity, revision and destination before sending."); }); }));
-      this.cleanups.push(this.ctx.sessions.onSelectionChanged(() => { void this.restoreBoundMaterial().catch(() => { this.emit(this.state.phase, "A selected Key could not be restored; no substitute was registered."); }); }));
+      this.cleanups.push(this.ctx.cli.onMaterialRequested((request) => { void this.supplyMaterial(request).catch(() => { this.emit(this.state.phase, "已绑定的 Key 不可用。发送前请重新确认它的身份、代次和目标。"); }); }));
+      this.cleanups.push(this.ctx.sessions.onSelectionChanged(() => { void this.restoreBoundMaterial().catch(() => { this.emit(this.state.phase, "无法恢复所选 Key，未注册任何替代 Key。"); }); }));
       this.cleanups.push(this.ctx.cli.onChanged((event) => { if (event.sourceId === this.sourceId && event.publicationRevision !== this.publication?.publicationRevision) void this.refreshPublication(); }));
       await this.reload();
-    } catch { this.emit("error", "Plugin initialization failed. Check SDK compatibility and granted permissions, then reload the plugin."); }
+    } catch { this.emit("error", "插件初始化失败。请检查 SDK 兼容性与已授予的权限，然后重新加载插件。"); }
   }
   dispose(): void { this.active = false; for (const cleanup of this.cleanups.splice(0).reverse()) cleanup(); this.listeners.clear(); this.discoveries.clear(); this.templates.clear(); this.registry = emptyRegistry(); }
   private async refreshPublication(): Promise<void> {
-    try { this.publication = await this.ctx.cli.getSource(this.sourceId); if (!this.active) return; this.emit(this.publication?.available && this.publication.documentVersion === this.version ? "published" : "saved-unpublished", "Publication changed. Reload before editing from another window."); }
-    catch { this.emit(this.state.phase, "Cannot read the current publication. Retry after checking plugin permissions."); }
+    try { this.publication = await this.ctx.cli.getSource(this.sourceId); if (!this.active) return; this.emit(this.publication?.available && this.publication.documentVersion === this.version ? "published" : "saved-unpublished", "发布内容已变化。在其他窗口编辑前，请先重新加载。"); }
+    catch { this.emit(this.state.phase, "无法读取当前发布内容，请检查插件权限后重试。"); }
   }
   async reload(): Promise<void> {
-    if (this.busy) throw new Error("Wait for the current save to finish");
-    this.emit("loading", "Loading registry…");
+    if (this.busy) throw new Error("请等待当前保存操作结束");
+    this.emit("loading", "正在加载供应商配置…");
     try {
       const [document, publication] = await Promise.all([this.ctx.documentStorage.readText("registry.json"), this.ctx.cli.getSource(this.sourceId)]);
       if (!this.active) return;
       const registry = document ? parseRegistry(document.content) : emptyRegistry();
       this.registry = registry; this.version = document?.version ?? null; this.publication = publication;
-      this.emit(publication?.available && publication.documentVersion === this.version ? "published" : document ? "saved-unpublished" : "ready", publication && publication.documentVersion !== this.version ? "Saved changes are not published. The previous publication is still in use." : "Registry loaded. Keys are stored only in the private registry document.");
+      this.emit(publication?.available && publication.documentVersion === this.version ? "published" : document ? "saved-unpublished" : "ready", publication && publication.documentVersion !== this.version ? "已保存的修改尚未发布，仍在使用此前的发布版本。" : "配置已加载。Key 仅保存在插件私有的 registry.json 中。");
       if (document && publication && !publication.available && publication.documentVersion === document.version) await this.retryPublish();
-      else try { await this.restoreBoundMaterial(); } catch { this.emit(this.state.phase, "Registry loaded; an existing session Key is unavailable. Reconfirm it explicitly; no substitute was registered."); }
-    } catch { this.emit("error", "Could not load registry or restore bound material. Check document permissions/schema, then reload. No file was overwritten."); }
+      else try { await this.restoreBoundMaterial(); } catch { this.emit(this.state.phase, "配置已加载，但已有会话的 Key 不可用。请明确重新选择，未注册任何替代 Key。"); }
+    } catch { this.emit("error", "无法加载配置或恢复已绑定的运行材料。请检查文档权限与格式后重新加载，没有覆盖任何文件。"); }
   }
   async save(view: RegistryView, expectedVersion: string | null, keyEdits: Readonly<Record<string, string>> = {}): Promise<void> {
-    if (this.busy) throw new Error("Another save is in progress");
-    if (this.state.phase === "error" || this.state.phase === "loading") throw new Error("Reload a valid registry before saving");
-    if (expectedVersion !== this.version) { this.emit("conflict", "This draft is stale. Reload and review changes before saving."); throw new Error("Registry version conflict"); }
+    if (this.busy) throw new Error("另一个保存操作正在进行");
+    if (this.state.phase === "error" || this.state.phase === "loading") throw new Error("保存前请重新加载有效配置");
+    if (expectedVersion !== this.version) { this.emit("conflict", "草稿已过期，请重新加载并核对修改后再保存。"); throw new Error("配置版本冲突"); }
     const credentials = view.credentials.map((credential) => {
       const existing = this.registry.credentials.find((c) => c.id === credential.id);
       const value = keyEdits[credential.id] ?? existing?.value;
-      if (!value) throw new Error("A new Key requires an explicit value");
-      if (existing && existing.providerId !== credential.providerId) throw new Error("A Key cannot move between Providers");
+      if (!value) throw new Error("新增 Key 必须明确填写值");
+      if (existing && existing.providerId !== credential.providerId) throw new Error("Key 不能在不同供应商之间移动");
       return { ...credential, value, credentialRevision: existing ? existing.credentialRevision + (keyEdits[credential.id] !== undefined ? 1 : 0) : 1 };
     });
     const next = validateRegistry({ ...structuredClone(view), credentials, revision: this.registry.revision + 1 });
     await this.persistAndPublish(next, expectedVersion);
   }
   private async persistAndPublish(next: Registry, expectedVersion: string | null): Promise<void> {
-    if (this.busy) throw new Error("Another save is in progress");
-    if (!this.active) throw new Error("Plugin is inactive");
-    this.busy = true; this.emit("saving", "Saving the registry with a version check…");
+    if (this.busy) throw new Error("另一个保存操作正在进行");
+    if (!this.active) throw new Error("插件未启用");
+    this.busy = true; this.emit("saving", "正在校验版本并保存配置…");
     try {
       let result;
       try { result = await this.ctx.documentStorage.writeTextAtomic("registry.json", JSON.stringify(next, null, 2), expectedVersion); }
-      catch { this.emit("conflict", "The registry was not saved. Its version may have changed or storage may be unavailable. Reload and review; do not overwrite blindly."); throw new Error("Registry save rejected; reload before retrying"); }
+      catch { this.emit("conflict", "配置未保存，可能是版本已变化或存储不可用。请重新加载并核对，不要直接覆盖。"); throw new Error("配置保存被拒绝，请重新加载后再试"); }
       if (!this.active) return;
       this.registry = next; this.version = result.version;
       await this.publishSaved();
     } finally { this.busy = false; }
   }
   async retryPublish(): Promise<void> {
-    if (this.busy) throw new Error("Another save is in progress");
+    if (this.busy) throw new Error("另一个保存操作正在进行");
     this.busy = true;
     try { await this.publishSaved(); } finally { this.busy = false; }
   }
   private async publishSaved(): Promise<void> {
-    if (!this.version) { this.emit("ready", "Save the registry before publishing"); return; }
+    if (!this.version) { this.emit("ready", "发布前请先保存配置"); return; }
     let projection: RegistryProjection;
     try {
       await Promise.all(this.registry.bindings.filter((b) => b.enabled && this.registry.providers.some((p) => p.id === b.providerId && p.enabled)).map((b) => this.loadTemplates(b)));
       projection = projectRegistry(this.registry, (binding) => this.templatesFor(binding));
     } catch (error) {
-      this.emit("saved-unpublished", `Document saved; previous publication remains in use. ${error instanceof Error ? error.message : "Review the official templates and mapping policies."} Retry publication after correcting the draft; do not import again.`);
+      this.emit("saved-unpublished", `配置已保存，仍在使用此前的发布版本。${error instanceof Error ? error.message : "请核对官方模板与映射策略。"} 修正草稿后请重试发布，不要重复导入。`);
       return;
     }
     if (!this.active) return;
     try {
       const publication = await this.ctx.cli.publishSource({ sourceId: this.sourceId, documentPath: "registry.json", documentVersion: this.version, expectedPublicationRevision: this.publication?.publicationRevision ?? null, ...projection });
       this.publication = publication;
-      this.emit("published", "Registry saved and published. Native CLI files were not changed.");
-      try { await this.restoreBoundMaterial(); } catch { this.emit("published", "Published; one bound Key could not be restored. Reconfirm the affected session; no fallback was used."); }
-    } catch { this.emit("saved-unpublished", "Document saved, publication failed. The previous publication remains in use. Check target grants, official templates and mappings, then retry publication; do not import again."); }
+      this.emit("published", "配置已保存并发布，原生 CLI 文件未改动。");
+      try { await this.restoreBoundMaterial(); } catch { this.emit("published", "已发布，但有一个已绑定的 Key 无法恢复。请重新确认受影响的会话，没有使用替代 Key。"); }
+    } catch { this.emit("saved-unpublished", "配置已保存，但发布失败，仍在使用此前的发布版本。请检查目标授权、官方模板与映射后重试发布，不要重复导入。"); }
   }
   private async supplyMaterial(request: RuntimeMaterialRequest): Promise<void> {
     if (!this.active || request.use.sourceId !== this.sourceId) return;
     const source = this.publication;
-    if (!source || request.use.registryRevision !== source.documentVersion) throw new Error("Material belongs to another publication");
+    if (!source || request.use.registryRevision !== source.documentVersion) throw new Error("运行材料属于另一个发布版本");
     const profile = source.profiles.find((p) => p.profileKey === request.profileKey);
-    if (!profile?.credentials.some((c) => c.credentialId === request.use.credentialId && c.credentialRevision === request.use.credentialRevision)) throw new Error("Key is not in the published profile");
+    if (!profile?.credentials.some((c) => c.credentialId === request.use.credentialId && c.credentialRevision === request.use.credentialRevision)) throw new Error("Key 不在已发布的执行配置中");
     const credential = this.registry.credentials.find((c) => c.id === request.use.credentialId && c.credentialRevision === request.use.credentialRevision && c.enabled);
-    if (!credential) throw new Error("Bound Key is missing, disabled or changed");
+    if (!credential) throw new Error("已绑定的 Key 缺失、已禁用或代次已变化");
     await this.ctx.cli.registerRuntimeMaterial({ ...request, value: credential.value });
   }
   private async restoreBoundMaterial(): Promise<void> {
@@ -127,8 +127,8 @@ export class ProviderController {
     if (!refresh && this.templates.has(cacheKey)) return this.templates.get(cacheKey)!;
     let result: ModelDiscoveryResult;
     try { result = await this.ctx.cli.listModels({ source: "official", engineId: binding.engineId, executionTarget: binding.executionTarget }); }
-    catch { throw new Error("Official templates could not be read for this CLI and execution target"); }
-    if (result.status === "failed" || result.status === "unsupported") throw new Error("Official templates are unavailable for this CLI and execution target");
+    catch { throw new Error("无法读取该 CLI 与执行目标的官方模板"); }
+    if (result.status === "failed" || result.status === "unsupported") throw new Error("该 CLI 与执行目标的官方模板不可用");
     const previous = this.templates.get(cacheKey) ?? [];
     const models = result.models.filter((model) => model.templateRef?.engineId === binding.engineId && model.evidence === "official");
     const merged = result.status === "partial" ? [...previous.filter((p) => !models.some((m) => m.templateRef?.modelId === p.templateRef?.modelId && m.templateRef?.revision === p.templateRef?.revision)), ...models] : models;
@@ -137,15 +137,15 @@ export class ProviderController {
   async authorizeDraft(view: RegistryView, bindingId: string): Promise<RegistryView> {
     const binding = view.bindings.find((b) => b.id === bindingId);
     const endpoint = view.endpoints.find((e) => e.id === binding?.endpointId);
-    if (!binding || !endpoint) throw new Error("Choose a binding endpoint first");
+    if (!binding || !endpoint) throw new Error("请先为绑定选择端点");
     const credentials = endpoint.auth === "none" ? [] : view.credentials.filter((c) => c.providerId === binding.providerId && c.enabled).map((c) => ({ credentialId: c.id, credentialRevision: c.credentialRevision, name: c.name, ...(c.remark ? { remark: c.remark } : {}) }));
-    const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials, purpose: "Use this Provider for the selected CLI and explicitly chosen session Key" });
+    const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials, purpose: "为所选 CLI 使用此供应商，并使用会话明确选定的 Key" });
     const next = structuredClone(view); next.bindings.find((b) => b.id === bindingId)!.targetGrantId = grant.grantId; return next;
   }
   async discover(bindingId: string, explicitCredentialId?: string): Promise<ModelDiscoveryResult> {
     const binding = this.registry.bindings.find((b) => b.id === bindingId);
     const profile = this.publication?.profiles.find((p) => p.profileKey === bindingId);
-    if (!binding || !profile || !this.publication || this.publication.documentVersion !== this.version) throw new Error("Save, authorize and publish this binding before endpoint discovery");
+    if (!binding || !profile || !this.publication || this.publication.documentVersion !== this.version) throw new Error("从端点发现模型前，请先保存、授权并发布此绑定");
     const credential = profile.auth === "none" ? undefined : credentialForBinding(this.registry, binding, explicitCredentialId);
     const cacheKey = JSON.stringify([bindingId, profile.protocol, profile.baseUrl, profile.executionTarget, credential?.id, credential?.credentialRevision]);
     const result = await this.ctx.cli.listModels({ source: "authorized-endpoint", engineId: binding.engineId, executionTarget: binding.executionTarget, sourceId: this.sourceId, profileKey: binding.id, targetGrantId: profile.targetGrantId, protocol: profile.protocol, ...(credential ? { credentialUse: { sourceId: this.sourceId, credentialId: credential.id, credentialRevision: credential.credentialRevision, registryRevision: this.publication.documentVersion } } : {}) });
@@ -157,47 +157,47 @@ export class ProviderController {
   async listConfigTargets(): Promise<NativeConfigTarget[]> { return this.ctx.cli.listConfigTargets(); }
   async previewImport(targetId: string): Promise<NativeConfigPreview> { return this.ctx.cli.previewConfigImport(targetId); }
   async confirmImport(preview: NativeConfigPreview, decisions: ImportDecision[], expectedVersion: string | null): Promise<void> {
-    if (expectedVersion !== this.version || this.busy) throw new Error("Registry changed while reviewing import; reload and preview again");
+    if (expectedVersion !== this.version || this.busy) throw new Error("核对导入内容期间配置已变化，请重新加载并预览");
     const ids = decisions.filter((d) => d.action !== "skip").map((d) => d.candidateId);
-    if (!ids.length) throw new Error("Select at least one import candidate");
+    if (!ids.length) throw new Error("请至少选择一个导入候选项");
     const imported = await this.ctx.cli.confirmConfigImport(preview.previewId, ids);
     let next: Registry;
     try { next = mergeImportedCandidates(this.registry, imported.candidates, decisions); }
     finally { for (const candidate of imported.candidates) delete candidate.value; }
     for (const binding of next.bindings.filter((b) => !b.targetGrantId && b.enabled)) {
       const endpoint = next.endpoints.find((e) => e.id === binding.endpointId)!;
-      const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials: endpoint.auth === "none" ? [] : next.credentials.filter((c) => c.providerId === binding.providerId && c.enabled).map(credentialIdentity), purpose: "Authorize the imported CLI Provider destination; native files will not change" });
+      const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials: endpoint.auth === "none" ? [] : next.credentials.filter((c) => c.providerId === binding.providerId && c.enabled).map(credentialIdentity), purpose: "授权导入的 CLI 供应商目标；原生文件不会改动" });
       binding.targetGrantId = grant.grantId;
     }
-    if (expectedVersion !== this.version || this.busy) throw new Error("Registry changed during import confirmation; preview again");
+    if (expectedVersion !== this.version || this.busy) throw new Error("确认导入期间配置已变化，请重新预览");
     next.revision = this.registry.revision + 1; await this.persistAndPublish(next, expectedVersion);
   }
   async previewPatch(targetId: string): Promise<ConfigPatchPreview> {
     const context = await this.ctx.sessions.getContext();
-    if (!context?.selection) throw new Error("Select a complete model and effort in the chat first");
+    if (!context?.selection) throw new Error("请先在聊天中完整选择模型与推理强度");
     const selection: ExecutionSelectionInput = { modelSelection: context.selection.modelSelection, effort: context.selection.effort };
     return this.ctx.cli.previewConfigPatch(targetId, selection);
   }
   async applyPatch(previewId: string): Promise<void> {
-    if (this.busy) throw new Error("Wait for the registry save");
+    if (this.busy) throw new Error("请等待配置保存完成");
     this.busy = true;
     const previousPhase = this.state.phase;
-    this.emit("saving", "Applying the explicitly confirmed native patch…");
+    this.emit("saving", "正在写入已明确确认的原生补丁…");
     let receipt;
     try { receipt = await this.ctx.cli.applyConfigPatch(previewId); }
-    catch { this.emit(previousPhase, "Native patch was rejected. Refresh its preview before trying again."); throw new Error("Native patch rejected"); }
+    catch { this.emit(previousPhase, "原生补丁被拒绝，请刷新预览后再试。"); throw new Error("原生补丁被拒绝"); }
     finally { this.busy = false; }
     const next = structuredClone(this.registry); next.patchReceipts.push(receipt); next.revision++;
     try { await this.persistAndPublish(next, this.version); }
-    catch { this.registry.patchReceipts.push(receipt); this.emit("conflict", `Native patch applied, but its receipt could not be saved. Keep this page open; restore is available for receipt ${receipt.receiptId}. Reload only after restoring or recording the receipt.`); throw new Error("Native patch applied but receipt save failed; restore it before leaving"); }
+    catch { this.registry.patchReceipts.push(receipt); this.emit("conflict", `原生补丁已写入，但回执未能保存。请保持本页打开；可通过回执 ${receipt.receiptId} 恢复。恢复补丁或记录回执后再重新加载。`); throw new Error("原生补丁已写入但回执保存失败，请在离开前恢复补丁"); }
   }
   async restorePatch(receiptId: string): Promise<void> {
-    if (this.busy) throw new Error("Wait for the registry save");
+    if (this.busy) throw new Error("请等待配置保存完成");
     this.busy = true;
     const previousPhase = this.state.phase;
-    this.emit("saving", "Restoring the explicitly selected native patch…");
+    this.emit("saving", "正在恢复明确选中的原生补丁…");
     try { await this.ctx.cli.restoreConfigPatch(receiptId); }
-    catch { this.emit(previousPhase, "Native restore was rejected, possibly due to external file changes. Do not overwrite the changed file."); throw new Error("Native restore rejected"); }
+    catch { this.emit(previousPhase, "原生恢复被拒绝，可能是文件已被外部修改。不要覆盖已变化的文件。"); throw new Error("原生恢复被拒绝"); }
     finally { this.busy = false; }
     const next = structuredClone(this.registry); next.patchReceipts = next.patchReceipts.filter((r) => r.receiptId !== receiptId); next.revision++;
     await this.persistAndPublish(next, this.version);

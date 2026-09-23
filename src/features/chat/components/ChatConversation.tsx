@@ -22,7 +22,7 @@ import {
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
 import { useComposerActions } from "./use-composer-actions";
-import { filterEngineOptions } from "./engine-options";
+import { filterEngineOptions, type EngineOption } from "./engine-options";
 import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
 import { useComposerImages } from "./use-composer-images";
@@ -91,7 +91,7 @@ function useConversationMenus({
   setCodexServiceTier,
   refreshModels,
   loadingEngines,
-  allowedEngines,
+  cliOptions,
 }: {
   engines: EngineInfo[];
   engineInfo: EngineInfo | undefined;
@@ -116,18 +116,12 @@ function useConversationMenus({
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   refreshModels: () => Promise<void>;
   loadingEngines: readonly string[];
-  /** 接管工作区(桥返回非 null):仅列允许表内引擎(null = 不过滤)。 */
-  allowedEngines: string[] | null;
+  /** Installed CLI rows, computed once by the caller so the builtin picker and
+   *  a plugin replacement entry always offer the same list. */
+  cliOptions: EngineOption[];
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Disabled-in-settings CLIs leave the picker entirely. 接管工作区下:
-  // 列表只留桥给的允许表,可用态按列表内与否而不是本机 `command -v` ——
-  // 否则本机没装的 CLI 在接管工作区里永远灰点。
-  const cliOptions = useMemo(
-    () => filterEngineOptions(engines, allowedEngines, t),
-    [engines, allowedEngines, t],
-  );
   // Every CLI is switched off in settings: swap the picker for a placeholder
   // that deep-links to the CLI config page.
   const noEnabledEngines = engines.length > 0 && cliOptions.length === 0;
@@ -346,7 +340,21 @@ export const ChatConversation = memo(function ChatConversation({
     () => Object.keys(pendingEngines),
     [pendingEngines],
   );
-  const { entryProps, tokenPolicy } = useExecutionChoices(active, engines, catalogs, modelsByEngine, channelsByEngine, refreshModels);
+  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
+  // null = 非接管工作区,按本机探针展示。
+  const uiHooks = useWorkspaceUIHooks();
+  const allowedEngines = useMemo(
+    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
+    () => workspaceAllowedEngines(active?.workspacePath),
+    [uiHooks, active?.workspacePath],
+  );
+  // One source of truth for the CLI rows: the builtin picker and a plugin
+  // replacement entry must offer exactly the same installed CLIs.
+  const cliOptions = useMemo(
+    () => filterEngineOptions(engines, allowedEngines, t),
+    [engines, allowedEngines, t],
+  );
+  const { entryProps, tokenPolicy } = useExecutionChoices(active, engines, catalogs, modelsByEngine, channelsByEngine, refreshModels, cliOptions, setActiveEngine);
   const runTokenPolicy = useChatStore((s) => s.bySession[key]?.runTokenPolicy);
   const runModel = useChatStore((s) => s.bySession[key]?.activeModel ?? undefined);
 
@@ -395,20 +403,12 @@ export const ChatConversation = memo(function ChatConversation({
     supportsImages,
     composerInputRef,
   });
-  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
-  // null = 非接管工作区,按本机探针展示。
-  const uiHooks = useWorkspaceUIHooks();
-  const allowedEngines = useMemo(
-    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
-    () => workspaceAllowedEngines(active?.workspacePath),
-    [uiHooks, active?.workspacePath],
-  );
   const { addMenu, cliMenu, permissionMenu, noEnabledEngines } =
     useConversationMenus({
       engines,
       engineInfo,
       activeEngine,
-      allowedEngines,
+      cliOptions,
       modelsByEngine,
       onPickFiles: handleAddAttachments,
       onPickSkills: handlePickSkills,

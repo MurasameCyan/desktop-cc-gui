@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { ExecutionChoice, ModelEntryProps, PublishedSource } from "@ccgui/plugin-sdk";
+import type { EngineChoice, ExecutionChoice, ModelEntryProps, PublishedSource } from "@ccgui/plugin-sdk";
 import type { ModelOption } from "@/components/application/ai-chat/cli-menu";
 import { EFFORT_LEVELS } from "@/components/application/ai-chat/effort-levels";
 import { ipc, type EngineCatalog, type EngineInfo } from "@/lib/ipc";
@@ -10,12 +10,14 @@ import { errorText } from "@/lib/errors";
 import { PSEUDO_LOCAL } from "@/features/settings/providers";
 import { useChatStore, sessionKey, type ActiveSession } from "../store";
 import { applyExecutionSelection, contributionTokenPolicy, executionTargetForTab, refreshExecutionSelection, sameModelChoice } from "../store/execution-selection";
+import type { EngineOption } from "./engine-options";
 
-export function useExecutionChoices(active: ActiveSession | null, engines: EngineInfo[], catalogs: Record<string, EngineCatalog>, models: Record<string, ModelOption[]>, channels: Record<string, { id: string; label: string }[]>, refreshNative: () => Promise<void>) {
+export function useExecutionChoices(active: ActiveSession | null, engines: EngineInfo[], catalogs: Record<string, EngineCatalog>, models: Record<string, ModelOption[]>, channels: Record<string, { id: string; label: string }[]>, refreshNative: () => Promise<void>, engineOptions: EngineOption[], selectEngine: (engineId: string) => void) {
   const { t } = useTranslation();
   const key = active ? sessionKey(active.engine, active.sessionId, active.workspacePath) : "";
   const selection = useChatStore((s) => s.bySession[key]?.executionSelection ?? null);
   const unavailableReason = useChatStore((s) => s.bySession[key]?.selectionUnavailableReason ?? undefined);
+  const firstTurnBusy = useChatStore((s) => !!(s.bySession[key]?.preparing || s.bySession[key]?.streaming));
   const workspaces = useChatStore((s) => s.workspaces);
   const [sources, setSources] = useState<PublishedSource[]>([]);
   const [loading, setLoading] = useState(false);
@@ -62,16 +64,16 @@ export function useExecutionChoices(active: ActiveSession | null, engines: Engin
         modelSelection: { source: "contribution", engineId: profile.engineId, sourceId: source.sourceId, profileKey: choice.profileKey, modelKey: choice.modelKey,
           credential: profile.credentials.find((credential) => credential.credentialId === profile.defaultCredentialId) ?? null },
         credentials: profile.credentials, capabilities: choice.capabilities, tokenPolicy: choice.tokenPolicy,
-        unavailableReason: !source.available ? source.unavailableReason ?? "Provider is unavailable" : source.unavailableProfiles?.[profile.profileKey],
+        unavailableReason: !source.available ? source.unavailableReason ?? t("chat.providerUnavailable") : source.unavailableProfiles?.[profile.profileKey],
       });
     }
     if (selection && !result.some((choice) => sameModelChoice(choice.modelSelection, selection.modelSelection))) {
       const model = selection.modelSelection;
-      result.push({ choiceId: JSON.stringify(["unavailable", model]), label: model.source === "native" ? model.modelId ?? "CLI default" : model.modelKey,
+      result.push({ choiceId: JSON.stringify(["unavailable", model]), label: model.source === "native" ? model.modelId ?? t("chat.cliNativeDefault") : model.modelKey,
         group: model.source === "native" ? t("settings.cliOfficial") : model.sourceId, modelSelection: model,
         credentials: model.source === "contribution" && model.credential ? [model.credential] : [],
         capabilities: { images: "unknown", tools: "unknown", effortLevels: selection.effort ? [selection.effort] : [] }, tokenPolicy: {},
-        unavailableReason: unavailableReason ?? catalogError ?? "The selected model is no longer available",
+        unavailableReason: unavailableReason ?? catalogError ?? t("chat.selectedModelUnavailable"),
       });
     }
     return result;
@@ -86,7 +88,32 @@ export function useExecutionChoices(active: ActiveSession | null, engines: Engin
       await Promise.all([refreshNative(), reloadSources(), active ? refreshExecutionSelection({ set: useChatStore.setState, get: useChatStore.getState }, active) : Promise.resolve()]);
     } finally { setLoading(false); }
   }, [active, refreshNative, reloadSources]);
+  // Only a conversation that has not sent its first turn can change CLI:
+  // setActiveEngine retargets a pending tab and otherwise just moves the
+  // preference, so a started session would silently keep its old engine.
+  const started = !!target?.sessionId;
+  const engineChoices = useMemo<EngineChoice[]>(() => engineOptions.map((option) => ({
+    engineId: option.id, label: option.label, available: option.available,
+    disabled: option.disabled || started || firstTurnBusy,
+    ...(option.disabled ? { disabledReason: option.disabledReason }
+      : started ? { disabledReason: t("chat.engineLockedAfterStart") }
+        : firstTurnBusy ? { disabledReason: t("chat.engineSwitchInFlight") } : {}),
+  })), [engineOptions, started, firstTurnBusy, t]);
+  const onSelectEngine: ModelEntryProps["onSelectEngine"] = useCallback(async (engineId) => {
+    const option = engineOptions.find((item) => item.id === engineId);
+    if (!option || option.disabled) throw new Error(t("chat.engineUnavailable"));
+    const state = useChatStore.getState();
+    const selected = state.active;
+    if (!target || !selected || selected.engine !== target.engineId || selected.workspacePath !== target.workspacePath
+      || selected.sessionId !== target.sessionId || (!target.sessionId && selected.pendingId !== target.pendingId)) {
+      throw new Error(t("chat.engineSelectionChanged"));
+    }
+    if (selected.sessionId) throw new Error(t("chat.engineLockedAfterStart"));
+    const session = state.bySession[key];
+    if (session?.preparing || session?.streaming) throw new Error(t("chat.engineSwitchInFlight"));
+    selectEngine(engineId);
+  }, [engineOptions, target, key, selectEngine, t]);
   const tokenPolicy = contributionTokenPolicy(selection?.modelSelection, sources)
     ?? choices.find((choice) => selection && sameModelChoice(choice.modelSelection, selection.modelSelection))?.tokenPolicy;
-  return { entryProps: target ? { context: { target, selection, unavailableReason: unavailableReason ?? catalogError }, choices, loading, onApply, onRefresh } satisfies ModelEntryProps : null, tokenPolicy };
+  return { entryProps: target ? { context: { target, selection, unavailableReason: unavailableReason ?? catalogError }, choices, engines: engineChoices, loading, onApply, onSelectEngine, onRefresh } satisfies ModelEntryProps : null, tokenPolicy };
 }

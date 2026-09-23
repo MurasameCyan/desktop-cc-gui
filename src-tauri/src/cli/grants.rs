@@ -57,14 +57,14 @@ pub async fn plugin_cli_request_target_grant(app: tauri::AppHandle, state: tauri
     if !request.credentials.is_empty() { require_permission(&plugin_id, "cli.runtime.sensitive")?; }
     let generation = *state.cli.inner.lock().generations.get(&plugin_id).unwrap_or(&0);
     let target = match &request.execution_target {
-        ExecutionTarget::Local => "This computer".to_string(),
-        ExecutionTarget::Wsl { host_id, distro } => format!("WSL host {host_id}, distribution {distro}"),
+        ExecutionTarget::Local => "本机".to_string(),
+        ExecutionTarget::Wsl { host_id, distro } => format!("WSL 主机 {host_id}，发行版 {distro}"),
     };
-    let identities = if request.credentials.is_empty() { "None (unauthenticated)".into() } else {
-        request.credentials.iter().map(|key| format!("{} [{}], generation {}", key.name, key.credential_id, key.credential_revision)).collect::<Vec<_>>().join("\n")
+    let identities = if request.credentials.is_empty() { "无（不使用认证）".into() } else {
+        request.credentials.iter().map(|key| format!("{} [{}]，第 {} 代", key.name, key.credential_id, key.credential_revision)).collect::<Vec<_>>().join("\n")
     };
-    let message = format!("Plugin: {plugin_id}\nSource: {}\nFull destination: {}\nOrigin: {}\nExecution environment: {target}\nCredential identities:\n{identities}\n\nPlugin-supplied purpose: {}\n\nAllow this plugin to send these credentials only to this destination in this environment? Authorization can be revoked.", request.source_id, request.base_url, url.origin().ascii_serialization(), request.purpose);
-    confirm_desktop(&app, "Authorize execution destination", &message).await?;
+    let message = format!("插件：{plugin_id}\n来源：{}\n完整目标地址：{}\n源站：{}\n执行环境：{target}\n凭据身份：\n{identities}\n\n插件声明的用途：{}\n\n是否允许此插件仅在该执行环境中，将这些凭据发送到此目标？此授权可以撤销。", request.source_id, request.base_url, url.origin().ascii_serialization(), request.purpose);
+    confirm_desktop(&app, "授权执行目标", &message).await?;
     require_permission(&plugin_id, "network.targets.request")?;
     if !request.credentials.is_empty() { require_permission(&plugin_id, "cli.runtime.sensitive")?; }
     let grant = TargetGrant { grant_id:uuid::Uuid::new_v4().to_string(),source_id:request.source_id,base_url:request.base_url,execution_target:request.execution_target,credentials:request.credentials };

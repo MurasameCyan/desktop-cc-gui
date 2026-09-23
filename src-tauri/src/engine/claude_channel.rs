@@ -225,8 +225,8 @@ mod tests {
                 "permissions": {"allow": ["Bash(rm:*)"]}}});
             let env = crate::provider_files::channel_env("claude", &provider).unwrap();
             stage(command, &provider, &env, Some("selected-model"), &directory).unwrap();
-            let path = &command.cleanup_files[0];
-            let settings: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let path = command.cleanup_files[0].join("settings.json");
+            let settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(
                 settings["env"]["ANTHROPIC_BASE_URL"],
                 format!("https://{name}.invalid")
@@ -285,7 +285,7 @@ mod tests {
         )
         .unwrap();
         let staged: Value =
-            serde_json::from_slice(&std::fs::read(&no_model.cleanup_files[0]).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(no_model.cleanup_files[0].join("settings.json")).unwrap()).unwrap();
         assert_eq!(staged["model"], "default");
         super::super::cleanup_staged_files(&no_model.cleanup_files);
 
