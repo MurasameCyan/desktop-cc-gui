@@ -142,16 +142,13 @@ export type _InternalMessageCaptureKeys = Assert<
 export type _DocumentStorageRemoveParams = Assert<
   Mutual<Params<DocumentStorage["remove"]>, Params<Pub.DocumentStorage["remove"]>>
 >;
-type _PluginManifest = Assert<Mutual<PluginManifest, Pub.PluginManifest>>;
-type _JsonSchemaObject = Assert<Mutual<JsonSchemaObject, Pub.JsonSchemaObject>>;
-type _JsonSchemaProperty = Assert<Mutual<JsonSchemaProperty, Pub.JsonSchemaProperty>>;
-type _ComposerSlotId = Assert<Mutual<ComposerSlotId, Pub.ComposerSlotId>>;
-type _SessionMenuTarget = Assert<Mutual<SessionMenuTarget, Pub.SessionMenuTarget>>;
-type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
-type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
-type _ConversationProps = Assert<Mutual<PluginConversationProps, Pub.PluginConversationProps>>;
-type _AgentCatalogEntry = Assert<Mutual<PluginAgentCatalogEntry, Pub.PluginAgentCatalogEntry>>;
-type _AgentShape = Assert<Mutual<PluginContext["agent"], Pub.PluginContext["agent"]>>;
+export type _ConversationProps = Assert<
+  Mutual<PluginConversationProps, Pub.PluginConversationProps>
+>;
+export type _AgentCatalogEntry = Assert<
+  Mutual<PluginAgentCatalogEntry, Pub.PluginAgentCatalogEntry>
+>;
+export type _AgentShape = Assert<Mutual<PluginContext["agent"], Pub.PluginContext["agent"]>>;
 
 // --- PluginContext：顶层与各能力组 key 完全对齐 ------------------------------
 

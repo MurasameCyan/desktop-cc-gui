@@ -1685,6 +1685,7 @@ mod tests {
         let request = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            prompt_contributions: vec![],
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,

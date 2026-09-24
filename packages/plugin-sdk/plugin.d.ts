@@ -379,6 +379,8 @@ export interface PluginContext {
       key?: string;
       component: ComponentLike;
       order?: number;
+    }): Disposer;
+    /** 会话内对话模式（权限 ui:conversation-mode）。 */
     registerConversationMode(def: {
       key?: string;
       label: () => string;

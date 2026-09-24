@@ -1313,6 +1313,7 @@ mod terminal_event_tests {
             todos: None,
             args: None,
             result: None,
+            tool_call_id: None,
             patch: false,
         };
 

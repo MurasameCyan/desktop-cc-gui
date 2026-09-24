@@ -708,6 +708,7 @@ pub(crate) async fn mission_agent_send(
         workspace_path,
         session_id,
         prompt,
+        Vec::new(),
         None,
         model,
         effort,

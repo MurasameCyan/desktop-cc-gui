@@ -1130,7 +1130,6 @@ export const en: Messages = {
       "In the 0.x line the minor is the breaking digit (^0.3 does not cover a 0.4 host); when on, plugins declaring ^0.N (N below the host minor) load and are marked Compatibility mode.",
     compatBadgeHint: "Declares sdk {{range}}, host {{host}}: loaded in compatibility mode",
     marketTitle: "Plugin Marketplace",
-    market: {
     hub: {
       title: "Plugins",
       marketTab: "Marketplace",

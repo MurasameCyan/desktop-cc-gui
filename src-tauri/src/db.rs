@@ -1013,6 +1013,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE accepted_internal_frames ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''",
             [],
         )?;
+    }
+
     // Additive migration: git worktree children hang under their parent
     // workspace row in the sidebar (kind="worktree"). Matches the legacy
     // app's per-workspace `kind` in workspaces.json.

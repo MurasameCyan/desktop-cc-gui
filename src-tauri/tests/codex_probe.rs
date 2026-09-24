@@ -134,6 +134,14 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
             Arc::clone(&emitter),
             ccgui_next_lib::terminal::TERMINAL_OUTPUT_EVENT,
         ),
+        plugin_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
+        ),
+        mission_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters: BroadcastEmit::new(emitter),

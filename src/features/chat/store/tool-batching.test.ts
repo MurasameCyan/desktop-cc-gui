@@ -25,6 +25,11 @@ function setup(messages: Message[] = []) {
     active: null,
     drafts: {},
     archivedSessionKeys: {},
+    // The pending -> native session migration rekeys remembered prompt
+    // contributions and stamps the created key; both read their map
+    // unconditionally.
+    createdSessionKeys: {},
+    sessionContributions: {},
   }) as unknown as ChatStore);
   const set = vi.fn<EngineEventDeps["set"]>((update) => store.setState(update));
   const changed = vi.fn();

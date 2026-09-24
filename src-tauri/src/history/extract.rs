@@ -1749,7 +1749,7 @@ mod tests {
         let input = format!("{}\n{}", call, result);
         let extractor: LineExtractor<'_> =
             Box::new(|value: &Value| extract_pi_family_line(value, ImageMode::Collect));
-        let parsed = collect_session(std::io::Cursor::new(input), &extractor);
+        let parsed = collect_session(std::io::Cursor::new(input), &extractor, &HashSet::new());
         assert_eq!(parsed.messages.len(), 1);
         let todos = parsed.messages[0].todos.as_ref().expect("todos must be populated");
         assert_eq!(todos.items.len(), 1);

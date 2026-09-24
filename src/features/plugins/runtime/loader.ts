@@ -2,7 +2,6 @@ import { ipc, type PluginInfo } from "@/lib/ipc";
 import { getAppVersion, pickDirectory } from "@/lib/platform";
 import i18n from "@/lib/i18n";
 import { buildAgentCatalog } from "../conversation/agent-catalog";
-import { getAppVersion } from "@/lib/platform";
 import { invoke } from "@/lib/transport";
 import { useChatStore } from "@/features/chat/store";
 import {

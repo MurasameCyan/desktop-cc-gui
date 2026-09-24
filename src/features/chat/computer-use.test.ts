@@ -116,10 +116,14 @@ describe("computer-use sends", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0].computerUse).toBe(true);
 
-    // Drain it the way the queue does on user request.
+    // Drain it the way the queue does on user request. drainQueue fires the
+    // send without awaiting it, and the send itself awaits the beforeTurn
+    // hooks before reaching ipc, so the call lands a few microtasks later.
     await useChatStore.getState().sendQueuedNow(queued[0].id);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: "打开计算器", computerUse: true }),
+    await vi.waitFor(() =>
+      expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
+        expect.objectContaining({ prompt: "打开计算器", computerUse: true }),
+      ),
     );
   });
 

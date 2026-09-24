@@ -187,6 +187,8 @@ describe("createPluginContext", () => {
       proxied.pathname.replace("model.json", "textures/texture.png"),
     );
     expect(proxied.search).toBe("?revision=2");
+  });
+
   it("preserves the native interrupt routed boolean for recovery", async () => {
     const backend = fakeStorage();
     const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
