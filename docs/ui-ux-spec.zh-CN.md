@@ -73,6 +73,7 @@
 - **虚拟光标由 App 强制显示，不是设置项**：运行期间 `cu_overlay.rs` 跟随每个动作目标显示指针，模型侧没有可关闭它的工具；提示词只能说明它存在（computer_use.rs 的 MCP `instructions`），不能决定其可见性。
 - **急停只在电脑操控回合期间武装**：`computerUseSetActive` 在发送时武装、回合终止（`engine-events.ts` 的 `done`/`error`）时解除，全局 Esc 不超出它的运行期。
 - 可交互元素至少实现：默认 / hover / `focus-visible`（`ring-border-focus-ring`）/ active / disabled。按钮类控件的焦点环只走 `focus-visible`（不打扰鼠标用户）；输入类控件可以用 `focus:border-border-focus-ring` 表示聚焦，因为文本输入聚焦本身就是用户意图。
+- **渠道选择后保留当前引擎面板**：`engine-model-panel.tsx` 的 `ChannelPicker` 在选项卸载前将焦点交回同一面板的渠道按钮（`preventScroll: true`），桌面浮层与移动端弹窗共用。不能让选项卸载后的焦点恢复落到首个引擎行，触发 `onFocus` 把 Codex 面板切成 Claude Code；正常的引擎行点击、键盘导航与悬停切换保持不变。
 - disabled 必须改变光标语义（`disabled:cursor-not-allowed` 或 `disabled:cursor-default`）并降低强调（`opacity-50`~`60` 或语义 disabled token），不能只是点不动。
 - **异步动作进行中不可重入**：进行中禁用按钮（或首行拦截 `if (running) return`），避免重复请求。
 - **反馈不改变布局**：图标在默认态与反馈态之间切换时，外层容器尺寸固定（`ActionFeedbackIcon` 用 `iconClassName` 同时约束容器和图标），按钮不能因为换图标而抖动。
@@ -242,6 +243,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.53 | 2026-09-24 | 渠道下拉收起前归还触发按钮焦点，修复 Codex 切换供应商后面板跳到 Claude Code；增加焦点回归用例，浏览器夹具覆盖多引擎与真实聚焦的渠道选择；§3 补充规则 |
 | v0.52 | 2026-09-24 | 设置「电脑操控」移除拖拽授权引导：删掉“重启生效 / 把图标拖进授权列表”提示与可拖拽 App 图标，macOS 授权只保留「打开系统设置」深链（`computer_use_open_permission_settings`）；同步删除 `computer_use_drag_source` 命令、`tauri-plugin-drag` 依赖与 `drag:default` 权限；§3 更新权限行规则 |
 | v0.51 | 2026-09-24 | AskUserQuestion 多题卡片：单选自动前进、多选逐题确认与单选/多选样式区分 |
 | v0.50 | 2026-09-23 | 桌面宠物（§4.3）：透明置顶宠物窗口的点击穿透/拖动/右键缩放交互、状态气泡动效时长、位置与尺寸记忆、多会话轮播；移除宠物改用 `ConfirmDialog`（danger），后端宠物错误码本地化 |
