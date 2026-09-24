@@ -16,6 +16,7 @@
     "ui:session-menu",
     "ui:sidebar-entry",
     "ui:center-tab",
+    "ui:conversation-mode",
     "agent",
     "theme",
     "i18n",

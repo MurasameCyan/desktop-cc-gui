@@ -42,15 +42,12 @@ import { launchPiFamilyLogin } from "./piFamilyLogin";
 import { PiFamilyOauthSection } from "./PiFamilyOauthSection";
 import { notifyCliConfigChanged } from "./providers";
 
-export function PiFamilyAuthSection({
-  engine,
-  openCustomEditorSignal,
-}: {
-  engine: "pi" | "omp";
-  /** Bump to open the 自定义供应商 editor from the 官方配置 row's 编辑
-   *  entry (pi/omp official files are never cc-gui-managed, so no gate). */
-  openCustomEditorSignal?: number;
-}) {
+/** All credential-store / custom-provider state and handlers. Kept JSX-free so
+ *  the component below only composes the three groups and their dialogs. */
+function usePiFamilyAuthState(
+  engine: "pi" | "omp",
+  openCustomEditorSignal?: number,
+) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<PiFamilyAuthListResult | null>(null);
@@ -362,6 +359,120 @@ export function PiFamilyAuthSection({
     [engine, navigate, t],
   );
 
+  const toggleShowAll = useCallback(() => setShowAll((value) => !value), []);
+  const toggleDraftVisible = useCallback(() => setDraftVisible((visible) => !visible), []);
+
+  return {
+    notice,
+    oauthProviders,
+    oauthActive,
+    handleLaunchLogin,
+    loadError,
+    storePath,
+    query,
+    setQuery,
+    showAll,
+    toggleShowAll,
+    visibleProviders,
+    byId,
+    editingId,
+    openEditor,
+    deleteTarget,
+    setDeleteTarget,
+    handleDelete,
+    draftKey,
+    setDraftKey,
+    draftVisible,
+    toggleDraftVisible,
+    saving,
+    actionError,
+    handleSave,
+    closeEditor,
+    modelsConfig,
+    modelsEditorOpen,
+    modelsDraft,
+    setModelsDraft,
+    modelsSaving,
+    modelsError,
+    openModelsEditor,
+    handleModelsSave,
+    customQuery,
+    setCustomQuery,
+    visibleCustomProviders,
+    customEditingId,
+    customDraft,
+    setCustomDraft,
+    customSaving,
+    customError,
+    openCustomProviderEditor,
+    handleCustomProviderSave,
+    closeCustomProviderEditor,
+    customDeleteTarget,
+    setCustomDeleteTarget,
+    handleCustomProviderDelete,
+  };
+}
+
+export function PiFamilyAuthSection({
+  engine,
+  openCustomEditorSignal,
+}: {
+  engine: "pi" | "omp";
+  /** Bump to open the 自定义供应商 editor from the 官方配置 row's 编辑
+   *  entry (pi/omp official files are never cc-gui-managed, so no gate). */
+  openCustomEditorSignal?: number;
+}) {
+  const { t } = useTranslation();
+  const {
+    notice,
+    oauthProviders,
+    oauthActive,
+    handleLaunchLogin,
+    loadError,
+    storePath,
+    query,
+    setQuery,
+    showAll,
+    toggleShowAll,
+    visibleProviders,
+    byId,
+    editingId,
+    openEditor,
+    deleteTarget,
+    setDeleteTarget,
+    handleDelete,
+    draftKey,
+    setDraftKey,
+    draftVisible,
+    toggleDraftVisible,
+    saving,
+    actionError,
+    handleSave,
+    closeEditor,
+    modelsConfig,
+    modelsEditorOpen,
+    modelsDraft,
+    setModelsDraft,
+    modelsSaving,
+    modelsError,
+    openModelsEditor,
+    handleModelsSave,
+    customQuery,
+    setCustomQuery,
+    visibleCustomProviders,
+    customEditingId,
+    customDraft,
+    setCustomDraft,
+    customSaving,
+    customError,
+    openCustomProviderEditor,
+    handleCustomProviderSave,
+    closeCustomProviderEditor,
+    customDeleteTarget,
+    setCustomDeleteTarget,
+    handleCustomProviderDelete,
+  } = usePiFamilyAuthState(engine, openCustomEditorSignal);
+
   return (
     <div className="flex w-full flex-col gap-6" data-testid="pi-family-auth-section">
       {notice && (
@@ -385,7 +496,7 @@ export function PiFamilyAuthSection({
         query={query}
         onQueryChange={setQuery}
         showAll={showAll}
-        onToggleShowAll={() => setShowAll((value) => !value)}
+        onToggleShowAll={toggleShowAll}
         totalCount={PI_FAMILY_APIKEY_PROVIDERS.length}
         providers={visibleProviders}
         byId={byId}
@@ -395,7 +506,7 @@ export function PiFamilyAuthSection({
         draftKey={draftKey}
         onDraftKeyChange={setDraftKey}
         draftVisible={draftVisible}
-        onToggleDraftVisible={() => setDraftVisible((visible) => !visible)}
+        onToggleDraftVisible={toggleDraftVisible}
         saving={saving}
         actionError={actionError}
         onSave={(provider) => void handleSave(provider)}

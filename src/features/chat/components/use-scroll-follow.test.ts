@@ -35,6 +35,7 @@ describe("useScrollFollow touch intent", () => {
   let el: HTMLDivElement;
   let geometry: { scrollHeight: number; clientHeight: number; scrollTop: number };
   let follow: ScrollFollow;
+  let scrollToSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     pendingFrames = [];
@@ -66,6 +67,7 @@ describe("useScrollFollow touch intent", () => {
       return null;
     }
     el = document.createElement("div");
+    scrollToSpy = vi.fn();
     Object.defineProperties(el, {
       scrollHeight: { get: () => geometry.scrollHeight, configurable: true },
       clientHeight: { get: () => geometry.clientHeight, configurable: true },
@@ -76,6 +78,9 @@ describe("useScrollFollow touch intent", () => {
         },
         configurable: true,
       },
+      // Edge jumps glide by default; the spy records the request so tests can
+      // settle the animation themselves (jsdom never runs one).
+      scrollTo: { value: scrollToSpy, configurable: true },
     });
     container.appendChild(el);
     act(() => {
@@ -152,5 +157,77 @@ describe("useScrollFollow touch intent", () => {
     scrollTo(2100);
 
     expect(follow.isFollowing()).toBe(false);
+  });
+
+  it("glides to the tail and hard-pins only once the slide settles", () => {
+    mount();
+    geometry.scrollTop = 3000;
+
+    act(() => follow.scrollToEdge("bottom"));
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 4400, behavior: "smooth" });
+
+    // A stream flush mid-slide must not cut the transition short.
+    act(() => follow.scrollToBottom());
+    expect(geometry.scrollTop).toBe(3000);
+
+    // Content grew while gliding: the settle pin lands on the true tail.
+    geometry.scrollHeight = 5200;
+    act(() => {
+      el.dispatchEvent(new Event("scrollend"));
+    });
+    expect(geometry.scrollTop).toBe(4600);
+  });
+
+  it("lets a wheel-up mid-slide take over instead of yanking the tail back", () => {
+    mount();
+    geometry.scrollTop = 3000;
+    act(() => follow.scrollToEdge("bottom"));
+
+    geometry.scrollTop = 3400;
+    act(() => {
+      el.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+      el.dispatchEvent(new Event("scrollend"));
+    });
+
+    expect(geometry.scrollTop).toBe(3400);
+    expect(follow.isFollowing()).toBe(false);
+  });
+
+  it("glides to the top and pauses following on a top-edge jump", () => {
+    mount();
+    geometry.scrollTop = 3000;
+
+    act(() => follow.scrollToEdge("top"));
+
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+    expect(follow.isFollowing()).toBe(false);
+  });
+
+  it("jumps instantly when the system asks for reduced motion", () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true }));
+    mount();
+    geometry.scrollTop = 3000;
+
+    act(() => follow.scrollToEdge("bottom"));
+
+    expect(scrollToSpy).not.toHaveBeenCalled();
+    expect(geometry.scrollTop).toBe(4400);
+  });
+
+  it("resumeFollow cancels an in-flight glide and pins instantly", () => {
+    mount();
+    geometry.scrollTop = 3000;
+    act(() => follow.scrollToEdge("bottom"));
+
+    act(() => follow.resumeFollow());
+    expect(geometry.scrollTop).toBe(4400);
+
+    // The cancelled glide's settle must not pin a second time.
+    geometry.scrollTop = 1000;
+    act(() => {
+      el.dispatchEvent(new Event("scrollend"));
+    });
+    expect(geometry.scrollTop).toBe(1000);
+    expect(follow.isFollowing()).toBe(true);
   });
 });

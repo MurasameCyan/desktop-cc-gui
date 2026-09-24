@@ -20,6 +20,9 @@ export interface AiChatThread {
 
 export interface AiChatRepo {
   id?: string;
+  /** Workspace path — the git store's status cache is keyed by it (worktree
+   *  child rows read dirty counts through this). */
+  path?: string;
   label: string;
   /** Original workspace folder name when `label` is a user-set alias
    *  (surfaced as the row tooltip). */
@@ -33,7 +36,20 @@ export interface AiChatRepo {
   labelSuffix?: string;
   /** Expanded on first render (folder-open icon + visible threads). */
   defaultOpen?: boolean;
+  /** Worktree child workspaces attached under this repo, each carrying its
+   *  own threads; rendered as a WORKTREES group inside the expanded area. */
+  worktrees?: AiChatRepo[];
+  /** Set on a repo that IS a worktree child row. */
+  worktree?: AiChatWorktreeMeta;
 }
+
+/** Worktree child metadata on a repo row (set when this repo IS a worktree
+ *  child): branch label + PR badge data, from workspace meta. */
+export interface AiChatWorktreeMeta {
+  branch: string;
+  prNumber?: number;
+}
+
 /** A workspace group section (工作区二级分类): named groups render with a
  *  collapsible header; the single `id: null` section is ungrouped repos
  *  rendered flat, exactly as before groups existed. */

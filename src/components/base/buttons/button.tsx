@@ -38,6 +38,10 @@ import { cx, sortCx } from "@/utils/cx";
  * For icon-only buttons:
  *   <Button iconOnly leadingIcon={Plus} aria-label="Add" />
  *
+ * An icon-only button may instead pass `children` to replace the leading
+ * icon with animated/composite content (same contract as `IconButton`), e.g.
+ * the spin → check feedback on refresh actions.
+ *
  * The HTML `type` prop is preserved; Figma's "Type" enum is renamed to
  * `variant` to avoid the clash.
  */
@@ -154,7 +158,11 @@ export function Button({
       )}
       {...props}
     >
-      {Leading ? <Leading className={styles.icon[size]} aria-hidden /> : null}
+      {iconOnly && children != null
+        ? children
+        : Leading
+          ? <Leading className={styles.icon[size]} aria-hidden />
+          : null}
       {!iconOnly && children !== undefined && children !== null && (
         <span className={styles.label[size]}>{children}</span>
       )}

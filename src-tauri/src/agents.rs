@@ -59,7 +59,10 @@ fn read_store_from(path: &Path) -> Result<AgentStore, String> {
     match serde_json::from_str(&content) {
         Ok(store) => Ok(store),
         Err(e) => {
-            eprintln!("[agents] corrupt {}, resetting to empty: {e}", path.display());
+            eprintln!(
+                "[agents] corrupt {}, resetting to empty: {e}",
+                path.display()
+            );
             Ok(AgentStore::default())
         }
     }
@@ -76,8 +79,7 @@ fn write_store_to(path: &Path, store: &AgentStore) -> Result<(), String> {
     }
     let content = serde_json::to_string_pretty(store)
         .map_err(|e| format!("Failed to serialize agents: {e}"))?;
-    std::fs::write(path, content)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    std::fs::write(path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
 /// Trimmed name, or a validation error: required, 1–64 chars.
@@ -269,11 +271,9 @@ fn import_legacy_agents_from(
     {
         let conn = db.0.lock();
         let done = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key=?1",
-                [FLAG],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key=?1", [FLAG], |r| {
+                r.get::<_, String>(0)
+            })
             .ok();
         if done.is_some() {
             return Ok(());
@@ -349,7 +349,8 @@ mod tests {
     impl ScratchHome {
         fn new(name: &str) -> Self {
             let guard = crate::paths::HOME_ENV_LOCK.lock();
-            let dir = std::env::temp_dir().join(format!("ccgui-agents-{name}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("ccgui-agents-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             let previous = std::env::var_os("HOME");
@@ -401,20 +402,31 @@ mod tests {
         assert_eq!(list[0].prompt.as_deref(), Some("审查 diff"));
 
         // Partial update: name only, prompt/icon untouched.
-        assert!(agent_update_blocking(agent.id.clone(), Some("评审".to_string()), None, None).unwrap());
+        assert!(
+            agent_update_blocking(agent.id.clone(), Some("评审".to_string()), None, None).unwrap()
+        );
         let list = agent_list_blocking().unwrap();
         assert_eq!(list[0].name, "评审");
         assert_eq!(list[0].prompt.as_deref(), Some("审查 diff"));
         assert_eq!(list[0].icon.as_deref(), Some("bot"));
 
         // Some("") clears optional fields.
-        assert!(agent_update_blocking(agent.id.clone(), None, Some("".to_string()), Some("".to_string())).unwrap());
+        assert!(agent_update_blocking(
+            agent.id.clone(),
+            None,
+            Some("".to_string()),
+            Some("".to_string())
+        )
+        .unwrap());
         let list = agent_list_blocking().unwrap();
         assert_eq!(list[0].prompt, None);
         assert_eq!(list[0].icon, None);
 
         // Unknown ids are a false, not an error.
-        assert!(!agent_update_blocking("missing".to_string(), Some("x".to_string()), None, None).unwrap());
+        assert!(
+            !agent_update_blocking("missing".to_string(), Some("x".to_string()), None, None)
+                .unwrap()
+        );
         assert!(!agent_delete_blocking("missing".to_string()).unwrap());
 
         assert!(agent_delete_blocking(agent.id.clone()).unwrap());
@@ -439,8 +451,10 @@ mod tests {
     struct ScratchDir(PathBuf);
     impl ScratchDir {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("ccgui-agents-migrate-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "ccgui-agents-migrate-{name}-{}",
+                std::process::id()
+            ));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -483,7 +497,11 @@ mod tests {
 
         import_legacy_agents_from(&db, &legacy, &dest).unwrap();
         let store = read_store_from(&dest).unwrap();
-        assert_eq!(store.agents.len(), 3, "a0 kept, a1/a2 imported, blank-name a3 skipped");
+        assert_eq!(
+            store.agents.len(),
+            3,
+            "a0 kept, a1/a2 imported, blank-name a3 skipped"
+        );
 
         let a0 = store.agents.iter().find(|a| a.id == "a0").unwrap();
         assert_eq!(a0.name, "已有", "an existing id is never overwritten");
@@ -523,8 +541,12 @@ mod tests {
     fn legacy_import_without_file_only_sets_flag() {
         let scratch = ScratchDir::new("missing");
         let db = crate::db::Db::open_at(&scratch.path("app.db")).unwrap();
-        import_legacy_agents_from(&db, &scratch.path("nope.json"), &scratch.path("agents.json"))
-            .unwrap();
+        import_legacy_agents_from(
+            &db,
+            &scratch.path("nope.json"),
+            &scratch.path("agents.json"),
+        )
+        .unwrap();
         assert!(!scratch.path("agents.json").exists());
         let conn = db.0.lock();
         let flag: String = conn

@@ -117,3 +117,19 @@ it("offers no menu when onNewBrowser is omitted", async () => {
 
   expect(menuItems()).toEqual([]);
 });
+
+it("marks a tab with a pending notice as unread, with its own accessible name", async () => {
+  await render({
+    tabs: [
+      ...TABS,
+      { key: "notes", label: "Release Notes", streaming: false, unread: "新版本" },
+    ],
+  });
+
+  // 未读提醒不借用会话活动的绿点（语义与颜色都是另一套）。
+  expect(node.querySelector('[data-tab-key="b"] [role="status"]')).toBeNull();
+  const dot = node.querySelector('[data-tab-key="notes"] [role="status"]');
+  expect(dot?.getAttribute("aria-label")).toBe("新版本");
+  expect(dot?.getAttribute("title")).toBe("新版本");
+  expect(dot?.className).toContain("bg-accent-500");
+});

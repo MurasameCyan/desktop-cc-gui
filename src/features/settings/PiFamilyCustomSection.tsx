@@ -3,6 +3,7 @@
  *  All state stays with the parent; this file is presentational. */
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import claudeIcon from "@lobehub/icons-static-svg/icons/claude-color.svg";
 import openaiIcon from "@lobehub/icons-static-svg/icons/openai.svg";
 import Boxes from "lucide-react/dist/esm/icons/boxes";
@@ -212,6 +213,187 @@ interface PiFamilyCustomSectionProps {
   onDeleteProvider: (provider: PiFamilyCustomProviderSummary) => void;
 }
 
+interface CustomProviderRowProps {
+  provider: PiFamilyCustomProviderSummary;
+  modelsConfig: PiFamilyModelsConfigReadResult | null;
+  expanded: boolean;
+  providerDraft: string;
+  providerSaving: boolean;
+  providerError: string | null;
+  onOpenProviderEditor: (id: string) => void;
+  onProviderDraftChange: (value: string) => void;
+  onProviderSave: () => void;
+  onCloseProviderEditor: () => void;
+  onDeleteProvider: (provider: PiFamilyCustomProviderSummary) => void;
+}
+
+/** One provider row plus its inline raw-text editor. */
+function CustomProviderRow({
+  provider,
+  modelsConfig,
+  expanded,
+  providerDraft,
+  providerSaving,
+  providerError,
+  onOpenProviderEditor,
+  onProviderDraftChange,
+  onProviderSave,
+  onCloseProviderEditor,
+  onDeleteProvider,
+}: CustomProviderRowProps) {
+  const { t } = useTranslation();
+  const keyLabel = t(
+    provider.hasApiKey
+      ? "settings.piAuthCustomHasKey"
+      : "settings.piAuthCustomNoKey",
+  );
+  return (
+    <div>
+      <div className={cx(ROW, expanded && "border-b-0")}>
+        <BrandIcon iconSrc={null} />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <p className="truncate text-body-regular text-text-primary">
+            {provider.name ?? provider.id}
+          </p>
+          <code className="w-fit truncate rounded border border-dashed border-border-button-default px-1 py-px text-[11px] text-text-tertiary">
+            {provider.baseUrl ?? provider.id}
+          </code>
+        </div>
+        <span
+          className="flex shrink-0 items-center gap-1 text-body-2-regular text-text-tertiary"
+          aria-label={t("settings.piAuthCustomModelCount", {
+            count: provider.modelCount,
+          })}
+          title={t("settings.piAuthCustomModelCount", {
+            count: provider.modelCount,
+          })}
+        >
+          {provider.modelCount}
+          <Boxes className="size-3.5" aria-hidden />
+        </span>
+        {provider.api ? (
+          <span
+            className="flex size-5 shrink-0 items-center justify-center text-text-tertiary"
+            role="img"
+            aria-label={provider.api}
+            title={provider.api}
+          >
+            <ProtocolIcon api={provider.api} />
+          </span>
+        ) : null}
+        <span
+          className={cx(
+            "flex size-5 shrink-0 items-center justify-center",
+            provider.hasApiKey
+              ? "text-notification-success-foreground"
+              : "text-text-tertiary",
+          )}
+          role="img"
+          aria-label={keyLabel}
+          title={keyLabel}
+        >
+          <KeyRound className="size-3.5" aria-hidden />
+        </span>
+        <span aria-hidden className="h-4 w-px shrink-0 bg-separator-border" />
+        <button
+          type="button"
+          aria-label={t("settings.cliEdit")}
+          title={t("settings.cliEdit")}
+          disabled={providerSaving}
+          onClick={() => onOpenProviderEditor(provider.id)}
+          className={ICON_BUTTON}
+        >
+          <Pencil className="size-4" aria-hidden />
+        </button>
+        <button
+          type="button"
+          aria-label={t("settings.cliDelete")}
+          title={t("settings.cliDelete")}
+          disabled={providerSaving}
+          onClick={() => onDeleteProvider(provider)}
+          className={cx(ICON_BUTTON, "hover:text-text-error-primary")}
+        >
+          <Trash2 className="size-4" aria-hidden />
+        </button>
+      </div>
+      {expanded ? (
+        <CustomProviderEditor
+          modelsConfig={modelsConfig}
+          provider={provider}
+          draft={providerDraft}
+          saving={providerSaving}
+          error={providerError}
+          onDraftChange={onProviderDraftChange}
+          onSave={onProviderSave}
+          onCancel={onCloseProviderEditor}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Section title, config path, search box, and the editor toggle. */
+function CustomSectionHeader({
+  path,
+  totalCount,
+  query,
+  onQueryChange,
+  editorOpen,
+  onToggleEditor,
+}: {
+  path: string;
+  totalCount: number;
+  query: string;
+  onQueryChange: (value: string) => void;
+  editorOpen: boolean;
+  onToggleEditor: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <SettingsSectionLabel>
+        {t("settings.piAuthCustomTitle")}
+        <span className="ml-2 text-body-2-regular font-normal text-text-tertiary">
+          {t("settings.piAuthCustomHint", { path })}
+        </span>
+      </SettingsSectionLabel>
+      <div className="flex shrink-0 items-center gap-2">
+        {totalCount > 0 ? (
+          <div className="flex items-center gap-1.5 rounded-lg bg-background-tertiary px-2.5">
+            <Search className="size-3.5 text-foreground-icon-secondary" aria-hidden />
+            <input
+              value={query}
+              onChange={(event) => onQueryChange(event.target.value)}
+              placeholder={t("settings.piAuthCustomSearchPlaceholder")}
+              className="h-8 w-44 bg-transparent text-body-2-regular text-text-primary outline-none placeholder:text-text-tertiary"
+            />
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className="shrink-0 rounded-lg border border-border-button-default px-2.5 py-1 text-body-2-medium text-text-primary hover:bg-background-secondary-hover"
+          onClick={onToggleEditor}
+        >
+          {editorOpen ? t("settings.piAuthCollapse") : t("settings.piAuthEditConfig")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Empty-state copy for the provider list (search miss / no file / no rows). */
+function emptyStateMessage(
+  t: TFunction,
+  modelsConfig: PiFamilyModelsConfigReadResult,
+  query: string,
+): string {
+  if (query.trim()) return t("settings.piAuthEmptySearch", { query });
+  if (modelsConfig.providers.length > 0) return t("settings.piAuthEmptySearch", { query });
+  return modelsConfig.file.exists
+    ? t("settings.piAuthCustomEmpty")
+    : t("settings.piAuthCustomMissing");
+}
+
 export function PiFamilyCustomSection({
   modelsConfig,
   editorOpen,
@@ -238,34 +420,14 @@ export function PiFamilyCustomSection({
   const totalCount = modelsConfig?.providers.length ?? 0;
   return (
     <div className="flex w-full flex-col gap-2">
-      <div className="flex items-center justify-between gap-3">
-        <SettingsSectionLabel>
-          {t("settings.piAuthCustomTitle")}
-          <span className="ml-2 text-body-2-regular font-normal text-text-tertiary">
-            {t("settings.piAuthCustomHint", { path: modelsConfig?.file.path ?? "" })}
-          </span>
-        </SettingsSectionLabel>
-        <div className="flex shrink-0 items-center gap-2">
-          {totalCount > 0 ? (
-            <div className="flex items-center gap-1.5 rounded-lg bg-background-tertiary px-2.5">
-              <Search className="size-3.5 text-foreground-icon-secondary" aria-hidden />
-              <input
-                value={query}
-                onChange={(event) => onQueryChange(event.target.value)}
-                placeholder={t("settings.piAuthCustomSearchPlaceholder")}
-                className="h-8 w-44 bg-transparent text-body-2-regular text-text-primary outline-none placeholder:text-text-tertiary"
-              />
-            </div>
-          ) : null}
-          <button
-            type="button"
-            className="shrink-0 rounded-lg border border-border-button-default px-2.5 py-1 text-body-2-medium text-text-primary hover:bg-background-secondary-hover"
-            onClick={onToggleEditor}
-          >
-            {editorOpen ? t("settings.piAuthCollapse") : t("settings.piAuthEditConfig")}
-          </button>
-        </div>
-      </div>
+      <CustomSectionHeader
+        path={modelsConfig?.file.path ?? ""}
+        totalCount={totalCount}
+        query={query}
+        onQueryChange={onQueryChange}
+        editorOpen={editorOpen}
+        onToggleEditor={onToggleEditor}
+      />
       <SettingsCard>
         {modelsConfig?.parseError ? (
           <div className={cx(ROW, "text-body-regular text-text-error-primary")} role="alert">
@@ -277,109 +439,25 @@ export function PiFamilyCustomSection({
             {providerError}
           </div>
         ) : null}
-        {providers.map((provider) => {
-          const expanded = editingProviderId === provider.id;
-          return (
-            <div key={provider.id}>
-              <div className={cx(ROW, expanded && "border-b-0")}>
-                <BrandIcon iconSrc={null} />
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <p className="truncate text-body-regular text-text-primary">
-                    {provider.name ?? provider.id}
-                  </p>
-                  <code className="w-fit truncate rounded border border-dashed border-border-button-default px-1 py-px text-[11px] text-text-tertiary">
-                    {provider.baseUrl ?? provider.id}
-                  </code>
-                </div>
-                <span
-                  className="flex shrink-0 items-center gap-1 text-body-2-regular text-text-tertiary"
-                  aria-label={t("settings.piAuthCustomModelCount", {
-                    count: provider.modelCount,
-                  })}
-                  title={t("settings.piAuthCustomModelCount", {
-                    count: provider.modelCount,
-                  })}
-                >
-                  {provider.modelCount}
-                  <Boxes className="size-3.5" aria-hidden />
-                </span>
-                {provider.api ? (
-                  <span
-                    className="flex size-5 shrink-0 items-center justify-center text-text-tertiary"
-                    role="img"
-                    aria-label={provider.api}
-                    title={provider.api}
-                  >
-                    <ProtocolIcon api={provider.api} />
-                  </span>
-                ) : null}
-                <span
-                  className={cx(
-                    "flex size-5 shrink-0 items-center justify-center",
-                    provider.hasApiKey
-                      ? "text-notification-success-foreground"
-                      : "text-text-tertiary",
-                  )}
-                  role="img"
-                  aria-label={t(
-                    provider.hasApiKey
-                      ? "settings.piAuthCustomHasKey"
-                      : "settings.piAuthCustomNoKey",
-                  )}
-                  title={t(
-                    provider.hasApiKey
-                      ? "settings.piAuthCustomHasKey"
-                      : "settings.piAuthCustomNoKey",
-                  )}
-                >
-                  <KeyRound className="size-3.5" aria-hidden />
-                </span>
-                <span aria-hidden className="h-4 w-px shrink-0 bg-separator-border" />
-                <button
-                  type="button"
-                  aria-label={t("settings.cliEdit")}
-                  title={t("settings.cliEdit")}
-                  disabled={providerSaving}
-                  onClick={() => onOpenProviderEditor(provider.id)}
-                  className={ICON_BUTTON}
-                >
-                  <Pencil className="size-4" aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  aria-label={t("settings.cliDelete")}
-                  title={t("settings.cliDelete")}
-                  disabled={providerSaving}
-                  onClick={() => onDeleteProvider(provider)}
-                  className={cx(ICON_BUTTON, "hover:text-text-error-primary")}
-                >
-                  <Trash2 className="size-4" aria-hidden />
-                </button>
-              </div>
-              {expanded ? (
-                <CustomProviderEditor
-                  modelsConfig={modelsConfig}
-                  provider={provider}
-                  draft={providerDraft}
-                  saving={providerSaving}
-                  error={providerError}
-                  onDraftChange={onProviderDraftChange}
-                  onSave={onProviderSave}
-                  onCancel={onCloseProviderEditor}
-                />
-              ) : null}
-            </div>
-          );
-        })}
+        {providers.map((provider) => (
+          <CustomProviderRow
+            key={provider.id}
+            provider={provider}
+            modelsConfig={modelsConfig}
+            expanded={editingProviderId === provider.id}
+            providerDraft={providerDraft}
+            providerSaving={providerSaving}
+            providerError={providerError}
+            onOpenProviderEditor={onOpenProviderEditor}
+            onProviderDraftChange={onProviderDraftChange}
+            onProviderSave={onProviderSave}
+            onCloseProviderEditor={onCloseProviderEditor}
+            onDeleteProvider={onDeleteProvider}
+          />
+        ))}
         {modelsConfig && !modelsConfig.parseError && providers.length === 0 ? (
           <div className={cx(ROW, "text-body-regular text-text-tertiary")}>
-            {query.trim()
-              ? t("settings.piAuthEmptySearch", { query })
-              : modelsConfig.providers.length > 0
-                ? t("settings.piAuthEmptySearch", { query })
-                : modelsConfig.file.exists
-                  ? t("settings.piAuthCustomEmpty")
-                  : t("settings.piAuthCustomMissing")}
+            {emptyStateMessage(t, modelsConfig, query)}
           </div>
         ) : null}
         {editorOpen ? (

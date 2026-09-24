@@ -123,7 +123,11 @@ fn fallback_models() -> Vec<EngineModel> {
             id: (*id).to_string(),
             name: Some((*name).to_string()),
             description: None,
-            provider: id.split_once('/').map(|(p, _)| p).unwrap_or("opencode").to_string(),
+            provider: id
+                .split_once('/')
+                .map(|(p, _)| p)
+                .unwrap_or("opencode")
+                .to_string(),
             context_window: None,
         })
         .collect()

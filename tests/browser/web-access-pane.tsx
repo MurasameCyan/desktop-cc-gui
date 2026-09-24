@@ -15,12 +15,15 @@ function Fixture() {
       <div className="flex h-[720px] w-[1120px] flex-col overflow-clip rounded-3xl bg-background-full">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div id="pane" className="h-full overflow-y-auto px-8 pb-8 pt-8">
-            <WebAccessSection />
-            {/* Anything below measures the shift a status line would cause. */}
-            <div
-              id="tail"
-              className="mt-4 h-[420px] rounded-2xl bg-background-secondary-default"
-            />
+            {/* Same reading column as SettingsShell's content pane. */}
+            <div className="mx-auto w-full max-w-[720px]">
+              <WebAccessSection />
+              {/* Anything below measures the shift a status line would cause. */}
+              <div
+                id="tail"
+                className="mt-4 h-[420px] rounded-2xl bg-background-secondary-default"
+              />
+            </div>
           </div>
         </div>
       </div>

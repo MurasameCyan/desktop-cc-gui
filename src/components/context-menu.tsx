@@ -9,6 +9,8 @@ export interface ContextMenuEntry {
   icon: ReactNode;
   danger?: boolean;
   disabled?: boolean;
+  /** Native tooltip — used to explain why a disabled entry is unavailable. */
+  title?: string;
   onSelect: () => void;
 }
 
@@ -100,6 +102,7 @@ export function ContextMenu({
             type="button"
             role="menuitem"
             disabled={entry.disabled}
+            title={entry.title}
             onClick={() => {
               onClose();
               entry.onSelect();

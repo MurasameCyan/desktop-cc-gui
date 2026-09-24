@@ -26,6 +26,7 @@ vi.mock("@/lib/platform", () => ({
 
 import { AppStatusBar } from "./app-status-bar";
 import { getAppVersion } from "@/lib/platform";
+import { useReleaseNotesTabStore } from "@/features/update/notes-tab";
 import { statusBarRegistry } from "@ccgui/plugin-sdk";
 import type { Disposer } from "@ccgui/plugin-sdk";
 
@@ -144,10 +145,12 @@ describe("AppStatusBar version chip", () => {
     // The shared platform mock defaults to no version; restore it so the
     // plugin-items suite keeps rendering without the chip.
     vi.mocked(getAppVersion).mockResolvedValue(null);
+    useReleaseNotesTabStore.setState({ open: false, active: false });
   });
 
-  it("opens the changelog dialog when the version chip is clicked", async () => {
+  it("opens the release-notes center tab when the version chip is clicked", async () => {
     vi.mocked(getAppVersion).mockResolvedValue("1.0.2");
+    useReleaseNotesTabStore.setState({ open: false, active: false });
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -162,9 +165,11 @@ describe("AppStatusBar version chip", () => {
       await act(async () => {
         chip!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
-      // ModalShell portals to document.body: title + newest version badge.
-      expect(document.body.textContent).toContain(i18n.t("changelog.title"));
-      expect(document.body.textContent).toContain("v1.0.2");
+      // 版本号不再是弹窗：它打开（并聚焦）更新说明页签；页签自己带「检查
+      // 更新」入口，按版本翻页的历史弹窗已下线。
+      expect(useReleaseNotesTabStore.getState()).toMatchObject({ open: true, active: true });
+      expect(chip!.getAttribute("aria-label")).toBe(i18n.t("changelog.title"));
+      expect(chip!.getAttribute("title")).toBe(i18n.t("commands.openReleaseNotes"));
     } finally {
       await act(async () => {
         root.unmount();

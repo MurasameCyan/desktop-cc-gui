@@ -23,8 +23,10 @@ vi.mock("@/lib/events", () => ({
 }));
 
 const loadPlugin = vi.fn(async (_args: unknown) => {});
+const reloadPlugin = vi.fn(async (_args: unknown) => {});
 vi.mock("../runtime/loader", () => ({
   loadPlugin: (args: unknown) => loadPlugin(args),
+  reloadPlugin: (args: unknown) => reloadPlugin(args),
 }));
 
 const refreshInstalled = vi.fn(async () => {});
@@ -48,6 +50,9 @@ function entry(over: Partial<MarketPlugin> = {}): MarketPlugin {
     sdkVersion: "^0.3",
     permissions: ["storage"],
     downloads: null,
+    screenshots: [],
+    icon: null,
+    updatedAt: null,
     ...over,
   };
 }
@@ -67,6 +72,8 @@ function installedInfo(over: Partial<PluginInfo> = {}): PluginInfo {
     permissions: ["storage"],
     installedAt: 0,
     minAppVersion: "1.0.0",
+    icon: null,
+    screenshots: [],
     ...over,
   };
 }
@@ -119,13 +126,13 @@ describe("checkUpdates", () => {
 });
 
 describe("install", () => {
-  it("activates an enabled plugin and refreshes installed state and updates", async () => {
+  it("hot-reloads an enabled plugin and refreshes installed state and updates", async () => {
     pluginInstallFromMarketplace.mockResolvedValue(installedInfo());
 
     await useMarketplaceStore.getState().install("react-doctor");
 
     expect(pluginInstallFromMarketplace).toHaveBeenCalledWith("react-doctor");
-    expect(loadPlugin).toHaveBeenCalledOnce();
+    expect(reloadPlugin).toHaveBeenCalledOnce();
     expect(refreshInstalled).toHaveBeenCalledOnce();
     expect(pluginCheckUpdates).toHaveBeenCalled();
     expect(useMarketplaceStore.getState().installing).toBeNull();
@@ -137,6 +144,18 @@ describe("install", () => {
 
     await useMarketplaceStore.getState().install("react-doctor");
 
+    expect(reloadPlugin).not.toHaveBeenCalled();
+  });
+
+  it("re-activates the already-running instance instead of no-op loading (update hot swap)", async () => {
+    // Regression: loadPlugin early-returns for an already-active id, so an
+    // update stayed on the old bytes until a manual disable/enable or app
+    // restart. The update path must reload the running instance.
+    pluginInstallFromMarketplace.mockResolvedValue(installedInfo({ version: "0.3.0" }));
+
+    await useMarketplaceStore.getState().install("react-doctor");
+
+    expect(reloadPlugin).toHaveBeenCalledWith({ info: installedInfo({ version: "0.3.0" }) });
     expect(loadPlugin).not.toHaveBeenCalled();
   });
 
@@ -175,7 +194,7 @@ describe("install", () => {
 
     expect(useMarketplaceStore.getState().installing).toBeNull();
     expect(useMarketplaceStore.getState().error).toContain("SHA-256 mismatch");
-    expect(loadPlugin).not.toHaveBeenCalled();
+    expect(reloadPlugin).not.toHaveBeenCalled();
     expect(unlisten).toHaveBeenCalledOnce();
   });
 });

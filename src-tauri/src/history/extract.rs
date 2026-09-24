@@ -156,7 +156,9 @@ fn fold_rows(rows: Vec<LineRow>) -> ParsedSession {
             if let Some(last) = messages.iter_mut().rev().find(|m| m.role == "assistant") {
                 let mut new_usage = row.usage;
                 if let (Some(prev), Some(next)) = (last.usage.as_ref(), new_usage.as_mut()) {
-                    if let (Some(mcw), Some(obj)) = (prev.get("model_context_window"), next.as_object_mut()) {
+                    if let (Some(mcw), Some(obj)) =
+                        (prev.get("model_context_window"), next.as_object_mut())
+                    {
                         if !obj.contains_key("model_context_window") {
                             obj.insert("model_context_window".to_string(), mcw.clone());
                         }
@@ -181,6 +183,9 @@ fn fold_rows(rows: Vec<LineRow>) -> ParsedSession {
                         .rposition(|m| m.role == "tool" && m.result.is_none()),
                 };
                 if let Some(index) = index {
+                    if let Some(todos) = crate::engine::parse_todo_result(&res) {
+                        messages[index].todos = Some(todos);
+                    }
                     messages[index].result = Some(res);
                 }
             }
@@ -1368,24 +1373,22 @@ fn opencode_rows(
     let message_dir = storage.join("message").join(session_id);
     // Sort by time.created (name order only works while ids stay
     // timestamp-prefixed); stable fallback is the filename.
-    let mut messages: Vec<(i64, PathBuf, Value)> = opencode_list_json(&message_dir, MAX_OPENCODE_MESSAGES)
-        .into_iter()
-        .filter_map(|path| {
-            let value = read_json_file(&path, None)?;
-            let created = value
-                .get("time")
-                .and_then(|t| t.get("created"))
-                .and_then(Value::as_i64)
-                .unwrap_or(i64::MAX);
-            Some((created, path, value))
-        })
-        .collect();
+    let mut messages: Vec<(i64, PathBuf, Value)> =
+        opencode_list_json(&message_dir, MAX_OPENCODE_MESSAGES)
+            .into_iter()
+            .filter_map(|path| {
+                let value = read_json_file(&path, None)?;
+                let created = value
+                    .get("time")
+                    .and_then(|t| t.get("created"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX);
+                Some((created, path, value))
+            })
+            .collect();
     messages.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     for (_, _, message) in messages {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         if role != "user" && role != "assistant" {
             continue;
         }
@@ -1705,8 +1708,53 @@ mod tests {
         let parsed = collect_session(std::io::Cursor::new(input), &extractor, &HashSet::new());
 
         let (first, second) = (&parsed.messages[0], &parsed.messages[1]);
-        assert_eq!(first.result.as_ref().unwrap()["details"]["jobs"][0]["status"], "running");
-        assert_eq!(second.result.as_ref().unwrap()["details"]["jobs"][0]["status"], "completed");
+        assert_eq!(
+            first.result.as_ref().unwrap()["details"]["jobs"][0]["status"],
+            "running"
+        );
+        assert_eq!(
+            second.result.as_ref().unwrap()["details"]["jobs"][0]["status"],
+            "completed"
+        );
+    }
+
+    #[test]
+    fn pi_tool_results_populate_todos_from_details_phases() {
+        let call = serde_json::json!({
+            "type": "message",
+            "message": {"role": "assistant", "content": [{
+                "type": "toolCall",
+                "id": "todo_call_1",
+                "name": "todo",
+                "intent": "Initialize todos",
+                "arguments": {"op": "init", "list": [{"phase": "P1", "items": ["Task 1"]}]}
+            }]}
+        });
+        let result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "todo_call_1",
+                "content": [{"type": "text", "text": "Done"}],
+                "details": {
+                    "phases": [
+                        {
+                            "name": "P1",
+                            "tasks": [{"content": "Task 1", "status": "completed"}]
+                        }
+                    ]
+                }
+            }
+        });
+        let input = format!("{}\n{}", call, result);
+        let extractor: LineExtractor<'_> =
+            Box::new(|value: &Value| extract_pi_family_line(value, ImageMode::Collect));
+        let parsed = collect_session(std::io::Cursor::new(input), &extractor);
+        assert_eq!(parsed.messages.len(), 1);
+        let todos = parsed.messages[0].todos.as_ref().expect("todos must be populated");
+        assert_eq!(todos.items.len(), 1);
+        assert_eq!(todos.items[0].content, "Task 1");
+        assert_eq!(todos.items[0].status, "complete");
     }
 
     #[test]
@@ -1840,8 +1888,11 @@ mod tests {
         // `PathBuf::join` normalizes "/"-rooted refs per platform ("/tmp/a.png"
         // stays verbatim, "b.jpg" joins with the platform separator), so
         // compare Path equality instead of string equality.
-        let got: Vec<std::path::PathBuf> =
-            rows[0].images.iter().map(std::path::PathBuf::from).collect();
+        let got: Vec<std::path::PathBuf> = rows[0]
+            .images
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -1951,7 +2002,10 @@ mod tests {
         assert_eq!(rows[0].role, "__usage__");
         assert_eq!(rows[0].usage.as_ref().unwrap()["input_tokens"], 34660);
         assert_eq!(rows[0].usage.as_ref().unwrap()["total_tokens"], 34745);
-        assert_eq!(rows[0].usage.as_ref().unwrap()["model_context_window"], 475000);
+        assert_eq!(
+            rows[0].usage.as_ref().unwrap()["model_context_window"],
+            475000
+        );
     }
 
     #[test]
@@ -2039,10 +2093,22 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].role, "__usage__");
         let usage = rows[0].usage.as_ref().expect("usage object");
-        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(30000));
-        assert_eq!(usage.get("cached_input_tokens").and_then(Value::as_i64), Some(15000));
-        assert_eq!(usage.get("total_tokens").and_then(Value::as_i64), Some(30500));
-        assert_eq!(usage.get("model_context_window").and_then(Value::as_i64), Some(1000000));
+        assert_eq!(
+            usage.get("input_tokens").and_then(Value::as_i64),
+            Some(30000)
+        );
+        assert_eq!(
+            usage.get("cached_input_tokens").and_then(Value::as_i64),
+            Some(15000)
+        );
+        assert_eq!(
+            usage.get("total_tokens").and_then(Value::as_i64),
+            Some(30500)
+        );
+        assert_eq!(
+            usage.get("model_context_window").and_then(Value::as_i64),
+            Some(1000000)
+        );
     }
 
     #[test]
@@ -2061,8 +2127,14 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].role, "__usage__");
         let usage = rows[0].usage.as_ref().expect("usage object");
-        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(8038));
-        assert_eq!(usage.get("total_tokens").and_then(Value::as_i64), Some(8038));
+        assert_eq!(
+            usage.get("input_tokens").and_then(Value::as_i64),
+            Some(8038)
+        );
+        assert_eq!(
+            usage.get("total_tokens").and_then(Value::as_i64),
+            Some(8038)
+        );
     }
 
     #[test]
@@ -2212,7 +2284,10 @@ mod tests {
         assert_eq!(parsed.messages[0].text, "hello opencode");
         assert_eq!(parsed.messages[2].text, "read");
         assert_eq!(parsed.messages[2].path.as_deref(), Some("src/main.rs"));
-        assert_eq!(parsed.messages[2].result, Some(serde_json::json!("file body")));
+        assert_eq!(
+            parsed.messages[2].result,
+            Some(serde_json::json!("file body"))
+        );
         let answer = &parsed.messages[3];
         assert_eq!(answer.text, "done");
         assert_eq!(answer.model.as_deref(), Some("claude-sonnet-4-5"));
@@ -2220,7 +2295,10 @@ mod tests {
         // step-finish tokens fold onto the last assistant message.
         let usage = answer.usage.as_ref().expect("usage folded");
         assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(10));
-        assert_eq!(usage.get("cache_read_input_tokens").and_then(Value::as_i64), Some(1));
+        assert_eq!(
+            usage.get("cache_read_input_tokens").and_then(Value::as_i64),
+            Some(1)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

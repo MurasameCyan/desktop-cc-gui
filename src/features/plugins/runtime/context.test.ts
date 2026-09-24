@@ -19,6 +19,7 @@ import {
   statusBarRegistry,
   composerStatusRegistry,
   overlayRegistry,
+  conversationModeRegistry,
   timelineRowRegistry,
   workspaceMenuRegistry,
 } from "@ccgui/plugin-sdk";
@@ -186,6 +187,47 @@ describe("createPluginContext", () => {
       proxied.pathname.replace("model.json", "textures/texture.png"),
     );
     expect(proxied.search).toBe("?revision=2");
+  it("preserves the native interrupt routed boolean for recovery", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
+    backend.bridgeInvoke.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect(await ctx.agent.interrupt("live")).toBe(true);
+    expect(await ctx.agent.interrupt("gone")).toBe(false);
+    expect(backend.bridgeInvoke).toHaveBeenLastCalledWith("plugin_agent_interrupt", { pluginId: "test-plugin", runId: "gone" });
+  });
+  it("forwards a validated optional request token but never a plugin-supplied run id", async () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
+    const requestId = "a".repeat(32);
+    await ctx.agent.start({ engine: "pi", prompt: "inspect", workspacePath: "/w", requestId });
+    expect(backend.bridgeInvoke).toHaveBeenCalledWith("plugin_agent_start", expect.objectContaining({ requestId }));
+    expect(() => ctx.agent.start({ engine: "pi", prompt: "inspect", workspacePath: "/w", requestId: "arbitrary-run-id" })).toThrow(/requestId/);
+    expect(backend.bridgeInvoke).toHaveBeenCalledTimes(1);
+  });
+  it("gates conversation modes and tracks their scoped registration for unload", () => {
+    const denied = createPluginContext(manifest([]), fakeStorage(), { appVersion: "1" });
+    const def = { key: "relay", label: () => "Relay", component: () => null };
+    expect(() => denied.ctx.ui.registerConversationMode(def)).toThrow(/ui:conversation-mode/);
+    const handle = createPluginContext(manifest(["ui:conversation-mode"]), fakeStorage(), { appVersion: "1" });
+    handle.ctx.ui.registerConversationMode(def);
+    expect(conversationModeRegistry.get("plugin:test-plugin:relay")?.component).toBe(def.component);
+    handle.disposers.forEach((dispose) => dispose());
+    expect(conversationModeRegistry.getSnapshot()).toEqual([]);
+  });
+
+  it("gates the private agent catalog seam and forwards readOnly", async () => {
+    const backend = { ...fakeStorage(), agentCatalog: vi.fn(async () => []) };
+    const denied = createPluginContext(manifest([]), backend, { appVersion: "1" });
+    await expect(denied.ctx.agent.catalog("/workspace")).rejects.toThrow(/agent/);
+    expect(backend.agentCatalog).not.toHaveBeenCalled();
+    const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
+    expect(await ctx.agent.catalog("/workspace")).toEqual([]);
+    expect(backend.agentCatalog).toHaveBeenCalledWith("/workspace");
+    await ctx.agent.start({ engine: "codex", prompt: "inspect", workspacePath: "/workspace", readOnly: true });
+    expect(backend.bridgeInvoke).toHaveBeenCalledWith("plugin_agent_start", expect.objectContaining({ readOnly: true }));
+    backend.agentCatalog.mockRejectedValueOnce(new Error("engine probe failed"));
+    await expect(ctx.agent.catalog("/workspace")).rejects.toThrow("engine probe failed");
+    await expect(ctx.bridge.invoke("list_engines")).rejects.toThrow(/unknown bridge/);
   });
 
   it("registers a settings section under plugin:<id> and the disposer removes it", () => {

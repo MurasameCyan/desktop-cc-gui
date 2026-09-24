@@ -26,6 +26,111 @@ body,
 body {
   overscroll-behavior: none;
 }
+
+.pet-overlay {
+  position: relative;
+  width: 252px;
+  height: 189px;
+  overflow: visible;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pet-overlay:active {
+  cursor: grabbing;
+}
+
+.pet-sprite {
+  background-repeat: no-repeat;
+  image-rendering: auto;
+  /* The sprite is a real <button> for keyboard access to the scale cycle;
+     strip the UA button chrome so only the sprite bitmap shows. */
+  padding: 0;
+  border: 0;
+  background-color: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: inherit;
+  appearance: none;
+}
+
+.pet-bubble {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  right: 6px;
+  z-index: 2;
+  display: flex;
+  min-height: 50px;
+  box-sizing: border-box;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 16px 9px;
+  border: 1px solid color-mix(in srgb, var(--color-border-button-white, #ffffff) 62%, transparent);
+  border-radius: 26px;
+  background: color-mix(
+    in srgb,
+    var(--color-background-primary-default, #ffffff) 74%,
+    transparent
+  );
+  /* Intentional glass specular highlight (not a themed surface): the bubble
+     floats over arbitrary desktop content, so the inner white edge stays a
+     raw value per the glassmorphism design, same as backdrop-filter. */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.56);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  color: var(--color-text-primary, #172033);
+  font-size: 13px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px) scale(0.97);
+  transform-origin: center bottom;
+  transition:
+    opacity 160ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    filter 180ms ease;
+  filter: blur(1px);
+}
+
+.pet-bubble-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+}
+
+.pet-bubble-session,
+.pet-bubble-status {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pet-bubble-session {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.pet-bubble-status {
+  color: var(--color-text-secondary, #64748b);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-bubble {
+    transition: opacity 180ms ease;
+    transform: translateY(0);
+    filter: none;
+  }
+}
 /* 对话内搜索（⌘F / Ctrl+F）命中底色：Custom Highlight API 注册的 Range
    用 ::highlight 伪元素上色——不动 DOM，选择/复制行为不变。 */
 ::highlight(ccgui-chat-search) {
@@ -309,6 +414,16 @@ body {
   display: block;
   min-width: max-content;
   font-size: inherit;
+}
+
+/* Plugin README fences render as bare <pre>: they don't go through the chat's
+   carded renderer above, so the block itself has to own the horizontal
+   scroll. Without it a single long command painted across the right-hand
+   rail instead of scrolling inside the document column. */
+.prose-plugin-readme pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
 }
 
 /* Single-line fence: compact card, copy floats top-right. */

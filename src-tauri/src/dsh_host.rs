@@ -107,7 +107,9 @@ impl DshHostState {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ==================== Config / status ====================
@@ -550,9 +552,9 @@ fn normalize_describe(value: &Value) -> Value {
         .get("namespaces")
         .and_then(Value::as_array)
         .and_then(|namespaces| {
-            namespaces
-                .iter()
-                .find(|entry| entry.get("ns").and_then(Value::as_str) == Some("agent-default-model"))
+            namespaces.iter().find(|entry| {
+                entry.get("ns").and_then(Value::as_str) == Some("agent-default-model")
+            })
         });
     let inner = entry.and_then(|entry| entry.get("value")).cloned();
     let mut view = Map::new();
@@ -576,9 +578,7 @@ fn dsh_bin(settings: &AppSettings) -> String {
         let trimmed = custom.trim();
         if !trimmed.is_empty() {
             match crate::settings::validate_bin_override(trimmed) {
-                Ok(path) => {
-                    return resolve::resolve_launchable_cli_binary(&path.to_string_lossy())
-                }
+                Ok(path) => return resolve::resolve_launchable_cli_binary(&path.to_string_lossy()),
                 Err(reason) => {
                     eprintln!("[dsh] ignoring invalid dsh bin override: {reason}");
                 }
@@ -647,7 +647,10 @@ pub(crate) async fn ensure_host(
     // BrowserAuth: a listener rejecting our cookie is alive but locked.
     // Local ports are ours to reclaim — stop the listener and spawn with our
     // own token chain; remote origins can't be adopted.
-    if matches!(probe_describe(&cfg.origin).await, ProbeOutcome::Unauthorized) {
+    if matches!(
+        probe_describe(&cfg.origin).await,
+        ProbeOutcome::Unauthorized
+    ) {
         if !is_local_host(&cfg.host) {
             return Err(format!(
                 "DSH host 已在 {} 运行但缺少凭据（401）。远程 host 无法自动接管，请在设置里改用本机地址。",
@@ -802,7 +805,10 @@ async fn status_snapshot(host_state: &DshHostState, settings: &AppSettings) -> D
         ProbeOutcome::Live(value) => (Some(normalize_describe(&value)), None),
         ProbeOutcome::Unauthorized => (
             None,
-            Some("host 已运行但凭据无效（401）。点「立即启动」重新拉起，凭据会随之更新。".to_string()),
+            Some(
+                "host 已运行但凭据无效（401）。点「立即启动」重新拉起，凭据会随之更新。"
+                    .to_string(),
+            ),
         ),
         ProbeOutcome::Down(error) => (None, Some(error)),
     };
@@ -826,7 +832,9 @@ async fn status_snapshot(host_state: &DshHostState, settings: &AppSettings) -> D
 // ==================== Commands ====================
 
 #[tauri::command]
-pub async fn dsh_host_status(state: tauri::State<'_, crate::AppState>) -> Result<DshHostStatus, String> {
+pub async fn dsh_host_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<DshHostStatus, String> {
     let settings = crate::settings::read_settings().unwrap_or_default();
     Ok(status_snapshot(&state.dsh_host, &settings).await)
 }
@@ -996,7 +1004,8 @@ mod tests {
 
     #[test]
     fn launch_token_is_extracted_from_web_url_line() {
-        let line = "dsh web: http://127.0.0.1:3080/?token=RmF6KLIdrmQlbogo4A_StSQsyzSCzn79Et8S0CVjpUE";
+        let line =
+            "dsh web: http://127.0.0.1:3080/?token=RmF6KLIdrmQlbogo4A_StSQsyzSCzn79Et8S0CVjpUE";
         assert_eq!(
             extract_launch_token(line).as_deref(),
             Some("RmF6KLIdrmQlbogo4A_StSQsyzSCzn79Et8S0CVjpUE")

@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn<(workspacePath: string, force?: boolean) => Promise<void>>(),
   pull: vi.fn<(workspacePath: string) => Promise<void>>(),
   push: vi.fn<(workspacePath: string) => Promise<void>>(),
+  loadBranches: vi.fn<(workspacePath: string) => Promise<void>>(),
+  checkout: vi.fn<(workspacePath: string, branch: string) => Promise<void>>(),
   errors: {} as Record<string, string | null>,
   notRepo: {} as Record<string, boolean>,
 }));
@@ -16,6 +18,8 @@ vi.mock("./store", () => ({
       refresh: mocks.refresh,
       pull: mocks.pull,
       push: mocks.push,
+      loadBranches: mocks.loadBranches,
+      checkout: mocks.checkout,
       errorByWorkspace: mocks.errors,
       notRepoByWorkspace: mocks.notRepo,
     }),
@@ -24,6 +28,7 @@ vi.mock("./store", () => ({
 
 import "@/lib/i18n";
 import { ChangesPanelHeader } from "./ChangesPanelHeader";
+import type { BranchInfo } from "@/lib/ipc";
 
 // React 18's act() requires this flag to be set by the test environment.
 declare global {
@@ -43,6 +48,10 @@ describe("ChangesPanelHeader refresh feedback", () => {
     mocks.refresh.mockReset();
     mocks.pull.mockReset();
     mocks.push.mockReset();
+    mocks.loadBranches.mockReset();
+    mocks.loadBranches.mockResolvedValue(undefined);
+    mocks.checkout.mockReset();
+    mocks.checkout.mockResolvedValue(undefined);
     for (const key of Object.keys(mocks.errors)) delete mocks.errors[key];
     for (const key of Object.keys(mocks.notRepo)) delete mocks.notRepo[key];
     container = document.createElement("div");
@@ -59,7 +68,7 @@ describe("ChangesPanelHeader refresh feedback", () => {
     vi.useRealTimers();
   });
 
-  async function render() {
+  async function render(branches: BranchInfo[] = []) {
     const nextRoot = createRoot(container);
     root = nextRoot;
     await act(async () => {
@@ -70,7 +79,7 @@ describe("ChangesPanelHeader refresh feedback", () => {
           branch="main"
           ahead={0}
           behind={0}
-          branches={[]}
+          branches={branches}
           pending={{}}
           error={null}
           run={(_key, action) => {
@@ -103,6 +112,32 @@ describe("ChangesPanelHeader refresh feedback", () => {
     });
     return { promise, resolve };
   }
+
+  it("checks out a remote branch picked from the search list", async () => {
+    await render([
+      { name: "main", isRemote: false },
+      { name: "origin/v1.0.9", isRemote: true },
+    ]);
+
+    const trigger = [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("main"),
+    )!;
+    await act(async () => trigger.click());
+    // The cached list is reloaded on every open (external checkouts).
+    expect(mocks.loadBranches).toHaveBeenCalledWith(WS);
+
+    // The popover portals to <body>, not the component container.
+    const row = [...document.body.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("origin/v1.0.9"),
+    )!;
+    expect(row).toBeTruthy();
+    // Remote-tracking rows carry the badge so `origin/x` is not read as a
+    // local branch named `origin/x`.
+    expect(row.textContent).toContain("远程分支");
+
+    await act(async () => row.click());
+    expect(mocks.checkout).toHaveBeenCalledWith(WS, "origin/v1.0.9");
+  });
 
   it("spins, flashes a check on success, then returns to the arrow", async () => {
     const pending = deferred();

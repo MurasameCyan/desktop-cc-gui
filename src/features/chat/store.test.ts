@@ -39,6 +39,7 @@ vi.mock("@/lib/ipc", () => ({
 vi.mock("@/lib/events", () => ({
   listenEngineEvents: vi.fn(async () => () => {}),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const WS = "/tmp/ws";

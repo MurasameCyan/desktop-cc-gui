@@ -34,19 +34,15 @@ const INTERRUPT_DEADLINE: u64 = 120_000;
 /// A 1×1 pixel PNG, solid `#0000FF`: the image case needs a real file for the
 /// transport to encode, and a colour with only one honest answer.
 const BLUE_PNG: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
-    0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
-    0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
-    0xda, 0x63, 0x60, 0x60, 0xf8, 0x0f, 0x00, 0x01, 0x03, 0x01, 0x00, 0x36, 0x74, 0x11,
-    0x40, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x60, 0x60, 0xf8, 0x0f,
+    0x00, 0x01, 0x03, 0x01, 0x00, 0x36, 0x74, 0x11, 0x40, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+    0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ccgui-ask-live-{}-{}",
-        tag,
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ccgui-ask-live-{}-{}", tag, std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -69,6 +65,10 @@ fn build_app(
             Arc::new(app.handle().clone()),
             ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
         ),
+        mission_sink: EventSink::with_name(
+            Arc::new(app.handle().clone()),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
@@ -78,6 +78,7 @@ fn build_app(
         opencode_server: Arc::new(
             ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
         ),
+        worktree_creations: ccgui_next_lib::git_worktree::CreationRegistry::default(),
     };
     app.manage(state);
     app.manage(ConfigStore::default());
@@ -171,7 +172,14 @@ async fn send(
         None,
         None,
         (engine_id == "kimi").then(|| "medium".to_string()),
-        Some(if engine_id == "kimi" { "auto" } else { "bypass" }.to_string()),
+        Some(
+            if engine_id == "kimi" {
+                "auto"
+            } else {
+                "bypass"
+            }
+            .to_string(),
+        ),
         None,
         Some(run_id.to_string()),
         None,
@@ -199,7 +207,12 @@ async fn wait_done(
 
 fn assert_drained(engine_id: &str, app: &tauri::App<tauri::test::MockRuntime>, stage: &str) {
     assert!(
-        app.state::<AppState>().processes.0.lock().unwrap().is_empty(),
+        app.state::<AppState>()
+            .processes
+            .0
+            .lock()
+            .unwrap()
+            .is_empty(),
         "{engine_id}: the run is still registered after {stage}"
     );
 }
@@ -263,7 +276,11 @@ async fn live_ask(engine_id: &str) {
                 .as_str()
                 .unwrap_or_else(|| panic!("{engine_id}: card has no question text: {card}"))
                 .to_string(),
-            if card["multiSelect"] == true { json!([label]) } else { json!(label) },
+            if card["multiSelect"] == true {
+                json!([label])
+            } else {
+                json!(label)
+            },
         );
     }
     println!(
@@ -321,7 +338,12 @@ async fn live_resume(engine_id: &str) {
     let session_id = first_kind(&seen, "done")
         .and_then(|done| done["sessionId"].as_str().map(str::to_string))
         .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| panic!("{engine_id}: done carried no session id: {:?}", kinds(&seen)));
+        .unwrap_or_else(|| {
+            panic!(
+                "{engine_id}: done carried no session id: {:?}",
+                kinds(&seen)
+            )
+        });
     assert_drained(engine_id, &app, "the first turn");
     println!("[{engine_id}] session: {session_id}");
 
@@ -422,7 +444,9 @@ async fn live_image(engine_id: &str) {
     std::fs::create_dir_all(&workspace).unwrap();
     let png = workspace.join("probe-blue.png");
     if engine_id == "kimi" {
-        image::RgbImage::from_pixel(64, 64, image::Rgb([0u8, 0, 255])).save(&png).unwrap();
+        image::RgbImage::from_pixel(64, 64, image::Rgb([0u8, 0, 255]))
+            .save(&png)
+            .unwrap();
     } else {
         std::fs::write(&png, BLUE_PNG).unwrap();
     }
@@ -486,25 +510,49 @@ async fn kimi_explicit_k3_256k_medium_official_channel() {
         Some("__local_settings_json__".into()),
         Some("run-kimi-explicit-model".into()),
         None,
-    ).await.unwrap();
-    let seen = wait_for(&events, "explicit model question", |seen| {
-        count_kind(seen, "question") > 0 || count_kind(seen, "error") > 0
-    }, ASK_DEADLINE).await;
+    )
+    .await
+    .unwrap();
+    let seen = wait_for(
+        &events,
+        "explicit model question",
+        |seen| count_kind(seen, "question") > 0 || count_kind(seen, "error") > 0,
+        ASK_DEADLINE,
+    )
+    .await;
     assert_no_error("kimi", "explicit model question", &seen);
     let question = first_kind(&seen, "question").unwrap();
     let cards = question["data"]["input"]["questions"].as_array().unwrap();
     assert_eq!(cards.len(), 3);
-    let answers: serde_json::Map<String, Value> = cards.iter().map(|card| {
-        let label = card["options"][0]["label"].clone();
-        (card["question"].as_str().unwrap().into(),
-            if card["multiSelect"] == true { json!([label]) } else { label })
-    }).collect();
-    engine::answer_question(app.state::<AppState>(), "run-kimi-explicit-model".into(),
-        question["data"]["requestId"].as_str().unwrap().into(), Some(json!(answers))).await.unwrap();
+    let answers: serde_json::Map<String, Value> = cards
+        .iter()
+        .map(|card| {
+            let label = card["options"][0]["label"].clone();
+            (
+                card["question"].as_str().unwrap().into(),
+                if card["multiSelect"] == true {
+                    json!([label])
+                } else {
+                    label
+                },
+            )
+        })
+        .collect();
+    engine::answer_question(
+        app.state::<AppState>(),
+        "run-kimi-explicit-model".into(),
+        question["data"]["requestId"].as_str().unwrap().into(),
+        Some(json!(answers)),
+    )
+    .await
+    .unwrap();
     let seen = wait_done("kimi", &events, 1, "explicit UI model and channel").await;
     let reply = text_of(&seen);
     for card in cards {
-        assert!(reply.contains(label_stem(card["options"][0]["label"].as_str().unwrap())), "{reply}");
+        assert!(
+            reply.contains(label_stem(card["options"][0]["label"].as_str().unwrap())),
+            "{reply}"
+        );
     }
     assert_drained("kimi", &app, "explicit model");
 }
@@ -552,11 +600,29 @@ async fn kimi_invalid_model_exposes_the_setup_error() {
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
     let (app, events) = build_app(&home);
-    engine::send_message(app.state::<AppState>(), "kimi".into(), workspace.to_string_lossy().into(),
-        None, "do not run".into(), None, Some("ccgui-nonexistent-model".into()), None,
-        Some("auto".into()), Some("__local_settings_json__".into()), Some("run-kimi-invalid-model".into()), None,
-    ).await.unwrap();
-    let seen = wait_for(&events, "invalid model error", |seen| count_kind(seen, "error") > 0, ASK_DEADLINE).await;
+    engine::send_message(
+        app.state::<AppState>(),
+        "kimi".into(),
+        workspace.to_string_lossy().into(),
+        None,
+        "do not run".into(),
+        None,
+        Some("ccgui-nonexistent-model".into()),
+        None,
+        Some("auto".into()),
+        Some("__local_settings_json__".into()),
+        Some("run-kimi-invalid-model".into()),
+        None,
+    )
+    .await
+    .unwrap();
+    let seen = wait_for(
+        &events,
+        "invalid model error",
+        |seen| count_kind(seen, "error") > 0,
+        ASK_DEADLINE,
+    )
+    .await;
     let error = first_kind(&seen, "error").unwrap();
     let message = error["data"].as_str().unwrap();
     assert!(message.contains("session/set_config_option"), "{message}");

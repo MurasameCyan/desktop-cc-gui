@@ -43,6 +43,10 @@ fn build_app(home: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
             Arc::new(app.handle().clone()),
             ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
         ),
+        mission_sink: EventSink::with_name(
+            Arc::new(app.handle().clone()),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
@@ -52,6 +56,7 @@ fn build_app(home: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
         opencode_server: std::sync::Arc::new(
             ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
         ),
+        worktree_creations: ccgui_next_lib::git_worktree::CreationRegistry::default(),
     });
     app.manage(ConfigStore::default());
     app

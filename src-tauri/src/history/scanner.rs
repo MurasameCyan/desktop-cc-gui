@@ -86,8 +86,14 @@ fn gather_candidates(workspaces: &[String]) -> Vec<Candidate> {
             .chain(discover_kimi(&workspace))
             .chain(discover_grok(&workspace))
             .chain(discover_agy(&workspace))
-            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Global))
-            .chain(discover_qoder(&workspace, crate::engine::qoder::QoderDistribution::Cn))
+            .chain(discover_qoder(
+                &workspace,
+                crate::engine::qoder::QoderDistribution::Global,
+            ))
+            .chain(discover_qoder(
+                &workspace,
+                crate::engine::qoder::QoderDistribution::Cn,
+            ))
             .chain(discover_opencode(&workspace))
         {
             if seen_paths.insert(file.file_path.clone()) {
@@ -343,7 +349,9 @@ fn prune_engine_subagent_sessions(
             .prepare("SELECT session_id, file_path FROM sessions WHERE engine=?1")
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([engine], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .query_map([engine], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for row in rows {
@@ -659,10 +667,7 @@ pub(super) mod tests {
         }
     }
 
-    struct HomeEnvPair(
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-    );
+    struct HomeEnvPair(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
 
     impl Drop for HomeGuard {
         fn drop(&mut self) {
@@ -700,11 +705,15 @@ pub(super) mod tests {
 
     /// A custom codex home must not prune sessions indexed from a v0.9
     /// managed provider home — they live outside every codex home by design.
-    #[test] 
+    #[test]
     fn prune_codex_outside_home_keeps_provider_home_sessions() -> Result<(), String> {
         let home = scratch_dir("prune-codex-legacy");
         let _guard = HomeGuard::set(&home);
-        let legacy_dir = home.join(".ccgui").join("codex-provider-homes").join("p1").join("sessions");
+        let legacy_dir = home
+            .join(".ccgui")
+            .join("codex-provider-homes")
+            .join("p1")
+            .join("sessions");
         let other_dir = home.join("elsewhere");
         std::fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&other_dir).map_err(|e| e.to_string())?;
@@ -1073,35 +1082,59 @@ pub(super) mod tests {
         let workspace = home.join("ws");
         std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
         let db = crate::db::Db::open_at(&home.join("app.db")).map_err(|e| e.to_string())?;
-        db.0.lock().execute(
-            "INSERT INTO workspaces(id,path,name) VALUES('w1',?1,'ws')",
-            [workspace.to_string_lossy().as_ref()],
-        ).map_err(|e| e.to_string())?;
+        db.0.lock()
+            .execute(
+                "INSERT INTO workspaces(id,path,name) VALUES('w1',?1,'ws')",
+                [workspace.to_string_lossy().as_ref()],
+            )
+            .map_err(|e| e.to_string())?;
         let session_id = "failed-first-turn";
-        let claude_path = home.join(".claude").join("projects")
-            .join(super::super::claude_encode_project_path(&workspace.to_string_lossy()))
+        let claude_path = home
+            .join(".claude")
+            .join("projects")
+            .join(super::super::claude_encode_project_path(
+                &workspace.to_string_lossy(),
+            ))
             .join(format!("{session_id}.jsonl"));
-        let codex_path = home.join(".codex").join("sessions").join("2026").join("09").join("18")
+        let codex_path = home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("18")
             .join(format!("rollout-2026-09-18T00-00-00-{session_id}.jsonl"));
         let fixtures = [
-            ("claude", claude_path, vec![serde_json::json!({
-                "type": "user", "sessionId": session_id,
-                "message": {"role": "user", "content": "hello"}
-            })]),
-            ("codex", codex_path, vec![
-                serde_json::json!({"type": "session_meta", "payload": {
-                    "id": session_id, "cwd": workspace.to_string_lossy()
-                }}),
-                serde_json::json!({"type": "response_item", "payload": {
-                    "type": "message", "role": "user",
-                    "content": [{"type": "input_text", "text": "hello"}]
-                }}),
-            ]),
+            (
+                "claude",
+                claude_path,
+                vec![serde_json::json!({
+                    "type": "user", "sessionId": session_id,
+                    "message": {"role": "user", "content": "hello"}
+                })],
+            ),
+            (
+                "codex",
+                codex_path,
+                vec![
+                    serde_json::json!({"type": "session_meta", "payload": {
+                        "id": session_id, "cwd": workspace.to_string_lossy()
+                    }}),
+                    serde_json::json!({"type": "response_item", "payload": {
+                        "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hello"}]
+                    }}),
+                ],
+            ),
         ];
         for (engine, path, lines) in &fixtures {
             // Each engine starts with a real file and no sessions-table row.
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let text = lines.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            let text = lines
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
             std::fs::write(path, text).map_err(|e| e.to_string())?;
             db.remember_session_model(engine, session_id, "model", 1)?;
             db.remember_session_effort(engine, session_id, "high", 1)?;
@@ -1115,7 +1148,10 @@ pub(super) mod tests {
             assert_eq!(count, 0);
 
             super::super::reader::delete_session_blocking(&db, engine, session_id)?;
-            assert!(!path.exists(), "{engine}: first delete must remove the transcript");
+            assert!(
+                !path.exists(),
+                "{engine}: first delete must remove the transcript"
+            );
             scan_with(&db, || {})?;
             for table in ["accepted_internal_frames", "sessions", "session_models", "session_efforts"] {
                 let count: i64 = db.0.lock().query_row(
@@ -1135,9 +1171,15 @@ pub(super) mod tests {
             ).map_err(|e| e.to_string())?;
             assert_eq!(count, 0);
         }
-        db.0.lock().execute("DROP TABLE meta", []).map_err(|e| e.to_string())?;
-        let error = super::super::reader::delete_session_blocking(&db, "codex", "scan-failed").unwrap_err();
-        assert!(error.contains("scan before deleting codex/scan-failed"), "{error}");
+        db.0.lock()
+            .execute("DROP TABLE meta", [])
+            .map_err(|e| e.to_string())?;
+        let error =
+            super::super::reader::delete_session_blocking(&db, "codex", "scan-failed").unwrap_err();
+        assert!(
+            error.contains("scan before deleting codex/scan-failed"),
+            "{error}"
+        );
         assert!(error.contains("no such table"), "{error}");
         drop(db);
         std::fs::remove_dir_all(&home).map_err(|e| e.to_string())?;
@@ -1292,10 +1334,7 @@ pub(super) mod tests {
         std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
         let cwd = workspace.display().to_string();
         let escaped = cwd.replace('\\', "\\\\");
-        let project = home
-            .join(".dsh")
-            .join("sessions")
-            .join("--ws--");
+        let project = home.join(".dsh").join("sessions").join("--ws--");
         let parent_dir = project.join("parent");
         let child_dir = project.join("child");
         write_zstd_jsonl(
@@ -1430,5 +1469,4 @@ pub(super) mod tests {
         std::fs::remove_dir_all(&home).ok();
         Ok(())
     }
-
 }

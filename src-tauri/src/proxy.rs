@@ -117,8 +117,8 @@ pub(crate) fn validate_proxy_settings(settings: &AppSettings) -> Result<(), Stri
     }
     let proxy_url = normalized_proxy_url(settings.system_proxy_url.as_deref())
         .ok_or_else(|| "Proxy URL is required when network proxy is enabled.".to_string())?;
-    let parsed = reqwest::Url::parse(&proxy_url)
-        .map_err(|error| format!("Invalid proxy URL: {error}"))?;
+    let parsed =
+        reqwest::Url::parse(&proxy_url).map_err(|error| format!("Invalid proxy URL: {error}"))?;
     if !ALLOWED_SCHEMES.contains(&parsed.scheme()) {
         return Err(format!(
             "Invalid proxy URL: unsupported scheme \"{}\" (expected http, https or socks5).",
@@ -188,9 +188,15 @@ mod tests {
     #[test]
     fn validate_checks_scheme_and_host() {
         let _guard = PROXY_ENV_TEST_LOCK.lock();
-        assert!(validate_proxy_settings(&proxy_settings(true, Some("http://127.0.0.1:7890"))).is_ok());
-        assert!(validate_proxy_settings(&proxy_settings(true, Some("socks5://127.0.0.1:1080"))).is_ok());
-        assert!(validate_proxy_settings(&proxy_settings(true, Some("ftp://127.0.0.1:21"))).is_err());
+        assert!(
+            validate_proxy_settings(&proxy_settings(true, Some("http://127.0.0.1:7890"))).is_ok()
+        );
+        assert!(
+            validate_proxy_settings(&proxy_settings(true, Some("socks5://127.0.0.1:1080"))).is_ok()
+        );
+        assert!(
+            validate_proxy_settings(&proxy_settings(true, Some("ftp://127.0.0.1:21"))).is_err()
+        );
         assert!(validate_proxy_settings(&proxy_settings(true, Some("not a url"))).is_err());
     }
 

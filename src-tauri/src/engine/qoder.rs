@@ -122,7 +122,10 @@ mod tests {
         assert_eq!(QoderDistribution::Cn.engine_id(), "qoder-cn");
         assert_eq!(QoderDistribution::Global.cli_name(), "qodercli");
         assert_eq!(QoderDistribution::Cn.cli_name(), "qoderclicn");
-        assert_eq!(QoderDistribution::Global.default_config_dir_name(), ".qoder");
+        assert_eq!(
+            QoderDistribution::Global.default_config_dir_name(),
+            ".qoder"
+        );
         assert_eq!(QoderDistribution::Cn.default_config_dir_name(), ".qoder-cn");
     }
 

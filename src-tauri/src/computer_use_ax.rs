@@ -52,7 +52,8 @@ mod ffi {
             cstr: *const std::ffi::c_char,
             encoding: u32,
         ) -> CFStringRef;
-        pub fn CFStringGetCStringPtr(string: CFStringRef, encoding: u32) -> *const std::ffi::c_char;
+        pub fn CFStringGetCStringPtr(string: CFStringRef, encoding: u32)
+            -> *const std::ffi::c_char;
         pub fn CFStringGetCString(
             string: CFStringRef,
             buffer: *mut std::ffi::c_char,
@@ -117,7 +118,9 @@ mod imp {
 
     fn cfstring(text: &str) -> CFStringRef {
         let cstr = CString::new(text).unwrap_or_else(|_| CString::new("").unwrap());
-        unsafe { CFStringCreateWithCString(std::ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8) }
+        unsafe {
+            CFStringCreateWithCString(std::ptr::null(), cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+        }
     }
 
     fn release(value: CFTypeRef) {
@@ -401,7 +404,10 @@ mod imp {
         Ok(text)
     }
 
-    fn resolve(state_id: &str, ref_id: usize) -> Result<(AXUIElementRef, &'static [&'static str]), String> {
+    fn resolve(
+        state_id: &str,
+        ref_id: usize,
+    ) -> Result<(AXUIElementRef, &'static [&'static str]), String> {
         let guard = CURRENT.lock();
         let state = guard
             .as_ref()
@@ -427,7 +433,10 @@ mod imp {
                 actions.join(", ")
             ));
         }
-        let (cx, cy) = match (point_attr(element, "AXPosition"), size_attr(element, "AXSize")) {
+        let (cx, cy) = match (
+            point_attr(element, "AXPosition"),
+            size_attr(element, "AXSize"),
+        ) {
             (Some((x, y)), Some((w, h))) => (x + w / 2.0, y + h / 2.0),
             _ => (0.0, 0.0),
         };
@@ -435,10 +444,14 @@ mod imp {
         let status = unsafe { AXUIElementPerformAction(element, action) };
         release(action as CFTypeRef);
         if status != AX_SUCCESS {
-            return Err(format!("AXPress failed (error {status}); fall back to a pixel click"));
+            return Err(format!(
+                "AXPress failed (error {status}); fall back to a pixel click"
+            ));
         }
         crate::computer_use::notify_cursor(cx as i32, cy as i32);
-        Ok(format!("Pressed element [{ref_id}] (center {cx:.0},{cy:.0})."))
+        Ok(format!(
+            "Pressed element [{ref_id}] (center {cx:.0},{cy:.0})."
+        ))
     }
 
     pub fn set_value(state_id: &str, ref_id: usize, value: &str) -> Result<String, String> {
@@ -459,14 +472,18 @@ mod imp {
                 "set_value failed (error {status}); fall back to click + type_text"
             ));
         }
-        Ok(format!("Set element [{ref_id}] value ({} chars).", value.chars().count()))
+        Ok(format!(
+            "Set element [{ref_id}] value ({} chars).",
+            value.chars().count()
+        ))
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
     fn unsupported() -> String {
-        "accessibility-tree state is macOS-only; use screenshot + pixel actions on this platform".into()
+        "accessibility-tree state is macOS-only; use screenshot + pixel actions on this platform"
+            .into()
     }
     pub fn app_state() -> Result<String, String> {
         Err(unsupported())

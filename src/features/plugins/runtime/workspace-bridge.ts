@@ -1,5 +1,5 @@
 import { ipc } from "@/lib/ipc";
-import { useBrowserStore } from "@/features/browser/store";
+import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { useChatStore } from "@/features/chat/store";
 import { withAuthorizedHostInvoke } from "./hardening";
 
@@ -59,7 +59,8 @@ export function openPluginSession(
       `[plugins] "${pluginId}" sessions.selectSession: unknown session ${engine}/${sessionId}`,
     );
   }
-  // The chat surface comes forward; a browser tab in view steps aside.
-  useBrowserStore.getState().deactivate();
+  // The chat surface comes forward; other center surfaces in view (browser,
+  // file, plugin tab/hub, workbench, diff) step aside.
+  dismissCenterSurfaces();
   store.selectSession(engine, sessionId, workspacePath);
 }

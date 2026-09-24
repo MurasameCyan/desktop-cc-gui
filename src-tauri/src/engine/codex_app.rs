@@ -40,15 +40,16 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{timeout, Instant};
 
+use super::codex_read_only;
 use super::images;
 use super::qoder_session::{
     encode_ndjson, jsonrpc_id_key, jsonrpc_request, jsonrpc_result_response, teardown, KILL_POLL,
     PROMPT_TIMEOUT, RPC_HANDSHAKE_TIMEOUT,
 };
 use super::{
-    assistant_message, cleanup_staged_files, read_line_capped, spawn_stderr_capture,
-    tool_call_message, tool_result_patch, BuiltCommand, EngineEvent, LineRead, SendRequest,
-    TurnCore, TurnState, VirtualRunGuard, MAX_LINE_BYTES,
+    assistant_message, read_line_capped, spawn_stderr_capture, tool_call_message,
+    tool_result_patch, BuiltCommand, EngineEvent, LineRead, SendRequest, TurnCore, TurnState,
+    VirtualRunGuard, MAX_LINE_BYTES,
 };
 
 /// Terminal marker for a kill-interrupted turn. The driver swallows it (the
@@ -101,6 +102,8 @@ struct TurnView {
     /// Last `thread/tokenUsage/updated` payload, folded into this turn's Done:
     /// the terminal notification itself carries no usage.
     last_usage: Option<Value>,
+    exit_unconfirmed: bool,
+    isolated_home: Option<std::path::PathBuf>,
 }
 
 /// A turn's JSON-RPC channel to one `codex app-server` child.
@@ -313,7 +316,10 @@ fn handle_server_request(
         // sandbox is the boundary this app chose, so approving here would be a
         // privilege escalation the exec transport never allowed either.
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-            Handled::Answer(jsonrpc_result_response(id, json!({ "decision": "decline" })))
+            Handled::Answer(jsonrpc_result_response(
+                id,
+                json!({ "decision": "decline" }),
+            ))
         }
         // An empty profile grants nothing, and still settles the request.
         "item/permissions/requestApproval" => {
@@ -495,7 +501,10 @@ fn handle_item(
                 for change in changes {
                     core.dispatch_event(
                         state,
-                        tool_call_message("apply_patch", Some(&pick(change, &["path", "kind", "diff"]))),
+                        tool_call_message(
+                            "apply_patch",
+                            Some(&pick(change, &["path", "kind", "diff"])),
+                        ),
                     );
                 }
             }
@@ -628,7 +637,8 @@ pub(super) fn answer_frame(parked: &Value, answers: Option<&Value>) -> Result<Va
             .as_object()
             .ok_or_else(|| "codex answers must be an object".to_string())?;
         for (text, choice) in answers {
-            let Some(question_id) = ids.and_then(|ids| ids.get(text)).and_then(Value::as_str) else {
+            let Some(question_id) = ids.and_then(|ids| ids.get(text)).and_then(Value::as_str)
+            else {
                 return Err(format!("codex did not ask a question titled {text:?}"));
             };
             // A single-select arrives as a bare label; the wire only has the
@@ -714,6 +724,7 @@ fn sandbox_for(permission: Option<&str>) -> &'static str {
     match permission {
         Some("bypass") => "danger-full-access",
         Some("manual") => "read-only",
+        Some(codex_read_only::PERMISSION) => "read-only",
         _ => "workspace-write",
     }
 }
@@ -897,6 +908,9 @@ pub(super) async fn run_app_server_turn(
     if let Some(session_id) = preassigned_session_id {
         core.registry.remove_if_pid(&session_id, virtual_pid);
     }
+    if !view.exit_unconfirmed {
+        state.confirm_exit(&core);
+    }
     core.sink.flush();
 }
 
@@ -913,10 +927,10 @@ async fn turn_inner(
         cleanup_files,
         ..
     } = built;
+    let _staging_guard = codex_read_only::StagedHomeGuard(cleanup_files);
     let outcome = drive(&mut command, core, state, view, req, killed).await;
     // Staged prompt files go on every exit path, including a spawn that never
     // got off the ground.
-    cleanup_staged_files(&cleanup_files);
     outcome
 }
 
@@ -930,13 +944,21 @@ async fn drive(
     req: &SendRequest,
     killed: &Arc<AtomicBool>,
 ) -> Result<(), String> {
+    if codex_read_only::requested(req) {
+        view.isolated_home = Some(
+            std::fs::canonicalize(codex_read_only::isolated_home(command)?)
+                .map_err(|_| "Cannot verify isolated Codex home")?,
+        );
+    }
     let mut spawned = spawn_app_server(command, &req.workspace)?;
+    view.exit_unconfirmed = true;
     // The answer command writes a parked question's response on this same pipe,
     // so the registry gets the writer from the first frame on.
     core.registry
         .set_stdin(&core.run_id, Arc::clone(&spawned.server.stdin));
     let result = handshake_and_turn(&mut spawned.server, core, state, view, req, killed).await;
     teardown(&mut spawned.child).await;
+    view.exit_unconfirmed = !matches!(spawned.child.try_wait(), Ok(Some(_)));
     match result {
         Ok(()) => Ok(()),
         Err(error) => Err(terminal_message(error, &spawned.stderr_buf)),
@@ -959,10 +981,10 @@ async fn handshake_and_turn(
             json!({ "clientInfo": {
                 "name": "ccgui",
                 "version": env!("CARGO_PKG_VERSION"),
-            }}),
+            }, "capabilities": {"experimentalApi": codex_read_only::requested(req)}}),
         )
         .await?;
-    server
+    let initialized = server
         .pump(
             "initialize",
             Expect::Reply(&key),
@@ -973,6 +995,43 @@ async fn handshake_and_turn(
         )
         .await?
         .ok_or_else(|| "the codex app-server ended before initialize was answered".to_string())?;
+    if codex_read_only::requested(req) {
+        codex_read_only::validate_version(&initialized)?;
+        for (method, params) in [
+            ("configRequirements/read", json!({})),
+            (
+                "config/read",
+                json!({"cwd":req.workspace.to_string_lossy(),"includeLayers":true}),
+            ),
+        ] {
+            let key = server.request(method, params).await?;
+            let response = server
+                .pump(
+                    method,
+                    Expect::Reply(&key),
+                    Instant::now() + RPC_HANDSHAKE_TIMEOUT,
+                    killed,
+                    None,
+                    &mut |value| route(core, state, view, value),
+                )
+                .await?
+                .ok_or("Codex isolation preflight ended without a response")?;
+            if method == "configRequirements/read" {
+                if response.get("requirements") != Some(&Value::Null) {
+                    return Err(
+                        "Codex read-only planning does not support managed requirements".into(),
+                    );
+                }
+            } else {
+                codex_read_only::validate_config(
+                    &response,
+                    view.isolated_home
+                        .as_deref()
+                        .ok_or("Missing isolated Codex planning home")?,
+                )?;
+            }
+        }
+    }
     // Resuming re-attaches the conversation the app already holds; starting
     // opens a new one. Both take the run's sandbox, and approvals stay pinned
     // off: this client has no approval UI and the sandbox is the boundary.
@@ -989,8 +1048,27 @@ async fn handshake_and_turn(
     params["cwd"] = json!(req.workspace.to_string_lossy());
     params["sandbox"] = json!(sandbox_for(req.permission.as_deref()));
     params["approvalPolicy"] = json!("never");
+    if codex_read_only::requested(req) {
+        params["ephemeral"] = json!(true);
+        params["dynamicTools"] = json!([]);
+        params["selectedCapabilityRoots"] = json!([]);
+        params["environments"] =
+            json!([{"environmentId":"local","cwd":req.workspace.to_string_lossy()}]);
+    }
     if let Some(model) = req.model.as_deref() {
         params["model"] = json!(model);
+    }
+    if !codex_read_only::requested(req) {
+        if let Some(effort) = req.effort.as_deref() {
+            if let Some(obj) = params.as_object_mut() {
+                if !obj.contains_key("config") || obj["config"].is_null() {
+                    obj.insert("config".to_string(), json!({}));
+                }
+                if let Some(config) = obj.get_mut("config").and_then(Value::as_object_mut) {
+                    config.insert("model_reasoning_effort".to_string(), json!(effort));
+                }
+            }
+        }
     }
     let key = server.request(method, params).await?;
     let result = server
@@ -1004,6 +1082,9 @@ async fn handshake_and_turn(
         )
         .await?
         .ok_or_else(|| format!("the codex app-server ended before {method} was answered"))?;
+    if codex_read_only::requested(req) {
+        codex_read_only::validate_thread(&result)?;
+    }
     let thread_id = result
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -1014,14 +1095,27 @@ async fn handshake_and_turn(
     if let Some(model) = result.get("model").and_then(Value::as_str) {
         core.dispatch_event(state, EngineEvent::Model(model.to_string()));
     }
+    let reported_effort = result
+        .get("reasoningEffort")
+        .or_else(|| result.pointer("/thread/reasoningEffort"))
+        .and_then(Value::as_str);
+    if let Some(effort) = req.effort.as_deref().or(reported_effort) {
+        core.dispatch_event(state, EngineEvent::Effort(effort.to_string()));
+    }
     // The turn id is needed to interrupt a cancelled turn, so it must be known
     // before the turn pump starts.
-    let key = server
-        .request(
-            "turn/start",
-            json!({ "threadId": thread_id, "input": turn_input(req) }),
-        )
-        .await?;
+    let mut turn_params = json!({ "threadId": thread_id, "input": turn_input(req) });
+    if codex_read_only::requested(req) {
+        turn_params["approvalPolicy"] = json!("never");
+        turn_params["sandboxPolicy"] = json!({"type":"readOnly","networkAccess":false});
+    }
+    if let Some(effort) = req.effort.as_deref() {
+        turn_params["effort"] = json!(effort);
+    }
+    if let Some(model) = req.model.as_deref() {
+        turn_params["model"] = json!(model);
+    }
+    let key = server.request("turn/start", turn_params).await?;
     let deadline = Instant::now() + PROMPT_TIMEOUT;
     // A fast turn can be over before its own acknowledgement is read, so an
     // ended pump here is a settled turn and not a missing reply.
@@ -1148,6 +1242,181 @@ mod tests {
         json!({ "rpcId": rpc_id, "ids": ids })
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires CCGUI_CODEX_READ_ONLY_TEST_BIN pointing to audited Codex 0.154.0 on macOS; no model calls"]
+    async fn installed_codex_isolated_planner_blocks_writes_and_external_tools() {
+        use crate::engine::Engine;
+        let bin = std::env::var("CCGUI_CODEX_READ_ONLY_TEST_BIN").unwrap();
+        let root =
+            std::env::temp_dir().join(format!("ccgui-codex-isolation-{}", uuid::Uuid::new_v4()));
+        let _root_guard = codex_read_only::StagedHomeGuard(vec![root.clone()]);
+        let native = root.join("native");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::create_dir_all(workspace.join(".codex")).unwrap();
+        let marker = root.join("MCP_STARTED");
+        let malicious = format!(
+            "[mcp_servers.fixture]\ncommand=\"/bin/sh\"\nargs=[\"-c\",\"touch {}\"]\n",
+            marker.display()
+        );
+        std::fs::write(native.join("config.toml"),format!("model=\"probe\"\nmodel_provider=\"probe\"\nnotify=[\"/bin/sh\",\"-c\",\"touch {}\"]\n[model_providers.probe]\nname=\"probe\"\nbase_url=\"http://127.0.0.1:9/v1\"\nwire_api=\"responses\"\n{malicious}",marker.display())).unwrap();
+        std::fs::write(workspace.join(".codex/config.toml"), &malicious).unwrap();
+        let request = SendRequest {
+            session_id: None,
+            workspace: workspace.clone(),
+            prompt: "not sent".into(),
+            images: vec![],
+            model: Some("probe".into()),
+            effort: None,
+            service_tier: None,
+            permission: Some(codex_read_only::PERMISSION.into()),
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+            allowed_tools: None,
+        };
+        assert!(crate::engine::codex::CodexEngine
+            .build_command(&request, &bin)
+            .is_err());
+        let mut built = crate::engine::codex::CodexEngine
+            .host_command(&request, &bin)
+            .unwrap();
+        codex_read_only::stage(&request, &mut built, &native, &root.join("staging")).unwrap();
+        let home =
+            std::fs::canonicalize(codex_read_only::isolated_home(&built.command).unwrap()).unwrap();
+        assert!(!std::fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .contains("mcp_servers"));
+        let mut spawned = spawn_app_server(&mut built.command, &workspace).unwrap();
+        let killed = AtomicBool::new(false);
+        let result: Result<(),String> = async {
+            for (method,params) in [
+                ("initialize",json!({"clientInfo":{"name":"ccgui_probe","version":"1"},"capabilities":{"experimentalApi":true}})),
+                ("configRequirements/read",json!({})),
+                ("config/read",json!({"cwd":workspace,"includeLayers":true})),
+                ("thread/start",json!({"cwd":workspace,"model":"probe","sandbox":"read-only","approvalPolicy":"never","ephemeral":true,"dynamicTools":[],"selectedCapabilityRoots":[],"environments":[{"environmentId":"local","cwd":workspace}]})),
+                ("command/exec",json!({"command":["/bin/sh","-c","cat .codex/config.toml"],"cwd":workspace,"sandboxPolicy":{"type":"readOnly","networkAccess":false},"timeoutMs":3000})),
+                ("command/exec",json!({"command":["/bin/sh","-c","touch DENIED_WRITE"],"cwd":workspace,"sandboxPolicy":{"type":"readOnly","networkAccess":false},"timeoutMs":3000})),
+            ] {
+                let writing=params.pointer("/command/2")==Some(&json!("touch DENIED_WRITE"));
+                let key=spawned.server.request(method,params).await?;
+                let response=spawned.server.pump(method,Expect::Reply(&key),Instant::now()+Duration::from_secs(10),&killed,None,&mut |_| Handled::Ignore).await?
+                    .ok_or("Probe ended without a response")?;
+                match method {
+                    "initialize"=>codex_read_only::validate_version(&response).map_err(|error| format!("{error}; reported user agent: {}",response["userAgent"]))?,
+                    "configRequirements/read"=>assert_eq!(response["requirements"],Value::Null),
+                    "config/read"=>codex_read_only::validate_config(&response,&home)?,
+                    "thread/start"=>codex_read_only::validate_thread(&response)?,
+                    "command/exec" if writing=>assert_ne!(response["exitCode"],json!(0)),
+                    "command/exec"=>assert_eq!(response["exitCode"],json!(0)),
+                    _=>unreachable!(),
+                }
+            }
+            Ok(())
+        }.await;
+        teardown(&mut spawned.child).await;
+        result.unwrap();
+        assert!(!marker.exists());
+        assert!(!workspace.join("DENIED_WRITE").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_codex_interrupt_during_handshake_waits_for_process_exit() {
+        let (mut core, registry, emitter) = test_core();
+        let mut entry = registry.get("test-run").unwrap();
+        registry.remove_if_pid("test-run", entry.pid);
+        core.run_id = "pa-relay-codex-interrupt".into();
+        entry.run_id = core.run_id.clone();
+        let killed = entry.killed.clone();
+        let virtual_pid = entry.pid;
+        registry.insert(core.run_id.clone(), entry);
+        let directory =
+            std::env::temp_dir().join(format!("ccgui-codex-interrupt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "echo $$ > '{}'; read ignored; exec sleep 30",
+                pid_file.display()
+            ),
+        ]);
+        let request = SendRequest {
+            session_id: None,
+            workspace: directory.clone(),
+            prompt: "hi".into(),
+            images: vec![],
+            model: None,
+            effort: None,
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+            allowed_tools: None,
+        };
+        let built = BuiltCommand {
+            command,
+            stdin_payload: None,
+            keep_stdin_open: true,
+            cleanup_files: vec![],
+            mcp_restore: None,
+            preassigned_session_id: None,
+        };
+        let run_id = core.run_id.clone();
+        let sink = core.sink.clone();
+        let task = tokio::spawn(run_app_server_turn(
+            core,
+            request,
+            built,
+            killed,
+            virtual_pid,
+        ));
+        timeout(Duration::from_secs(3), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let child_pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(registry.kill(&run_id));
+        timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(child_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(registry.active_run_count(), 0);
+        sink.flush();
+        let events: Vec<Value> = emitter
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|raw| serde_json::from_str::<Vec<Value>>(raw).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event["kind"].as_str(), Some("done" | "error")))
+                .count(),
+            1
+        );
+        assert_eq!(events.last().unwrap()["kind"], "done");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn answer_frame_keys_a_single_choice_by_the_servers_question_id() {
         let frame = answer_frame(
@@ -1191,8 +1460,8 @@ mod tests {
 
     #[test]
     fn answer_frame_rejects_a_non_object_answer_map() {
-        let error = answer_frame(&parked(json!(1), json!({})), Some(&json!(["Alpha"])))
-            .unwrap_err();
+        let error =
+            answer_frame(&parked(json!(1), json!({})), Some(&json!(["Alpha"]))).unwrap_err();
         assert!(error.contains("object"), "{error}");
     }
 
@@ -1200,11 +1469,7 @@ mod tests {
     fn answer_frame_settles_a_dismissed_card_with_an_empty_answer() {
         // A dismissal is not an error: the model must be able to move on, and
         // an empty answer map is the protocol's way of saying "nothing chosen".
-        let frame = answer_frame(
-            &parked(json!(3), json!({ "Which one?": "q1" })),
-            None,
-        )
-        .unwrap();
+        let frame = answer_frame(&parked(json!(3), json!({ "Which one?": "q1" })), None).unwrap();
         assert_eq!(frame["id"], json!(3));
         assert_eq!(frame["result"], json!({ "answers": {} }));
     }

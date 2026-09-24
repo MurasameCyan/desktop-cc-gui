@@ -4,8 +4,9 @@ import Download from "lucide-react/dist/esm/icons/download";
 import RefreshCcw from "lucide-react/dist/esm/icons/refresh-ccw";
 import X from "lucide-react/dist/esm/icons/x";
 import { Button } from "@/components/base/buttons/button";
-import { useUpdateStore } from "./store";
+import { downloadPercent, useUpdateStore } from "./store";
 import type { UpdateStage } from "./store";
+import { useUpdateStageMessage } from "./stage-message";
 
 /** Stages that surface the toast; idle/checking/latest stay silent. */
 const VISIBLE_STAGES: readonly UpdateStage[] = [
@@ -15,36 +16,6 @@ const VISIBLE_STAGES: readonly UpdateStage[] = [
   "restarting",
   "error",
 ];
-
-/** One-line status text for the current stage. */
-function UpdateToastMessage({
-  stage,
-  version,
-  percent,
-  error,
-}: {
-  stage: UpdateStage;
-  version?: string;
-  /** Download progress 0–100, null when the total size is unknown. */
-  percent: number | null;
-  error?: string;
-}) {
-  const { t } = useTranslation();
-  switch (stage) {
-    case "available":
-      return t("settings.updateAvailable", { version });
-    case "downloading":
-      return t("settings.updateDownloading") + (percent !== null ? ` ${percent}%` : "");
-    case "installing":
-      return t("settings.updateInstalling");
-    case "restarting":
-      return t("settings.updateRestarting");
-    case "error":
-      return t("settings.updateError", { message: error });
-    default:
-      return null;
-  }
-}
 
 /** Dismiss affordance, offered only while the toast expects a decision
  *  (update available / error), not mid-install. */
@@ -119,6 +90,12 @@ function UpdateToastActions({
  * Floating update banner, mounted once in App. Auto-check failures stay
  * silent; the toast appears when an update is actually available, tracks
  * download/install, and surfaces errors from user-initiated actions.
+ *
+ * z-105: outranks the fullscreen page shells (settings / plugin pages,
+ * z-100) so a check started inside settings can be acted on — "update
+ * now" — without closing it first. Modals (z-110) stay above: they hide
+ * the rest of the app from assistive tech, so a toast floating over their
+ * backdrop would be clickable but unannounced.
  */
 export function UpdateToast() {
   const stage = useUpdateStore((s) => s.stage);
@@ -132,10 +109,14 @@ export function UpdateToast() {
 
   const visible = VISIBLE_STAGES.includes(stage);
 
-  const percent =
-    totalBytes && totalBytes > 0
-      ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
-      : null;
+  const percent = downloadPercent(downloadedBytes, totalBytes);
+  const message = useUpdateStageMessage({
+    stage,
+    version,
+    downloadedBytes,
+    totalBytes,
+    error,
+  });
 
   return (
     <AnimatePresence>
@@ -146,19 +127,12 @@ export function UpdateToast() {
           exit={{ opacity: 0, y: 16 }}
           transition={{ duration: 0.18 }}
           role="status"
-          className="fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-3 rounded-2xl border border-separator-border bg-background-primary-default p-4 shadow-xl"
+          className="fixed bottom-4 right-4 z-105 flex w-80 flex-col gap-3 rounded-2xl border border-separator-border bg-background-primary-default p-4 shadow-xl"
         >
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-2">
               <Download className="size-[18px] shrink-0 text-foreground-icon-secondary" aria-hidden />
-              <p className="text-body-medium text-text-primary">
-                <UpdateToastMessage
-                  stage={stage}
-                  version={version}
-                  percent={percent}
-                  error={error}
-                />
-              </p>
+              <p className="text-body-medium text-text-primary">{message}</p>
             </div>
             {(stage === "available" || stage === "error") && (
               <DismissToastButton onDismiss={dismiss} />

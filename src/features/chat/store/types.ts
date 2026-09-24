@@ -11,6 +11,14 @@ import type { ActiveSession } from "./persistence";
 import type { SessionContributions } from "./session-contributions";
 import type { SessionState } from "./stream";
 
+/** Per-send options carried from the composer to the spawn request. */
+export interface SendOptions {
+  /** 电脑操控: mount the app's computer-use driver (screenshot/input MCP
+   *  server + virtual pointer overlay) for this turn. Engines that cannot
+   *  mount it are refused before the send (see computer-use.ts). */
+  computerUse?: boolean;
+}
+
 export interface ChatStore {
   workspaces: Workspace[];
   sessions: SessionMeta[];
@@ -171,8 +179,15 @@ export interface ChatStore {
   dismissActionError: () => void;
   /** Clear a session's turn/load error banner. */
   dismissSessionError: (key: string) => void;
+  /** Surface a banner on a session without a send (e.g. a refused
+   *  computer-use command); the composer keeps the user's draft. */
+  setSessionError: (key: string, message: string) => void;
   loadEarlier: () => Promise<void>;
-  send: (prompt: string, images: string[]) => Promise<void>;
+  send: (
+    prompt: string,
+    images: string[],
+    options?: SendOptions,
+  ) => Promise<void>;
   /** Answer a permission-denial grant card: persist the directory grant
    * (accept) or mark the card declined. */
   respondToGrant: (key: string, seq: number, accept: boolean) => Promise<void>;
@@ -187,7 +202,7 @@ export interface ChatStore {
    * after a directory grant takes effect on the next launch). */
   resendLastUser: (key: string) => Promise<void>;
   /** Enqueue a message on the active session while a turn streams. */
-  queueMessage: (text: string, images: string[]) => void;
+  queueMessage: (text: string, images: string[], options?: SendOptions) => void;
   /** Drop a queued message from the active session. */
   removeQueued: (id: string) => void;
   /** Send one queued message now: it takes the head of the queue, and a

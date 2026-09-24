@@ -5,6 +5,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  COMPOSER_INSERTING_ATTR,
   extractText,
   insertTextAtCaret,
 } from "@/components/application/ai-chat/file-tags";
@@ -97,6 +98,10 @@ export function ComposerEditable({
         : t("chat.inputPlaceholder")}
       data-completion-suffix={mentionOpen || slashOpen || agentOpen || promptOpen ? undefined : completionSuffix || undefined}
       onInput={() => {
+        // insertTextAtCaret's editing command fires input mid-insert. Acting
+        // on it (especially syncTags → innerHTML) wipes the undo step the
+        // command just opened. The caller emits once the insert returns.
+        if (editableRef.current?.hasAttribute(COMPOSER_INSERTING_ATTR)) return;
         emitChange();
         syncTags();
         if (!isComposingRef.current) updateTriggers();

@@ -178,11 +178,9 @@ fn load_user_turns(conversation_id: Option<&str>) -> Vec<UserTurn> {
 fn summary_row(path: &Path) -> Option<(String, String, i64)> {
     let id = conversation_id(path)?;
     let db = crate::engine::agy::agy_home().join("conversation_summaries.db");
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     conn.query_row(
         "SELECT title, preview, step_count FROM conversation_summaries WHERE conversation_id = ?1",
         rusqlite::params![id],
@@ -198,11 +196,9 @@ fn summary_row(path: &Path) -> Option<(String, String, i64)> {
 }
 
 fn load_steps(path: &Path) -> Option<Vec<(i64, Vec<u8>)>> {
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
     let mut stmt = conn
         .prepare("SELECT step_type, step_payload FROM steps ORDER BY idx")
         .ok()?;
@@ -306,8 +302,7 @@ fn looks_like_status_ping(text: &str) -> bool {
     if lower.starts_with("waiting for") || lower.starts_with("i will wait") {
         return true;
     }
-    t.starts_with("正在")
-        && (t.contains("请稍候") || t.ends_with("...") || t.ends_with('…'))
+    t.starts_with("正在") && (t.contains("请稍候") || t.ends_with("...") || t.ends_with('…'))
 }
 
 /// WeCom webhook markdown (`<font color="info">`, `<@Name>`) is what agy
@@ -713,7 +708,8 @@ mod tests {
 
     #[test]
     fn tool_json_is_not_treated_as_assistant() {
-        let json = r#"{"DirectoryPath":"/tmp","toolAction":"Checking","toolSummary":"Check config"}"#;
+        let json =
+            r#"{"DirectoryPath":"/tmp","toolAction":"Checking","toolSummary":"Check config"}"#;
         assert!(pick_assistant(&[proto(1, 1, json)]).is_none());
     }
 }

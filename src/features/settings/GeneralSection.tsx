@@ -12,11 +12,14 @@ import {
   SettingsRow,
   SettingsSectionLabel,
 } from "@/components/application/settings/settings-rows";
-import { ipc, type AppSettings } from "@/lib/ipc";
-import { IS_WINDOWS } from "@/lib/platform";
+import { ConfirmDialog } from "@/components/dialogs";
+import { ipc, type AppSettings, type PetSummary } from "@/lib/ipc";
+import { petErrorMessage } from "@/features/pet/pet-errors";
+import { IS_WINDOWS, pickDirectory } from "@/lib/platform";
 import { applyTheme } from "./theme";
 import { PromptHistoryManager, PromptHistoryToggleRow } from "./PromptHistorySettings";
 import { useChatStore } from "@/features/chat/store";
+import { PET_SCALE_OPTIONS, normalizePetScale } from "@/features/pet/pet-scale";
 
 export const LANGUAGE_STORAGE_KEY = "ccgui-next.language";
 
@@ -27,9 +30,9 @@ const THREAD_LIMIT_MIN = 1;
 const THREAD_LIMIT_MAX = 30;
 const THREAD_LIMIT_DEFAULT = 5;
 
-/** General page: appearance (theme/language/thread limit) + behavior
- *  (composer send shortcut). */
-export function GeneralSection() {
+/** App-settings state + persistence for the General page. Kept JSX-free so
+ *  the component below only composes the cards. */
+function useGeneralSettingsState() {
   const { t, i18n } = useTranslation();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +40,11 @@ export function GeneralSection() {
   const [limitText, setLimitText] = useState<string | null>(null);
   // 窗口当前是否有系统装饰（isDecorated）；null = 还没读回来。
   const [decorated, setDecorated] = useState<boolean | null>(null);
+  const [pets, setPets] = useState<PetSummary[]>([]);
+  const [petBusy, setPetBusy] = useState(false);
+  // Pet pending destructive confirmation; null = no dialog open.
+  const [removingPet, setRemovingPet] = useState<PetSummary | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     ipc
@@ -49,6 +57,10 @@ export function GeneralSection() {
       .catch((e) => {
         if (!cancelled) setError(String(e));
       });
+    void ipc
+      .listPets()
+      .then(setPets)
+      .catch((e) => console.warn("[settings] pet list failed", e));
     return () => {
       cancelled = true;
     };
@@ -60,15 +72,17 @@ export function GeneralSection() {
   // Read-modify-write: the local `settings` descends from a mount-time
   // snapshot; persisting it whole would clobber concurrent edits (CLI config
   // page, chat-side model pinning). Apply each patch onto a fresh read.
-  const save = useCallback(async (patch: Partial<AppSettings>) => {
+  const save = useCallback(async (patch: Partial<AppSettings>): Promise<boolean> => {
     try {
       const latest = await ipc.getAppSettings();
       const next = { ...latest, ...patch };
       await ipc.updateAppSettings(next);
       setSettings(next);
       setError(null);
+      return true;
     } catch (e) {
       setError(String(e));
+      return false;
     }
   }, []);
 
@@ -151,6 +165,383 @@ export function GeneralSection() {
     useChatStore.getState().setThinkingAutoCollapse(autoCollapse);
     void save({ thinkingAutoCollapse: autoCollapse });
   };
+  const onPetEnabledChange = (enabled: boolean) => {
+    if (!settings) return;
+    if (enabled && !pets.some((pet) => pet.id === settings.petId)) {
+      setError(t("settings.petImportRequired"));
+      return;
+    }
+    setSettings({ ...settings, petEnabled: enabled });
+    void save({ petEnabled: enabled }).then((ok) => {
+      if (ok) void ipc.setPetVisible(enabled).catch((e) => setError(petErrorMessage(e, t)));
+    });
+  };
+  const onPetScaleChange = async (key: Key | null) => {
+    if (!settings || key == null) return;
+    const next = normalizePetScale(Number(key));
+    const previous = normalizePetScale(settings.petScale);
+    if (next === previous) return;
+    setSettings({ ...settings, petScale: next });
+    try {
+      const applied = await ipc.setPetScale(next);
+      setSettings((current) => (current ? { ...current, petScale: normalizePetScale(applied) } : current));
+      setError(null);
+    } catch (e) {
+      setSettings((current) => (current ? { ...current, petScale: previous } : current));
+      setError(petErrorMessage(e, t));
+    }
+  };
+  const onPetChange = async (key: Key | null) => {
+    if (!settings || key == null) return;
+    const petId = String(key);
+    setSettings({ ...settings, petId });
+    const saved = await save({ petId });
+    if (!saved) return;
+    // Recreate the overlay so the selected package is loaded immediately.
+    try {
+      await ipc.setPetVisible(false);
+      await ipc.setPetVisible(settings.petEnabled ?? false);
+    } catch (e) {
+      setError(petErrorMessage(e, t));
+    }
+  };
+  const importPet = async () => {
+    const path = await pickDirectory(t("settings.petImportHint"));
+    if (!path) return;
+    setPetBusy(true);
+    try {
+      const imported = await ipc.importPet(path);
+      setPets((current) => [...current.filter((pet) => pet.id !== imported.id), imported]);
+      setSettings((current) => (current ? { ...current, petId: imported.id } : current));
+      const saved = await save({ petId: imported.id });
+      if (saved && settings?.petEnabled) {
+        await ipc.setPetVisible(false);
+        await ipc.setPetVisible(true);
+      }
+    } catch (e) {
+      setError(`${t("settings.petImportFailed")}: ${petErrorMessage(e, t)}`);
+    } finally {
+      setPetBusy(false);
+    }
+  };
+  const removePet = async (pet: PetSummary) => {
+    try {
+      await ipc.removePet(pet.id);
+      setPets((current) => current.filter((item) => item.id !== pet.id));
+      if (settings?.petId === pet.id) {
+        if (settings.petEnabled) await ipc.setPetVisible(false).catch(() => {});
+        await save({ petId: "", petEnabled: false });
+      }
+    } catch (e) {
+      setError(petErrorMessage(e, t));
+    }
+  };
+  const selectedPetId = settings?.petId?.trim() ?? "";
+  const selectedPet = pets.find((pet) => pet.id === selectedPetId);
+
+  return {
+    settings,
+    error,
+    limitText,
+    decorated,
+    pets,
+    petBusy,
+    removingPet,
+    setRemovingPet,
+    removePet,
+    selectedPetId,
+    selectedPet,
+    onThemeChange,
+    onTitlebarChange,
+    onLanguageChange,
+    onThreadLimitChange,
+    commitThreadLimitText,
+    onThreadLimitKeyDown,
+    onSendShortcutChange,
+    onThinkingAutoCollapseChange,
+    onPetEnabledChange,
+    onPetScaleChange,
+    onPetChange,
+    importPet,
+  };
+}
+
+/** Appearance card: theme, Windows titlebar + restart, language, thread limit. */
+function AppearanceCard({
+  settings,
+  limitText,
+  decorated,
+  onThemeChange,
+  onTitlebarChange,
+  onLanguageChange,
+  onThreadLimitChange,
+  onThreadLimitCommit,
+  onThreadLimitKeyDown,
+}: {
+  settings: AppSettings;
+  limitText: string | null;
+  decorated: boolean | null;
+  onThemeChange: (key: Key | null) => void;
+  onTitlebarChange: (key: Key | null) => void;
+  onLanguageChange: (key: Key | null) => void;
+  onThreadLimitChange: (value: string) => void;
+  onThreadLimitCommit: () => void;
+  onThreadLimitKeyDown: (event: KeyboardEvent) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <SettingsSectionLabel>{t("settings.appearance")}</SettingsSectionLabel>
+      <SettingsCard>
+        <SettingsRow label={t("settings.theme")}>
+          <Select
+            aria-label={t("settings.theme")}
+            selectedKey={settings.theme}
+            onSelectionChange={onThemeChange}
+            triggerClassName={SELECT_TRIGGER}
+          >
+            <SelectItem id="system">{t("settings.themeSystem")}</SelectItem>
+            <SelectItem id="light">{t("settings.themeLight")}</SelectItem>
+            <SelectItem id="dark">{t("settings.themeDark")}</SelectItem>
+          </Select>
+        </SettingsRow>
+        {IS_WINDOWS && (
+          <SettingsRow
+            label={t("settings.titlebar")}
+            description={t("settings.titlebarRestartHint")}
+          >
+            <div className="flex items-center gap-2">
+              <Select
+                aria-label={t("settings.titlebar")}
+                selectedKey={settings.titlebar}
+                onSelectionChange={onTitlebarChange}
+                triggerClassName={SELECT_TRIGGER}
+              >
+                <SelectItem id="native">{t("settings.titlebarNative")}</SelectItem>
+                <SelectItem id="mac">{t("settings.titlebarMac")}</SelectItem>
+              </Select>
+              <Button
+                size="small"
+                variant="ghost"
+                disabled={
+                  decorated === null || (settings.titlebar === "native") === decorated
+                }
+                onClick={() => void ipc.restartApp()}
+              >
+                {t("settings.restartNow")}
+              </Button>
+            </div>
+          </SettingsRow>
+        )}
+        <SettingsRow label={t("settings.language")}>
+          <Select
+            aria-label={t("settings.language")}
+            selectedKey={settings.language}
+            onSelectionChange={onLanguageChange}
+            triggerClassName={SELECT_TRIGGER}
+          >
+            <SelectItem id="zh">{t("settings.langZh")}</SelectItem>
+            <SelectItem id="en">{t("settings.langEn")}</SelectItem>
+          </Select>
+        </SettingsRow>
+        <SettingsRow label={t("settings.sidebarThreadLimit")}>
+          <Input
+            aria-label={t("settings.sidebarThreadLimit")}
+            size="small"
+            className="w-20"
+            inputClassName="text-center"
+            inputMode="numeric"
+            value={
+              limitText ??
+              String(settings.sidebarThreadLimit ?? THREAD_LIMIT_DEFAULT)
+            }
+            onChange={onThreadLimitChange}
+            onBlur={onThreadLimitCommit}
+            onKeyDown={onThreadLimitKeyDown}
+          />
+        </SettingsRow>
+      </SettingsCard>
+    </div>
+  );
+}
+
+/** Pet card: overlay toggle, package select/import/remove, and scale. */
+function PetCard({
+  settings,
+  pets,
+  petBusy,
+  selectedPetId,
+  selectedPet,
+  onPetEnabledChange,
+  onPetScaleChange,
+  onPetChange,
+  onImportPet,
+  onRemovePet,
+}: {
+  settings: AppSettings;
+  pets: PetSummary[];
+  petBusy: boolean;
+  selectedPetId: string;
+  selectedPet: PetSummary | undefined;
+  onPetEnabledChange: (enabled: boolean) => void;
+  onPetScaleChange: (key: Key | null) => void;
+  onPetChange: (key: Key | null) => void;
+  onImportPet: () => Promise<void>;
+  onRemovePet: (pet: PetSummary) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <SettingsSectionLabel>{t("settings.pet")}</SettingsSectionLabel>
+      <SettingsCard>
+        <SettingsRow
+          label={t("settings.petEnabled")}
+          description={t("settings.petEnabledDesc")}
+        >
+          <Switch
+            size="sm"
+            aria-label={t("settings.petEnabled")}
+            isSelected={settings.petEnabled ?? false}
+            isDisabled={!selectedPet || petBusy}
+            onChange={onPetEnabledChange}
+          />
+        </SettingsRow>
+        {!selectedPet && (
+          <p className="px-3 pb-2 text-body-2-regular text-text-tertiary">
+            {t("settings.petImportRequired")}
+          </p>
+        )}
+        <SettingsRow label={t("settings.petCharacter")}>
+          <div className="flex items-center gap-2">
+            <Select
+              aria-label={t("settings.petCharacter")}
+              selectedKey={selectedPetId || null}
+              isDisabled={pets.length === 0 || petBusy}
+              onSelectionChange={onPetChange}
+              triggerClassName={SELECT_TRIGGER}
+            >
+              {pets.map((pet) => (
+                <SelectItem key={pet.id} id={pet.id} textValue={pet.displayName}>
+                  {pet.displayName}
+                </SelectItem>
+              ))}
+            </Select>
+            <Button size="small" variant="secondary" onClick={() => void onImportPet()} disabled={petBusy}>
+              {t("settings.petImport")}
+            </Button>
+            {selectedPet && (
+              <Button
+                size="small"
+                variant="ghost"
+                onClick={() => void onRemovePet(selectedPet)}
+              >
+                {t("settings.petRemove")}
+              </Button>
+            )}
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.petScale")}
+        >
+          <Select
+            aria-label={t("settings.petScale")}
+            selectedKey={String(normalizePetScale(settings.petScale))}
+            onSelectionChange={onPetScaleChange}
+            triggerClassName={SELECT_TRIGGER}
+          >
+            {PET_SCALE_OPTIONS.map((value) => (
+              <SelectItem key={value} id={String(value)} textValue={`${value * 100}%`}>
+                {t("settings.petScaleValue", { percent: value * 100 })}
+              </SelectItem>
+            ))}
+          </Select>
+        </SettingsRow>
+      </SettingsCard>
+    </div>
+  );
+}
+
+/** Behavior card: composer send shortcut, thinking auto-collapse, prompt
+ *  history. */
+function BehaviorCard({
+  settings,
+  onSendShortcutChange,
+  onThinkingAutoCollapseChange,
+}: {
+  settings: AppSettings;
+  onSendShortcutChange: (key: Key | null) => void;
+  onThinkingAutoCollapseChange: (autoCollapse: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <SettingsSectionLabel>{t("settings.behavior")}</SettingsSectionLabel>
+      <SettingsCard>
+        <SettingsRow label={t("settings.sendShortcut")}>
+          <Select
+            aria-label={t("settings.sendShortcut")}
+            selectedKey={settings.composerSendShortcut ?? "enter"}
+            onSelectionChange={onSendShortcutChange}
+            triggerClassName={SELECT_TRIGGER}
+          >
+            <SelectItem id="enter">{t("settings.sendShortcutEnter")}</SelectItem>
+            {/* macOS sends with ⌘+Enter, other platforms Ctrl+Enter
+                (composer-editable reads metaKey || ctrlKey). */}
+            <SelectItem id="cmdEnter">
+              {t(navigator.platform.includes("Mac")
+                ? "settings.sendShortcutCmdEnter"
+                : "settings.sendShortcutCmdEnterCtrl")}
+            </SelectItem>
+          </Select>
+        </SettingsRow>
+
+        <SettingsRow
+          label={t("settings.thinkingAutoCollapse")}
+          description={t("settings.thinkingAutoCollapseDesc")}
+        >
+          <Switch
+            size="sm"
+            aria-label={t("settings.thinkingAutoCollapse")}
+            isSelected={settings.thinkingAutoCollapse ?? true}
+            onChange={onThinkingAutoCollapseChange}
+          />
+        </SettingsRow>
+        <PromptHistoryToggleRow />
+      </SettingsCard>
+    </div>
+  );
+}
+
+/** General page: appearance (theme/language/thread limit) + behavior
+ *  (composer send shortcut). */
+export function GeneralSection() {
+  const { t } = useTranslation();
+  const {
+    settings,
+    error,
+    limitText,
+    decorated,
+    pets,
+    petBusy,
+    removingPet,
+    setRemovingPet,
+    removePet,
+    selectedPetId,
+    selectedPet,
+    onThemeChange,
+    onTitlebarChange,
+    onLanguageChange,
+    onThreadLimitChange,
+    commitThreadLimitText,
+    onThreadLimitKeyDown,
+    onSendShortcutChange,
+    onThinkingAutoCollapseChange,
+    onPetEnabledChange,
+    onPetScaleChange,
+    onPetChange,
+    importPet,
+  } = useGeneralSettingsState();
+
   return (
     <div className="flex w-full flex-col gap-6">
       {error && (
@@ -162,117 +553,52 @@ export function GeneralSection() {
         <p className="text-body-regular text-text-tertiary">{t("common.loading")}</p>
       )}
       {settings && (
-        <div className="flex w-full flex-col gap-2">
-          <SettingsSectionLabel>{t("settings.appearance")}</SettingsSectionLabel>
-          <SettingsCard>
-            <SettingsRow label={t("settings.theme")}>
-              <Select
-                aria-label={t("settings.theme")}
-                selectedKey={settings.theme}
-                onSelectionChange={onThemeChange}
-                triggerClassName={SELECT_TRIGGER}
-              >
-                <SelectItem id="system">{t("settings.themeSystem")}</SelectItem>
-                <SelectItem id="light">{t("settings.themeLight")}</SelectItem>
-                <SelectItem id="dark">{t("settings.themeDark")}</SelectItem>
-              </Select>
-            </SettingsRow>
-            {IS_WINDOWS && (
-              <SettingsRow
-                label={t("settings.titlebar")}
-                description={t("settings.titlebarRestartHint")}
-              >
-                <div className="flex items-center gap-2">
-                  <Select
-                    aria-label={t("settings.titlebar")}
-                    selectedKey={settings.titlebar}
-                    onSelectionChange={onTitlebarChange}
-                    triggerClassName={SELECT_TRIGGER}
-                  >
-                    <SelectItem id="native">{t("settings.titlebarNative")}</SelectItem>
-                    <SelectItem id="mac">{t("settings.titlebarMac")}</SelectItem>
-                  </Select>
-                  <Button
-                    size="small"
-                    variant="ghost"
-                    disabled={
-                      decorated === null || (settings.titlebar === "native") === decorated
-                    }
-                    onClick={() => void ipc.restartApp()}
-                  >
-                    {t("settings.restartNow")}
-                  </Button>
-                </div>
-              </SettingsRow>
-            )}
-            <SettingsRow label={t("settings.language")}>
-              <Select
-                aria-label={t("settings.language")}
-                selectedKey={settings.language}
-                onSelectionChange={onLanguageChange}
-                triggerClassName={SELECT_TRIGGER}
-              >
-                <SelectItem id="zh">{t("settings.langZh")}</SelectItem>
-                <SelectItem id="en">{t("settings.langEn")}</SelectItem>
-              </Select>
-            </SettingsRow>
-            <SettingsRow label={t("settings.sidebarThreadLimit")}>
-              <Input
-                aria-label={t("settings.sidebarThreadLimit")}
-                size="small"
-                className="w-20"
-                inputClassName="text-center"
-                inputMode="numeric"
-                value={
-                  limitText ??
-                  String(settings.sidebarThreadLimit ?? THREAD_LIMIT_DEFAULT)
-                }
-                onChange={onThreadLimitChange}
-                onBlur={commitThreadLimitText}
-                onKeyDown={onThreadLimitKeyDown}
-              />
-            </SettingsRow>
-          </SettingsCard>
-        </div>
+        <AppearanceCard
+          settings={settings}
+          limitText={limitText}
+          decorated={decorated}
+          onThemeChange={onThemeChange}
+          onTitlebarChange={onTitlebarChange}
+          onLanguageChange={onLanguageChange}
+          onThreadLimitChange={onThreadLimitChange}
+          onThreadLimitCommit={commitThreadLimitText}
+          onThreadLimitKeyDown={onThreadLimitKeyDown}
+        />
       )}
       {settings && (
-        <div className="flex w-full flex-col gap-2">
-          <SettingsSectionLabel>{t("settings.behavior")}</SettingsSectionLabel>
-          <SettingsCard>
-            <SettingsRow label={t("settings.sendShortcut")}>
-              <Select
-                aria-label={t("settings.sendShortcut")}
-                selectedKey={settings.composerSendShortcut ?? "enter"}
-                onSelectionChange={onSendShortcutChange}
-                triggerClassName={SELECT_TRIGGER}
-              >
-                <SelectItem id="enter">{t("settings.sendShortcutEnter")}</SelectItem>
-                {/* macOS sends with ⌘+Enter, other platforms Ctrl+Enter
-                    (composer-editable reads metaKey || ctrlKey). */}
-                <SelectItem id="cmdEnter">
-                  {t(navigator.platform.includes("Mac")
-                    ? "settings.sendShortcutCmdEnter"
-                    : "settings.sendShortcutCmdEnterCtrl")}
-                </SelectItem>
-              </Select>
-            </SettingsRow>
-
-            <SettingsRow
-              label={t("settings.thinkingAutoCollapse")}
-              description={t("settings.thinkingAutoCollapseDesc")}
-            >
-              <Switch
-                size="sm"
-                aria-label={t("settings.thinkingAutoCollapse")}
-                isSelected={settings.thinkingAutoCollapse ?? true}
-                onChange={onThinkingAutoCollapseChange}
-              />
-            </SettingsRow>
-            <PromptHistoryToggleRow />
-          </SettingsCard>
-        </div>
+        <PetCard
+          settings={settings}
+          pets={pets}
+          petBusy={petBusy}
+          selectedPetId={selectedPetId}
+          selectedPet={selectedPet}
+          onPetEnabledChange={onPetEnabledChange}
+          onPetScaleChange={onPetScaleChange}
+          onPetChange={onPetChange}
+          onImportPet={importPet}
+          onRemovePet={removePet}
+        />
+      )}
+      {settings && (
+        <BehaviorCard
+          settings={settings}
+          onSendShortcutChange={onSendShortcutChange}
+          onThinkingAutoCollapseChange={onThinkingAutoCollapseChange}
+        />
       )}
       {settings && <PromptHistoryManager />}
+      {removingPet && (
+        <ConfirmDialog
+          danger
+          message={t("settings.petRemoveConfirm", { name: removingPet.displayName })}
+          onCancel={() => setRemovingPet(null)}
+          onConfirm={() => {
+            const pet = removingPet;
+            setRemovingPet(null);
+            void removePet(pet);
+          }}
+        />
+      )}
     </div>
   );
 }

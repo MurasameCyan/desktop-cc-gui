@@ -53,6 +53,13 @@ pub(crate) struct PluginManifest {
     /// declared here so the field is schema-known and future UI can show it.
     #[allow(dead_code)] // schema-known only; read by no host code yet
     pub(crate) sdk_version: Option<String>,
+    /// Optional market artwork: a square icon and up to five screenshots.
+    /// Purely presentational — install never fails on them, and `info_for`
+    /// drops anything that is not a safe image path (see fs::safe_artwork_path).
+    #[serde(default)]
+    pub(crate) icon: Option<String>,
+    #[serde(default)]
+    pub(crate) screenshots: Vec<String>,
 }
 
 /// ids double as directory names, so the manifest charset whitelist is also
@@ -122,8 +129,8 @@ pub(crate) fn validate_manifest(
     dir: &Path,
     files: &[(PathBuf, u64)],
 ) -> Result<PluginManifest, String> {
-    let path = manifest_path(dir)
-        .ok_or_else(|| format!("{}: missing manifest.json", dir.display()))?;
+    let path =
+        manifest_path(dir).ok_or_else(|| format!("{}: missing manifest.json", dir.display()))?;
     let content =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let manifest: PluginManifest =
@@ -195,7 +202,7 @@ pub(crate) fn validate_manifest(
 mod tests {
     use super::*;
     use crate::plugins::fs::MAX_FILE_BYTES;
-    use crate::plugins::test_support::{validate, valid_manifest, write_plugin, Scratch};
+    use crate::plugins::test_support::{valid_manifest, validate, write_plugin, Scratch};
 
     #[test]
     fn id_charset_matches_contract() {
@@ -355,7 +362,11 @@ mod tests {
         // A file past the 16MB cap refuses the whole bundle.
         let dir = scratch.path("oversized");
         write_plugin(&dir, &valid_manifest("big-plugin"));
-        std::fs::write(dir.join("blob.bin"), vec![0u8; (MAX_FILE_BYTES + 1) as usize]).unwrap();
+        std::fs::write(
+            dir.join("blob.bin"),
+            vec![0u8; (MAX_FILE_BYTES + 1) as usize],
+        )
+        .unwrap();
         assert!(validate(&dir).unwrap_err().contains("16MB limit"));
     }
 
@@ -377,14 +388,14 @@ mod tests {
     fn manifest_validation_rejects_bad_grant_shapes() {
         let scratch = Scratch::new();
         let cases: Vec<&str> = vec![
-            r#""cmd:tt_proxy""#,         // cmd: mechanism removed
+            r#""cmd:tt_proxy""#,            // cmd: mechanism removed
             r#""cmd:plugin_http_request""#, // even the new commands are not grantable
-            r#""exec:../evil""#,        // path separators
+            r#""exec:../evil""#,            // path separators
             r#""exec:/bin/sh""#,
-            r#""exec:""#,               // empty bin
-            r#""network:bad host""#,    // space in host
-            r#""network:host:abc""#,    // non-numeric port
-            r#""network:host:90-80""#,  // inverted range
+            r#""exec:""#,                 // empty bin
+            r#""network:bad host""#,      // space in host
+            r#""network:host:abc""#,      // non-numeric port
+            r#""network:host:90-80""#,    // inverted range
             r#""network:*.example.com""#, // wildcard
         ];
         for (i, permission) in cases.iter().enumerate() {

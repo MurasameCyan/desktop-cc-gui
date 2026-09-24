@@ -1,5 +1,6 @@
 // Transport picks Tauri IPC natively and the web-access WS bridge in browsers.
-import { invoke } from "./transport";
+import { invoke, listen } from "./transport";
+import type { NativePerformanceDiagnostics } from "./performance-types";
 import { withGrantRetry } from "./grant";
 
 // ==================== Shared types (mirror Rust serde camelCase) ====================
@@ -40,6 +41,9 @@ export interface TodoItem {
   id?: string | null;
   content: string;
   status: TodoStatus;
+  phase?: string | null;
+  reason?: string | null;
+  detail?: string | null;
 }
 
 /** Todo-list payload on todo-class tool rows: replace = full snapshot,
@@ -117,10 +121,113 @@ export interface Workspace {
   sortOrder: number | null;
   /** Sidebar group id (工作区分组); null = ungrouped. */
   groupId: string | null;
+  /** "worktree" = git worktree child under its parent workspace row;
+   *  undefined = ordinary workspace. */
+  kind?: "worktree";
+  /** Parent workspace id; only set when kind="worktree". */
+  parentId?: string;
   /** Opaque per-workspace metadata written by host-capability callers
    *  (e.g. { wsl: { hostId, distro } } from the wsl plugin); absent for
    *  ordinary directories. */
   meta?: Record<string, unknown>;
+}
+
+/** meta.worktree：worktree 子工作区的自描述（分支/来源 PR），由宿主在
+ *  创建时写入，侧栏徽标与删除流程读取。 */
+export interface WorktreeMeta {
+  branch: string;
+  baseRef?: string;
+  prNumber?: number;
+  prTitle?: string;
+  prUrl?: string;
+}
+
+/** Reads meta.worktree with a shape check; null for ordinary workspaces or
+ *  foreign/malformed meta (plugin-owned shapes are not our business). */
+export function worktreeMetaOf(workspace: Workspace): WorktreeMeta | null {
+  const raw = workspace.meta?.worktree;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const branch = (raw as Record<string, unknown>).branch;
+  if (typeof branch !== "string" || branch.trim() === "") return null;
+  return raw as unknown as WorktreeMeta;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  head: string;
+  isMain: boolean;
+  locked: boolean;
+  lockReason?: string;
+  /** git 判定目录已丢失（porcelain 的 prunable 属性）。 */
+  prunable: boolean;
+}
+
+export interface WorktreeCreateArgs {
+  repoPath: string;
+  parentWorkspaceId: string;
+  branch: string;
+  worktreePath: string;
+  baseRef: string | null;
+  prNumber: number | null;
+  prTitle: string | null;
+  prUrl: string | null;
+  existingBranch: boolean;
+}
+
+/** git_worktree_create 的阶段事件载荷（"worktree://create-progress"）。 */
+export type WorktreeCreateStage =
+  | "validate"
+  | "fetch"
+  | "add"
+  | "register"
+  | "done"
+  | "failed"
+  | "canceled";
+
+export type WorktreeErrorKind =
+  | "not_a_repo"
+  | "invalid_branch"
+  | "branch_not_found"
+  | "branch_exists"
+  | "branch_checked_out"
+  | "dir_exists"
+  | "pr_not_found"
+  | "fetch_failed"
+  | "base_not_found"
+  | "add_failed"
+  | "register_failed"
+  | "sparse_checkout_empty"
+  | "invalid_args"
+  | "unknown";
+
+export interface WorktreeCreateProgress {
+  creationId: string;
+  stage: WorktreeCreateStage;
+  message?: string;
+  errorKind?: WorktreeErrorKind;
+  error?: string;
+}
+
+export interface WorktreeRemoveResult {
+  orphanDirectory: boolean;
+  branchDeleted: boolean;
+  branchKeptReason?: "checked_out_elsewhere" | "unknown";
+}
+
+export interface PrPreview {
+  number: number;
+  /** "owner/repo" on GitHub. */
+  repo: string;
+  /** true = gh CLI 不可用/失败，仅 PR 号可确认。 */
+  degraded: boolean;
+  title?: string;
+  author?: string;
+  additions?: number;
+  deletions?: number;
+  state?: string;
+  branchConflict: boolean;
+  dirConflict: boolean;
 }
 
 export interface EngineInfo {
@@ -131,10 +238,25 @@ export interface EngineInfo {
   enabled: boolean;
   supportsImages: boolean;
   supportsEffort?: boolean;
+  /** Whether the engine can mount the app's computer-use driver (an MCP
+   *  server it accepts at launch). The composer's `/ccgui-cua` refuses on
+   *  engines that answer false instead of sending a text-only turn. */
+  supportsComputerUse?: boolean;
   /** Permission modes the engine honors at spawn ("auto" | "manual" |
    * "plan" | "bypass"); the composer picker greys out the rest. */
   permissions: string[];
+  /** 引擎能否兑现逐次调用的工具白名单（任务工作台只读节点）；
+   *  不支持的引擎会被工作台阻止运行只读节点。 */
+  supportsToolConstraints?: boolean;
 }
+export interface ComputerUsePermissionStatus {
+  accessibility: boolean;
+  screenRecording: boolean;
+  /** False on platforms with no OS-level grant flow (Windows/Linux): the UI
+   *  shows "no permission needed" instead of un-granted rows. */
+  osPermissionsRequired: boolean;
+}
+
 /** One entry of an engine's model catalog (`--list-models` probe). */
 export interface EngineModel {
   /** Selector passed to `--model` ("provider/model"). */
@@ -276,6 +398,9 @@ export interface AppSettings {
   /** Thinking-process row behavior once its thinking settles: true/absent =
    *  auto-fold (default), false = stay expanded until the user folds it. */
   thinkingAutoCollapse?: boolean | null;
+  /** Beta entry points (设置 → 其他 → 内测功能): feature id -> enabled.
+   *  Missing/false = the entry stays hidden (default off). */
+  betaFeatures?: Record<string, boolean> | null;
   /** Terminal shell override; null/empty = auto-detect. */
   terminalShellPath: string | null;
   /** DSH host address (default "127.0.0.1"). */
@@ -289,6 +414,14 @@ export interface AppSettings {
   systemProxyEnabled: boolean;
   /** Proxy URL (http/https/socks5); null = unset. */
   systemProxyUrl: string | null;
+  /** Always-on-top desktop pet switch; off by default. */
+  petEnabled?: boolean;
+  /** Selected pet package id. */
+  petId?: string;
+  /** Display scale of the desktop pet. */
+  petScale?: number;
+  /** Last desktop-pet position in logical desktop pixels. */
+  petPosition?: { x: number; y: number } | null;
   /** Require a pairing key before the bridge serves a browser. */
   webAuthEnabled?: boolean | null;
   /** 8-character pairing key, minted when the switch is turned on. */
@@ -502,8 +635,22 @@ export interface RepositorySummary {
  *  exact repo-root directory (blue name); plain folders never carry color. */
 export type FileTreeColor = "modified" | "untracked" | "repository";
 
+export interface GitTreeLevel {
+  path: string;
+  files: string[];
+  directories: string[];
+}
+
+export interface GitTreeStatus {
+  repositories: RepositorySummary[];
+  fileColors: Record<string, Record<string, FileTreeColor>>;
+}
+
 export interface BranchInfo {
   name: string;
+  /** Remote-tracking branch (`origin/x`): checking it out materializes (or
+   *  switches to) the local branch of the same short name. */
+  isRemote: boolean;
 }
 export interface AppMetrics {
   /** Resident memory of the app process, bytes. */
@@ -637,6 +784,12 @@ export interface CliUpdatePlan {
 // Shared in-flight/cached app-settings promise: startup, the settings page
 // and the chat store all read the same settings, so fetch once.
 let settingsPromise: Promise<AppSettings> | null = null;
+// Backend writes that bypass update_app_settings (pet scale / position /
+// visibility) broadcast this event; drop the shared cache in every window so
+// a later read-modify-write save cannot resurrect the pre-write values.
+void listen("settings://changed", () => {
+  settingsPromise = null;
+});
 
 function fetchAppSettings(): Promise<AppSettings> {
   return (settingsPromise ??= invoke<AppSettings>("get_app_settings").catch((e) => {
@@ -700,6 +853,32 @@ export interface PluginInfo {
   permissions: string[];
   installedAt: number;
   minAppVersion: string | null;
+  /** Artwork declared by the installed manifest: `https://` URLs render
+   *  directly, repo-relative paths are read from the plugin directory through
+   *  `plugin_read_artwork`. Null / empty when the plugin ships none — the UI
+   *  then keeps its deterministic letter tile and renders no gallery. */
+  icon: string | null;
+  screenshots: string[];
+}
+
+/** 内置「插件开发」skill 的落盘结果（`creator_skill_install`）：每个引擎
+ *  skills 根一条，action 说明本次到底做了什么（written = 新装/刷新，
+ *  current = 已最新，conflict = 同名目录非本应用所写、刻意未动，failed = 读写失败）。 */
+export type CreatorSkillAction = "written" | "current" | "conflict" | "failed";
+
+export interface CreatorSkillTarget {
+  /** 目标 skills 根（`<engine home>/skills`）。 */
+  root: string;
+  /** 该 skill 目录的绝对路径。 */
+  path: string;
+  action: CreatorSkillAction;
+  error: string | null;
+}
+
+export interface CreatorSkillReport {
+  /** 随包资源里 skill 的目录；null = 打包缺资源（打包 bug）。 */
+  source: string | null;
+  targets: CreatorSkillTarget[];
 }
 /** Marketplace listing row (plan §6.1): community-plugins.json merged with
  *  plugins/<id>.json — the fields the market UI renders. */
@@ -711,12 +890,23 @@ export interface MarketPlugin {
   author: string;
   tier: "declarative" | "js";
   version: string;
+  /** Index-repo stamp of the pinned release's publish time (RFC 3339 UTC);
+   *  null when the index entry predates the field — the rail hides the row. */
+  updatedAt: string | null;
   minAppVersion: string | null;
   sdkVersion: string | null;
   permissions: string[];
   /** Lifetime download count from the index stats bot; null when the
    *  stats file is unavailable — decorative, never gates anything. */
   downloads: number | null;
+  /** Detail-page carousel: absolute https URLs, already resolved by the
+   *  backend from the index's repo-relative paths. Empty when the plugin
+   *  ships no screenshots. */
+  screenshots: string[];
+  /** Market identity tile: absolute https URL, already resolved by the
+   *  backend from the index's repo-relative path. Null when the index
+   *  carries no icon — the row keeps its deterministic letter tile. */
+  icon: string | null;
 }
 
 /** One installed marketplace plugin with a newer indexed version. */
@@ -777,6 +967,20 @@ export interface OfficialConfigFile {
 export interface OfficialConfigDraft {
   path: string;
   content: string;
+}
+
+export interface PetSummary {
+  id: string;
+  displayName: string;
+  description: string;
+  spriteVersionNumber: number;
+  builtIn: boolean;
+}
+
+export interface PetPackage extends PetSummary {
+  spritesheetPath: string;
+  spritesheetDataUrl: string;
+  frameCounts?: number[];
 }
 
 export const ipc = {
@@ -842,6 +1046,33 @@ export const ipc = {
     // not answer — one bad value here blanks every settings page.
     settingsPromise = null;
   },
+  listPets: () => invoke<PetSummary[]>("pet_list"),
+  importPet: (path: string) => invoke<PetSummary>("pet_import", { path }),
+  removePet: (id: string) => invoke<void>("pet_remove", { id }),
+  getPetPackage: (id: string) => invoke<PetPackage>("pet_get_package", { id }),
+  setPetVisible: (visible: boolean) => invoke<void>("pet_set_visible", { visible }),
+  setPetScale: async (scale: number) => {
+    const applied = await invoke<number>("pet_set_scale", { scale });
+    // pet_set_scale persists the value outside update_app_settings; invalidate
+    // the shared read cache so reopening Settings cannot show the old scale.
+    settingsPromise = null;
+    return applied;
+  },
+  setPetState: (state: {
+    sessionKey: string | null;
+    sessionName: string | null;
+    status: string;
+    lookDirection: number;
+    activity: "idle" | "thinking" | "tool" | "command" | "waiting" | "failed" | "completed";
+    changedAt: number;
+  }) =>
+    invoke<void>("pet_set_state", { next: state }),
+  savePetPosition: async (position: { x: number; y: number }) => {
+    await invoke<void>("pet_save_position", { position });
+    // pet_save_position persists outside update_app_settings (same bypass as
+    // setPetScale above); invalidate this window's shared read cache too.
+    settingsPromise = null;
+  },
   setWindowTheme: (dark: boolean) =>
     invoke<void>("set_window_theme", { dark }),
   /** 立即重启应用（标题栏样式等需重启生效的设置项用）。 */
@@ -866,9 +1097,39 @@ export const ipc = {
     effort: string | null;
     permission: string | null;
     providerId: string | null;
+    /** 电脑操控: hand the agent the app's screenshot/input driver for this
+     *  turn (see features/chat/computer-use.ts). */
+    computerUse?: boolean;
   }) => invoke<SendResult>("send_message", args),
   interruptSession: (sessionId: string) =>
     invoke<boolean>("interrupt_session", { sessionId }),
+  // 电脑操控 (computer use)
+  /** macOS TCC probe. `osPermissionsRequired` is false on Windows/Linux,
+   *  where the driver needs no OS grant. */
+  computerUsePermissionStatus: () =>
+    invoke<ComputerUsePermissionStatus>("computer_use_permission_status"),
+  /** Deep-link the matching System Settings pane (macOS). */
+  computerUseOpenPermissionSettings: (kind: "accessibility" | "screenRecording") =>
+    invoke<void>("computer_use_open_permission_settings", { kind }),
+  /** Arm/disarm the global Esc-to-stop while a computer-use run is active. */
+  computerUseSetActive: (active: boolean) =>
+    invoke<void>("computer_use_set_active", { active }),
+  /** 任务工作台 agent 节点：原生桥（事件走 mission-agent://event）。 */
+  missionAgentStart: (args: {
+    /** 前端预生成的 runId（mission- 前缀）；先注册监听再 invoke。 */
+    runId: string;
+    engine: string;
+    workspacePath: string;
+    sessionId: string | null;
+    prompt: string;
+    model: string | null;
+    effort: string | null;
+    providerId: string | null;
+    /** 只读白名单；null = 不加约束（普通 agent 节点）。 */
+    allowedTools: string[] | null;
+  }) => invoke<SendResult>("mission_agent_start", args),
+  missionAgentInterrupt: (runId: string) =>
+    invoke<boolean>("mission_agent_interrupt", { runId }),
   listEngines: () => invoke<EngineInfo[]>("list_engines"),
   /** Record a complete internal frame already accepted by its live capture
    * validator, so history reload can hide only that exact frame.
@@ -915,11 +1176,10 @@ export const ipc = {
    *  every token is ≥3 chars, exact AND-substring LIKE otherwise. */
   searchMessages: (
     query: string,
-    sort?: "relevance" | "recency",
     limit?: number,
     offset?: number,
   ) =>
-    invoke<MessageSearchPage>("search_messages", { query, sort, limit, offset }),
+    invoke<MessageSearchPage>("search_messages", { query, limit, offset }),
   /** Remote (WSL distro) transcript: host fetches the jsonl over the ssh
    *  channel, caches it locally, and parses with the same engine reader. */
   loadRemoteSessionPage: (
@@ -973,6 +1233,15 @@ export const ipc = {
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   addWorkspace: (path: string, meta?: Record<string, unknown>) =>
     invoke<Workspace>("add_workspace", { path, meta: meta ?? null }),
+  /** Register a git worktree as a child workspace of `parentId`. The Rust
+   *  side validates the parent row exists. */
+  addWorktreeWorkspace: (path: string, parentId: string, meta?: Record<string, unknown>) =>
+    invoke<Workspace>("add_workspace", {
+      path,
+      meta: meta ?? null,
+      kind: "worktree",
+      parentId,
+    }),
   /** Plugin-scoped workspace registration: the Rust side re-checks the
    *  plugin's manifest grants (host:workspace; meta.wsl additionally needs
    *  host:workspace:remote) — the server-side counterpart of the JS gate in
@@ -1101,6 +1370,8 @@ export const ipc = {
     invoke<RepositorySummary[]>("git_repository_summaries", { paths }),
   gitFileColors: (path: string, files: string[]) =>
     invoke<Record<string, FileTreeColor>>("git_file_colors", { path, files }),
+  gitTreeStatus: (levels: GitTreeLevel[]) =>
+    invoke<GitTreeStatus>("git_tree_status", { levels }),
   gitDiff: (path: string, file: string, staged: boolean) =>
     invoke<string>("git_diff", { path, file, staged }),
   gitStage: (path: string, files: string[]) => invoke<void>("git_stage", { path, files }),
@@ -1117,6 +1388,43 @@ export const ipc = {
     invoke<void>("git_checkout", { path, branch }),
   gitCreateBranch: (path: string, name: string) =>
     invoke<void>("git_create_branch", { path, name }),
+  // git worktree (子工作区)
+  gitWorktreeList: (repoPath: string) =>
+    invoke<WorktreeInfo[]>("git_worktree_list", { repoPath }),
+  /** Starts a background worktree creation; progress arrives on
+   *  "worktree://create-progress" events keyed by creationId. The invoke
+   *  promise resolves when the pipeline settles (failure also arrives as a
+   *  failed-stage event). */
+  gitWorktreeCreate: (creationId: string, args: WorktreeCreateArgs) =>
+    invoke<void>("git_worktree_create", { creationId, args }),
+  gitWorktreeCreateCancel: (creationId: string) =>
+    invoke<boolean>("git_worktree_create_cancel", { creationId }),
+  gitWorktreeRemove: (
+    repoPath: string,
+    worktreePath: string,
+    branch: string | null,
+    deleteBranch: boolean,
+  ) =>
+    invoke<WorktreeRemoveResult>("git_worktree_remove", {
+      repoPath,
+      worktreePath,
+      branch,
+      deleteBranch,
+    }),
+  gitBranchMerged: (repoPath: string, branch: string, base: string) =>
+    invoke<boolean>("git_branch_merged", { repoPath, branch, base }),
+  gitResolvePr: (
+    repoPath: string,
+    input: string,
+    suggestedBranch: string,
+    worktreePath: string,
+  ) =>
+    invoke<PrPreview>("git_resolve_pr", {
+      repoPath,
+      input,
+      suggestedBranch,
+      worktreePath,
+    }),
   // open-app
   openWorkspaceIn: (path: string, options: { appName: string; args?: string[] }) =>
     invoke<void>("open_workspace_in", { path, app: options.appName, args: options.args ?? [] }),
@@ -1130,6 +1438,9 @@ export const ipc = {
     invoke<void>("reveal_in_file_manager", { path }),
   // metrics
   appMetrics: () => invoke<AppMetrics>("app_metrics"),
+  performanceDiagnostics: () => invoke<NativePerformanceDiagnostics>("performance_diagnostics"),
+  performanceDiagnosticsEnabled: () => invoke<boolean>("performance_diagnostics_enabled"),
+  performanceDiagnosticsSetEnabled: (enabled: boolean) => invoke<boolean>("performance_diagnostics_set_enabled", { enabled }),
   // plugins
   pluginList: () => invoke<PluginInfo[]>("plugin_list"),
   pluginInstallFromPath: (path: string) =>
@@ -1142,6 +1453,11 @@ export const ipc = {
     invoke<PluginInfo>("plugin_quarantine", { id, error }),
   pluginReadFile: (id: string, name: string) =>
     invoke<string>("plugin_read_file", { id, name }),
+  /** One declared artwork file of an installed plugin as a data URL. The
+   *  webview has no filesystem access, so locally installed plugins get their
+   *  icon/gallery through this path-scoped read. */
+  pluginReadArtwork: (id: string, path: string) =>
+    invoke<string>("plugin_read_artwork", { id, path }),
   pluginStorageGet: (id: string, key: string) =>
     invoke<unknown>("plugin_storage_get", { id, key }),
   pluginStorageSet: (id: string, key: string, value: unknown) =>
@@ -1199,9 +1515,17 @@ export const ipc = {
   // web bridge; fetch/checkUpdates ride the read-only whitelist.
   pluginFetchIndex: (force = false) =>
     invoke<MarketPlugin[]>("plugin_fetch_index", { force }),
+  /** Long-form intro (README.md from the plugin repo's default branch) for
+   *  the market detail page. Fetched on open, cached backend-side for 1h. */
+  pluginFetchMarketReadme: (id: string) =>
+    invoke<string>("plugin_fetch_market_readme", { id }),
   pluginInstallFromMarketplace: (id: string) =>
     invoke<PluginInfo>("plugin_install_from_marketplace", { id }),
   pluginCheckUpdates: () => invoke<PluginUpdate[]>("plugin_check_updates"),
+  /** 内置「插件开发」skill 的落盘：幂等地同步进各引擎的 skills 根（Claude /
+   *  Codex / ~/.agents）。插件中心的「创建插件」在开新会话前调一次，这样
+   *  `/ccgui-plugin-creator` 在引擎侧确实存在、可被解析。 */
+  creatorSkillInstall: () => invoke<CreatorSkillReport>("creator_skill_install"),
   // web access (start/stop are desktop-only; the bridge answers status too)
   webDevices: () => invoke<WebDevice[]>("web_devices"),
   webDeviceApprove: (id: string) => invoke<boolean>("web_device_approve", { id }),

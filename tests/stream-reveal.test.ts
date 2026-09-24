@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { StreamReveal, visiblePrefix, visibleWindow, type RevealClock } from "../src/features/chat/components/stream-reveal.ts";
+import { StreamReveal, REVEAL_MAX_LAG_MS, visibleLineWindow, visiblePrefix, visibleWindow, type RevealClock } from "../src/features/chat/components/stream-reveal.ts";
 function clock() {
   let now = 0, id = 0;
   const frames = new Map<number, () => void>();
@@ -138,6 +138,91 @@ test("observed OMP bursts avoid emptying the queue too early and bound per-frame
   assert.equal(c.pending(),0);
 });
 
+test("a 200 tok/s burst stream advances every frame instead of landing whole batches", () => {
+  // OMP writes ~100 characters every ~144ms at this rate; showing them as they
+  // arrive is what made the thinking panel read as flashing text.
+  const c=clock(), reveal=new StreamReveal(true,c.api);
+  const burst="汉".repeat(100);
+  const burstFrames=Math.round(144/(1000/60));
+  let text="",maxStep=0,previous=0,maxLag=0,frames=0,dumped=0;
+  for(let b=0;b<20;b++){
+    text+=burst;reveal.update(text,true);
+    for(let f=0;f<burstFrames;f++){
+      c.advance(1000/60);
+      const visible=reveal.read(0,text.length);
+      const step=visible-previous;
+      maxStep=Math.max(maxStep,step);if(step>=20)dumped++;
+      maxLag=Math.max(maxLag,text.length-visible);
+      previous=visible;frames++;
+    }
+  }
+  for(let f=0;f<20;f++)c.advance(1000/60);
+  // The old prefix cursor revealed whole 100-character batches in one frame.
+  assert.equal(dumped,0,`frames revealing 20+ characters at once: ${dumped}`);
+  assert.ok(maxStep<=20,`largest single-frame step: ${maxStep}`);
+  // Lag holds back about one burst — never the whole stream, never a dump.
+  assert.ok(maxLag>=50,`reveal is not holding anything back: ${maxLag}`);
+  assert.ok(maxLag<=200,`largest backlog shown late: ${maxLag}`);
+  assert.ok(maxLag<text.length/4,`backlog relative to the stream: ${maxLag}/${text.length}`);
+  assert.equal(reveal.read(0,text.length),text.length);
+  assert.equal(c.pending(),0);
+  assert.equal(REVEAL_MAX_LAG_MS,240);
+});
+test("markdown reshaping the rendered text does not dump the unrevealed backlog", () => {
+  // Closing `**` consumes the opening markers: the rendered text stops being
+  // a literal extension, which used to call finish() and reveal everything at
+  // once (measured 20-62 character single-frame jumps at 200 tok/s).
+  const c=clock(), reveal=new StreamReveal(true,c.api);
+  const head="x".repeat(300);
+  reveal.update(head,true);
+  c.advance(16);
+  const before=reveal.read(0,head.length);
+  assert.ok(before>0 && before<head.length,`cursor mid-drain: ${before}`);
+  // Same length, reshaped in the middle (a construct consumed at character
+  // 150 — not at the head, which is a wholesale swap, covered above).
+  reveal.update(head.slice(0,150)+"y"+head.slice(151),true);
+  const after=reveal.read(0,head.length);
+  assert.ok(after>=before,`reshape must not hide text: ${before} -> ${after}`);
+  assert.ok(after<head.length,`reshape must not reveal the backlog: ${after}`);
+  c.advance(1000);
+  assert.equal(reveal.read(0,head.length),head.length);
+});
+test("thinking window drops whole rows from the revealed cursor, not from the received tail", () => {
+  const text="1234567890\n".repeat(300);
+  const end=2000,limit=1000;
+  const windowed=visibleLineWindow(text,end,limit);
+  assert.equal(windowed.truncated,true);
+  // Cut lands on the row boundary after the limit, so the window is a pure
+  // suffix of what has been revealed and never exceeds the limit.
+  assert.equal(windowed.text,text.slice(1001,end));
+  assert.ok(windowed.text.length<=limit);
+  // A burst still being drained cannot push content out before it was shown.
+  const early=visibleLineWindow(text,600,limit);
+  assert.deepEqual(early,{text:text.slice(0,600),truncated:false});
+  const past=visibleLineWindow(text,text.length,limit);
+  assert.ok(past.text.length<=limit);
+  assert.ok(past.text.startsWith("1234567890\n"));
+});
+test("a cancelled drain resumes on the next identical snapshot instead of freezing", () => {
+  // Fast Refresh re-running effects (or StrictMode's double effect) cleans up
+  // between two commits that carry the same text. The pending tail must not
+  // stay hidden until the provider happens to send more.
+  const c=clock(), reveal=new StreamReveal(true,c.api);
+  reveal.update("x".repeat(200),true);
+  c.advance(32);
+  const before=reveal.read(0,200);
+  assert.ok(before>0 && before<200,`mid-drain: ${before}`);
+  reveal.cancel();
+  assert.equal(reveal.read(0,200),before,"cancel keeps the cursor for a real unmount");
+  reveal.update("x".repeat(200),true);
+  // Re-arms without moving the deadline: the burst still lands by 240ms.
+  for(let i=0;i<6;i++)c.advance(1000/60);
+  const resumed=reveal.read(0,200);
+  assert.ok(resumed>before && resumed<200,`resumed: ${before} -> ${resumed}`);
+  for(let i=0;i<7;i++)c.advance(1000/60);
+  assert.equal(reveal.read(0,200),200,"cleared by the original deadline");
+  assert.equal(c.pending(),0);
+});
 test("reused grapheme reader preserves exact boundaries while the cursor moves both ways", async () => {
   const { createVisibleTextReader } = await import("../src/features/chat/components/stream-reveal.ts");
   const text = "A👩‍💻e\u0301🇨🇳你好".repeat(30);

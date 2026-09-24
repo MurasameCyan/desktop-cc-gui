@@ -34,6 +34,9 @@ import { EmptyState } from "@/components/base/empty-state";
 import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
+import { ConversationModePane, ConversationModePicker } from "@/features/plugins/conversation/ConversationModeHost";
+import { useConversationMode } from "@/features/plugins/conversation/use-conversation-mode";
+import { McpCommandPanel } from "@/features/mcp/McpCommandPanel";
 
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -63,6 +66,41 @@ const SessionTimeline = memo(function SessionTimeline({
   );
 });
 
+
+/** Timeline (with the session error banner) for an open session, or the
+ *  no-session placeholder. */
+function ConversationBody({
+  active,
+  hasSession,
+  sessionError,
+  sessionKey: key,
+  onDismissError,
+  onLoadEarlier,
+}: {
+  active: ActiveSession | null;
+  hasSession: boolean;
+  sessionError: string | null;
+  sessionKey: string;
+  onDismissError: () => void;
+  onLoadEarlier: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!active || !hasSession) {
+    return <EmptyState className="text-body-medium">{t("chat.selectSession")}</EmptyState>;
+  }
+  return (
+    <>
+      {sessionError && (
+        <ErrorBanner className="mx-4 mt-3" message={sessionError} onDismiss={onDismissError} />
+      )}
+      <SessionTimeline
+        sessionKey={key}
+        workspacePath={active.workspacePath}
+        onLoadEarlier={onLoadEarlier}
+      />
+    </>
+  );
+}
 
 /** Composer menu slots (add / CLI / permission) plus the all-engines-disabled
  * state, memoized so per-keystroke draft updates don't rebuild the menus. */
@@ -236,7 +274,8 @@ export const ChatConversation = memo(function ChatConversation({
   startNewChat: (workspacePath: string) => void;
   composerInputRef: React.RefObject<ComposerInputHandle | null>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const conversationMode = useConversationMode(active);
   const key = active
     ? sessionKey(active.engine, active.sessionId, active.workspacePath)
     : "";
@@ -424,28 +463,30 @@ export const ChatConversation = memo(function ChatConversation({
       loadingEngines,
     });
 
+  if (active && conversationMode.exitBlocked && !conversationMode.mode) {
+    return <EmptyState className="text-body-medium">{t("plugins.conversationMode.recoveryRequired")}</EmptyState>;
+  }
+
+  if (active && conversationMode.mode) {
+    return <ConversationModePane
+      mode={conversationMode.mode}
+      conversationId={conversationMode.conversationId}
+      workspacePath={active.workspacePath}
+      language={i18n.language}
+      onExit={conversationMode.onExit}
+    />;
+  }
+
   return (
     <>
-      {active && hasSession ? (
-        <>
-          {sessionError && (
-            <ErrorBanner
-              className="mx-4 mt-3"
-              message={sessionError}
-              onDismiss={() => dismissSessionError(key)}
-            />
-          )}
-          <SessionTimeline
-            sessionKey={key}
-            workspacePath={active.workspacePath}
-            onLoadEarlier={handleLoadEarlier}
-          />
-        </>
-      ) : (
-        <EmptyState className="text-body-medium">
-          {t("chat.selectSession")}
-        </EmptyState>
-      )}
+      <ConversationBody
+        active={active}
+        hasSession={hasSession}
+        sessionError={sessionError}
+        sessionKey={key}
+        onDismissError={() => dismissSessionError(key)}
+        onLoadEarlier={handleLoadEarlier}
+      />
 
       <ConversationFooter
         active={active}
@@ -470,7 +511,7 @@ export const ChatConversation = memo(function ChatConversation({
         noEnabledEngines={noEnabledEngines}
         composerInputRef={composerInputRef}
         addMenu={addMenu}
-        cliMenu={cliMenu}
+        cliMenu={<>{cliMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0} onSelect={conversationMode.onSelect} /></>}
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}
@@ -484,6 +525,9 @@ export const ChatConversation = memo(function ChatConversation({
         onBranchSelect={handleBranchSelect}
         startNewChat={startNewChat}
       />
+
+      {/* `/mcp`：当前会话引擎的 MCP 清单（与设置页共享同一份数据）。 */}
+      <McpCommandPanel />
     </>
   );
 });

@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useReducedMotion } from "motion/react";
@@ -9,6 +9,9 @@ import { StepRow, type TaskListChip } from "@/components/application/task-list/t
 import { getFileTreeIconSvg } from "@/features/files/fileIcons";
 import { markToolKeys, toolEntranceKey, type ProcessItem } from "./timeline-rows";
 import { ToolPayloadViewer } from "./ToolPayloadViewer";
+import { useLiveReveal } from "./use-live-reveal";
+import { useRevealed } from "./reveal-text";
+import { createVisibleTextReader } from "./stream-reveal";
 
 /** Classify a tool-call label (tool name or shell command) into a type chip. */
 function toolTypeKey(text: string): string {
@@ -73,9 +76,14 @@ type ProcessSection =
       firstIndex: number;
     };
 
-function groupProcessSections(items: ProcessItem[]): ProcessSection[] {
+const PROCESS_PAGE_SIZE = 40;
+
+export type ProcessSearchTarget = { itemIndex: number; requestKey: string };
+
+function groupProcessSections(items: ProcessItem[], offset: number): ProcessSection[] {
   const sections: ProcessSection[] = [];
-  items.forEach((item, index) => {
+  items.forEach((item, localIndex) => {
+    const index = offset + localIndex;
     if (item.type === "thinking") {
       sections.push({ type: "thinking", text: item.text, live: item.live, firstIndex: index });
     } else {
@@ -104,6 +112,7 @@ const FrozenStepRow = memo(function FrozenStepRow({
   result,
   first,
   last,
+  index,
 }: {
   play: boolean;
   text: string;
@@ -112,6 +121,7 @@ const FrozenStepRow = memo(function FrozenStepRow({
   result?: unknown;
   first: boolean;
   last: boolean;
+  index: number;
 }) {
   const reduceRef = useRef(!play);
   const { t } = useTranslation();
@@ -133,6 +143,7 @@ const FrozenStepRow = memo(function FrozenStepRow({
       last={last}
       reduce={reduceRef.current}
     >
+      <span data-process-item-index={index} />
       {hasPayload ? (
         <div className="-mt-0.5 mb-1">
           <button
@@ -165,38 +176,28 @@ const FrozenStepRow = memo(function FrozenStepRow({
   );
 });
 
-/** Live thinking window: the last ~2000 chars, cut at a LINE boundary so a
- *  row slides out as a whole instead of dissolving character by character.
- *  `truncated` tells the surface to fade its top edge, hinting at the
- *  content above the window. */
-function liveThinkingWindow(text: string): { body: string; truncated: boolean } {
-  const WINDOW_CHARS = 2000;
-  if (text.length <= WINDOW_CHARS) return { body: text, truncated: false };
-  const cut = text.length - WINDOW_CHARS;
-  const newline = text.indexOf("\n", cut);
-  // No newline inside the window (one enormous line): keep the char cut —
-  // there is no line boundary to honor.
-  const start = newline === -1 ? cut : newline + 1;
-  return { body: text.slice(start), truncated: true };
-}
-
 /** Thinking body: brain header + left-railed gray content, mirroring the
  * reference chat UI. Plain pre-wrapped text — never markdown-reparsed per
- * delta. The live view is windowed to the last 2000 chars; the cut lands on
- * a line boundary and the top edge fades out, so overflow leaves as whole
- * dissolving rows rather than a hard char-by-char wipe. */
-function ThinkingSurface({
+ * delta — but paced by the same reveal as assistant markdown: a provider
+ * burst (at 200 tok/s OMP writes ~100 characters every ~144ms) is spread
+ * across the frames of its own arrival cadence instead of landing whole. */
+export function ThinkingSurface({
   text,
   title,
   live,
+  itemIndex,
 }: {
   text: string;
   title?: string;
   live?: boolean;
+  itemIndex?: number;
 }) {
-  const { body, truncated } = live ? liveThinkingWindow(text) : { body: text, truncated: false };
+  const controller = useLiveReveal(text, Boolean(live));
+  const revealed = useRevealed(controller, 0, text.length);
+  const reader = useMemo(() => createVisibleTextReader(text), [text]);
+  const body = live ? reader.prefix(revealed) : text;
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1" data-process-item-index={itemIndex}>
       {title && (
         <div className="flex items-center gap-1.5 text-body-regular text-text-tertiary">
           <Brain className="size-3.5" aria-hidden />
@@ -204,11 +205,7 @@ function ThinkingSurface({
         </div>
       )}
       <div
-        className={cx(
-          "ml-2 whitespace-pre-wrap break-words border-l border-foreground-icon-quaternary pl-4 text-[12px] leading-[1.65] text-text-tertiary",
-          truncated &&
-            "[mask-image:linear-gradient(to_bottom,transparent_0,#000_36px)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0,#000_36px)]",
-        )}
+        className="ml-2 whitespace-pre-wrap break-words border-l border-foreground-icon-quaternary pl-4 text-[12px] leading-[1.65] text-text-tertiary"
       >
         {body}
       </div>
@@ -267,19 +264,22 @@ function useProcessExpansion(
   turnLive: boolean,
   hasLiveThinking: boolean,
   thinkingAutoCollapse: boolean,
+  searchRequest?: string,
 ) {
-  const [expanded, setExpanded] = useState(autoExpand);
+  const [expanded, setExpanded] = useState(autoExpand || searchRequest !== undefined);
   // Once the user clicks the header, their choice wins over the auto
   // expand/collapse driven by streaming state.
-  const [overridden, setOverridden] = useState(false);
+  const [overridden, setOverridden] = useState(searchRequest !== undefined);
   // React-blessed adjust-during-render: previous prop values live in state,
   // so a prop change settles in the same commit that observed it — no
   // one-frame paint of the stale expanded value.
-  const [prev, setPrev] = useState({ auto: autoExpand, live: turnLive, thinking: hasLiveThinking });
-  const next = { auto: autoExpand, live: turnLive, thinking: hasLiveThinking };
-  if (prev.auto !== next.auto || prev.live !== next.live || prev.thinking !== next.thinking) {
+  const [prev, setPrev] = useState({ auto: autoExpand, live: turnLive, thinking: hasLiveThinking, searchRequest });
+  const next = { auto: autoExpand, live: turnLive, thinking: hasLiveThinking, searchRequest };
+  if (prev.auto !== next.auto || prev.live !== next.live || prev.thinking !== next.thinking || prev.searchRequest !== next.searchRequest) {
     setPrev(next);
-    const settled = expansionTransition(prev, next, expanded, overridden, thinkingAutoCollapse);
+    const settled = searchRequest !== undefined && searchRequest !== prev.searchRequest
+      ? { expanded: true, overridden: true }
+      : expansionTransition(prev, next, expanded, overridden, thinkingAutoCollapse);
     // Setting state to its current value bails out without a re-render, so
     // the no-op transitions are free.
     setOverridden(settled.overridden);
@@ -290,6 +290,23 @@ function useProcessExpansion(
     setExpanded((v) => !v);
   };
   return { expanded, toggleExpanded };
+}
+
+/** Count the first `limit` tool calls the entrance animation has not played for
+ *  yet; a bounded scan keeps large processes cheap. */
+function countUnseenTools(
+  items: ProcessItem[],
+  processId: number,
+  seenTools: Set<string>,
+  limit = 2,
+): number {
+  let count = 0;
+  for (let index = 0; index < items.length && count < limit; index++) {
+    if (items[index].type === "tool" && !seenTools.has(toolEntranceKey(processId, index))) {
+      count++;
+    }
+  }
+  return count;
 }
 
 /** Collapsed summary line: a lone thinking block is titled by the header
@@ -312,26 +329,71 @@ function processSummaryLabel(
 /** Expanded body: thinking runs as railed sections, tool sub-runs as tree
  * rows with file/type chips and a one-time blur-in per new tool call. */
 function ProcessDisclosureBody({
-  sections,
+  items,
   expanded,
   reduceMotion,
   singleThinking,
   processId,
   seenTools,
+  searchTarget,
 }: {
-  sections: ProcessSection[];
+  items: ProcessItem[];
   expanded: boolean;
   reduceMotion: boolean;
   singleThinking: boolean;
   processId: number;
   seenTools: Set<string>;
+  searchTarget?: ProcessSearchTarget;
 }) {
   const { t } = useTranslation();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [selectedPage, setSelectedPage] = useState<number | null>(() => searchTarget ? Math.floor(searchTarget.itemIndex / PROCESS_PAGE_SIZE) : null);
+  const [handledSearch, setHandledSearch] = useState(searchTarget?.requestKey);
+  if (handledSearch !== searchTarget?.requestKey) {
+    setHandledSearch(searchTarget?.requestKey);
+    if (searchTarget) setSelectedPage(Math.floor(searchTarget.itemIndex / PROCESS_PAGE_SIZE));
+  }
+  const lastPage = Math.max(0, Math.ceil(items.length / PROCESS_PAGE_SIZE) - 1);
+  const page = Math.min(selectedPage ?? lastPage, lastPage);
+  const start = page * PROCESS_PAGE_SIZE;
+  const end = Math.min(start + PROCESS_PAGE_SIZE, items.length);
+  const sections = useMemo(
+    () => groupProcessSections(items.slice(start, end), start),
+    [items, start, end],
+  );
+  const searchItemIndex = searchTarget?.itemIndex ?? null;
+  const searchRequestKey = searchTarget?.requestKey;
+  useEffect(() => {
+    if (!expanded || searchItemIndex === null || Math.floor(searchItemIndex / PROCESS_PAGE_SIZE) !== page) return;
+    const frame = requestAnimationFrame(() => {
+      const marker = bodyRef.current?.querySelector<HTMLElement>(`[data-process-item-index="${searchItemIndex}"]`);
+      const target = marker?.closest("li") ?? marker;
+      target?.scrollIntoView?.({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [expanded, searchItemIndex, searchRequestKey, page]);
+  const pageButtonClass = "cursor-pointer rounded px-2 py-1 text-caption-1-regular text-text-secondary hover:bg-background-secondary-default disabled:cursor-default disabled:opacity-40";
   return (
-    <div className="mt-2 flex flex-col gap-3">
+    <div ref={bodyRef} className="mt-2 flex flex-col gap-3">
+      {lastPage > 0 && (
+        <nav aria-label={t("chat.processHistoryPages")} className="flex flex-wrap items-center gap-1">
+          <button type="button" className={pageButtonClass} disabled={page === 0} onClick={() => setSelectedPage(page - 1)}>
+            {t("chat.processPreviousPage")}
+          </button>
+          <span className="text-caption-1-regular text-text-tertiary" aria-live="off">
+            {t("chat.processPageRange", { start: start + 1, end, total: items.length })}
+          </span>
+          <button type="button" className={pageButtonClass} disabled={page === lastPage} onClick={() => setSelectedPage(page + 1 === lastPage ? null : page + 1)}>
+            {t("chat.processNextPage")}
+          </button>
+          <button type="button" className={pageButtonClass} disabled={selectedPage === null} onClick={() => setSelectedPage(null)}>
+            {t("chat.processLatestPage")}
+          </button>
+        </nav>
+      )}
       {sections.map((section) =>
         section.type === "thinking" ? (
-          <ThinkingSurface key={section.firstIndex} text={section.text} title={singleThinking ? undefined : t("chat.thinkingProcess")} live={section.live} />
+          <ThinkingSurface key={section.firstIndex} text={section.text} title={singleThinking ? undefined : t("chat.thinkingProcess")} live={section.live} itemIndex={section.firstIndex} />
         ) : (
           <ul key={section.firstIndex} className="ml-2 flex flex-col">
             {section.calls.map((call, j) => {
@@ -342,6 +404,7 @@ function ProcessDisclosureBody({
               return (
                 <FrozenStepRow
                   key={call.index}
+                  index={call.index}
                   play={play}
                   text={call.text}
                   path={call.path}
@@ -381,6 +444,7 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
   thinkingAutoCollapse = true,
   processId,
   seenTools,
+  searchTarget,
 }: {
   items: ProcessItem[];
   autoExpand?: boolean;
@@ -394,12 +458,17 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
   thinkingAutoCollapse?: boolean;
   processId: number;
   seenTools: Set<string>;
+  searchTarget?: ProcessSearchTarget;
 }) {
   const { t } = useTranslation();
-  const sections = useMemo(() => groupProcessSections(items), [items]);
-  const hasLiveThinking = sections.some((s) => s.type === "thinking" && s.live);
-  const { expanded, toggleExpanded } = useProcessExpansion(autoExpand, turnLive, hasLiveThinking, thinkingAutoCollapse);
+  const hasLiveThinking = items.some((item) => item.type === "thinking" && item.live);
+  const { expanded, toggleExpanded } = useProcessExpansion(autoExpand, turnLive, hasLiveThinking, thinkingAutoCollapse, searchTarget?.requestKey);
   const reduceMotion = useReducedMotion() ?? false;
+  const largeProcess = items.length > PROCESS_PAGE_SIZE;
+  const unseenToolCount = largeProcess
+    ? 0
+    : countUnseenTools(items, processId, seenTools);
+  const skipProcessAnimation = reduceMotion || largeProcess || unseenToolCount > 1;
   // Mark after paint, not at animation complete: a virtualizer remount
   // mid-entrance must skip the replay. New keys still play on this first
   // paint because the set is read before this effect runs.
@@ -412,11 +481,6 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
   // "思考过程" title itself, and the expanded body drops the inner repeat.
   const singleThinking = items.length === 1 && items[0].type === "thinking";
   const label = processSummaryLabel(t, singleThinking, thinkingCount, toolCount);
-  // Body stays mounted while expanded or while this row's own thinking is
-  // streaming (the auto-open above makes both true then); once the thinking
-  // settles the body stays mounted only through the close animation, so
-  // expanding later re-renders the FULL settled text — the 2000-char live
-  // window only ever applies live.
   const showBody = expanded || hasLiveThinking;
   const [bodyMounted, setBodyMounted] = useState(showBody);
   useLayoutEffect(() => {
@@ -424,13 +488,13 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
       setBodyMounted(true);
       return;
     }
-    if (reduceMotion || prefersReducedMotion()) {
+    if (skipProcessAnimation || prefersReducedMotion()) {
       setBodyMounted(false);
       return;
     }
     const timeout = window.setTimeout(() => setBodyMounted(false), PROCESS_COLLAPSE_MS);
     return () => window.clearTimeout(timeout);
-  }, [showBody, reduceMotion]);
+  }, [showBody, skipProcessAnimation]);
   return (
     <div className="mb-1.5 flex flex-col">
       <button
@@ -454,19 +518,22 @@ export const ProcessDisclosure = memo(function ProcessDisclosure({
       <div
         aria-hidden={!expanded}
         className={cx(
-          "grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none",
+          "grid",
+          !skipProcessAnimation && "transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none",
           expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
         )}
       >
         <div className="min-h-0 overflow-hidden">
           {bodyMounted ? (
             <ProcessDisclosureBody
-              sections={sections}
+              key={processId}
+              items={items}
               expanded={expanded}
-              reduceMotion={reduceMotion}
+              reduceMotion={skipProcessAnimation}
               singleThinking={singleThinking}
               processId={processId}
               seenTools={seenTools}
+              searchTarget={searchTarget}
             />
           ) : null}
         </div>

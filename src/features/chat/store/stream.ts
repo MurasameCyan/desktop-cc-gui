@@ -11,6 +11,9 @@ export interface QueuedMessage {
   text: string;
   images: string[];
   queuedAt: number;
+  /** Computer-use send: the flag rides the queue so the drained turn still
+   *  mounts the driver instead of silently running text-only. */
+  computerUse?: boolean;
 }
 
 export interface SessionState {
@@ -28,6 +31,9 @@ export interface SessionState {
   activeEffort?: string | null;
   /** In-app channel this session runs; spawn injects its env. */
   activeProvider?: string | null;
+  /** Whether the turn currently running was sent with 电脑操控; read by
+   *  resendLastUser so a retry repeats the same kind of turn. */
+  activeComputerUse?: boolean;
   /** Newest single report: the context meter reads occupancy from it. */
   usage: unknown;
   /** Running total of the reply in flight (sum of its reports), so the tail
@@ -337,6 +343,56 @@ export function appendToolMessage<T extends BySessionSlice>(
   patch = false,
   result?: unknown,
 ) {
+  appendToolMessages(set, key, [{ text, path, todos, args, patch, result }], model);
+}
+
+export interface ToolMessageInput {
+  text: string;
+  path?: string | null;
+  todos?: TodosPayload | null;
+  args?: unknown;
+  patch?: boolean;
+  result?: unknown;
+}
+
+function sameToolValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  const pending: Array<[unknown, unknown]> = [[left, right]];
+  const seen = new WeakMap<object, object>();
+  while (pending.length) {
+    const [current, incoming] = pending.pop()!;
+    if (Object.is(current, incoming)) continue;
+    if (!current || !incoming || typeof current !== "object" || typeof incoming !== "object") return false;
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.getPrototypeOf(incoming)) return false;
+    if (Array.isArray(current)) {
+      if (current.length !== (incoming as unknown[]).length) return false;
+    } else if (prototype !== Object.prototype && prototype !== null) {
+      return false;
+    }
+    const previous = seen.get(current);
+    if (previous) {
+      if (previous !== incoming) return false;
+      continue;
+    }
+    seen.set(current, incoming);
+    const keys = Object.keys(current);
+    if (keys.length !== Object.keys(incoming).length) return false;
+    for (const key of keys) {
+      if (!Object.hasOwn(incoming, key)) return false;
+      pending.push([(current as Record<string, unknown>)[key], (incoming as Record<string, unknown>)[key]]);
+    }
+  }
+  return true;
+}
+
+export function appendToolMessages<T extends BySessionSlice>(
+  set: SetFn<T>,
+  key: string,
+  tools: ToolMessageInput[],
+  model: string | null,
+) {
+  if (tools.length === 0) return;
   const pending = drainPending(key);
   set((s) => {
     const prev = s.bySession[key] ?? EMPTY_SESSION;
@@ -344,57 +400,81 @@ export function appendToolMessage<T extends BySessionSlice>(
       ? applyStreamParts(prev.messages, pending.parts, pending.model ?? model)
       : prev.messages;
     messages = settleLiveRows(messages);
-    // If this is a result patch, attach to the matching or latest tool message
-    if (patch && result !== undefined) {
-      const target = text
-        ? messages.slice().reverse().find((m) => m.role === "tool" && (!text || m.text.includes(text)))
-        : messages.slice().reverse().find((m) => m.role === "tool");
-      if (target) {
-        messages = messages.map((m) =>
-          m.seq === target.seq
-            ? { ...m, result, ...(todos ? { todos } : {}) }
-            : m,
-        );
+    const emptyTools = new Map<string, { indices: number[]; cursor: number }>();
+    const indicesBySeq = new Map<number, number[]>();
+    const toolIndices: number[] = [];
+    const resultTargets = new Map<string, { scanned: number; index: number }>();
+    const indexMessage = (message: Message, index: number) => {
+      const indices = indicesBySeq.get(message.seq);
+      if (indices) indices.push(index);
+      else indicesBySeq.set(message.seq, [index]);
+      if (message.role !== "tool") return;
+      toolIndices.push(index);
+      if (message.args == null) {
+        const queue = emptyTools.get(message.text);
+        if (queue) queue.indices.push(index);
+        else emptyTools.set(message.text, { indices: [index], cursor: 0 });
       }
-      return { bySession: { ...s.bySession, [key]: { ...prev, messages } } } as Partial<T>;
-    }
-    // Claude streams the tool name first, then patches args onto that row.
-    // Match the oldest still-empty same-name tool so parallel Reads stay in
-    // order. Unmatched patches are dropped — appending would duplicate.
-    if (patch) {
-      const target = messages.find(
-        (m) => m.role === "tool" && m.text === text && m.args == null,
-      );
-      if (!target) {
-        return { bySession: { ...s.bySession, [key]: { ...prev, messages } } } as Partial<T>;
+    };
+    messages.forEach(indexMessage);
+    const writable = () => {
+      if (messages === prev.messages) messages = messages.slice();
+    };
+    for (const tool of tools) {
+      const { text, path, todos, args, patch, result } = tool;
+      if (!patch) {
+        const message: Message = {
+          role: "tool",
+          text,
+          path: path ?? null,
+          ts: new Date().toISOString(),
+          seq: messages.length ? messages[messages.length - 1].seq + 1 : 1,
+          ...(todos ? { todos } : {}),
+          ...(args !== undefined ? { args } : {}),
+          ...(result !== undefined ? { result } : {}),
+        };
+        writable();
+        indexMessage(message, messages.length);
+        messages.push(message);
+        continue;
       }
-      messages = messages.map((m) =>
-        m.seq === target.seq
-          ? {
-              ...m,
-              path: path ?? m.path,
+      let target = -1;
+      if (result !== undefined) {
+        const cached = resultTargets.get(text);
+        target = cached?.index ?? -1;
+        for (let offset = toolIndices.length - 1; offset >= (cached?.scanned ?? 0); offset--) {
+          const index = toolIndices[offset];
+          if (!text || messages[index].text.includes(text)) {
+            target = index;
+            break;
+          }
+        }
+        resultTargets.set(text, { scanned: toolIndices.length, index: target });
+      } else {
+        const queue = emptyTools.get(text);
+        if (queue) {
+          while (queue.cursor < queue.indices.length && messages[queue.indices[queue.cursor]].args != null) {
+            queue.cursor++;
+          }
+          target = queue.indices[queue.cursor] ?? -1;
+        }
+      }
+      if (target < 0) continue;
+      for (const index of indicesBySeq.get(messages[target].seq)!) {
+        const message = messages[index];
+        const patchFields = result !== undefined
+          ? { result, ...(todos ? { todos } : {}) }
+          : {
+              path: path ?? message.path,
               ...(todos ? { todos } : {}),
               ...(args !== undefined ? { args } : {}),
-              ...(result !== undefined ? { result } : {}),
-            }
-          : m,
-      );
-      return { bySession: { ...s.bySession, [key]: { ...prev, messages } } } as Partial<T>;
+            };
+        if (Object.entries(patchFields).every(([field, value]) => sameToolValue(message[field as keyof Message], value))) continue;
+        writable();
+        messages[index] = { ...message, ...patchFields };
+      }
     }
-    const seq = messages.length ? messages[messages.length - 1].seq + 1 : 1;
-    messages = [
-      ...messages,
-      {
-        role: "tool",
-        text,
-        path,
-        ts: new Date().toISOString(),
-        seq,
-        ...(todos ? { todos } : {}),
-        ...(args !== undefined ? { args } : {}),
-        ...(result !== undefined ? { result } : {}),
-      },
-    ];
+    if (messages === prev.messages) return s;
     return { bySession: { ...s.bySession, [key]: { ...prev, messages } } } as Partial<T>;
   });
 }

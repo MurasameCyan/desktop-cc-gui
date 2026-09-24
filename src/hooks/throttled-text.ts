@@ -1,3 +1,20 @@
+/** Short replies can be parsed more often; large documents need breathing
+ * room for input, layout and reveal frames between full Markdown parses. */
+export function streamParseInterval(length: number): number {
+  return length <= 4000 ? 32 : length <= 16000 ? 64 : 128;
+}
+
+/** A live commit competes with the reveal frames for the main thread: at
+ * 200 tok/s the base cadence asks for 30 full-document parses per second, and
+ * a parse that overruns the frame budget starves presentation (the text then
+ * lands in uneven chunks). A commit that costs more than the base interval
+ * gets proportionally more room next time — a bounded backoff that keeps the
+ * parse pipeline near half the wall clock instead of as fast as possible. */
+export function nextParseInterval(base: number, commitMs: number): number {
+  if (!(commitMs > 0)) return base;
+  return Math.min(160, Math.max(base, Math.round(commitMs * 2)));
+}
+
 export interface ThrottleClock {
   now(): number;
   timeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;

@@ -9,11 +9,11 @@ import {
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
 
 describe("isKnownPermission", () => {
-  it("accepts every declared base permission", () => {
+  it("accepts every declared base permission (33 项)", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
-    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(32);
+    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(33);
   });
   it("accepts the six lifecycle, prompt, workspace, and document-storage grants", () => {
     expect([
@@ -25,10 +25,11 @@ describe("isKnownPermission", () => {
       "plugin.storage",
     ].every(isKnownPermission)).toBe(true);
   });
-  it("accepts the upstream sidebar-entry, center-tab, and agent grants", () => {
+  it("accepts the upstream sidebar-entry, center-tab, conversation-mode, and agent grants", () => {
     expect([
       "ui:sidebar-entry",
       "ui:center-tab",
+      "ui:conversation-mode",
       "agent",
     ].every(isKnownPermission)).toBe(true);
   });

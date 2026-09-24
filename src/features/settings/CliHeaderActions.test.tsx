@@ -119,7 +119,8 @@ describe("CliHeaderActions", () => {
     );
     expect(refreshBtn).not.toBeNull();
     expect(refreshBtn!.disabled).toBe(true);
-    expect(refreshBtn!.className).toContain("animate-spin");
+    // Same spin feedback as the 变更 panel's refresh while the probe runs.
+    expect(refreshBtn!.querySelector(".animate-refresh-spin")).not.toBeNull();
     await act(async () => {
       resolveProbe(versionStatus("omp"));
     });

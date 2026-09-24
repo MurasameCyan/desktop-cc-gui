@@ -1,6 +1,13 @@
 import { useSyncExternalStore, type ComponentType } from "react";
 import type { Components } from "react-markdown";
 import type { Disposer } from "./manifest";
+import type { PluginConversationProps } from "./context";
+
+export interface ConversationModeDef {
+  id: string;
+  label: () => string;
+  component: ComponentType<PluginConversationProps>;
+}
 
 /**
  * 扩展点定义类型（plan §4.2）与注册表（plan §4.1 runtime/registry.ts）。
@@ -53,7 +60,8 @@ export interface ComposerSlotDef {
 }
 
 /** Chat right-panel tab (plan §4.2 #4). Builtin tabs (files/changes) are
- *  registered through the same registry; plugin tabs render inside a
+ *  registered through the same registry and keep icon + label in the strip;
+ *  plugin tabs render icon-only (label → title/accessible name) inside a
  *  PluginBoundary. */
 export interface PanelTabDef {
   id: string;
@@ -290,6 +298,7 @@ export const sidebarNavRegistry = new Registry<SidebarNavEntryDef>();
 
 /** Center-area tab definitions (0.3.12). */
 export const centerTabRegistry = new Registry<CenterTabDef>();
+export const conversationModeRegistry = new Registry<ConversationModeDef>();
 
 // ---------------------------------------------------------------------------
 // 注册表 id / 排序辅助

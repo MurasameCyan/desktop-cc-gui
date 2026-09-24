@@ -151,7 +151,9 @@ fn build_prompt_contents(
     content: &str,
 ) -> String {
     let description = description.map(str::trim).filter(|value| !value.is_empty());
-    let argument_hint = argument_hint.map(str::trim).filter(|value| !value.is_empty());
+    let argument_hint = argument_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if description.is_none() && argument_hint.is_none() {
         return content.to_string();
     }
@@ -228,10 +230,7 @@ fn discover_prompts_in(dir: &Path, scope: &str) -> Vec<CustomPromptEntry> {
     out
 }
 
-fn prompts_list_blocking(
-    db: &crate::db::Db,
-    path: &str,
-) -> Result<Vec<CustomPromptEntry>, String> {
+fn prompts_list_blocking(db: &crate::db::Db, path: &str) -> Result<Vec<CustomPromptEntry>, String> {
     let roots = prompt_roots(path, db)?;
     let mut out = Vec::new();
     for (dir, scope) in &roots {
@@ -278,7 +277,9 @@ fn prompts_create_blocking(
     Ok(CustomPromptEntry {
         name,
         path: target.to_string_lossy().to_string(),
-        description: description.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        description: description
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
         argument_hint: argument_hint
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
@@ -434,7 +435,15 @@ pub async fn prompts_create(
 ) -> Result<CustomPromptEntry, String> {
     let db = Arc::clone(db.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        prompts_create_blocking(&db, &path, &scope, &name, description, argument_hint, content)
+        prompts_create_blocking(
+            &db,
+            &path,
+            &scope,
+            &name,
+            description,
+            argument_hint,
+            content,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -497,7 +506,10 @@ fn copy_prompt_files(src: &Path, dest: &Path) -> usize {
         match fs::create_dir_all(dest).and_then(|_| fs::copy(&path, &target).map(|_| ())) {
             Ok(()) => copied += 1,
             Err(err) => {
-                eprintln!("[prompts] skipping {} during legacy import: {err}", path.display())
+                eprintln!(
+                    "[prompts] skipping {} during legacy import: {err}",
+                    path.display()
+                )
             }
         }
     }
@@ -518,7 +530,10 @@ fn legacy_custom_codex_home(
         .pointer("/settings/codexHome")
         .and_then(serde_json::Value::as_str)
     {
-        Some(value) => (value, entry.get("path").and_then(serde_json::Value::as_str)?),
+        Some(value) => (
+            value,
+            entry.get("path").and_then(serde_json::Value::as_str)?,
+        ),
         None => {
             let parent = entry
                 .get("parentId")
@@ -589,11 +604,9 @@ fn import_legacy_prompts_from(
     {
         let conn = db.0.lock();
         let done = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key=?1",
-                [FLAG],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key=?1", [FLAG], |r| {
+                r.get::<_, String>(0)
+            })
             .ok();
         if done.is_some() {
             return Ok(());
@@ -910,12 +923,14 @@ mod tests {
         let global = PathBuf::from("/def/prompts");
 
         // Resolving to the default home → None (the global copy covers it).
-        let entry = serde_json::json!({"id": "w", "path": "/repo", "settings": {"codexHome": "/def"}});
+        let entry =
+            serde_json::json!({"id": "w", "path": "/repo", "settings": {"codexHome": "/def"}});
         let by_id = std::collections::HashMap::new();
         assert_eq!(legacy_custom_codex_home(&entry, &by_id, &global), None);
 
         // Relative values resolve against the owning workspace's path.
-        let entry = serde_json::json!({"id": "w", "path": "/repo", "settings": {"codexHome": ".codex"}});
+        let entry =
+            serde_json::json!({"id": "w", "path": "/repo", "settings": {"codexHome": ".codex"}});
         assert_eq!(
             legacy_custom_codex_home(&entry, &by_id, &global),
             Some(PathBuf::from("/repo/.codex"))
@@ -923,7 +938,8 @@ mod tests {
 
         // A worktree child inherits the parent's override, resolved against
         // the parent's path.
-        let parent = serde_json::json!({"id": "p", "path": "/parent", "settings": {"codexHome": "ph"}});
+        let parent =
+            serde_json::json!({"id": "p", "path": "/parent", "settings": {"codexHome": "ph"}});
         let child = serde_json::json!({"id": "c", "path": "/child", "parentId": "p"});
         let by_id: std::collections::HashMap<&str, &serde_json::Value> =
             [("p", &parent), ("c", &child)].into_iter().collect();

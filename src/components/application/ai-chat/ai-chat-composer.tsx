@@ -196,18 +196,24 @@ export function Composer({
   // suffix is painted via data-completion-suffix and accepted with Tab.
   const completion = usePromptCompletion(isComposing ? "" : (value ?? ""));
 
-  // Replace the field's content programmatically (history recall, Tab
-  // accept): rebuild DOM from text, caret to end, emit upward.
+  // Replace the field's content programmatically: rebuild DOM from text and
+  // put the caret at its end. Shared by the external-value sync (draft
+  // restore) and by history recall / Tab accept below.
+  const replaceEditableText = useCallback((text: string) => {
+    const el = editableRef.current;
+    if (!el) return;
+    el.innerHTML = sanitizeEditableHtml(htmlFromText(text));
+    setCaretOffset(el, text.length);
+  }, []);
+
+  // Replace the field's content and emit upward (history recall, Tab accept).
   const setEditableText = useCallback(
     (text: string) => {
-      const el = editableRef.current;
-      if (!el) return;
-      el.innerHTML = sanitizeEditableHtml(htmlFromText(text));
-      setCaretOffset(el, text.length);
+      replaceEditableText(text);
       emitChange();
       syncTags();
     },
-    [emitChange, syncTags],
+    [replaceEditableText, emitChange, syncTags],
   );
 
   // ArrowUp/ArrowDown recall of previously submitted prompts.
@@ -216,17 +222,21 @@ export function Composer({
     setText: setEditableText,
   });
 
-  // External value changes (draft restore on tab switch, clear on submit):
-  // the effect below rebuilds the DOM from text; the mention picker resets
-  // itself on the same signal (see useMentionPicker). Own emissions are
-  // already in the DOM and skip both paths through lastEmittedRef.
+  // External value changes (draft restore on tab switch, clear on submit,
+  // 插件中心「创建插件」预填命令): the effect below rebuilds the DOM from text;
+  // the mention picker resets itself on the same signal (see useMentionPicker).
+  // Own emissions are already in the DOM and skip both paths through
+  // lastEmittedRef.
+  //
+  // 光标必须我们自己落位：DOM 一重建，浏览器手里的插入点就没了，随后的
+  // focus()（例如 creator flow 的 focusComposerWhenVisible）会把光标放到
+  // 内容开头。落到文本末尾，用户可以直接接着敲需求。
   useEffect(() => {
     const v = value ?? "";
     if (v === lastEmittedRef.current) return;
     lastEmittedRef.current = v;
-    const el = editableRef.current;
-    if (el) el.innerHTML = sanitizeEditableHtml(htmlFromText(v));
-  }, [value]);
+    replaceEditableText(v);
+  }, [value, replaceEditableText]);
 
   // Expose the field handle (focus + mention insertion from the file tree).
   useComposerInputHandle({
@@ -472,7 +482,8 @@ export function StatusBar({
   canCompact,
 }: {
   branch?: string;
-  /** Local branches for the switcher; empty until the first load. */
+  /** Local and remote-tracking branches for the switcher; empty until the
+   *  first load. */
   branches?: BranchMenuItem[];
   /** Repository display name when the chip tracks a nested repo (file-tree
    *  selection inside a subfolder repository); prefixes the branch label. */

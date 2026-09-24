@@ -350,21 +350,25 @@ export function useEngineModels(
       context === "remote" ? "" : wsKey,
       ...Object.keys(contextByWs).filter((ws) => contextByWs[ws] === "remote"),
     ];
-    await Promise.all(
-      targets.flatMap((ws) =>
-        engines.map(async (engine) => {
-          markPending(ws, engine.id, true);
-          try {
-            applyCatalog(engine.id, ws, await ipc.listEngineModels(engine.id, ws || undefined));
-          } catch {
-            // A failed probe keeps the stale catalog rather than blanking the
-            // flyout.
-          } finally {
-            markPending(ws, engine.id, false);
-          }
-        }),
-      ),
-    );
+    // Collect every probe before awaiting: the requests must all be in flight
+    // at once. (An await inside the building loops would serialize them.)
+    const probes: Promise<void>[] = [];
+    for (const ws of targets) {
+      for (const engine of engines) {
+        markPending(ws, engine.id, true);
+        probes.push(
+          ipc
+            .listEngineModels(engine.id, ws || undefined)
+            .then((list) => applyCatalog(engine.id, ws, list))
+            .catch(() => {
+              // A failed probe keeps the stale catalog rather than blanking the
+              // flyout.
+            })
+            .finally(() => markPending(ws, engine.id, false)),
+        );
+      }
+    }
+    await Promise.all(probes);
   }, [engines, wsKey, context, applyCatalog, markPending, contextByWs]);
 
   return {

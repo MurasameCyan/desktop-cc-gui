@@ -105,7 +105,7 @@ export interface PiFamilyOauthProvider {
   /** Credential-store ids that mean "authorized" for this row. */
   statusIds: readonly string[];
   /** i18n key suffix (settings.piAuth.oauthDesc.*). */
-  descKey: "claude" | "codex" | "copilot" | "xai" | "openrouter" | "radius" | "kimi" | "zai" | "geminiCli";
+  descKey: "claude" | "codex" | "copilot" | "xai" | "openrouter" | "radius" | "kimi" | "zai" | "antigravity" | "geminiCli";
 }
 
 const PI_OAUTH_PROVIDERS: readonly PiFamilyOauthProvider[] = [
@@ -127,6 +127,7 @@ const OMP_OAUTH_PROVIDERS: readonly PiFamilyOauthProvider[] = [
   { id: "openrouter", name: "OpenRouter", iconSrc: openrouterIcon, loginArg: "openrouter", statusIds: ["openrouter"], descKey: "openrouter" },
   { id: "kimi-code", name: "Kimi Code", iconSrc: kimiIcon, loginArg: "kimi-code", statusIds: ["kimi-code"], descKey: "kimi" },
   { id: "zai", name: "Z.AI (GLM Coding Plan)", iconSrc: zhipuIcon, loginArg: "zai", statusIds: ["zai", "zai-coding-plan"], descKey: "zai" },
+  { id: "google-antigravity", name: "Google Antigravity", iconSrc: geminiIcon, loginArg: "google-antigravity", statusIds: ["google-antigravity"], descKey: "antigravity" },
   { id: "google-gemini-cli", name: "Google Code Assist (Gemini CLI)", iconSrc: geminiIcon, loginArg: "google-gemini-cli", statusIds: ["google-gemini-cli"], descKey: "geminiCli" },
 ];
 

@@ -6,7 +6,7 @@ import {
   type Workspace,
 } from "@/lib/ipc";
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
-import { listenEngineEvents, listenSessionsChanged } from "@/lib/events";
+import { listenEngineEvents, listenSessionsChanged, listenComputerUseEscape } from "@/lib/events";
 import { errorText } from "@/lib/errors";
 import { writeStored } from "@/lib/storage";
 import { subscribeTauriEvent } from "@/hooks/use-tauri-event";
@@ -146,6 +146,12 @@ export function createSessionActions(
         ),
         subscribeTauriEvent(() =>
           listenSessionsChanged(() => void get().refreshSessions()),
+        ),
+        // Global Esc during a computer-use run: the backend arms that hotkey
+        // only while a run is active, so this fires exactly when the user
+        // needs the escape hatch out of a machine-driving turn.
+        subscribeTauriEvent(() =>
+          listenComputerUseEscape(() => void get().interrupt()),
         ),
       );
       // Settings' CLI enable switch / channel edits: re-filter history and

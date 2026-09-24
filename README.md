@@ -291,6 +291,7 @@ Not sure where to start? Browse the [Issues](https://github.com/zhukunpenglinyut
 ### Want to dig deeper?
 
 - [Plugin development guide (中文)](docs/plugin-development-guide.zh-CN.md) — SDK, manifest, permissions, and the trust boundary.
+- [UI/UX spec (中文)](docs/ui-ux-spec.zh-CN.md) — design tokens, states, action feedback, and the refresh-button inventory.
 - [docs/omp-fast-mode.md](docs/omp-fast-mode.md) — notes on the Codex Fast / OMP fast mode.
 
 ---

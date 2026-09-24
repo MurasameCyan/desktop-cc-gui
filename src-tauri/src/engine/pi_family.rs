@@ -178,11 +178,20 @@ export default function ccguiAskBridge(pi: ExtensionAPI) {
 		if (!rawLevel || rawLevel === "off") return;
 		const effort = rawLevel;
 		const p = payload as Record<string, any>;
-		// 1. Anthropic messages format: output_config.effort for adaptive thinking (recognized by NewAPI/OneAPI)
-		if (!p.output_config || typeof p.output_config !== "object") {
-			p.output_config = { effort };
-		} else if (!p.output_config.effort) {
-			p.output_config.effort = effort;
+		const api = ctx?.model?.api;
+		if (api === "google-generative-ai" || api === "google-gemini-cli" || api === "google-vertex") {
+			// Google 传输使用 generationConfig.thinkingConfig；Cloud Code Assist 会将下方
+			// 通用推理字段识别为未知 protobuf 字段并拒绝请求。
+			delete p.reasoning_effort;
+			delete p.reasoning;
+			return p;
+		}
+		if (ctx?.model?.api === "anthropic-messages") {
+			if (!p.output_config || typeof p.output_config !== "object") {
+				p.output_config = { effort };
+			} else if (!p.output_config.effort) {
+				p.output_config.effort = effort;
+			}
 		}
 		// 2. OpenAI completions format: top-level reasoning_effort
 		if (!p.reasoning_effort) {
@@ -265,8 +274,31 @@ impl Engine for PiFamilyEngine {
         }
     }
 
+    fn supports_tool_constraints(&self) -> bool {
+        self.id == "pi"
+    }
+
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = command_for_binary(bin);
+        if let Some(tools) = req.allowed_tools.as_deref() {
+            if self.id != "pi"
+                || tools.is_empty()
+                || tools
+                    .iter()
+                    .any(|tool| !matches!(tool.as_str(), "read" | "grep" | "find" | "ls"))
+                || req.computer_use == Some(true)
+            {
+                return Err("read-only tool constraints require Pi built-in read/grep/find/ls tools without computer use".into());
+            }
+            if req.session_id.as_deref().is_some_and(|session| {
+                session.contains('/') || session.contains('\\') || session.ends_with(".jsonl")
+            }) {
+                return Err(
+                    "read-only Pi runs accept session IDs, not writable session file paths".into(),
+                );
+            }
+            cmd.args(["--no-extensions", "--tools", &tools.join(",")]);
+        }
         // pi 与 omp 都走 rpc:提问对话框以 extension_ui_request 帧到达、应答
         // 写回 stdin。omp 用 rpc-ui(hasUI 打开 CLI 内置 ask);pi 用 rpc 加
         // 自带的 ask 桥扩展(pi 没有内置提问工具)。
@@ -280,8 +312,10 @@ impl Engine for PiFamilyEngine {
         } else if rpc_mode {
             cmd.arg("--mode");
             cmd.arg("rpc");
-            cmd.arg("--extension");
-            cmd.arg(ensure_pi_ask_bridge()?);
+            if req.allowed_tools.is_none() {
+                cmd.arg("--extension");
+                cmd.arg(ensure_pi_ask_bridge()?);
+            }
         } else {
             cmd.arg("--print");
             cmd.arg("--mode");
@@ -390,7 +424,12 @@ impl Engine for PiFamilyEngine {
             if rpc_ui {
                 lines.push(serde_json::json!({"id": "ccgui-negotiate", "type": "negotiate_protocol", "protocolVersion": 2}).to_string());
             }
-            if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            if let Some(effort) = req
+                .effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+            {
                 lines.push(serde_json::json!({"id": "ccgui-effort", "type": "set_thinking_level", "level": effort}).to_string());
             }
             lines.push(serde_json::json!({"id": "ccgui-state", "type": "get_state"}).to_string());
@@ -461,10 +500,12 @@ impl PiFamilyEngine {
             return None;
         }
         let mut chunks = self.rpc_chunks.lock().ok()?;
-        let acc = chunks.entry(chunk_id.clone()).or_insert_with(|| RpcChunkAcc {
-            parts: vec![None; count],
-            received: 0,
-        });
+        let acc = chunks
+            .entry(chunk_id.clone())
+            .or_insert_with(|| RpcChunkAcc {
+                parts: vec![None; count],
+                received: 0,
+            });
         if acc.parts.len() != count {
             chunks.remove(&chunk_id);
             return None;
@@ -491,7 +532,11 @@ impl PiFamilyEngine {
 /// 构造 omp rpc-ui 的提问应答帧。answers 是 UI 的 map(渲染题文 → 选中
 /// label 或自由文本);omp 的降级链一次一题,取唯一的值。None = 用户忽略
 /// (cancelled,CLI 侧按用户取消继续)。
-pub(crate) fn extension_ui_answer_frame(method: &str, request_id: &str, answers: Option<&Value>) -> Value {
+pub(crate) fn extension_ui_answer_frame(
+    method: &str,
+    request_id: &str,
+    answers: Option<&Value>,
+) -> Value {
     let answer = answers
         .and_then(Value::as_object)
         .and_then(|map| map.values().next());
@@ -567,6 +612,7 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             | "tool_execution_start"
             | "tool_execution_end"
             | "message_end"
+            | "message_start"
             | "turn_end"
             | "agent_end"
             | "auto_retry_start"
@@ -585,6 +631,9 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
         return;
     };
     match event_type {
+        // Response stream opens: reader.rs starts the genMs window here so
+        // TTFT and tool-argument decoding are counted, not just text deltas.
+        "message_start" => out.push(EngineEvent::Generation { active: true }),
         "session" => {
             push_session_id(&value, "id", out);
         }
@@ -602,7 +651,10 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
         // 截断降级,但会话本身不受影响。
         "response" => {
             let command = value.get("command").and_then(Value::as_str).unwrap_or("");
-            let success = value.get("success").and_then(Value::as_bool).unwrap_or(false);
+            let success = value
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if success {
                 if command == "get_state" {
                     if let Some(id) = value
@@ -619,11 +671,11 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
                     .and_then(Value::as_str)
                     .unwrap_or("未知错误");
                 match command {
-                    "prompt" => {
-                        out.push(EngineEvent::Error(format!("omp 任务下发失败:{error}")))
-                    }
+                    "prompt" => out.push(EngineEvent::Error(format!("omp 任务下发失败:{error}"))),
                     "negotiate_protocol" => {}
-                    _ => out.push(EngineEvent::Warn(format!("omp 命令 {command} 失败:{error}"))),
+                    _ => out.push(EngineEvent::Warn(format!(
+                        "omp 命令 {command} 失败:{error}"
+                    ))),
                 }
             }
         }
@@ -649,10 +701,7 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             ));
         }
         "tool_execution_end" => {
-            let name = value
-                .get("toolName")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let name = value.get("toolName").and_then(Value::as_str).unwrap_or("");
             let result = value.get("result");
             out.push(super::tool_result_patch_with_id(
                 name,
@@ -743,7 +792,8 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
                 message: String::new(),
             });
             if value.get("success").and_then(Value::as_bool) == Some(false) {
-                let error = value.get("finalError")
+                let error = value
+                    .get("finalError")
                     .and_then(Value::as_str)
                     .filter(|text| !text.trim().is_empty())
                     .unwrap_or("Automatic retry failed")
@@ -762,7 +812,10 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             {
                 out.push(match error {
                     Some(error) => EngineEvent::Error(error),
-                    None => EngineEvent::Done { session_id: None, usage: None },
+                    None => EngineEvent::Done {
+                        session_id: None,
+                        usage: None,
+                    },
                 });
             } else {
                 out.push(EngineEvent::AttemptEnd { error });
@@ -775,7 +828,11 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
 /// The final assistant result wins; earlier failed attempts may have recovered.
 fn attempt_error(value: &Value) -> Option<String> {
     let message = value.get("message").or_else(|| {
-        value.get("messages")?.as_array()?.iter().rev()
+        value
+            .get("messages")?
+            .as_array()?
+            .iter()
+            .rev()
             .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
     });
     nested_error_text(value, &["message"])
@@ -815,9 +872,19 @@ fn nested_error_text(value: &Value, prefix: &[&str]) -> Option<String> {
         );
     }
     candidates.push(value.get("errorMessage").and_then(Value::as_str));
-    candidates.push(value.get("error").and_then(|e| e.get("message")).and_then(Value::as_str));
+    candidates.push(
+        value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str),
+    );
     for pre in prefix {
-        candidates.push(value.get(*pre).and_then(|m| m.get("error")).and_then(Value::as_str));
+        candidates.push(
+            value
+                .get(*pre)
+                .and_then(|m| m.get("error"))
+                .and_then(Value::as_str),
+        );
     }
     candidates
         .into_iter()
@@ -931,7 +998,8 @@ mod tests {
             &mut out,
         );
         assert!(
-            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "xhigh")),
+            out.iter()
+                .any(|e| matches!(e, EngineEvent::Effort(level) if level == "xhigh")),
             "got {out:?}"
         );
 
@@ -942,7 +1010,21 @@ mod tests {
         ] {
             let mut out = Vec::new();
             parse_pi_family_line(&line, &mut out);
-            assert!(!out.iter().any(|e| matches!(e, EngineEvent::Effort(_))), "got {out:?}");
+            assert!(
+                !out.iter().any(|e| matches!(e, EngineEvent::Effort(_))),
+                "got {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn message_start_opens_the_generation_window() {
+        let mut out = Vec::new();
+        let line = r#"{"type":"message_start","message":{"role":"assistant","content":[]}}"#;
+        parse_pi_family_line(line, &mut out);
+        match &out[..] {
+            [EngineEvent::Generation { active: true }] => {}
+            other => panic!("expected generation start, got {other:?}"),
         }
     }
 
@@ -1073,7 +1155,10 @@ mod tests {
             }] => {
                 assert_eq!(request_id, "0192ab3cd4ef0123");
                 assert_eq!(input["questions"][0]["question"], "部署到哪?");
-                assert_eq!(input["questions"][0]["options"][0]["label"], "staging (Recommended)");
+                assert_eq!(
+                    input["questions"][0]["options"][0]["label"],
+                    "staging (Recommended)"
+                );
                 assert_eq!(input["questions"][0]["options"][0]["description"], "预发");
                 assert_eq!(input["extui"]["method"], "select");
             }
@@ -1118,7 +1203,10 @@ mod tests {
         match &out[..] {
             [EngineEvent::Question { input, .. }] => {
                 assert_eq!(input["questions"][0]["question"], "继续吗\n\n这会删除文件");
-                assert_eq!(input["questions"][0]["options"][0]["label"], CONFIRM_YES_LABEL);
+                assert_eq!(
+                    input["questions"][0]["options"][0]["label"],
+                    CONFIRM_YES_LABEL
+                );
                 assert_eq!(input["extui"]["method"], "confirm");
             }
             other => panic!("expected question event, got {other:?}"),
@@ -1142,19 +1230,29 @@ mod tests {
     fn extension_ui_answer_frame_builds_the_response_per_method() {
         // select:input 的 value 原样回传(CLI 按 label 恒等匹配,自由文本兜底
         // 成选中项)。
-        let frame = extension_ui_answer_frame("select", "r1", Some(&serde_json::json!({ "部署到哪?": "prod" })));
+        let frame = extension_ui_answer_frame(
+            "select",
+            "r1",
+            Some(&serde_json::json!({ "部署到哪?": "prod" })),
+        );
         assert_eq!(frame["type"], "extension_ui_response");
         assert_eq!(frame["id"], "r1");
         assert_eq!(frame["value"], "prod");
 
         // 自由文本同样走 value。
-        let frame = extension_ui_answer_frame("editor", "r2", Some(&serde_json::json!({ "q": "随便" })));
+        let frame =
+            extension_ui_answer_frame("editor", "r2", Some(&serde_json::json!({ "q": "随便" })));
         assert_eq!(frame["value"], "随便");
 
         // confirm 映射 confirmed 布尔。
-        let yes = extension_ui_answer_frame("confirm", "r3", Some(&serde_json::json!({ "q": CONFIRM_YES_LABEL })));
+        let yes = extension_ui_answer_frame(
+            "confirm",
+            "r3",
+            Some(&serde_json::json!({ "q": CONFIRM_YES_LABEL })),
+        );
         assert_eq!(yes["confirmed"], true);
-        let no = extension_ui_answer_frame("confirm", "r3", Some(&serde_json::json!({ "q": "取消" })));
+        let no =
+            extension_ui_answer_frame("confirm", "r3", Some(&serde_json::json!({ "q": "取消" })));
         assert_eq!(no["confirmed"], false);
 
         // 忽略 = cancelled。
@@ -1457,7 +1555,9 @@ mod tests {
             let mut out = Vec::new();
             parse_pi_family_line(&line.to_string(), &mut out);
             match out.first() {
-                Some(EngineEvent::AttemptEnd { error: Some(text) }) => assert!(text.contains("boom") || text.contains("401"), "{line}"),
+                Some(EngineEvent::AttemptEnd { error: Some(text) }) => {
+                    assert!(text.contains("boom") || text.contains("401"), "{line}")
+                }
                 other => panic!("expected provisional error for {line}, got {other:?}"),
             }
         }
@@ -1475,13 +1575,19 @@ mod tests {
         let mut out = Vec::new();
         parse_pi_family_line(&line, &mut out);
         assert!(matches!(out[0], EngineEvent::Error(_)), "got {out:?}");
-        assert!(!out.iter().any(|e| matches!(e, EngineEvent::Done { .. })), "Done leaked after Error: {out:?}");
+        assert!(
+            !out.iter().any(|e| matches!(e, EngineEvent::Done { .. })),
+            "Done leaked after Error: {out:?}"
+        );
 
         // Healthy turn: agent_end without an error still settles with Done.
         let ok_line = serde_json::json!({"type":"agent_end","isTerminal":true}).to_string();
         let mut ok_out = Vec::new();
         parse_pi_family_line(&ok_line, &mut ok_out);
-        assert!(matches!(ok_out[0], EngineEvent::Done { .. }), "got {ok_out:?}");
+        assert!(
+            matches!(ok_out[0], EngineEvent::Done { .. }),
+            "got {ok_out:?}"
+        );
     }
 
     #[test]
@@ -1500,32 +1606,52 @@ mod tests {
         for line in lines {
             parse_pi_family_line(&line.to_string(), &mut out);
         }
-        assert!(!out.iter().any(|event| matches!(event, EngineEvent::Error(_) | EngineEvent::Done { .. })), "retry was terminated: {out:?}");
-        assert!(out.iter().any(|event| matches!(event, EngineEvent::Delta(text) if text == "recovered")));
+        assert!(
+            !out.iter()
+                .any(|event| matches!(event, EngineEvent::Error(_) | EngineEvent::Done { .. })),
+            "retry was terminated: {out:?}"
+        );
+        assert!(out
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Delta(text) if text == "recovered")));
     }
 
     #[test]
     fn terminal_agent_end_uses_the_last_assistant_result() {
         let mut out = Vec::new();
-        parse_pi_family_line(&serde_json::json!({
-            "type":"agent_end", "isTerminal":true,
-            "messages":[
-                {"role":"assistant","stopReason":"stop","content":[]},
-                {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
-                {"role":"toolResult","content":[]}
-            ]
-        }).to_string(), &mut out);
-        assert!(matches!(out.as_slice(), [EngineEvent::Error(text)] if text == "HTTP 502"), "final error was lost: {out:?}");
+        parse_pi_family_line(
+            &serde_json::json!({
+                "type":"agent_end", "isTerminal":true,
+                "messages":[
+                    {"role":"assistant","stopReason":"stop","content":[]},
+                    {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
+                    {"role":"toolResult","content":[]}
+                ]
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            matches!(out.as_slice(), [EngineEvent::Error(text)] if text == "HTTP 502"),
+            "final error was lost: {out:?}"
+        );
 
         out.clear();
-        parse_pi_family_line(&serde_json::json!({
-            "type":"agent_end", "isTerminal":true,
-            "messages":[
-                {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
-                {"role":"assistant","stopReason":"stop","content":[]}
-            ]
-        }).to_string(), &mut out);
-        assert!(matches!(out.as_slice(), [EngineEvent::Done { .. }]), "recovered error leaked: {out:?}");
+        parse_pi_family_line(
+            &serde_json::json!({
+                "type":"agent_end", "isTerminal":true,
+                "messages":[
+                    {"role":"assistant","stopReason":"error","errorMessage":"HTTP 502"},
+                    {"role":"assistant","stopReason":"stop","content":[]}
+                ]
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            matches!(out.as_slice(), [EngineEvent::Done { .. }]),
+            "recovered error leaked: {out:?}"
+        );
     }
 
     #[test]
@@ -1540,8 +1666,13 @@ mod tests {
         ] {
             parse_pi_family_line(&line.to_string(), &mut out);
         }
-        assert!(matches!(out.last(), Some(EngineEvent::Error(text)) if text == "socket closed unexpectedly"), "final failure was lost: {out:?}");
-        assert!(!out.iter().any(|event| matches!(event, EngineEvent::Done { .. })));
+        assert!(
+            matches!(out.last(), Some(EngineEvent::Error(text)) if text == "socket closed unexpectedly"),
+            "final failure was lost: {out:?}"
+        );
+        assert!(!out
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Done { .. })));
     }
 
     #[test]
@@ -1560,6 +1691,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();
         let args: Vec<String> = built
@@ -1570,7 +1702,12 @@ mod tests {
             .collect();
         assert!(args.windows(2).any(|w| w == ["--thinking", "ultra"]));
         assert_eq!(
-            built.command.as_std().get_envs().find(|(k, _)| *k == "CCGUI_REQUESTED_EFFORT").and_then(|(_, v)| v),
+            built
+                .command
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "CCGUI_REQUESTED_EFFORT")
+                .and_then(|(_, v)| v),
             Some(std::ffi::OsStr::new("ultra"))
         );
     }
@@ -1591,6 +1728,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();
         let payload = built.stdin_payload.expect("rpc stdin payload");
@@ -1618,7 +1756,9 @@ mod tests {
         })
         .to_string();
         parse_pi_family_line(&line, &mut out);
-        assert!(out.iter().any(|e| matches!(e, EngineEvent::Effort(l) if l == "high")));
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, EngineEvent::Effort(l) if l == "high")));
     }
 
     #[test]
@@ -1637,6 +1777,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();
         let args: Vec<String> = built
@@ -1645,6 +1786,8 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert!(args.windows(2).any(|w| w[0] == "--extension" && w[1].ends_with("ccgui-ask-bridge.ts")));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--extension" && w[1].ends_with("ccgui-ask-bridge.ts")));
     }
 }

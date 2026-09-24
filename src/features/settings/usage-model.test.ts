@@ -10,5 +10,10 @@ describe("modelDisplayName", () => {
     );
     expect(modelDisplayName("deepseek-v4-flash")).toBe("deepseek-v4-flash");
     expect(modelDisplayName("")).toBe("");
+    expect(
+      modelDisplayName(
+        "plugin_model-switcher_custom_1789978640996/gemini-3.8-flash",
+      ),
+    ).toBe("gemini-3.8-flash");
   });
 });

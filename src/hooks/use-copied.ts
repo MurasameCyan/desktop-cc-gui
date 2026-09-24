@@ -5,7 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * state. The reset timer is restarted on a second copy and cleared on
  * unmount, so no setState lands after the component is gone.
  */
-export function useCopied(resetMs = 1500): { copied: boolean; copy: (text: string) => void } {
+export const COPY_FEEDBACK_MS = 1500;
+
+export function useCopied(resetMs = COPY_FEEDBACK_MS): { copied: boolean; copy: (text: string) => void } {
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
 

@@ -15,6 +15,23 @@ export declare const SDK_VERSION: string;
 /** 每次注册的撤销句柄；卸载时逆序执行。 */
 export type Disposer = () => void;
 
+export type PluginConversationProps = {
+  conversationId: string;
+  workspacePath: string;
+  language: string;
+  onExit: () => void;
+  setExitBlocked?: (blocked: boolean) => void;
+};
+
+export interface PluginAgentCatalogEntry {
+  engine: string;
+  label: string;
+  available: boolean;
+  readOnly: boolean;
+  providers: { id: string; label: string }[];
+  models: { id: string; label: string }[];
+}
+
 /** 信任层级（ADR-1）：declarative = 零 JS 声明式。 */
 export type PluginTier = "declarative" | "js";
 
@@ -76,6 +93,11 @@ export interface PluginManifest {
     commands?: { key: string; title: string; emits?: string }[];
   };
   configSchema?: JsonSchemaObject;
+  /** 市场方形图标：仓库内相对路径（推荐 `docs/icon.png`）或 https URL；
+   *  缺省 = 市场用首字母瓷砖。仅索引消费，宿主安装不读。 */
+  icon?: string;
+  /** 市场详情页效果图：仓库内相对路径或 https URL，≤ 5 张；缺省 = 不渲染图集。 */
+  screenshots?: string[];
 }
 
 export type ComposerSlotId = "addMenu" | "cliMenu" | "permissionMenu";
@@ -357,6 +379,10 @@ export interface PluginContext {
       key?: string;
       component: ComponentLike;
       order?: number;
+    registerConversationMode(def: {
+      key?: string;
+      label: () => string;
+      component: ComponentLike<PluginConversationProps>;
     }): Disposer;
     /** 设置页 section（权限 ui:settings-section）。 */
     registerSettingsSection(def: {
@@ -382,7 +408,9 @@ export interface PluginContext {
       component: ComponentLike;
       order?: number;
     }): Disposer;
-    /** 聊天右侧面板 tab（权限 ui:panel-tab）。 */
+    /** 聊天右侧面板 tab（权限 ui:panel-tab）。插件 tab 在页签条里只渲染
+     *  图标，`icon` 即用户看到的主体；缺省时回落插件素材 / 首字母瓷砖，
+     *  `label` 作为 title 与可访问名。 */
     registerPanelTab(def: {
       key?: string;
       label: () => string;
@@ -502,13 +530,18 @@ export interface PluginContext {
   events: {
     /** 事件总线（权限 events）。宿主话题：`usage://updated`（引擎 usage
      *  事件透传，payload 为完整 EngineEventPayload `{ runId, sessionId,
-     *  engine, seq, kind, data, ts? }`，data 是引擎原始 usage JSON）；
+     *  engine, seq, kind, data, ts?, genMs? }`，data 是引擎原始 usage JSON）；
      *  `usage://done`（0.3.8 起，引擎 done 事件透传，data.usage 携带
      *  该轮最终用量——claude/grok 等只经 Done 上报用量的引擎由此对插件
      *  可见）；`session://activated`（0.3.8 起，活动会话切换，payload
      *  `{ engine, sessionId }`，pending 标签 sessionId 为 null，无活动
      *  标签时两者皆 null）；`composer://draft`（payload { text }，草稿
-     *  变化/清空/会话切换均发射）。 */
+     *  变化/清空/会话切换均发射）。
+     *
+     *  `genMs`（0.3.15 起，仅 `usage`/`done` 携带）：该报告对应的宿主实测
+     *  生成窗口毫秒——从响应流打开到流关闭，工具执行、用户等待与轮间隔
+     *  全部排除。插件按 `output tokens ÷ genMs` 即得不含工具等待的生成速度；
+     *  字段缺失（旧宿主 / 未计时的报告）时回退相邻报告 `ts` 间隔。 */
     on(topic: string, cb: (data: unknown) => void): Disposer;
     emit(topic: string, data: unknown): void;
   };
@@ -558,6 +591,7 @@ export interface PluginContext {
    *  进程——渠道注入、进程注册与聊天发送同构。事件经 `agent://<pluginId>`
    *  总线话题推送（ctx.events.on 订阅）。桌面专属。 */
   agent: {
+    catalog(workspacePath: string): Promise<PluginAgentCatalogEntry[]>;
     start(def: {
       engine: string;
       prompt: string;
@@ -565,8 +599,10 @@ export interface PluginContext {
       model?: string;
       providerId?: string;
       sessionId?: string;
+      readOnly?: boolean;
+      requestId?: string;
     }): Promise<{ runId: string; sessionId: string | null }>;
-    interrupt(runId: string): Promise<void>;
+    interrupt(runId: string): Promise<boolean>;
   };
   bridge: {
     /** 通用能力出口（0.3.0 起；旧的 `cmd:<command>` 逐命令授权机制已删除）。

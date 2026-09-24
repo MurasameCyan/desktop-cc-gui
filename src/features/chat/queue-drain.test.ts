@@ -33,6 +33,7 @@ vi.mock("@/lib/events", () => ({
     },
   ),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const WS = "/tmp/ws";

@@ -12,7 +12,7 @@ vi.mock("@/features/files/FilesPanel", () => ({
   FilesPanel: () => <div>files-panel-stub</div>,
 }));
 vi.mock("@/features/git/ChangesPanel", () => ({
-  ChangesPanel: () => <div>changes-panel-stub</div>,
+  ChangesPanel: ({ visible = true }: { visible?: boolean }) => visible ? <div>changes-panel-stub</div> : null,
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -27,14 +27,14 @@ describe("panel tabs registry integration (plan §4.2 #4)", () => {
   let container: HTMLDivElement;
   let root: Root;
 
-  function render(panelTab: string) {
+  function render(panelTab: string, panelCollapsed = false) {
     act(() => {
       root.render(
         <ChatSidePanel
           active={active}
           panelRef={{ current: null }}
           panelWidth={300}
-          panelCollapsed={false}
+          panelCollapsed={panelCollapsed}
           dragging={null}
           panelTab={panelTab}
           onResizeStart={() => {}}
@@ -52,6 +52,42 @@ describe("panel tabs registry integration (plan §4.2 #4)", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+  });
+
+  it("mounts Git only while visible and preserves the files panel node", () => {
+    render("files");
+    const files = Array.from(container.querySelectorAll("div")).find(
+      (element) => element.textContent === "files-panel-stub" && element.children.length === 0,
+    );
+    expect(container.textContent).not.toContain("changes-panel-stub");
+    render("changes");
+    expect(container.textContent).toContain("changes-panel-stub");
+    render("changes", true);
+    expect(container.textContent).not.toContain("changes-panel-stub");
+    render("changes");
+    expect(container.textContent).toContain("changes-panel-stub");
+    render("files");
+    expect(container.textContent).not.toContain("changes-panel-stub");
+    expect(files?.isConnected).toBe(true);
+  });
+
+  it("does not mount Git when the sidebar starts collapsed", () => {
+    render("changes", true);
+    expect(container.textContent).not.toContain("changes-panel-stub");
+    expect(container.textContent).toContain("files-panel-stub");
+  });
+
+  it("honors a registry override of the changes component without builtin props", () => {
+    const builtin = panelTabRegistry.get("changes")!;
+    const replacement = vi.fn((_props: { workspacePath: string }) => <div>custom-changes</div>);
+    try {
+      act(() => { panelTabRegistry.register({ ...builtin, component: replacement }); });
+      render("changes");
+      expect(container.textContent).toContain("custom-changes");
+      expect(replacement.mock.calls[0]?.[0]).toEqual({ workspacePath: active.workspacePath });
+    } finally {
+      act(() => { panelTabRegistry.register(builtin); });
+    }
   });
 
   it("renders a registered plugin tab's component; disposer removes it", () => {

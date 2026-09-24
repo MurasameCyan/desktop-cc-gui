@@ -2,13 +2,10 @@ import { useTranslation } from "react-i18next";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
 import { pluginIdFromRegistryKey } from "@ccgui/plugin-sdk";
 import { cx } from "@/utils/cx";
-import { resolveActivePanelTab, useSortedPanelTabs } from "./panel-tabs";
+import { ChangesTab } from "./panel-tabs";
+import { resolveActivePanelTab, useSortedPanelTabs } from "./use-panel-tabs";
 import type { ActiveSession } from "./store";
 
-/** Right-hand side panel: files/changes tabs with the full-height resize
- * strip on its left edge. Every registered tab's panel stays mounted so
- * tab switches preserve tree expansion and scroll state; plugin tabs render
- * inside a PluginBoundary (plan §4.2 #4). */
 export function ChatSidePanel({
   active,
   panelRef,
@@ -77,11 +74,13 @@ export function ChatSidePanel({
           !panelCollapsed && "border-l",
         )}
       >
-        {/* All tab panels stay mounted so tab
-            switches preserve tree expansion and scroll state. */}
         {panelTabs.map((tab) => {
           const TabComponent = tab.component;
-          const panel = <TabComponent workspacePath={active.workspacePath} />;
+          const panel = tab.id === "changes" && TabComponent === ChangesTab ? (
+            <ChangesTab workspacePath={active.workspacePath} visible={!panelCollapsed && activeTab === tab.id} />
+          ) : (
+            <TabComponent workspacePath={active.workspacePath} />
+          );
           return (
             <div
               key={tab.id}

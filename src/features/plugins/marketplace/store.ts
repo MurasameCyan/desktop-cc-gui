@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { ipc, type MarketPlugin, type PluginUpdate } from "@/lib/ipc";
 import { listenPluginInstallProgress } from "@/lib/events";
-import { loadPlugin } from "../runtime/loader";
+import { reloadPlugin } from "../runtime/loader";
 import { usePluginsStore } from "../manager/usePlugins";
 
 /**
@@ -61,7 +61,12 @@ export const useMarketplaceStore = create<MarketplaceStore>((set, get) => ({
       const info = await ipc.pluginInstallFromMarketplace(id);
       // Fresh installs default to enabled; a re-install (update) keeps the
       // user's flag — either way an enabled plugin activates immediately.
-      if (info.enabled) await loadPlugin({ info });
+      // reloadPlugin (not loadPlugin): an update targets an id that is very
+      // likely already active, and loadPlugin early-returns for those, so the
+      // new bytes only took effect after a manual disable/enable or app
+      // restart. Reload unloads the running instance first, then activates
+      // the freshly read bundle — registries are built for that overwrite.
+      if (info.enabled) await reloadPlugin({ info });
       await usePluginsStore.getState().refresh();
       await get().checkUpdates();
     } catch (error) {

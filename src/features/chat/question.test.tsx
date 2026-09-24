@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
-import { ipc } from "@/lib/ipc";
+import { ipc, type Message } from "@/lib/ipc";
 import { QuestionCard } from "./components/QuestionCard";
 import { useChatStore } from "./store";
 import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
@@ -24,6 +24,7 @@ vi.mock("@/lib/ipc", () => ({
 vi.mock("@/lib/events", () => ({
   listenEngineEvents: vi.fn(async () => () => {}),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const KEY = sessionKey("claude", "s-1", "/tmp/ws");
@@ -306,7 +307,9 @@ describe("QuestionCard free-form Other", () => {
   let container: HTMLDivElement;
   let root: Root;
 
-  function cardMessage(multiSelect = false) {
+  function cardMessage(
+    multiSelect = false,
+  ): Message & { question: NonNullable<Message["question"]> } {
     return {
       seq: 7,
       role: "question",
@@ -329,8 +332,9 @@ describe("QuestionCard free-form Other", () => {
         ],
         status: "pending" as const,
       },
-    };
+    } as Message & { question: NonNullable<Message["question"]> };
   }
+
   const buttonByText = (needle: string) =>
     [...container.querySelectorAll("button")].find((b) =>
       b.textContent?.includes(needle),
@@ -363,6 +367,51 @@ describe("QuestionCard free-form Other", () => {
     expect(container.querySelector("input")).toBeTruthy();
     act(() => root.render(<QuestionCard message={cardMessage(true) as never} />));
     expect(container.querySelector("input")).toBeFalsy();
+  });
+
+  it("uses a circular radio marker for single-select and a square checkbox for multi-select", async () => {
+    act(() => root.render(<QuestionCard message={cardMessage() as never} />));
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    const singleMarker = buttonByText("A")!.firstElementChild as HTMLElement;
+    expect(singleMarker.classList.contains("rounded-full")).toBe(true);
+    expect(singleMarker.firstElementChild?.classList.contains("rounded-full")).toBe(true);
+
+    act(() => root.render(<QuestionCard message={cardMessage(true) as never} />));
+    const multiMarker = buttonByText("A")!.firstElementChild as HTMLElement;
+    expect(multiMarker.classList.contains("rounded-full")).toBe(false);
+  });
+
+  it("hides Submit on a multi-select question that is not the last question", async () => {
+    const message = cardMessage(true);
+    message.question.questions.push({
+      question: "第二题",
+      header: "后续",
+      options: [{ label: "C" }],
+    });
+    act(() => root.render(<QuestionCard message={message as never} />));
+    expect(buttonByText("提交")).toBeFalsy();
+
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(buttonByText("提交")).toBeFalsy();
+    expect(buttonByText("确认本题并继续")).toBeTruthy();
+
+    await act(async () => {
+      buttonByText("确认本题并继续")!.click();
+    });
+    expect(buttonByText("提交")).toBeTruthy();
+  });
+
+  it("keeps Submit available on the final multi-select question", async () => {
+    act(() => root.render(<QuestionCard message={cardMessage(true) as never} />));
+    expect(buttonByText("提交")).toBeTruthy();
+    await act(async () => {
+      buttonByText("A")!.click();
+    });
+    expect(buttonByText("提交")!.disabled).toBe(false);
   });
 
   it("typing a custom answer and confirming sends the free text", async () => {
@@ -510,4 +559,52 @@ describe("QuestionCard free-form Other", () => {
       Q3: "B",
     });
   });
+
+  it("confirms a multi-select answer before moving to the next unanswered question", async () => {
+    const message = {
+      seq: 7,
+      role: "question",
+      text: "Q1",
+      ts: null,
+      question: {
+        requestId: "req-multi",
+        runId: "run-multi",
+        questions: [
+          {
+            question: "Q1",
+            header: "一",
+            multiSelect: true,
+            options: [{ label: "A" }, { label: "B" }],
+          },
+          {
+            question: "Q2",
+            header: "二",
+            multiSelect: false,
+            options: [{ label: "A" }, { label: "B" }],
+          },
+        ],
+        status: "pending" as const,
+      },
+    } as Message;
+    useChatStore.setState({
+      bySession: { [KEY]: { ...EMPTY_SESSION, messages: [message as never] } },
+    });
+    act(() => root.render(<QuestionCard message={message as never} />));
+    await act(async () => buttonByText("A")!.click());
+    expect(buttonByText(i18n.t("chat.questionConfirmAndContinue"))).toBeTruthy();
+    expect(buttonByText(i18n.t("chat.questionSubmit"))).toBeFalsy();
+
+    await act(async () =>
+      buttonByText(i18n.t("chat.questionConfirmAndContinue"))!.click(),
+    );
+    expect(container.textContent).toContain("2/2");
+    expect(container.querySelector('[aria-checked="true"]')).toBeFalsy();
+    await act(async () => buttonByText("B")!.click());
+    await act(async () => buttonByText(i18n.t("chat.questionSubmit"))!.click());
+    expect(vi.mocked(ipc.answerQuestion)).toHaveBeenLastCalledWith("run-multi", "req-multi", {
+      Q1: ["A"],
+      Q2: "B",
+    });
+  });
+
 });

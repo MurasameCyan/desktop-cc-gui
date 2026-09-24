@@ -33,6 +33,11 @@ struct DeviceIdArgs {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct DiagnosticsEnabledArgs {
+    enabled: bool,
+}
+
 fn parse_args<T: serde::de::DeserializeOwned>(raw: &Value) -> Result<T, String> {
     serde_json::from_value(raw.clone()).map_err(|e| format!("invalid args: {e}"))
 }
@@ -53,6 +58,19 @@ struct EngineIdArgs {
 struct PluginReadFileArgs {
     id: String,
     name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginReadArtworkArgs {
+    id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginIdArgs {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +164,15 @@ struct SendMessageArgs {
 #[serde(rename_all = "camelCase")]
 struct SessionIdArgs {
     session_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnswerQuestionArgs {
+    session_id: String,
+    request_id: String,
+    /// Question text → chosen label(s); `None` is the user's skip/dismiss.
+    #[serde(default)]
+    answers: Option<Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,6 +295,9 @@ struct PathArgs {
     /// Optional workspace meta passthrough (plugin workspaces.add keeps
     /// transport descriptions alive on the web runtime too).
     meta: Option<serde_json::Value>,
+    /// Optional worktree registration (host UI: 新建/恢复 worktree 子工作区).
+    kind: Option<String>,
+    parent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -398,7 +428,6 @@ struct SearchTextArgs {
 #[serde(rename_all = "camelCase")]
 struct SearchMessagesArgs {
     query: String,
-    sort: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
 }
@@ -414,6 +443,10 @@ struct GitDiffArgs {
 struct GitFilesArgs {
     path: String,
     files: Vec<String>,
+}
+#[derive(Deserialize)]
+struct GitTreeArgs {
+    levels: Vec<crate::git::GitTreeLevel>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -479,7 +512,11 @@ struct TerminalResizeArgs {
 /// milliseconds-scale, and the per-invoke tokio task keeps the read loop
 /// unblocked. Commands that genuinely need a thread pool already
 /// spawn_blocking internally (git_status, read_file, search_text…).
-pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> Result<Value, String> {
+pub(super) async fn dispatch(
+    app: &tauri::AppHandle,
+    cmd: &str,
+    raw: Value,
+) -> Result<Value, String> {
     match cmd {
         // config
         "get_cli_config" => ser(crate::config::get_cli_config()),
@@ -593,17 +630,20 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
             let a: SessionIdArgs = parse_args(&raw)?;
             ser(crate::engine::interrupt_session(app.state(), a.session_id).await)
         }
-        "list_engines" => ser(Ok(crate::engine::list_engines())),
+        // The remote UI renders the same AskUserQuestion card as the desktop
+        // (events already reach it); without this case its 提交/忽略 buttons
+        // failed with `unknown command: answer_question`.
+        "answer_question" => {
+            let a: AnswerQuestionArgs = parse_args(&raw)?;
+            ser(
+                crate::engine::answer_question(app.state(), a.session_id, a.request_id, a.answers)
+                    .await,
+            )
+        }
+        "list_engines" => ser(crate::engine::list_engines().await),
         "list_engine_models" => {
             let a: EngineArgs = parse_args(&raw)?;
-            ser(
-                crate::engine::models::list_engine_models(
-                    app.state(),
-                    a.engine,
-                    a.workspace,
-                )
-                .await,
-            )
+            ser(crate::engine::models::list_engine_models(app.state(), a.engine, a.workspace).await)
         }
         "save_pasted_image" => {
             let a: SavePastedImageArgs = parse_args(&raw)?;
@@ -623,11 +663,18 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "archive_session" => {
             let a: ArchiveSessionArgs = parse_args(&raw)?;
-            ser(crate::history::reader::archive_session(app.state(), a.session))
+            ser(crate::history::reader::archive_session(
+                app.state(),
+                a.session,
+            ))
         }
         "restore_session" => {
             let a: EngineSessionArgs = parse_args(&raw)?;
-            ser(crate::history::reader::restore_session(app.state(), a.engine, a.session_id))
+            ser(crate::history::reader::restore_session(
+                app.state(),
+                a.engine,
+                a.session_id,
+            ))
         }
         // Usage ledger: the mobile/web client renders the same page, so the
         // bridge must route it like every other settings surface.
@@ -661,18 +708,16 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "load_remote_session_page" => {
             let a: LoadRemoteSessionPageArgs = parse_args(&raw)?;
-            ser(
-                crate::history::reader::load_remote_session_page(
-                    app.state(),
-                    a.workspace_path,
-                    a.engine,
-                    a.session_id,
-                    a.remote_path,
-                    a.limit,
-                    a.before_seq,
-                )
-                .await,
+            ser(crate::history::reader::load_remote_session_page(
+                app.state(),
+                a.workspace_path,
+                a.engine,
+                a.session_id,
+                a.remote_path,
+                a.limit,
+                a.before_seq,
             )
+            .await)
         }
         "delete_session" => {
             let a: EngineSessionArgs = parse_args(&raw)?;
@@ -711,18 +756,19 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "add_workspace" => {
             let a: PathArgs = parse_args(&raw)?;
-            ser(crate::history::reader::add_workspace(app.state(), a.path, a.meta))
+            ser(crate::history::reader::add_workspace(
+                app.state(),
+                a.path,
+                a.meta,
+                a.kind,
+                a.parent_id,
+            ))
         }
         "plugin_add_workspace" => {
             let a: PluginAddWorkspaceArgs = parse_args(&raw)?;
             ser(
-                crate::plugin_caps::plugin_add_workspace(
-                    app.state(),
-                    a.plugin_id,
-                    a.path,
-                    a.meta,
-                )
-                .await,
+                crate::plugin_caps::plugin_add_workspace(app.state(), a.plugin_id, a.path, a.meta)
+                    .await,
             )
         }
         "remember_session_effort" => {
@@ -826,21 +872,13 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         "search_messages" => {
             let a: SearchMessagesArgs = parse_args(&raw)?;
             ser(
-                crate::history::search::search_messages(
-                    app.state(),
-                    a.query,
-                    a.sort,
-                    a.limit,
-                    a.offset,
-                )
-                .await,
+                crate::history::search::search_messages(app.state(), a.query, a.limit, a.offset)
+                    .await,
             )
         }
         "list_file_index" => {
             let a: FileIndexArgs = parse_args(&raw)?;
-            ser(
-                crate::files::list_file_index(app.state(), a.path, a.include_ignored).await,
-            )
+            ser(crate::files::list_file_index(app.state(), a.path, a.include_ignored).await)
         }
         "list_slash_commands" => {
             let a: PathArgs = parse_args(&raw)?;
@@ -909,7 +947,8 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
                 a.description,
                 a.argument_hint,
                 a.content,
-            ).await)
+            )
+            .await)
         }
         "prompts_update" => {
             let a: PromptUpdateArgs = parse_args(&raw)?;
@@ -936,7 +975,11 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         "git_file_colors" => {
             let a: GitFilesArgs = parse_args(&raw)?;
-            ser(Ok(crate::git::git_file_colors(a.path, a.files)))
+            ser(crate::git::git_file_colors(a.path, a.files).await)
+        }
+        "git_tree_status" => {
+            let a: GitTreeArgs = parse_args(&raw)?;
+            ser(crate::git::git_tree_status(a.levels).await)
         }
         "git_diff" => {
             let a: GitDiffArgs = parse_args(&raw)?;
@@ -949,6 +992,12 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         "git_unstage" => {
             let a: GitFilesArgs = parse_args(&raw)?;
             ser(crate::git::git_unstage(a.path, a.files))
+        }
+        // Same shared changes panel as the desktop, so the remote client's
+        // 「撤销更改」 must route too (it falls through to unknown otherwise).
+        "git_discard" => {
+            let a: GitFilesArgs = parse_args(&raw)?;
+            ser(crate::git::git_discard(a.path, a.files))
         }
         "git_commit" => {
             let a: GitCommitArgs = parse_args(&raw)?;
@@ -1010,6 +1059,18 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         }
         // metrics
         "app_metrics" => ser(crate::metrics::app_metrics(app.state())),
+        "performance_diagnostics" => ser(crate::metrics::performance_diagnostics(app.state())),
+        "performance_diagnostics_enabled" => {
+            ser(crate::metrics::performance_diagnostics_enabled(app.state()))
+        }
+        "performance_diagnostics_set_enabled" => {
+            let args: DiagnosticsEnabledArgs = parse_args(&raw)?;
+            ser(crate::metrics::performance_diagnostics_set_enabled(
+                args.enabled,
+                app.state(),
+                app.state(),
+            ))
+        }
         // web access: phones may read status; start/stop stay desktop-only.
         "web_access_status" => ser(Ok(web_access_status(app.clone()))),
         // The relay has no bootstrap problem (unlike the bridge, which cannot
@@ -1044,6 +1105,10 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         // bridge so web clients render plugin UI; install/uninstall/enable/
         // storage writes stay desktop-only and fall through to unknown.
         "plugin_list" => ser(crate::plugins::plugin_list(app.state()).await),
+        "plugin_read_artwork" => {
+            let a: PluginReadArtworkArgs = parse_args(&raw)?;
+            ser(crate::plugins::plugin_read_artwork(a.id, a.path))
+        }
         "plugin_read_file" => {
             let a: PluginReadFileArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_read_file(a.id, a.name))
@@ -1074,6 +1139,10 @@ pub(super) async fn dispatch(app: &tauri::AppHandle, cmd: &str, raw: Value) -> R
         // Marketplace browsing is read-only too, so the web client renders
         // the market page; plugin_install_from_marketplace stays desktop-only.
         "plugin_fetch_index" => ser(crate::plugins::market::plugin_fetch_index(false).await),
+        "plugin_fetch_market_readme" => {
+            let a: PluginIdArgs = parse_args(&raw)?;
+            ser(crate::plugins::market::plugin_fetch_market_readme(a.id).await)
+        }
         "plugin_check_updates" => ser(crate::plugins::market::plugin_check_updates().await),
         _ => Err(format!("unknown command: {cmd}")),
     }
