@@ -25,6 +25,7 @@ import {
 } from "./persistence";
 import { EMPTY_SESSION, patchSession } from "./stream";
 import { handleEngineEvents, upsertSessionMetaInto } from "./engine-events";
+import { mergePlanReviewHistory } from "./plan-review";
 import i18n from "@/lib/i18n";
 import {
   listExternalSessionMetas,
@@ -393,6 +394,10 @@ export function createSessionActions(
       const existing = get().bySession[key];
       if (existing && existing.messages.length > 0) return;
       patchSession(set, key, { loading: true });
+      // 并行取计划审批历史:失败静默降级为无历史计划,绝不阻塞会话加载。
+      const plansPromise = ipc
+        .listPlanReviews(engine, sessionId)
+        .catch(() => null);
       try {
         const page = await loadHistoryPage(engine, sessionId, workspacePath, 100);
         patchSession(set, key, {
@@ -405,6 +410,20 @@ export function createSessionActions(
           usage:
             [...page.messages].reverse().find((m) => m.usage)?.usage ?? null,
         });
+        // 历史页应用后再并入计划卡片(按 planId+revision 去重;活跃等待点
+        // 可否恢复由后端状态保证,前端只按 record.status 渲染)。
+        const plans = await plansPromise;
+        if (plans && plans.length > 0) {
+          set((s) => {
+            const cur = s.bySession[key];
+            if (!cur) return {};
+            const messages = mergePlanReviewHistory(cur.messages, plans);
+            if (!messages) return {};
+            return {
+              bySession: { ...s.bySession, [key]: { ...cur, messages } },
+            };
+          });
+        }
       } catch (error) {
         patchSession(set, key, { loading: false, error: String(error) });
       }

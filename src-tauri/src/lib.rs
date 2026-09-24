@@ -380,6 +380,8 @@ pub fn run() {
             engine::send_message,
             engine::interrupt_session,
             engine::answer_question,
+            engine::respond_plan_review,
+            engine::list_plan_reviews,
             engine::list_engines,
             engine::models::list_engine_models,
             engine::pi_family_auth::pi_family_auth_list,

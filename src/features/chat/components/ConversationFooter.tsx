@@ -15,6 +15,7 @@ import { imageMetaText } from "@/utils/image-meta";
 import type { AttachmentPreview } from "./use-composer-images";
 import { RunStatusStrip } from "./RunStatusStrip";
 import { QuestionDock, usePendingQuestion } from "./QuestionDock";
+import { PlanReviewDock, usePendingPlanReview } from "./PlanReviewDock";
 import { ErrorBanner } from "./ErrorBanner";
 import { sessionKey } from "../store";
 import { ComposerSlotExtras } from "@/features/plugins/boundary/composer-slot-extras";
@@ -388,6 +389,9 @@ export function ConversationFooter({
   // While the CLI waits on an AskUserQuestion the panel takes the composer's
   // place — it covers the input box instead of floating beside it.
   const pendingQuestion = usePendingQuestion();
+  // A plan revision awaiting the user's decision takes the same slot; the
+  // backend serializes native waiting points, so at most one is pending.
+  const pendingPlan = usePendingPlanReview();
 
   // The draft prop is the store's per-session value, so watching it covers
   // every change source at once: typing, submit-clear, and session switches
@@ -428,7 +432,9 @@ export function ConversationFooter({
           onZoomImage={setZoomImage}
         />
         <ActiveRunStatus active={active} />
-        {pendingQuestion ? (
+        {pendingPlan ? (
+          <PlanReviewDock />
+        ) : pendingQuestion ? (
           <QuestionDock />
         ) : (
           <FooterComposer

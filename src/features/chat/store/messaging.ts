@@ -41,6 +41,7 @@ import {
 import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
 import { engineSupportsComputerUse } from "../computer-use";
 import type { SendOptions } from "./types";
+import { patchPlanReview } from "./plan-review";
 import { effectivePermission } from "./permissions";
 import {
   buildAgentBlock,
@@ -87,6 +88,8 @@ export function createMessagingActions(
   ChatStore,
   | "send"
   | "respondToGrant"
+  | "respondToPlanReview"
+  | "resumePlanReview"
   | "respondToQuestion"
   | "resendLastUser"
   | "queueMessage"
@@ -481,6 +484,66 @@ export function createMessagingActions(
       } catch (error) {
         patchSession(set, key, { error: errorText(error) });
       }
+    },
+
+    respondToPlanReview: async (key, planId, expectedRevision, decision, feedback) => {
+      const row = (get().bySession[key]?.messages ?? []).find(
+        (m) =>
+          m.planReview?.planId === planId &&
+          m.planReview?.revision === expectedRevision,
+      );
+      const record = row?.planReview;
+      // Only an open revision can be decided; anything else (already
+      // submitted, settled, unknown) is a stale click the backend CAS would
+      // reject anyway.
+      if (
+        !record ||
+        (record.status !== "awaiting_review" && record.status !== "deferred")
+      ) {
+        return { kind: "error", error: i18n.t("chat.planReviewNotPending") };
+      }
+      const text = feedback?.trim() || undefined;
+      if (decision === "request_changes" && !text) {
+        return { kind: "error", error: i18n.t("chat.planReviewFeedbackRequired") };
+      }
+      if (decision !== "defer" && !record.complete) {
+        return { kind: "error", error: i18n.t("chat.planReviewIncomplete") };
+      }
+      const revertTo = record.status;
+      patchPlanReview(set, key, planId, expectedRevision, (cur) => ({
+        ...cur,
+        status: "submitting",
+      }));
+      try {
+        const outcome = await ipc.respondPlanReview(
+          planId,
+          expectedRevision,
+          decision,
+          text,
+        );
+        // Applied or conflict, the returned record is the backend's truth:
+        // a conflict replaces the card with the current state instead of
+        // pretending the submit landed.
+        patchPlanReview(set, key, planId, expectedRevision, () => outcome.review);
+        // A landed decision closes a dock the user reopened from the card.
+        if (get().bySession[key]?.planReviewResume === `${planId}:${expectedRevision}`) {
+          patchSession(set, key, { planReviewResume: null });
+        }
+        return outcome.outcome === "applied"
+          ? { kind: "applied", record: outcome.review }
+          : { kind: "conflict", record: outcome.review };
+      } catch (error) {
+        // Never fake success: the card returns to its pre-submit status so
+        // the user can retry (or the next settled event resolves it).
+        patchPlanReview(set, key, planId, expectedRevision, (cur) =>
+          cur.status === "submitting" ? { ...cur, status: revertTo } : cur,
+        );
+        return { kind: "error", error: errorText(error) };
+      }
+    },
+
+    resumePlanReview: (key, resume) => {
+      patchSession(set, key, { planReviewResume: resume });
     },
 
     respondToQuestion: async (key, seq, answers) => {

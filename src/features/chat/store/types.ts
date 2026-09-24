@@ -1,6 +1,8 @@
 import type { OmpServiceTier } from "@/lib/omp-service-tier";
 import type {
   EngineInfo,
+  PlanReview,
+  PlanReviewDecision,
   SessionMeta,
   Workspace,
   WorkspaceGroup,
@@ -9,6 +11,14 @@ import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
 import type { ComposerPermission } from "@/components/application/ai-chat/permission-menu";
 import type { ActiveSession } from "./persistence";
 import type { SessionState } from "./stream";
+
+/** Result of a plan-decision submit. `applied`/`conflict` come from the
+ *  backend CAS (the returned record already replaced the local card);
+ *  `error` keeps the card pending — a failure is never shown as approval. */
+export type PlanReviewRespondResult =
+  | { kind: "applied"; record: PlanReview }
+  | { kind: "conflict"; record: PlanReview }
+  | { kind: "error"; error: string };
 
 /** Per-send options carried from the composer to the spawn request. */
 export interface SendOptions {
@@ -181,6 +191,19 @@ export interface ChatStore {
     seq: number,
     answers: Record<string, string | string[]> | null,
   ) => Promise<void>;
+  /** Submit a plan decision: optimistic `submitting`, then the backend CAS
+   *  decides applied/conflict (expectedRevision stale = conflict, never a
+   *  duplicate execution). Errors keep the revision open for a retry. */
+  respondToPlanReview: (
+    key: string,
+    planId: string,
+    expectedRevision: number,
+    decision: PlanReviewDecision,
+    feedback?: string,
+  ) => Promise<PlanReviewRespondResult>;
+  /** Reopen the approval dock for a deferred plan (its timeline card's
+   *  「继续审批」), or clear the marker (null) once a decision lands. */
+  resumePlanReview: (key: string, resume: string | null) => void;
   /** Re-send the session's last user message (grant card's one-click retry
    * after a directory grant takes effect on the next launch). */
   resendLastUser: (key: string) => Promise<void>;

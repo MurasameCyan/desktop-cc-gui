@@ -56,6 +56,10 @@ export interface SessionState {
   /** Set by interrupt(): the next "done" settles the turn but must not
    * auto-drain the queue — pressing stop is not "go on to the next". */
   interrupted: boolean;
+  /** Deferred plan the user explicitly reopened from its timeline card
+   *  (`"${planId}:${revision}"`): the approval dock mounts for it again.
+   *  Pure UI state — the backend record stays `deferred` either way. */
+  planReviewResume: string | null;
 }
 
 export const EMPTY_SESSION: SessionState = {
@@ -75,6 +79,7 @@ export const EMPTY_SESSION: SessionState = {
   compaction: null,
   queue: [],
   interrupted: false,
+  planReviewResume: null,
 };
 
 /** The model one session runs with, most specific first:

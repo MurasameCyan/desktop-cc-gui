@@ -35,6 +35,7 @@ import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 import { ConversationModePane, ConversationModePicker } from "@/features/plugins/conversation/ConversationModeHost";
+import { usePlanReviewGateActive } from "./PlanReviewDock";
 import { useConversationMode } from "@/features/plugins/conversation/use-conversation-mode";
 import { McpCommandPanel } from "@/features/mcp/McpCommandPanel";
 
@@ -276,6 +277,9 @@ export const ChatConversation = memo(function ChatConversation({
 }) {
   const { t, i18n } = useTranslation();
   const conversationMode = useConversationMode(active);
+  // 互斥:计划等待中且 run 活跃时不得切入插件会话模式(会搁置原生等待点);
+  // 插件模式激活时整个普通会话区(含计划 dock)本就不挂载。
+  const planReviewGate = usePlanReviewGateActive();
   const key = active
     ? sessionKey(active.engine, active.sessionId, active.workspacePath)
     : "";
@@ -511,7 +515,7 @@ export const ChatConversation = memo(function ChatConversation({
         noEnabledEngines={noEnabledEngines}
         composerInputRef={composerInputRef}
         addMenu={addMenu}
-        cliMenu={<>{cliMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0} onSelect={conversationMode.onSelect} /></>}
+        cliMenu={<>{cliMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0 || planReviewGate} onSelect={conversationMode.onSelect} /></>}
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}
