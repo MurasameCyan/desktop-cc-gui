@@ -10,7 +10,7 @@ import type {
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
 import type { ComposerPermission } from "@/components/application/ai-chat/permission-menu";
 import type { ActiveSession } from "./persistence";
-import type { SessionState } from "./stream";
+import type { QueueMoveDirection, SessionState } from "./stream";
 
 /** Result of a plan-decision submit. `applied`/`conflict` come from the
  *  backend CAS (the returned record already replaced the local card);
@@ -211,6 +211,9 @@ export interface ChatStore {
   queueMessage: (text: string, images: string[], options?: SendOptions) => void;
   /** Drop a queued message from the active session. */
   removeQueued: (id: string) => void;
+  /** Move a queued message one row up or down in the queue card; directions
+   *  are screen-relative, see `QueueMoveDirection`. */
+  moveQueued: (id: string, direction: QueueMoveDirection) => void;
   /** Send one queued message now: it takes the head of the queue, and a
    *  running turn is stopped so the send is not left behind it. */
   sendQueuedNow: (id: string) => Promise<void>;
