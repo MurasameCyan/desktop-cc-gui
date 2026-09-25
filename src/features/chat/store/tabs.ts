@@ -7,8 +7,9 @@ import {
   sessionKey,
   type ActiveSession,
 } from "./persistence";
-import { EMPTY_SESSION, moveStreamingFlag } from "./stream";
+import { EMPTY_SESSION, moveRetryingFlag, moveStreamingFlag } from "./stream";
 import { emitSessionActivated } from "@/features/plugins/runtime/events";
+import { getConversationModeState } from "@/features/plugins/conversation/state";
 import type { ChatStore } from "./types";
 import type { StoreGet, StoreSet } from "./context";
 
@@ -119,6 +120,7 @@ export function createTabActions(
     sessionId: string | null,
     workspacePath: string,
   ) {
+    if (getConversationModeState().isTabCloseBlocked(sessionKey(engine, sessionId, workspacePath), workspacePath)) return;
     const s = get();
     const idx = s.openTabs.findIndex((t) =>
       sameTab(t, engine, sessionId, workspacePath),
@@ -208,6 +210,9 @@ export function createTabActions(
         const session = get().bySession[sessionKey(selected.engine, null, selected.workspacePath)];
         if (session?.streaming || session?.preparing) return;
       }
+      if (selected && getConversationModeState().isTabCloseBlocked(
+        sessionKey(selected.engine, selected.sessionId, selected.workspacePath), selected.workspacePath,
+      )) return;
       writeStored(ENGINE_PREF_KEY, engine);
       // Plugins follow the active engine through `session://activated`; the
       // picker is one of the ways it changes. Only the retarget below actually
@@ -297,8 +302,8 @@ export function createTabActions(
           openTabs,
           active: nextActive,
           bySession,
-          drafts,
           streamingByKey: moveStreamingFlag(s.streamingByKey, oldKey, newKey),
+          retryingByKey: moveRetryingFlag(s.retryingByKey, oldKey, newKey),
         };
       });
       if (retargets) emitSessionActivated(engine, null);

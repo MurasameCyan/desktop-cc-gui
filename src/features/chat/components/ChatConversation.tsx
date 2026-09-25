@@ -22,7 +22,8 @@ import {
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
 import { useComposerActions } from "./use-composer-actions";
-import { filterEngineOptions, type EngineOption } from "./engine-options";
+import { filterEngineOptions, orderEngineOptions, type EngineOption } from "./engine-options";
+import { useCliNavOrder } from "@/lib/cli-nav-order";
 import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
 import { useComposerImages } from "./use-composer-images";
@@ -36,6 +37,9 @@ import { rememberContextWindow, resolveContextMax } from "../context-window-memo
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 import { useExecutionChoices } from "./use-execution-choices";
 import { ModelEntry } from "@/features/plugins/boundary/model-entry";
+import { ConversationModePane, ConversationModePicker } from "@/features/plugins/conversation/ConversationModeHost";
+import { useConversationMode } from "@/features/plugins/conversation/use-conversation-mode";
+import { McpCommandPanel } from "@/features/mcp/McpCommandPanel";
 
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -65,6 +69,41 @@ const SessionTimeline = memo(function SessionTimeline({
   );
 });
 
+
+/** Timeline (with the session error banner) for an open session, or the
+ *  no-session placeholder. */
+function ConversationBody({
+  active,
+  hasSession,
+  sessionError,
+  sessionKey: key,
+  onDismissError,
+  onLoadEarlier,
+}: {
+  active: ActiveSession | null;
+  hasSession: boolean;
+  sessionError: string | null;
+  sessionKey: string;
+  onDismissError: () => void;
+  onLoadEarlier: () => void;
+}) {
+  const { t } = useTranslation();
+  if (!active || !hasSession) {
+    return <EmptyState className="text-body-medium">{t("chat.selectSession")}</EmptyState>;
+  }
+  return (
+    <>
+      {sessionError && (
+        <ErrorBanner className="mx-4 mt-3" message={sessionError} onDismiss={onDismissError} />
+      )}
+      <SessionTimeline
+        sessionKey={key}
+        workspacePath={active.workspacePath}
+        onLoadEarlier={onLoadEarlier}
+      />
+    </>
+  );
+}
 
 /** Composer menu slots (add / CLI / permission) plus the all-engines-disabled
  * state, memoized so per-keystroke draft updates don't rebuild the menus. */
@@ -122,6 +161,7 @@ function useConversationMenus({
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+
   // Every CLI is switched off in settings: swap the picker for a placeholder
   // that deep-links to the CLI config page.
   const noEnabledEngines = engines.length > 0 && cliOptions.length === 0;
@@ -232,7 +272,8 @@ export const ChatConversation = memo(function ChatConversation({
   startNewChat: (workspacePath: string) => void;
   composerInputRef: React.RefObject<ComposerInputHandle | null>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const conversationMode = useConversationMode(active);
   const key = active
     ? sessionKey(active.engine, active.sessionId, active.workspacePath)
     : "";
@@ -278,6 +319,7 @@ export const ChatConversation = memo(function ChatConversation({
     pinModels,
     loadEarlier,
     removeQueued,
+    moveQueued,
     sendQueuedNow,
     clearQueue,
   } = useChatStore(
@@ -291,6 +333,7 @@ export const ChatConversation = memo(function ChatConversation({
       pinModels: s.pinModels,
       loadEarlier: s.loadEarlier,
       removeQueued: s.removeQueued,
+      moveQueued: s.moveQueued,
       sendQueuedNow: s.sendQueuedNow,
       clearQueue: s.clearQueue,
     })),
@@ -350,9 +393,12 @@ export const ChatConversation = memo(function ChatConversation({
   );
   // One source of truth for the CLI rows: the builtin picker and a plugin
   // replacement entry must offer exactly the same installed CLIs.
+  // 顺序跟随设置页 CLI 管理栏的拖拽排序(同一份 localStorage);设置页里
+  // 拖动时这里通过 useCliNavOrder 的 change 事件同步更新。
+  const cliNavOrder = useCliNavOrder();
   const cliOptions = useMemo(
-    () => filterEngineOptions(engines, allowedEngines, t),
-    [engines, allowedEngines, t],
+    () => orderEngineOptions(filterEngineOptions(engines, allowedEngines, t), cliNavOrder),
+    [engines, allowedEngines, t, cliNavOrder],
   );
   const { entryProps, tokenPolicy } = useExecutionChoices(active, engines, catalogs, modelsByEngine, channelsByEngine, refreshModels, cliOptions, setActiveEngine);
   const runTokenPolicy = useChatStore((s) => s.bySession[key]?.runTokenPolicy);
@@ -431,34 +477,37 @@ export const ChatConversation = memo(function ChatConversation({
     });
   const modelMenu = !noEnabledEngines && entryProps ? <ModelEntry {...entryProps} fallback={cliMenu} /> : cliMenu;
 
+  if (active && conversationMode.exitBlocked && !conversationMode.mode) {
+    return <EmptyState className="text-body-medium">{t("plugins.conversationMode.recoveryRequired")}</EmptyState>;
+  }
+
+  if (active && conversationMode.mode) {
+    return <ConversationModePane
+      mode={conversationMode.mode}
+      conversationId={conversationMode.conversationId}
+      workspacePath={active.workspacePath}
+      language={i18n.language}
+      onExit={conversationMode.onExit}
+    />;
+  }
+
   return (
     <>
-          {sessionError && (
-            <ErrorBanner
-              className="mx-4 mt-3"
-              message={sessionError}
-              onDismiss={() => dismissSessionError(key)}
-            />
-          )}
-      {active && hasSession ? (
-        <>
-          <SessionTimeline
-            sessionKey={key}
-            workspacePath={active.workspacePath}
-            onLoadEarlier={handleLoadEarlier}
-          />
-        </>
-      ) : (
-        <EmptyState className="text-body-medium">
-          {t("chat.selectSession")}
-        </EmptyState>
-      )}
+      <ConversationBody
+        active={active}
+        hasSession={hasSession}
+        sessionError={sessionError}
+        sessionKey={key}
+        onDismissError={() => dismissSessionError(key)}
+        onLoadEarlier={handleLoadEarlier}
+      />
 
       <ConversationFooter
         active={active}
         workspaces={workspaces}
         queue={queue}
         onRemoveQueued={removeQueued}
+        onMoveQueued={moveQueued}
         onSendQueuedNow={sendQueuedNow}
         onClearQueued={clearQueue}
         imageError={imageError}
@@ -477,7 +526,7 @@ export const ChatConversation = memo(function ChatConversation({
         noEnabledEngines={noEnabledEngines}
         composerInputRef={composerInputRef}
         addMenu={addMenu}
-        cliMenu={modelMenu}
+        cliMenu={<>{modelMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0} onSelect={conversationMode.onSelect} /></>}
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}
@@ -491,6 +540,9 @@ export const ChatConversation = memo(function ChatConversation({
         onBranchSelect={handleBranchSelect}
         startNewChat={startNewChat}
       />
+
+      {/* `/mcp`：当前会话引擎的 MCP 清单（与设置页共享同一份数据）。 */}
+      <McpCommandPanel />
     </>
   );
 });

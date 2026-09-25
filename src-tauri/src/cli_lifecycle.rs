@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tauri::State;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -337,7 +337,10 @@ fn codex_native_argv() -> (&'static str, Vec<&'static str>) {
     } else {
         (
             "bash",
-            vec!["-lc", "curl -fsSL https://chatgpt.com/codex/install.sh | bash"],
+            vec![
+                "-lc",
+                "curl -fsSL https://chatgpt.com/codex/install.sh | bash",
+            ],
         )
     }
 }
@@ -686,8 +689,7 @@ mod tests {
             raws: StdMutex::new(Vec::new()),
         });
         let emitters = crate::event_sink::BroadcastEmit::new(collector.clone());
-        let reporter =
-            ProgressReporter::new(emitters, "run-test".to_string(), "kimi".to_string());
+        let reporter = ProgressReporter::new(emitters, "run-test".to_string(), "kimi".to_string());
         let mut command = Command::new("bash");
         command.args(["-c", "printf 'out1\\nout2\\n'; printf 'err1\\n' >&2"]);
 
@@ -735,7 +737,10 @@ mod tests {
         // claude / codex: a node_modules path means the npm distribution;
         // anything else uses the official standalone installer.
         assert_eq!(
-            update_kind("claude", "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+            update_kind(
+                "claude",
+                "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ),
             Some("npm")
         );
         assert_eq!(update_kind("codex", "/usr/local/bin/codex"), Some("native"));

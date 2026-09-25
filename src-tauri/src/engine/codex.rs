@@ -10,6 +10,76 @@ use serde_json::Value;
 /// `codex exec` answers every question itself.
 pub struct CodexEngine;
 
+/// TOML basic-string literal for a `-c key=<value>` override. codex parses
+/// the value as TOML, so a Windows path's backslashes would otherwise read
+/// as escape sequences.
+fn toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Mount the app's computer-use driver on this one launch. codex discovers
+/// MCP servers from `config.toml`, but `-c key=value` overrides (dotted path,
+/// TOML-parsed value) apply to this process only: no file is written, so a
+/// crash cannot strand our driver inside the user's config and there is
+/// nothing to restore afterwards.
+///
+/// `-c` is a top-level option, so every caller has to add these BEFORE the
+/// subcommand.
+fn apply_computer_use(
+    cmd: &mut tokio::process::Command,
+    req: &SendRequest,
+) -> Result<(), String> {
+    if req.computer_use != Some(true) {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("resolve own exe for computer use: {e}"))?;
+    let name = crate::computer_use::MCP_SERVER_NAME;
+    let mut overrides = vec![
+        format!(
+            "mcp_servers.{name}.command={}",
+            toml_string(&exe.to_string_lossy())
+        ),
+        format!(
+            "mcp_servers.{name}.args=[{}]",
+            toml_string("--computer-use-mcp")
+        ),
+    ];
+    // Overlay control channel: the child reports action targets so the main
+    // app's virtual cursor can follow (absent in tests).
+    if let (Some(base), Some(token)) = (
+        crate::cu_overlay::control_base(),
+        crate::cu_overlay::control_token(),
+    ) {
+        overrides.push(format!(
+            "mcp_servers.{name}.env.CCGUI_CU_CONTROL={}",
+            toml_string(&base)
+        ));
+        overrides.push(format!(
+            "mcp_servers.{name}.env.CCGUI_CU_TOKEN={}",
+            toml_string(&token)
+        ));
+    }
+    for value in overrides {
+        cmd.arg("-c").arg(value);
+    }
+    Ok(())
+}
+
 /// Process-scoped equivalents of the provider keys formerly written into
 /// config.toml/auth.json. Explicit model/effort picks still win.
 pub(super) fn apply_channel(
@@ -185,6 +255,7 @@ impl Engine for CodexEngine {
     /// question tool has to be here.
     fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = super::command_for_request(req, bin);
+        apply_computer_use(&mut cmd, req)?;
         cmd.arg("app-server");
         // Without this the model never asks: it emits a plain agent message
         // (plus a sleep item) instead of a client request.
@@ -198,6 +269,10 @@ impl Engine for CodexEngine {
             }
             cmd.arg("-c");
             cmd.arg(format!("service_tier=\"{tier}\""));
+        }
+        if let Some(effort) = req.effort.as_deref() {
+            cmd.arg("-c");
+            cmd.arg(format!("model_reasoning_effort=\"{effort}\""));
         }
         Ok(BuiltCommand {
             command: cmd,
@@ -215,6 +290,11 @@ impl Engine for CodexEngine {
     fn supports_images(&self) -> bool {
         true // -i/--image FILE
     }
+    /// The driver mounts through `-c mcp_servers.…`, which both the
+    /// app-server and the exec subcommand accept (see apply_computer_use).
+    fn supports_computer_use(&self) -> bool {
+        true
+    }
     fn supports_effort(&self) -> bool {
         true
     }
@@ -223,6 +303,15 @@ impl Engine for CodexEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
+        if super::codex_read_only::requested(req) {
+            return Err("Codex read-only planning requires the local app-server; exec/WSL fallback is forbidden".into());
+        }
+        // This path only serves a remote (WSL) workspace, and the injected
+        // driver is the local app's own binary: the distro cannot run it.
+        // Refuse before spawning instead of mounting a server that dies.
+        if req.computer_use == Some(true) {
+            return Err("操作电脑不支持远程工作区(WSL):注入的是本机驱动".into());
+        }
         let mut cmd = super::command_for_request(req, bin);
         cmd.arg("exec");
         let mut preassigned = None;
@@ -370,9 +459,11 @@ impl Engine for CodexEngine {
                 // other line) stays a non-terminal notice — only turn.failed
                 // ends the turn.
                 match parse_reconnect_notice(&value) {
-                    Some((attempt, max, message)) => {
-                        out.push(EngineEvent::Retry { attempt, max, message })
-                    }
+                    Some((attempt, max, message)) => out.push(EngineEvent::Retry {
+                        attempt,
+                        max,
+                        message,
+                    }),
                     None => out.push(EngineEvent::Warn(error_message(&value))),
                 }
             }
@@ -509,17 +600,22 @@ mod tests {
     }
 
     fn base_req() -> SendRequest {
-        SendRequest { execution: None, selection: None, session_id: None,
-        workspace: std::path::PathBuf::from("/tmp"),
-        prompt: "hi".into(),
-        images: Vec::new(),
-        model: Some("gpt-6-astra".into()),
-        effort: None,
-        service_tier: None,
-        permission: Some("auto".into()),
-        additional_dirs: Vec::new(),
-        provider_id: None,
-        computer_use: None, }
+        SendRequest {
+            session_id: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            prompt: "hi".into(),
+            images: Vec::new(),
+            model: Some("gpt-6-astra".into()),
+            effort: None,
+            service_tier: None,
+            permission: Some("auto".into()),
+            additional_dirs: Vec::new(),
+            provider_id: None,
+            computer_use: None,
+            execution: None,
+            selection: None,
+            allowed_tools: None,
+        }
     }
 
     fn channel_command(provider: &Value, req: &SendRequest) -> tokio::process::Command {
@@ -543,6 +639,83 @@ mod tests {
             }
         }
         result
+    }
+
+    #[test]
+    fn computer_use_mounts_the_local_driver_through_config_overrides() {
+        let mut req = base_req();
+        req.computer_use = Some(true);
+        let built = CodexEngine.host_command(&req, "fake-bin").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        // Each `-c` value is parsed as TOML here, which is also the contract
+        // codex itself enforces: an unparsable override is not a literal.
+        // They are read one by one because every one of them roots at
+        // `mcp_servers` — merging them into a single table would overwrite.
+        let tables: Vec<toml::Table> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| {
+                toml::from_str::<toml::Table>(&pair[1])
+                    .unwrap_or_else(|e| panic!("{}: {e}", pair[1]))
+            })
+            .collect();
+        let mounted = |key: &str| -> Option<&toml::Value> {
+            tables.iter().find_map(|table| {
+                table
+                    .get("mcp_servers")?
+                    .get(crate::computer_use::MCP_SERVER_NAME)?
+                    .get(key)
+            })
+        };
+        let command = mounted("command")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("driver not mounted: {args:?}"));
+        assert!(!command.is_empty());
+        assert_eq!(
+            mounted("args").and_then(toml::Value::as_array),
+            Some(&vec![toml::Value::from("--computer-use-mcp")])
+        );
+        // `-c` is a top-level option: the app-server subcommand has to come
+        // after every override.
+        let subcommand = args
+            .iter()
+            .position(|a| a == "app-server")
+            .unwrap_or_else(|| panic!("{args:?}"));
+        let last_override = args
+            .iter()
+            .rposition(|a| a.starts_with("mcp_servers."))
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert!(last_override < subcommand, "{args:?}");
+        // Off by default: no driver on an ordinary turn.
+        let off = CodexEngine.host_command(&base_req(), "fake-bin").unwrap();
+        assert!(overrides(&off.command).get("mcp_servers").is_none());
+    }
+
+    #[test]
+    fn computer_use_is_refused_on_the_remote_exec_path() {
+        // This path only serves a WSL workspace, and the injected driver is
+        // the local app's own binary: the distro cannot run it. Refusing up
+        // front beats mounting a server that dies on first use.
+        let mut req = base_req();
+        req.computer_use = Some(true);
+        let error = match CodexEngine.build_command(&req, "fake-bin") {
+            Err(error) => error,
+            Ok(_) => panic!("a remote computer-use launch must be refused"),
+        };
+        assert!(error.contains("操作电脑"), "{error}");
+    }
+
+    #[test]
+    fn toml_string_escapes_paths_that_would_read_as_escapes() {
+        // codex parses the value as TOML: a bare quoted Windows path would
+        // turn \t into a tab and \U into an escape.
+        assert_eq!(toml_string(r"C:\tmp\x"), r#""C:\\tmp\\x""#);
+        assert_eq!(toml_string("a\"b"), r#""a\"b""#);
     }
 
     #[test]
@@ -616,7 +789,10 @@ mod tests {
         let command = channel_command(&provider, &base_req());
         let config = overrides(&command);
         assert_eq!(config["model_context_window"].as_integer(), Some(1_000_000));
-        assert_eq!(config["model_auto_compact_token_limit"].as_integer(), Some(900_000));
+        assert_eq!(
+            config["model_auto_compact_token_limit"].as_integer(),
+            Some(900_000)
+        );
     }
 
     #[test]
@@ -646,6 +822,20 @@ mod tests {
         let args = argv(&req);
         assert!(args.iter().any(|a| a == "model_reasoning_effort=\"max\""));
         assert!(!args.iter().any(|a| a.contains("xhigh")));
+    }
+
+    #[test]
+    fn host_command_carries_effort_override() {
+        let mut req = base_req();
+        req.effort = Some("high".into());
+        let built = CodexEngine.host_command(&req, "fake-bin").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.iter().any(|a| a == "model_reasoning_effort=\"high\""));
     }
 
     fn parse(line: &str) -> Vec<EngineEvent> {

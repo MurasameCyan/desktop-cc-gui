@@ -70,9 +70,8 @@ const KILL_POLL: Duration = Duration::from_millis(150);
 /// this long before dispatching the prompt.
 const FOLLOW_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Per-turn view state: live deltas arrive per assistant attempt, and the
 /// durable `assistant/message` settlement must not double-render them.
@@ -135,10 +134,7 @@ pub(crate) async fn run_host_turn(
             view.last_usage.clone()
         };
         let session_id = state.native_session_id.clone();
-        core.dispatch_event(
-            &mut state,
-            EngineEvent::Done { session_id, usage },
-        );
+        core.dispatch_event(&mut state, EngineEvent::Done { session_id, usage });
     }
     core.registry.remove_if_pid(&core.run_id, virtual_pid);
     // Clean up both the native session id (if the engine reported one) and
@@ -200,7 +196,7 @@ async fn turn_inner(
         let (provider, model) = selector.split_once('/').filter(|(p, m)| !p.is_empty() && !m.is_empty())
             .ok_or("DSH requires a provider/model selector")?;
         let mut select_args = json!({ "request": { "sessionId": session_id, "provider": provider, "model": model } });
-        if let Some(effort) = req.effort.as_deref() {
+        if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
             select_args["request"]["effort"] = json!(effort);
             select_args["request"]["reasoningEffort"] = json!(effort);
         }
@@ -244,7 +240,12 @@ async fn turn_inner(
         "content": dsh_images::build_prompt_content(&req.prompt, &prompt_images),
         "clientTimeZone": client_time_zone(),
     });
-    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         prompt_request["effort"] = json!(effort);
         prompt_request["reasoningEffort"] = json!(effort);
     }
@@ -350,7 +351,8 @@ fn handle_session_event(
         "tool/call" => {
             let name = data.get("name").and_then(Value::as_str).unwrap_or("tool");
             if let Some(call_id) = data.get("callId").and_then(Value::as_str) {
-                view.tool_names.insert(call_id.to_string(), name.to_string());
+                view.tool_names
+                    .insert(call_id.to_string(), name.to_string());
             }
             let args = data
                 .get("arguments")
@@ -384,7 +386,10 @@ fn handle_session_event(
                 .any(|block| block.get("isError").and_then(Value::as_bool) == Some(true));
             core.dispatch_event(
                 state,
-                super::tool_result_patch(&name, Some(&json!({ "text": text, "isError": is_error }))),
+                super::tool_result_patch(
+                    &name,
+                    Some(&json!({ "text": text, "isError": is_error })),
+                ),
             );
         }
         "assistant/message" => {
@@ -442,7 +447,10 @@ fn handle_assistant_stream(
                 Some("usage") => {
                     if let Some(usage) = chunk.get("usage") {
                         view.last_usage = Some(attach_context_window(usage.clone()));
-                        core.dispatch_event(state, EngineEvent::Usage(attach_context_window(usage.clone())));
+                        core.dispatch_event(
+                            state,
+                            EngineEvent::Usage(attach_context_window(usage.clone())),
+                        );
                     }
                 }
                 _ => {} // block-start / block-end / tool-call-delta / finish
@@ -492,10 +500,7 @@ async fn handle_events_frame(
             // the same implicit behavior), and codemoss has no approval UI
             // for host sessions yet.
             let (outcome, notice) = if kind == "approval/request" {
-                (
-                    json!({ "kind": "result", "value": "allowed-once" }),
-                    None,
-                )
+                (json!({ "kind": "result", "value": "allowed-once" }), None)
             } else {
                 (
                     json!({
@@ -845,21 +850,29 @@ mod tests {
     async fn streams_a_live_host_turn() {
         let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
         let sink = EventSink::new(emitter.clone());
-        let core = TurnCore { execution: None, sink,
-        registry: Arc::new(ProcessRegistry::default()),
-        engine_id: "dsh".to_string(),
-        run_id: "test-run".to_string(), };
-        let req = SendRequest { execution: None, selection: None, session_id: None,
-        workspace: PathBuf::from("/tmp"),
-        prompt: "用一句话回答：1+1等于几？".to_string(),
-        images: Vec::new(),
-        model: None,
-        effort: None,
-        service_tier: None,
-        permission: None,
-        additional_dirs: Vec::new(),
-        provider_id: None,
-        computer_use: None, };
+        let core = TurnCore {
+            sink,
+            registry: Arc::new(ProcessRegistry::default()),
+            engine_id: "dsh".to_string(),
+            run_id: "test-run".to_string(),
+            execution: None,
+        };
+        let req = SendRequest {
+            session_id: None,
+            workspace: PathBuf::from("/tmp"),
+            prompt: "用一句话回答：1+1等于几？".to_string(),
+            images: Vec::new(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            permission: None,
+            additional_dirs: Vec::new(),
+            provider_id: None,
+            computer_use: None,
+            execution: None,
+            selection: None,
+            allowed_tools: None,
+        };
         run_host_turn(
             core,
             req,
@@ -881,7 +894,11 @@ mod tests {
             let batch = flushed.as_array().cloned().unwrap_or_else(|| vec![flushed]);
             for value in batch {
                 kinds.push((
-                    value.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                    value
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                     value.get("data").cloned().unwrap_or(Value::Null),
                 ));
             }
@@ -891,7 +908,10 @@ mod tests {
             .find(|(kind, _)| kind == "session")
             .map(|(_, data)| data.as_str().unwrap_or("").to_string());
         let session = session.expect("session id must be announced");
-        assert!(session.starts_with("session-"), "unexpected session id {session}");
+        assert!(
+            session.starts_with("session-"),
+            "unexpected session id {session}"
+        );
         let deltas: String = kinds
             .iter()
             .filter(|(kind, _)| kind == "delta")
@@ -918,21 +938,29 @@ mod tests {
             let prompt = prompt.to_string();
             async move {
                 let emitter = Arc::new(CollectingEmitter(StdMutex::new(Vec::new())));
-                let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
-                registry: Arc::new(ProcessRegistry::default()),
-                engine_id: "dsh".to_string(),
-                run_id: "test-run".to_string(), };
-                let req = SendRequest { execution: None, selection: None, session_id,
-                workspace: PathBuf::from("/tmp"),
-                prompt,
-                images: Vec::new(),
-                model: None,
-                effort: None,
-                service_tier: None,
-                permission: None,
-                additional_dirs: Vec::new(),
-                provider_id: None,
-                computer_use: None, };
+                let core = TurnCore {
+                    sink: EventSink::new(emitter.clone()),
+                    registry: Arc::new(ProcessRegistry::default()),
+                    engine_id: "dsh".to_string(),
+                    run_id: "test-run".to_string(),
+                    execution: None,
+                };
+                let req = SendRequest {
+                    session_id,
+                    workspace: PathBuf::from("/tmp"),
+                    prompt,
+                    images: Vec::new(),
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    permission: None,
+                    additional_dirs: Vec::new(),
+                    provider_id: None,
+                    computer_use: None,
+                    execution: None,
+                    selection: None,
+                    allowed_tools: None,
+                };
                 run_host_turn(
                     core,
                     req,
@@ -948,7 +976,10 @@ mod tests {
         };
 
         let (kinds1, session_id) = run(None, "用一句话回答：天空为什么是蓝色的？").await;
-        assert!(!session_id.is_empty(), "turn 1 announced no session: {kinds1:?}");
+        assert!(
+            !session_id.is_empty(),
+            "turn 1 announced no session: {kinds1:?}"
+        );
         assert!(
             !kinds1.iter().any(|(kind, _)| kind == "error"),
             "turn 1 errored: {kinds1:?}"
@@ -961,20 +992,19 @@ mod tests {
             "请用 bash 工具执行命令 echo codemoss-stream-check，然后告诉我输出内容。",
         )
         .await;
-        assert_eq!(session_id2, session_id, "resumed turn changed the session id");
+        assert_eq!(
+            session_id2, session_id,
+            "resumed turn changed the session id"
+        );
         assert!(
-            kinds2
-                .iter()
-                .any(|(kind, data)| kind == "message"
-                    && data.get("role").and_then(Value::as_str) == Some("tool")),
+            kinds2.iter().any(|(kind, data)| kind == "message"
+                && data.get("role").and_then(Value::as_str) == Some("tool")),
             "no tool row streamed: {kinds2:?}"
         );
         assert!(
-            kinds2
-                .iter()
-                .any(|(kind, data)| kind == "message"
-                    && data.get("patch").and_then(Value::as_bool) == Some(true)
-                    && data.get("result").is_some()),
+            kinds2.iter().any(|(kind, data)| kind == "message"
+                && data.get("patch").and_then(Value::as_bool) == Some(true)
+                && data.get("result").is_some()),
             "no tool result patch: {kinds2:?}"
         );
         assert!(kinds2.iter().any(|(kind, _)| kind == "done"), "{kinds2:?}");
@@ -1034,7 +1064,10 @@ mod tests {
         assert_eq!(rendered[0]["multiSelect"], true);
         assert_eq!(rendered[0]["options"][0]["label"], "A");
         // detail folds into the question text (plan-review carries markdown).
-        assert_eq!(rendered[1]["question"], "approve this plan?\n\n# 计划\nstep 1");
+        assert_eq!(
+            rendered[1]["question"],
+            "approve this plan?\n\n# 计划\nstep 1"
+        );
         assert_eq!(rendered[1]["header"], "提问");
         assert_eq!(rendered[1]["multiSelect"], false);
         assert_eq!(rendered[1]["options"], json!([]));
@@ -1054,8 +1087,14 @@ mod tests {
         let answers = json!({ "单选": "A", "多选": ["x", "y"], "自由": "随便写写" });
         let outcome = question_outcome(&request, Some(&answers));
         assert_eq!(outcome["kind"], "result");
-        assert_eq!(outcome["value"]["answers"][0], json!({ "id": "q1", "selected": ["A"] }));
-        assert_eq!(outcome["value"]["answers"][1], json!({ "id": "q2", "selected": ["x", "y"] }));
+        assert_eq!(
+            outcome["value"]["answers"][0],
+            json!({ "id": "q1", "selected": ["A"] })
+        );
+        assert_eq!(
+            outcome["value"]["answers"][1],
+            json!({ "id": "q2", "selected": ["x", "y"] })
+        );
         // Free-form text matching no option label travels as custom.
         assert_eq!(
             outcome["value"]["answers"][2],
@@ -1067,7 +1106,10 @@ mod tests {
         assert_eq!(dismissed["error"]["code"], "cancelled");
         // An unanswered question still echoes its id with an empty selection.
         let partial = question_outcome(&request, Some(&json!({})));
-        assert_eq!(partial["value"]["answers"][0], json!({ "id": "q1", "selected": [] }));
+        assert_eq!(
+            partial["value"]["answers"][0],
+            json!({ "id": "q1", "selected": [] })
+        );
     }
 
     #[tokio::test]
@@ -1089,7 +1131,14 @@ mod tests {
                 ]
             },
         });
-        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        handle_events_frame(
+            &core,
+            &mut state,
+            &mut view,
+            &frame,
+            "http://127.0.0.1:3080",
+        )
+        .await;
         core.sink.flush();
 
         // Card pushed to the UI…
@@ -1104,7 +1153,13 @@ mod tests {
         // …and the answer context parked under the same request id.
         let parked = registry
             .get("test-run")
-            .and_then(|entry| entry.questions.lock().ok().and_then(|q| q.get("evt-1").cloned()))
+            .and_then(|entry| {
+                entry
+                    .questions
+                    .lock()
+                    .ok()
+                    .and_then(|q| q.get("evt-1").cloned())
+            })
             .expect("answer context not parked");
         assert_eq!(parked["dsh"]["origin"], "http://127.0.0.1:3080");
         assert_eq!(parked["dsh"]["clientId"], "client-1");
@@ -1123,11 +1178,21 @@ mod tests {
             "eventId": "evt-2",
             "request": { "questions": [{ "id": "q1", "question": "x" }] },
         });
-        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        handle_events_frame(
+            &core,
+            &mut state,
+            &mut view,
+            &frame,
+            "http://127.0.0.1:3080",
+        )
+        .await;
         core.sink.flush();
         let kinds = collect_kinds(&emitter.0.lock().unwrap());
         assert!(kinds.iter().any(|(kind, _)| kind == "warn"), "{kinds:?}");
-        assert!(!kinds.iter().any(|(kind, _)| kind == "question"), "{kinds:?}");
+        assert!(
+            !kinds.iter().any(|(kind, _)| kind == "question"),
+            "{kinds:?}"
+        );
         let empty = registry
             .get("test-run")
             .map(|entry| entry.questions.lock().map(|q| q.is_empty()).unwrap_or(true));
@@ -1148,7 +1213,14 @@ mod tests {
             "eventId": "evt-3",
             "request": { "questions": [{ "id": "q1", "question": "x", "options": [{ "label": "A" }] }] },
         });
-        handle_events_frame(&core, &mut state, &mut view, &frame, "http://127.0.0.1:3080").await;
+        handle_events_frame(
+            &core,
+            &mut state,
+            &mut view,
+            &frame,
+            "http://127.0.0.1:3080",
+        )
+        .await;
         handle_events_frame(
             &core,
             &mut state,
@@ -1175,7 +1247,11 @@ mod tests {
             let batch = flushed.as_array().cloned().unwrap_or_else(|| vec![flushed]);
             for value in batch {
                 kinds.push((
-                    value.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                    value
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                     value.get("data").cloned().unwrap_or(Value::Null),
                 ));
             }

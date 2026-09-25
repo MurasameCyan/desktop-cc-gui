@@ -68,6 +68,16 @@ impl ProcessRegistry {
         self.0.lock().ok().and_then(|map| map.get(key).cloned())
     }
 
+    /// Number of in-flight runs, ignoring the run-id/session-id alias
+    /// duplication. The macOS quit guard asks this before letting Cmd+Q /
+    /// AppleScript `quit` take the app down mid-turn.
+    pub fn active_run_count(&self) -> usize {
+        match self.0.lock() {
+            Ok(map) => active_run_count(&map),
+            Err(poisoned) => active_run_count(&poisoned.into_inner()),
+        }
+    }
+
     /// Write one NDJSON control line to a live run's interactive stdin.
     /// Err when the run is unknown, its stdin is already closed, or the
     /// pipe refuses the write — a swallowed failure would leave the CLI
@@ -220,7 +230,11 @@ impl ProcessRegistry {
     /// already reaped — nothing left to signal. Virtual runs (no child) only
     /// raise the killed flag: the transport task observes it on its next
     /// loop tick, cancels the host-side turn, and settles the turn itself.
-    fn kill_entry(child: Option<&Arc<TokioMutex<tokio::process::Child>>>, pid: u32, killed: &Arc<std::sync::atomic::AtomicBool>) -> bool {
+    fn kill_entry(
+        child: Option<&Arc<TokioMutex<tokio::process::Child>>>,
+        pid: u32,
+        killed: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
         killed.store(true, std::sync::atomic::Ordering::SeqCst);
         let Some(child) = child else {
             return true;
@@ -489,7 +503,11 @@ mod registry_tests {
     #[tokio::test]
     async fn preassigned_session_alias_routes_stop_before_session_event() {
         let child = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
-            .args(if cfg!(windows) { ["/c", "ping -n 30 127.0.0.1"] } else { ["-c", "sleep 30"] })
+            .args(if cfg!(windows) {
+                ["/c", "ping -n 30 127.0.0.1"]
+            } else {
+                ["-c", "sleep 30"]
+            })
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

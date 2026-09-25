@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { installHardening, runAsPlugin } from "./hardening";
+import { describe, expect, it, vi } from "vitest";
+import { installHardening, resetHardeningForTests, runAsPlugin } from "./hardening";
 import * as hardening from "./hardening";
 
 describe("hardening", () => {
@@ -43,5 +43,28 @@ describe("hardening", () => {
       }),
     ).toThrow("plugin bug");
     await window.__TAURI_INTERNALS__!.invoke!("after_crash");
+  });
+
+  it("does not throw when Tauri marks invoke non-writable", async () => {
+    resetHardeningForTests();
+    const calls: string[] = [];
+    const invoke = async (cmd: string) => {
+      calls.push(cmd);
+      return null;
+    };
+    const internals = {};
+    // Same descriptor Tauri 2.11 uses: defineProperty defaults to
+    // writable:false, configurable:false. Assignment must not abort bootstrap.
+    Object.defineProperty(internals, "invoke", { value: invoke });
+    window.__TAURI_INTERNALS__ = internals as typeof window.__TAURI_INTERNALS__;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => installHardening()).not.toThrow();
+      await window.__TAURI_INTERNALS__!.invoke!("still_works");
+      expect(calls).toEqual(["still_works"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

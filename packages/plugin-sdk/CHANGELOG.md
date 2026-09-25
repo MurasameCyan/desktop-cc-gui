@@ -1,13 +1,37 @@
 # @ccgui/plugin-sdk changelog
 
-## 0.3.14 — 2026-09-23
+## 0.3.16 — 2026-09-25
 - **模型入口 CLI 切换**：`ModelEntryProps` 新增 `engines: EngineChoice[]` 与
   `onSelectEngine(engineId)`。列表与宿主原入口同源；回调真正更换未开始会话的
   执行目标，不是筛选模型。首轮请求准备中、运行中、已有会话以及过期上下文均拒绝切换。
-- 新版统一供应商插件声明 SDK `0.3.14`，旧宿主会在加载前被版本握手拦截，
+- 新版统一供应商插件声明 SDK `0.3.16`，旧宿主会在加载前被版本握手拦截，
   不会因缺少上述参数而在渲染时崩溃。
 - `@ccgui/plugin-ui` 新增 `EffortSlider`：受控档位拉条，原生键盘/拖拽操作，
   使用宿主主题 token；统一供应商入口显示的草稿档位与实际提交值保持一致。
+
+## 0.3.15 — 2026-09-23
+- **payload 增强**：引擎事件 wire payload 新增 `genMs`（宿主实测生成窗口毫秒数）——只出现在 `usage` / `done` 事件上，计量该报告对应的模型
+  真实生成时间：从响应流打开（引擎 message_start，或首个文本/思考 delta）
+  到流关闭，工具执行、用户等待与轮间隔全部排除。插件用它算 tok/s
+  （output token ÷ 生成窗口）即得不含工具等待的生成速度；字段缺失时
+  回退旧的相邻报告 `ts` 间隔。首个消费者：token-meter 插件。
+
+## 0.3.14 — 2026-09-23
+- `ui:conversation-mode` / `ctx.ui.registerConversationMode({ key?, label, component })`
+  注册当前会话内的替代界面。`PluginConversationProps` 提供稳定的 `conversationId`、
+  `workspacePath`、`language` 与 `onExit`；普通会话发送中或队列非空时不可进入。
+- `PluginConversationProps.setExitBlocked?(blocked)` 供插件在 layout effect 中报告
+  忙碌/恢复状态；锁定时宿主禁用退出按钮且拒绝 `onExit()`。锁按会话挂载隔离，
+  切换会话后旧回调不能退出新界面；空闲状态下仍可从崩溃边界返回普通对话。
+- `ctx.agent.catalog(workspacePath)`（`agent` 权限）只返回引擎可用性、只读能力、
+  渠道与模型的 ID/显示名，不返回配置、认证或环境变量。模型探测不可用时为 `[]`，
+  引擎与配置读取失败仍会 reject。禁用的引擎不出现在列表中。
+- `ctx.agent.start` 新增可选 `readOnly`；只读能力以 native 实现为准，目前仅 Pi
+  支持隔离只读调用；Codex 不宣称支持。未提供时保留既有行为。
+- `start({ requestId? })` 接受 32 位十六进制请求标识，native 生成
+  `pa-{pluginId}-{requestId}`；插件可在启动前持久化预期 run id 来恢复早到事件。
+  `interrupt(runId): Promise<boolean>` 保留 native 返回值：`true` 为已路由中断
+  （仍需等待终态事件），`false` 为没有匹配的活动 run。
 
 ## 0.3.13 — 2026-09-21
 - **新增能力 `agent`**：`ctx.agent.start/interrupt` 让插件经宿主引擎管线

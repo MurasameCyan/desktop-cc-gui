@@ -10,8 +10,10 @@
 //!   busy→idle settles the turn, `session.error` fails it.
 //! - The built-in `question` tool parks server-side: `question.asked` →
 //!   answer card → `POST /question/:requestID/reply {answers: string[][]}`
-//!   (or `/reject`). `permission.asked` auto-allows once — the old headless
-//!   run never prompted, same net behavior.
+//!   (or `/reject`). `permission.asked` is auto-answered: "once" per
+//!   ask, or "always" under bypass (approve matching asks for the rest
+//!   of the session) — either way the old headless run never prompted,
+//!   same net outcome; config denies never reach us.
 //! - Interrupt sends `POST /session/:id/abort`.
 
 use std::collections::HashMap;
@@ -80,14 +82,7 @@ async fn run_server_turn_with_probe_port(
     let mut view = TurnView::default();
     let preassigned_session_id = req.session_id.clone();
     let result = turn_inner(
-        &core,
-        &mut state,
-        &mut view,
-        &req,
-        &bin,
-        &server,
-        &killed,
-        probe_port,
+        &core, &mut state, &mut view, &req, &bin, &server, &killed, probe_port,
     )
     .await;
     // Pending questions die with the turn: settle their cards BEFORE any
@@ -178,11 +173,15 @@ async fn turn_inner(
 
     let mut kill_poll = tokio::time::interval(KILL_POLL);
     kill_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Wire value for answering permission asks this turn: bypass remembers
+    // approvals session-wide ("always"), every other mode approves each ask
+    // individually ("once").
+    let permission_reply = permission_reply(req.permission.as_deref());
     loop {
         tokio::select! {
             frame = events.recv() => match frame {
                 Some(value) => {
-                    handle_server_event(core, state, view, &value, &origin, &directory).await;
+                    handle_server_event(core, state, view, &value, &origin, &directory, permission_reply).await;
                     if view.turn_ended {
                         return Ok(());
                     }
@@ -286,7 +285,12 @@ async fn prompt(
     if req.permission.as_deref() == Some("plan") {
         body["agent"] = json!("plan");
     }
-    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         body["variant"] = json!(effort);
     }
     let response = reqwest::Client::new()
@@ -337,7 +341,9 @@ fn spawn_event_stream(
                 let frame = buffer[..at].to_string();
                 buffer.drain(..at + 2);
                 for line in frame.lines() {
-                    let Some(data) = line.strip_prefix("data:") else { continue };
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
                     let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
                         continue;
                     };
@@ -358,6 +364,18 @@ fn spawn_event_stream(
     (rx, ready_rx)
 }
 
+/// Reply sent to `permission.asked`: bypass pre-approves matching asks for
+/// the rest of the session ("always"), every other mode approves each ask
+/// individually ("once"). Explicit `deny` rules never produce an ask, so
+/// they hold under either reply.
+fn permission_reply(permission: Option<&str>) -> &'static str {
+    if permission == Some("bypass") {
+        "always"
+    } else {
+        "once"
+    }
+}
+
 /// One server event for this session, projected to engine events.
 async fn handle_server_event(
     core: &TurnCore,
@@ -366,6 +384,7 @@ async fn handle_server_event(
     value: &Value,
     origin: &str,
     directory: &str,
+    permission_reply: &str,
 ) {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     let properties = value.get("properties").cloned().unwrap_or(Value::Null);
@@ -374,12 +393,14 @@ async fn handle_server_event(
             let part = properties.get("part").cloned().unwrap_or(Value::Null);
             let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
             let key = (
-                part
-                    .get("messageID")
+                part.get("messageID")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                part.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+                part.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             );
             view.part_types.insert(key, part_type.to_string());
             if part_type == "tool" {
@@ -490,13 +511,14 @@ async fn handle_server_event(
         "permission.asked" => {
             // The attached client has no approval UI; the old one-shot run
             // ran under the CLI's own config (allow by default). Auto-allow
-            // once to preserve that behavior instead of parking the turn.
+            // instead of parking the turn: "always" under bypass (the
+            // server remembers it for the session), "once" otherwise.
             if let Some(request_id) = properties.get("id").and_then(Value::as_str) {
                 let _ = opencode_server::post(
                     origin,
                     &format!("/permission/{request_id}/reply"),
                     directory,
-                    Some(json!({ "reply": "once" })),
+                    Some(json!({ "reply": permission_reply })),
                 )
                 .await;
             }
@@ -508,10 +530,7 @@ async fn handle_server_event(
 /// One tool part's state transition: "running" opens the row,
 /// completed/error patches its result (the pi row convention).
 fn handle_tool_part(core: &TurnCore, state: &mut TurnState, part: &Value) {
-    let name = part
-        .get("tool")
-        .and_then(Value::as_str)
-        .unwrap_or("tool");
+    let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
     let tool_state = part.get("state").cloned().unwrap_or(Value::Null);
     let status = tool_state
         .get("status")
@@ -854,17 +873,22 @@ mod tests {
                 questions: Arc::new(StdMutex::new(HashMap::new())),
             },
         );
-        let req = SendRequest { execution: None, selection: None, session_id: None,
-        workspace: std::path::PathBuf::from("/tmp"),
-        prompt: "测试提问".to_string(),
-        images: Vec::new(),
-        model: None,
-        effort: None,
-        service_tier: None,
-        permission: None,
-        additional_dirs: Vec::new(),
-        provider_id: None,
-        computer_use: None, };
+        let req = SendRequest {
+            session_id: None,
+            workspace: std::path::PathBuf::from("/tmp"),
+            prompt: "测试提问".to_string(),
+            images: Vec::new(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            permission: None,
+            additional_dirs: Vec::new(),
+            provider_id: None,
+            computer_use: None,
+            execution: None,
+            selection: None,
+            allowed_tools: None,
+        };
         let turn = tokio::spawn(run_server_turn_with_probe_port(
             core,
             req,
@@ -879,15 +903,13 @@ mod tests {
         let mut parked = None;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            parked = registry
-                .get("oc-test-run")
-                .and_then(|entry| {
-                    entry
-                        .questions
-                        .lock()
-                        .ok()
-                        .and_then(|q| q.get("que_mock").cloned())
-                });
+            parked = registry.get("oc-test-run").and_then(|entry| {
+                entry
+                    .questions
+                    .lock()
+                    .ok()
+                    .and_then(|q| q.get("que_mock").cloned())
+            });
             if parked.is_some() {
                 break;
             }
@@ -915,14 +937,20 @@ mod tests {
             let flushed: Value = serde_json::from_str(raw).expect("flushed batch must be JSON");
             for value in flushed.as_array().cloned().unwrap_or_else(|| vec![flushed]) {
                 kinds.push((
-                    value.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+                    value
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
                     value.get("data").cloned().unwrap_or(Value::Null),
                 ));
             }
         }
         // Session announced, deltas streamed, question parked, done settled.
         assert!(
-            kinds.iter().any(|(k, d)| k == "session" && d == "ses_mock1"),
+            kinds
+                .iter()
+                .any(|(k, d)| k == "session" && d == "ses_mock1"),
             "{kinds:?}"
         );
         let deltas: String = kinds
@@ -937,19 +965,29 @@ mod tests {
             .map(|(_, d)| d.clone())
             .expect("no question event");
         assert_eq!(question["requestId"], "que_mock");
-        assert_eq!(question["input"]["questions"][0]["options"][1]["label"], "prod");
+        assert_eq!(
+            question["input"]["questions"][0]["options"][1]["label"],
+            "prod"
+        );
         assert!(kinds.iter().any(|(k, _)| k == "done"), "{kinds:?}");
         assert!(!kinds.iter().any(|(k, _)| k == "error"), "{kinds:?}");
 
         // The answered card must be out of the parked map (answer path removes
         // it before the turn-end drain ever sees it — same contract as the
         // answer_question command).
-        let still_parked = registry
-            .get("oc-test-run")
-            .and_then(|entry| entry.questions.lock().ok().and_then(|q| q.get("que_mock").cloned()));
+        let still_parked = registry.get("oc-test-run").and_then(|entry| {
+            entry
+                .questions
+                .lock()
+                .ok()
+                .and_then(|q| q.get("que_mock").cloned())
+        });
         // The reply was posted directly (mirroring answer_question), which
         // does not remove the parked copy; the drain settles it afterwards.
-        assert!(still_parked.is_none(), "drain must settle the parked question");
+        assert!(
+            still_parked.is_none(),
+            "drain must settle the parked question"
+        );
         // The mock saw the reply body the driver's mapping produced.
         let reply_body = reply_seen.try_recv().expect("mock saw no reply POST");
         let reply_json: Value = serde_json::from_str(&reply_body).expect("reply body json");
@@ -969,5 +1007,16 @@ mod tests {
             Some("plain".to_string())
         );
         assert_eq!(extract_error_message(&json!({})), None);
+    }
+
+    #[test]
+    fn bypass_answers_permission_asks_always() {
+        assert_eq!(permission_reply(Some("bypass")), "always");
+        // Every other mode (and unresolved/unknown values) approves each
+        // ask individually; the engine trait already falls back to "auto".
+        assert_eq!(permission_reply(Some("auto")), "once");
+        assert_eq!(permission_reply(Some("plan")), "once");
+        assert_eq!(permission_reply(Some("manual")), "once");
+        assert_eq!(permission_reply(None), "once");
     }
 }

@@ -1,4 +1,4 @@
-import { isValidElement, memo, useLayoutEffect, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { isValidElement, memo, useMemo, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -11,9 +11,8 @@ import {
   prepareMathText,
   restoreMathDollars,
 } from "./math-delimiters";
-import { useReducedMotion } from "motion/react";
-import { StreamReveal } from "./stream-reveal";
 import { RevealText } from "./reveal-text";
+import { useLiveReveal } from "./use-live-reveal";
 import { createRevealPlan } from "./reveal-plan";
 import { createCachedHighlighter } from "./cached-highlight";
 import { openExternal } from "@/lib/platform";
@@ -175,22 +174,10 @@ export default memo(function Markdown({
   // not end remark-math's span early; the prepared text feeds both the plan
   // and the renderer so reveal offsets stay aligned with the DOM.
   const mathText = useMemo(() => prepareMathText(text), [text]);
+  const plan = useMemo(createRevealPlan, [mathText, contributions]);
   // Show already-received text on mount (including virtualizer remounts);
   // smooth only subsequent arrivals, never replay a paragraph from empty.
-  const controller = useMemo(() => new StreamReveal(false), []);
-  const plan = useMemo(createRevealPlan, [mathText, contributions]);
-  const reducedMotion = useReducedMotion();
-  useLayoutEffect(() => {
-    controller.update(plan.text, streaming && !reducedMotion && !document.hidden);
-  }, [controller, plan, streaming, reducedMotion]);
-  useLayoutEffect(() => {
-    const onVisibility = () => { if (document.hidden) controller.finish(); };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      controller.cancel();
-    };
-  }, [controller]);
+  const controller = useLiveReveal(plan, streaming);
   // Stable components map: a new reference makes ReactMarkdown discard its
   // HAST tree and re-parse the whole document.
   const hostComponents = useMemo<Components>(

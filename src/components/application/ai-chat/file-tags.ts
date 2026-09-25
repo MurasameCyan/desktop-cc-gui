@@ -1,5 +1,6 @@
 import DOMPurify from "dompurify";
 import { getFileTreeIconSvg } from "@/features/files/fileIcons";
+import i18n from "@/lib/i18n";
 /** An active `@` autocomplete trigger at the caret: `start` is the offset
  * of the `@` itself, `query` is the text typed after it. */
 export interface MentionTrigger {
@@ -43,6 +44,15 @@ export function findMentionTrigger(text: string, caret: number): MentionTrigger 
  */
 
 export const FILE_TAG_CLASS = "composer-file-tag";
+
+/**
+ * Set on the editable while `insertTextAtCaret` is applying an editing
+ * command. The command fires `input` synchronously; the composer must ignore
+ * that event, or `renderFileTags` will replace innerHTML mid-command (which
+ * clears the undo step just opened, and can make the command fail so the DOM
+ * fallback inserts the text a second time).
+ */
+export const COMPOSER_INSERTING_ATTR = "data-composer-inserting";
 
 /** Absolute-path mention: `@/plain/path` or `@"quoted/path with spaces"`. */
 const MENTION_RE = /@(?:"(\/[^"]+)"|(\/[^\s@]+))/g;
@@ -224,7 +234,7 @@ function chipHtml(path: string): string {
     `<span class="${FILE_TAG_CLASS}" contenteditable="false" data-file-path="${escapedPath}" data-mention="${escapedMention}" title="${escapedPath}">` +
     `<span class="${FILE_TAG_CLASS}-icon">${icon}</span>` +
     `<span class="${FILE_TAG_CLASS}-text">${escapeHtmlText(name)}</span>` +
-    `<span class="${FILE_TAG_CLASS}-close" role="button" aria-label="remove">&times;</span>` +
+    `<span class="${FILE_TAG_CLASS}-close" role="button" aria-label="${escapeHtmlText(i18n.t("chat.removeTag", { name }))}">&times;</span>` +
     `</span>`
   );
 }
@@ -287,11 +297,63 @@ export function renderFileTags(el: HTMLElement): void {
 }
 
 /**
+ * Put the caret where an editing command will insert: the current caret when
+ * it already sits inside `el`, otherwise the end. Focus first when needed —
+ * execCommand no-ops on an unfocused editing host — then re-pin the caret,
+ * because focusing an element whose selection was outside can park it at 0.
+ */
+function ensureCaretIn(el: HTMLElement) {
+  const selection = window.getSelection();
+  const alreadyInside =
+    !!selection &&
+    selection.rangeCount > 0 &&
+    el.contains(selection.getRangeAt(0).startContainer);
+  if (document.activeElement !== el) el.focus({ preventScroll: true });
+  if (alreadyInside) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+}
+
+/**
+ * Plain text as HTML the editing host can insert without parsing markup:
+ * escaped text, newlines as <br> (same shape as htmlFromText). CRLF collapses
+ * to one break so a Windows clipboard paste doesn't keep a stray `\r`.
+ */
+function textToInsertHtml(text: string): string {
+  return escapeHtmlText(text).replace(/\r\n|\r|\n/g, "<br>");
+}
+
+/**
  * Insert plain text at the caret (or at the end when the caret is outside
- * the editable), converting newlines to <br>. Fires no input event — the
- * caller emits the change.
+ * the editable), converting newlines to <br>.
+ *
+ * Goes through insertHTML so the insert is its own undo step. Two failure
+ * modes if it doesn't: a raw Range mutation never enters the undo stack, so
+ * Ctrl+Z restores the pre-typing snapshot and takes the paste with it; and
+ * insertText is swallowed by the still-open typing command, so the same
+ * Ctrl+Z drops everything typed before the paste as well. insertHTML is not
+ * a typing command, so it closes that group and undoes as one paste.
+ * The command fires an input event; the caller still emits the change for
+ * engines that don't. Falls back to a DOM insert where execCommand is
+ * unavailable (jsdom).
  */
 export function insertTextAtCaret(el: HTMLElement, text: string) {
+  ensureCaretIn(el);
+  el.setAttribute(COMPOSER_INSERTING_ATTR, "");
+  let inserted = false;
+  try {
+    inserted = document.execCommand("insertHTML", false, textToInsertHtml(text));
+  } catch {
+    // Unsupported or rejected — fall through to the DOM insert.
+    inserted = false;
+  } finally {
+    el.removeAttribute(COMPOSER_INSERTING_ATTR);
+  }
+  if (inserted) return;
   const selection = window.getSelection();
   let range: Range;
   if (selection && selection.rangeCount > 0 && el.contains(selection.getRangeAt(0).startContainer)) {

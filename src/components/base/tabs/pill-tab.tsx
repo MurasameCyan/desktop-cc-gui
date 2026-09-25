@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentType, HTMLAttributes, ReactNode, Ref } from "react";
+import { useSettingsAnchorFlash } from "@/components/application/settings/settings-rows";
 import { cx, sortCx } from "@/utils/cx";
 
 const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
@@ -20,6 +21,9 @@ const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffec
  *   idle      label text/secondary, icon foreground/icon/secondary,
  *             background/primary/hover on hover (both styles)
  *   icon      optional 16px leading glyph
+ *   icon-only label omitted (`children` undefined): just the glyph, labelled
+ *             by `title` — used by plugin panel tabs, where the strip is too
+ *             tight for plugin-supplied labels
  *
  * `PillTabList` owns the animated selection background so it can slide
  * between pills with a subtle spring-like settle. `PillTab` remains a plain
@@ -159,6 +163,8 @@ export function PillTab({
   icon: Icon,
   isSelected,
   onSelect,
+  title,
+  anchor,
   children,
   className,
 }: {
@@ -166,13 +172,24 @@ export function PillTab({
   icon?: IconComponent;
   isSelected: boolean;
   onSelect: () => void;
-  children: ReactNode;
+  /** Accessible name + hover hint for the icon-only form (`aria-label` +
+   *  `title`); omitted when the label is visible. */
+  title?: string;
+  /** Settings-search anchor: a pill that *is* the setting (a settings page
+   *  tab) can be found and revealed by search. */
+  anchor?: string;
+  /** Visible label; omit for an icon-only pill. */
+  children?: ReactNode;
   className?: string;
 }) {
+  const flashing = useSettingsAnchorFlash(anchor);
   return (
     <button
       type="button"
+      data-setting-anchor={anchor}
       aria-pressed={isSelected}
+      aria-label={title}
+      title={title}
       data-pill-selected={isSelected ? "" : undefined}
       data-pill-variant={variant}
       onClick={onSelect}
@@ -181,6 +198,7 @@ export function PillTab({
         styles.radius[variant],
         "outline-none transition-colors duration-150 ease",
         "focus-visible:ring-2 focus-visible:ring-border-focus-ring",
+        flashing && "ring-2 ring-inset ring-border-focus-ring",
         className,
       )}
     >
@@ -203,14 +221,16 @@ export function PillTab({
           aria-hidden
         />
       )}
-      <span
-        className={cx(
-          "relative z-10 text-body-2-medium whitespace-nowrap",
-          isSelected ? styles.selectedLabel[variant] : "text-text-secondary",
-        )}
-      >
-        {children}
-      </span>
+      {children != null && (
+        <span
+          className={cx(
+            "relative z-10 text-body-2-medium whitespace-nowrap",
+            isSelected ? styles.selectedLabel[variant] : "text-text-secondary",
+          )}
+        >
+          {children}
+        </span>
+      )}
     </button>
   );
 }

@@ -289,6 +289,7 @@ perf(chat): reveal streamed text per frame without reparsing markdown
 ### 想深入了解项目内部？
 
 - [插件开发指南](docs/plugin-development-guide.zh-CN.md) — SDK、manifest、权限模型与信任边界。
+- [界面与交互规范](docs/ui-ux-spec.zh-CN.md) — 设计 token、状态与动作反馈、刷新入口清单。
 - [docs/omp-fast-mode.md](docs/omp-fast-mode.md) — Codex Fast / OMP 快速模式说明。
 
 ---

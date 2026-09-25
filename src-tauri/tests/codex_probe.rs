@@ -44,11 +44,8 @@ impl Emit for Capture {
 }
 
 fn temp_home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ccgui-codex-probe-{}-{}",
-        tag,
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("ccgui-codex-probe-{}-{}", tag, std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -71,11 +68,7 @@ fn write_fake_codex(home: &std::path::Path) {
     let bin_dir = home.join("appdata").join("npm");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let cmd = bin_dir.join("codex.cmd");
-    std::fs::write(
-        &cmd,
-        "@echo off\r\nnode \"%~dp0fake-codex.js\" %*\r\n",
-    )
-    .unwrap();
+    std::fs::write(&cmd, "@echo off\r\nnode \"%~dp0fake-codex.js\" %*\r\n").unwrap();
     let js = bin_dir.join("fake-codex.js");
     // Scenario via env: the test process sets it per run. The script reads
     // all of stdin (prompt), then writes the NDJSON events. In the "long"
@@ -149,6 +142,10 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
             Arc::clone(&emitter),
             ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
         ),
+        mission_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters,
@@ -158,11 +155,16 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
         opencode_server: std::sync::Arc::new(
             ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
         ),
+        worktree_creations: ccgui_next_lib::git_worktree::CreationRegistry::default(),
     };
     (state, capture)
 }
 
-async fn send_codex_and_wait(state: &AppState, events: &Arc<Capture>, deadline_ms: u64) -> Vec<Value> {
+async fn send_codex_and_wait(
+    state: &AppState,
+    events: &Arc<Capture>,
+    deadline_ms: u64,
+) -> Vec<Value> {
     let workspace = std::env::temp_dir().join(format!("ccgui-codex-ws-{}", std::process::id()));
     std::fs::create_dir_all(&workspace).unwrap();
     let result = engine::send_message_inner(
@@ -202,7 +204,9 @@ async fn send_codex_and_wait(state: &AppState, events: &Arc<Capture>, deadline_m
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let collected = events.0.lock().unwrap().clone();
-    assert!(collected.iter().all(|event| event["runId"] == "run-client-probe"));
+    assert!(collected
+        .iter()
+        .all(|event| event["runId"] == "run-client-probe"));
     collected
 }
 
@@ -210,7 +214,11 @@ fn collected_text(events: &[Value]) -> String {
     events
         .iter()
         .filter(|e| e.get("kind").and_then(Value::as_str) == Some("message"))
-        .filter_map(|e| e.get("data").and_then(|d| d.get("text")).and_then(Value::as_str))
+        .filter_map(|e| {
+            e.get("data")
+                .and_then(|d| d.get("text"))
+                .and_then(Value::as_str)
+        })
         .collect()
 }
 

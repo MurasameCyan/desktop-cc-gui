@@ -23,6 +23,8 @@ const POPOVER_CLASSES = menuPopoverSurface({ width: "w-[266px]", origin: "origin
 
 export interface BranchMenuItem {
   name: string;
+  /** Remote-tracking branch (`origin/x`); rendered with the remote badge. */
+  isRemote?: boolean;
 }
 
 /** Status-bar trigger + branch popover. `repoName` labels the repository the
@@ -34,7 +36,7 @@ export function BranchMenu({
   repoName,
   onSelect,
 }: {
-  /** Local branches; empty until the first load. */
+  /** Local and remote-tracking branches; empty until the first load. */
   branches: BranchMenuItem[];
   currentName?: string;
   /** Repository display name; renders as a prefix when set. */
@@ -122,6 +124,11 @@ export function BranchMenu({
                   <span className="truncate text-body-medium whitespace-nowrap text-text-primary">
                     {branch.name}
                   </span>
+                  {branch.isRemote && (
+                    <span className="ml-auto shrink-0 rounded-md bg-background-secondary-default px-1.5 py-0.5 text-caption-1-regular text-text-tertiary">
+                      {t("git.remoteBranch")}
+                    </span>
+                  )}
                   {branch.name === currentName && (
                     <Check
                       className="ml-auto size-4 shrink-0 text-foreground-icon-secondary"

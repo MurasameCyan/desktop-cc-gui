@@ -53,8 +53,15 @@ declare global {
 let installed = false;
 let reportedUnwrappable = false;
 
+/** Test-only: the guard is process-global, so a case that needs a fresh
+ *  install has to clear the flag explicitly. */
+export function resetHardeningForTests(): void {
+  installed = false;
+}
+
 /** Wrap the Tauri IPC entry point with the plugin-execution guard. Idempotent;
- *  no-op outside the desktop webview (web bridge has no __TAURI_INTERNALS__). */
+ *  no-op outside the desktop webview (web bridge has no __TAURI_INTERNALS__).
+ *  Failure to wrap is not fatal: bootstrap must still load plugins. */
 export function installHardening(): void {
   if (installed) return;
   const internals = window.__TAURI_INTERNALS__;
@@ -73,14 +80,35 @@ export function installHardening(): void {
     authorizedInvokeDepth = null;
     return original(cmd, args);
   };
-  try {
-    internals.invoke = wrapped;
-    installed = true;
-  } catch {
-    // WebView2 may expose a non-writable invoke. Backend gates still apply;
-    // this best-effort same-origin guard must not break plugin bootstrap.
+  // Tauri 2.11 defines `invoke` with Object.defineProperty and leaves it
+  // non-writable and non-configurable. A bare assignment throws in strict
+  // mode ("Cannot assign to read only property 'invoke'") and used to abort
+  // plugin bootstrap before plugin_list ran. When the property can't be
+  // replaced the guard stays off — plugins still load.
+  const descriptor = Object.getOwnPropertyDescriptor(internals, "invoke");
+  const warnInactive = (error?: unknown) => {
+    // Backend gates still apply; this best-effort same-origin guard must not
+    // break plugin bootstrap. Warn once per process.
     if (reportedUnwrappable) return;
     reportedUnwrappable = true;
-    console.warn("[plugins] direct-IPC guard unavailable: invoke is not writable");
+    console.warn(
+      "[plugins] could not wrap __TAURI_INTERNALS__.invoke; plugin IPC guard is inactive",
+      error,
+    );
+  };
+  try {
+    if (descriptor?.configurable) {
+      Object.defineProperty(internals, "invoke", { ...descriptor, value: wrapped });
+      installed = true;
+    } else if (descriptor?.writable !== false) {
+      internals.invoke = wrapped;
+      installed = true;
+    } else {
+      // Non-writable and non-configurable: the Tauri 2.11 descriptor.
+      // Replacing it is impossible; do not throw out of bootstrap.
+      warnInactive(new TypeError("invoke is read-only"));
+    }
+  } catch (error) {
+    warnInactive(error);
   }
 }

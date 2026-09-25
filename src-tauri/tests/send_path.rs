@@ -62,6 +62,10 @@ fn build_app(
             Arc::new(app.handle().clone()),
             ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
         ),
+        mission_sink: EventSink::with_name(
+            Arc::new(app.handle().clone()),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters,
@@ -71,6 +75,7 @@ fn build_app(
         opencode_server: std::sync::Arc::new(
             ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
         ),
+        worktree_creations: ccgui_next_lib::git_worktree::CreationRegistry::default(),
     };
     app.manage(state);
     app.manage(ConfigStore::default());
@@ -311,6 +316,10 @@ fn ipc_send_message_accepts_camel_case_args() {
             Arc::new(app.handle().clone()),
             ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
         ),
+        mission_sink: EventSink::with_name(
+            Arc::new(app.handle().clone()),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
         emitters,
@@ -320,6 +329,7 @@ fn ipc_send_message_accepts_camel_case_args() {
         opencode_server: std::sync::Arc::new(
             ccgui_next_lib::engine::opencode_server::OpencodeServerState::default(),
         ),
+        worktree_creations: ccgui_next_lib::git_worktree::CreationRegistry::default(),
     });
     app.manage(ConfigStore::default());
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

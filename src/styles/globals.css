@@ -265,6 +265,10 @@ input[type="search"]::-webkit-search-cancel-button {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-status-streaming) 18%, transparent);
   animation: sidebar-thread-status-heartbeat 0.92s ease-in-out infinite;
 }
+
+.sidebar-thread-status-retrying {
+  animation: none;
+}
 .sidebar-thread-status-unseen {
   background: var(--color-status-unseen);
 }
@@ -325,6 +329,17 @@ input[type="search"]::-webkit-search-cancel-button {
   -webkit-background-clip: text;
   animation: ai-chat-text-shimmer 2.6s linear infinite;
   will-change: background-position;
+}
+
+/* Provider backoff keeps the status visible without competing with the
+ * sidebar's scroll; the indicator remains on its deterministic first frame. */
+.bui-agent-thinking-static .bui-agent-thinking-star {
+  animation: none;
+  transform: none;
+  opacity: 0.7;
+}
+.bui-agent-thinking-static .bui-agent-thinking-comet {
+  animation: none;
 }
 
 /* Star sparkle: scale + fade in, settle, and vanish; per-star duration and
@@ -417,4 +432,19 @@ input[type="search"]::-webkit-search-cancel-button {
 input[type="password"]::-ms-reveal,
 input[type="password"]::-ms-clear {
   display: none;
+}
+
+/* Search palettes (⌘K commands / ⌘L sessions / ⌘P files): the field is
+ * borderless and focus is the caret plus the keyboard-highlighted row, so it
+ * never paints a focus box of its own. Tailwind's `outline-none` alone is not
+ * enough everywhere: Windows WebView2 was seen drawing a ring over the field
+ * (solid edge + tinted inner band) where macOS WKWebView draws none, and any
+ * stylesheet that lands after the host's — a plugin's `ctx.theme.injectCss` is
+ * unlayered by design and outranks every layer — wins a normal declaration
+ * here. The important flags keep the field flat; nothing else on these three
+ * inputs paints an outline or a shadow. See docs/ui-ux-spec.zh-CN.md. */
+.palette-search-field:focus,
+.palette-search-field:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }

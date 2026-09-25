@@ -89,8 +89,7 @@ pub(crate) fn remove_dir_if_exists(path: &Path) -> Result<(), String> {
 /// exists).
 fn heal_crash_window(staging: &Path, backup: &Path, target: &Path) -> Result<(), String> {
     if !target.exists() && backup.exists() {
-        std::fs::rename(backup, target)
-            .map_err(|e| format!("rename {}: {e}", backup.display()))?;
+        std::fs::rename(backup, target).map_err(|e| format!("rename {}: {e}", backup.display()))?;
     }
     remove_dir_if_exists(staging)?;
     remove_dir_if_exists(backup)
@@ -116,6 +115,8 @@ pub(crate) fn info_for(plugins_dir: &Path, id: &str, record: &PluginRecord) -> P
         permissions: record.permissions.clone(),
         installed_at: record.installed_at,
         min_app_version: None,
+        icon: None,
+        screenshots: Vec::new(),
     };
     if let Some(manifest) = manifest {
         info.name = manifest.name;
@@ -126,8 +127,95 @@ pub(crate) fn info_for(plugins_dir: &Path, id: &str, record: &PluginRecord) -> P
         info.author = manifest.author;
         info.tier = manifest.tier;
         info.min_app_version = manifest.min_app_version;
+        info.icon = manifest.icon.as_deref().and_then(safe_artwork_path);
+        info.screenshots = manifest
+            .screenshots
+            .iter()
+            .filter_map(|raw| safe_artwork_path(raw))
+            .collect();
     }
     info
+}
+
+/// Presentation assets are untrusted manifest input consumed by an <img>:
+/// images only, repo-relative or absolute https, no traversal, no backslashes
+/// or control characters, bounded length. Returns the trimmed value; bad
+/// entries are dropped rather than failing the install (artwork is optional).
+pub(crate) fn safe_artwork_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    if trimmed.contains('\\') {
+        return None;
+    }
+    let is_remote = trimmed.starts_with("https://");
+    if !is_remote
+        && (trimmed.starts_with('/') || trimmed.starts_with("//") || trimmed.contains("://"))
+    {
+        return None;
+    }
+    if !is_remote && trimmed.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    // Query/hash are allowed on remote URLs; the extension check looks at the
+    // path part only (mirrors the index validator's rule).
+    let path_part = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    let lower = path_part.to_ascii_lowercase();
+    let image = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif"]
+        .iter()
+        .any(|ext| lower.ends_with(ext));
+    image.then(|| trimmed.to_string())
+}
+
+/// Read one declared artwork file out of the *installed* plugin directory and
+/// return it as a data URL. The webview gets no filesystem access from this:
+/// `~/.ccgui-next` stays behind the asset protocol's deny list, and the
+/// canonical-path check keeps a manifest from reaching a sibling plugin or
+/// following a symlink out of its own tree.
+pub(crate) fn artwork_data_url(plugins_dir: &Path, id: &str, rel: &str) -> Result<String, String> {
+    let rel = safe_artwork_path(rel).ok_or_else(|| format!("{rel:?}: not a safe artwork path"))?;
+    if rel.starts_with("https://") {
+        return Err(format!(
+            "{rel}: remote artwork is loaded directly, not through the host"
+        ));
+    }
+    let plugin_dir = plugins_dir.join(id);
+    let canonical_dir =
+        std::fs::canonicalize(&plugin_dir).map_err(|e| format!("{}: {e}", plugin_dir.display()))?;
+    let path = canonical_dir.join(&rel);
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !canonical.starts_with(&canonical_dir) {
+        return Err(format!("{rel}: escapes the plugin directory"));
+    }
+    let size = std::fs::metadata(&canonical)
+        .map_err(|e| format!("stat {}: {e}", canonical.display()))?
+        .len();
+    if size > MAX_FILE_BYTES {
+        return Err(format!(
+            "{rel}: exceeds the {} byte limit ({size} bytes)",
+            MAX_FILE_BYTES
+        ));
+    }
+    let bytes =
+        std::fs::read(&canonical).map_err(|e| format!("read {}: {e}", canonical.display()))?;
+    let mime = match canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("avif") => "image/avif",
+        _ => "application/octet-stream",
+    };
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 /// Install transaction (plan §4.4): copy into `.staging-<id>/` next to the
@@ -344,5 +432,59 @@ mod tests {
         // Rollback: no target, no staging, no state record.
         assert!(!plugins_dir.exists() || std::fs::read_dir(&plugins_dir).unwrap().next().is_none());
         assert!(read_state(&state_path).unwrap().plugins.is_empty());
+    }
+
+    #[test]
+    fn artwork_paths_are_validated_and_served_as_data_urls() {
+        // Image-only, no traversal, no absolute paths, no backslashes.
+        assert_eq!(
+            safe_artwork_path("docs/icon.png").as_deref(),
+            Some("docs/icon.png")
+        );
+        assert_eq!(
+            safe_artwork_path("https://example.com/a.webp?v=2").as_deref(),
+            Some("https://example.com/a.webp?v=2")
+        );
+        assert_eq!(safe_artwork_path("../outside.png"), None);
+        assert_eq!(safe_artwork_path("/etc/passwd"), None);
+        assert_eq!(safe_artwork_path("a\\b.png"), None);
+        assert_eq!(safe_artwork_path("docs/notes.txt"), None);
+        assert_eq!(safe_artwork_path("http://example.com/a.png"), None);
+        assert_eq!(safe_artwork_path(""), None);
+
+        let scratch = Scratch::new();
+        let plugins_dir = scratch.path("plugins");
+        let dir = plugins_dir.join("art-plugin");
+        write_plugin(
+            &dir,
+            r#"{"id":"art-plugin","name":"Art","version":"1.0.0","tier":"declarative",
+                "icon":"docs/icon.png",
+                "screenshots":["docs/shot.png","../evil.png","notes.txt"]}"#,
+        );
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/icon.png"), [0x89u8, 0x50, 0x4e, 0x47]).unwrap();
+        std::fs::write(dir.join("docs/shot.png"), [1u8, 2, 3]).unwrap();
+
+        // The list carries only the usable entries; bad ones are dropped
+        // instead of failing an install over presentational fields.
+        let info = info_for(&plugins_dir, "art-plugin", &PluginRecord::fresh("local", 0));
+        assert_eq!(info.icon.as_deref(), Some("docs/icon.png"));
+        assert_eq!(info.screenshots, vec!["docs/shot.png".to_string()]);
+
+        let url = artwork_data_url(&plugins_dir, "art-plugin", "docs/icon.png").unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        assert_eq!(
+            url,
+            format!(
+                "data:image/png;base64,{}",
+                base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    [0x89u8, 0x50, 0x4e, 0x47],
+                )
+            )
+        );
+        assert!(artwork_data_url(&plugins_dir, "art-plugin", "../evil.png").is_err());
+        assert!(artwork_data_url(&plugins_dir, "art-plugin", "docs/missing.png").is_err());
+        assert!(artwork_data_url(&plugins_dir, "art-plugin", "https://example.com/a.png").is_err());
     }
 }

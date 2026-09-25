@@ -111,7 +111,12 @@ fn strip_verbatim_prefix(path: &str) -> &str {
 /// and the CLI encodes whatever cwd spelling it saw — so try the raw
 /// spelling, a trailing-separator-trimmed one, and the canonicalized path.
 fn claude_project_dirs(base: &Path, workspace: &Path) -> Vec<PathBuf> {
-    fn push(out: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<String>, base: &Path, spelling: &str) {
+    fn push(
+        out: &mut Vec<PathBuf>,
+        seen: &mut std::collections::HashSet<String>,
+        base: &Path,
+        spelling: &str,
+    ) {
         if !spelling.is_empty() && seen.insert(spelling.to_string()) {
             out.push(base.join(super::claude_encode_project_path(spelling)));
         }
@@ -384,10 +389,7 @@ pub(super) fn discover_opencode(workspace: &Path) -> Vec<SessionFile> {
                 let Some(meta) = read_small_json(&path, MAX_OPENCODE_META_BYTES) else {
                     continue;
                 };
-                let directory = meta
-                    .get("directory")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let directory = meta.get("directory").and_then(|v| v.as_str()).unwrap_or("");
                 if directory.is_empty() || !same_or_child(Path::new(directory), workspace) {
                     continue;
                 }
@@ -395,7 +397,11 @@ pub(super) fn discover_opencode(workspace: &Path) -> Vec<SessionFile> {
                     .get("id")
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
-                    .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                    .or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(str::to_string)
+                    })
                     .unwrap_or_default();
                 if session_id.is_empty() || !seen_sessions.insert(session_id.clone()) {
                     continue;
@@ -520,9 +526,9 @@ pub(super) fn discover_agy(workspace: &Path) -> Vec<SessionFile> {
         home.join("conversation_summaries.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT conversation_id, workspace_uris FROM conversation_summaries",
-        ) {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT conversation_id, workspace_uris FROM conversation_summaries")
+        {
             if let Ok(rows) = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             }) {
@@ -571,9 +577,8 @@ fn agy_uris_match_workspace(uris_json: &str, workspace: &Path) -> bool {
     let Ok(uris) = serde_json::from_str::<Vec<String>>(uris_json) else {
         return false;
     };
-    uris.iter().any(|uri| {
-        file_uri_path(uri).is_some_and(|path| same_or_child(&path, workspace))
-    })
+    uris.iter()
+        .any(|uri| file_uri_path(uri).is_some_and(|path| same_or_child(&path, workspace)))
 }
 
 fn file_uri_path(uri: &str) -> Option<PathBuf> {
@@ -778,7 +783,10 @@ fn dsh_session_log(dir: &Path) -> Option<PathBuf> {
         let Some(generation) = dsh_log_generation(name) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(current, _)| generation > *current) {
+        if best
+            .as_ref()
+            .is_none_or(|(current, _)| generation > *current)
+        {
             best = Some((generation, path));
         }
     }
@@ -895,8 +903,14 @@ mod tests {
     #[test]
     fn dsh_session_log_picks_highest_generation() {
         let dir = scratch_dir("dsh-gen");
-        write_zstd_jsonl(&dir.join("session.jsonl.zstd"), &[r#"{"type":"session","id":"old"}"#]);
-        write_zstd_jsonl(&dir.join("session.v3.jsonl.zstd"), &[r#"{"type":"session","id":"new"}"#]);
+        write_zstd_jsonl(
+            &dir.join("session.jsonl.zstd"),
+            &[r#"{"type":"session","id":"old"}"#],
+        );
+        write_zstd_jsonl(
+            &dir.join("session.v3.jsonl.zstd"),
+            &[r#"{"type":"session","id":"new"}"#],
+        );
         std::fs::write(dir.join("session.lock"), "").unwrap();
         let picked = dsh_session_log(&dir).unwrap();
         assert_eq!(picked.file_name().unwrap(), "session.v3.jsonl.zstd");
@@ -925,7 +939,9 @@ mod tests {
         let path = dir.join("session.v3.jsonl.zstd");
         write_zstd_jsonl(
             &path,
-            &[r#"{"type":"session","version":3,"id":"parent","cwd":"/ws","createdAt":1,"isSeeded":false,"delegationDepth":0}"#],
+            &[
+                r#"{"type":"session","version":3,"id":"parent","cwd":"/ws","createdAt":1,"isSeeded":false,"delegationDepth":0}"#,
+            ],
         );
         assert_eq!(
             identify_head("dsh", &path),
@@ -953,9 +969,18 @@ mod tests {
 
     #[test]
     fn strip_verbatim_prefix_removes_windows_prefix_only() {
-        assert_eq!(strip_verbatim_prefix(r"\\?\C:\Users\zlt\proj"), r"C:\Users\zlt\proj");
-        assert_eq!(strip_verbatim_prefix(r"C:\Users\zlt\proj"), r"C:\Users\zlt\proj");
-        assert_eq!(strip_verbatim_prefix("/Users/demo/proj"), "/Users/demo/proj");
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Users\zlt\proj"),
+            r"C:\Users\zlt\proj"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Users\zlt\proj"),
+            r"C:\Users\zlt\proj"
+        );
+        assert_eq!(
+            strip_verbatim_prefix("/Users/demo/proj"),
+            "/Users/demo/proj"
+        );
     }
 
     /// A workspace recorded with a trailing separator must still find the
@@ -981,7 +1006,12 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    fn write_kimi_wire_session(index_dir: &Path, session_dir: &Path, workspace: &Path, session_id: &str) {
+    fn write_kimi_wire_session(
+        index_dir: &Path,
+        session_dir: &Path,
+        workspace: &Path,
+        session_id: &str,
+    ) {
         let wire = session_dir.join("agents").join("main");
         std::fs::create_dir_all(index_dir).unwrap();
         std::fs::create_dir_all(&wire).unwrap();
@@ -1002,9 +1032,19 @@ mod tests {
         let home = scratch_dir("discover-kimi-legacy");
         let workspace = home.join("ws");
         std::fs::create_dir_all(&workspace).unwrap();
-        write_kimi_wire_session(&home.join(".kimi"), &home.join("old-cli-session"), &workspace, "old-cli");
+        write_kimi_wire_session(
+            &home.join(".kimi"),
+            &home.join("old-cli-session"),
+            &workspace,
+            "old-cli",
+        );
         let provider_home = home.join(".ccgui").join("kimi-provider-homes").join("p1");
-        write_kimi_wire_session(&provider_home, &home.join("managed-session"), &workspace, "managed");
+        write_kimi_wire_session(
+            &provider_home,
+            &home.join("managed-session"),
+            &workspace,
+            "managed",
+        );
 
         let _guard = HomeGuard::set(&home);
         // A stray KIMI_HOME on the host would redirect the legacy home.
@@ -1054,8 +1094,14 @@ mod tests {
 
     #[test]
     fn qoder_project_slug_matches_qodercli_encoding() {
-        assert_eq!(qoder_encode_project_slug("/Users/foo/bar"), "-Users-foo-bar");
-        assert_eq!(qoder_encode_project_slug("/Users/foo/bar/"), "-Users-foo-bar");
+        assert_eq!(
+            qoder_encode_project_slug("/Users/foo/bar"),
+            "-Users-foo-bar"
+        );
+        assert_eq!(
+            qoder_encode_project_slug("/Users/foo/bar/"),
+            "-Users-foo-bar"
+        );
         assert_eq!(qoder_encode_project_slug(r"C:\ws\proj"), "C--ws-proj");
         assert_eq!(qoder_encode_project_slug("/"), "-");
         assert_eq!(qoder_encode_project_slug(""), "");
@@ -1143,7 +1189,12 @@ mod tests {
     #[test]
     fn codex_candidates_include_provider_homes() {
         let home = scratch_dir("codex-candidates-legacy");
-        let active = home.join(".codex").join("sessions").join("2026").join("09").join("01");
+        let active = home
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("01");
         let managed = home
             .join(".ccgui")
             .join("codex-provider-homes")

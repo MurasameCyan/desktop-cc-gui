@@ -81,7 +81,10 @@ fn targets(engine: &str) -> Vec<Target> {
             home(Some("KIMI_CODE_HOME"), ".kimi-code").join("config.toml"),
             "config.toml",
         )],
-        "grok" => vec![target(home(Some("GROK_HOME"), ".grok").join("config.toml"), "config.toml")],
+        "grok" => vec![target(
+            home(Some("GROK_HOME"), ".grok").join("config.toml"),
+            "config.toml",
+        )],
         "agy" => vec![target(
             crate::engine::agy::agy_home().join("settings.json"),
             "settings.json",

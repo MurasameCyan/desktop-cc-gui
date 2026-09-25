@@ -7,6 +7,11 @@ import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import Minimize2 from "lucide-react/dist/esm/icons/minimize-2";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import { Collapsible } from "@/components/application/collapsible/collapsible";
+import {
+  ActionFeedbackIcon,
+  useRunningFeedback,
+  type ActionFeedback,
+} from "@/components/base/action-feedback";
 import { cx } from "@/utils/cx";
 import { formatTokens } from "@/utils/format-tokens";
 
@@ -289,6 +294,7 @@ function CardActionButton({
   busyLabel,
   icon: Icon,
   busyIconClassName,
+  feedback,
 }: {
   testId: string;
   disabled: boolean;
@@ -298,8 +304,10 @@ function CardActionButton({
   label?: string;
   busyLabel?: string;
   icon: ActionIcon;
-  /** Busy-state animation class (pulse for compact, spin for refresh). */
-  busyIconClassName: string;
+  /** Busy-state animation class when no `feedback` is given (compact pulse). */
+  busyIconClassName?: string;
+  /** Refresh-style feedback: spins + checks instead of the plain busy icon. */
+  feedback?: ActionFeedback;
 }) {
   return (
     <button
@@ -315,7 +323,20 @@ function CardActionButton({
           : "cursor-pointer text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary active:bg-background-tertiary-default",
       )}
     >
-      <Icon className={cx("size-3 shrink-0", busy && `${busyIconClassName} text-blue-500`)} aria-hidden />
+      {feedback ? (
+        <ActionFeedbackIcon
+          icon={Icon}
+          feedback={feedback}
+          spin
+          iconClassName="size-3"
+          runningClassName="text-blue-500"
+        />
+      ) : (
+        <Icon
+          className={cx("size-3 shrink-0", busy && `${busyIconClassName} text-blue-500`)}
+          aria-hidden
+        />
+      )}
       <span>{busy ? busyLabel : label}</span>
     </button>
   );
@@ -337,6 +358,9 @@ function ContextActions({
   refreshing: boolean;
   canCompact: boolean;
 }) {
+  // Refresh mirrors the git panel's refresh: spin while the usage re-fetch
+  // runs, check when it comes back.
+  const refreshFeedback = useRunningFeedback(refreshing);
   if (!onCompact && !onRefresh) return null;
   return (
     <div className="mt-2.5 flex items-center justify-end gap-2 border-t border-border-button-default/40 pt-2.5">
@@ -364,7 +388,7 @@ function ContextActions({
           label={text.refreshUsage ?? "刷新用量"}
           busyLabel={text.refreshing ?? "刷新中…"}
           icon={RefreshCw}
-          busyIconClassName="animate-spin"
+          feedback={refreshFeedback}
         />
       )}
     </div>

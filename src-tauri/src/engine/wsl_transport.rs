@@ -544,7 +544,10 @@ pub async fn run_script_output(
     upload_script(transport, &body, &remote_path).await?;
     let mut command = base_ssh_command(transport);
     command.arg(wsl_command_string(transport, &["bash", &remote_path]));
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // 全局 deadline(理由见 REMOTE_CALL_TIMEOUT):模型目录/历史回放都走
     // 这里,远端挂起不得拖死前端。kill_on_drop:超时后 output future 被
     // 丢弃即 SIGKILL 本地 ssh(远端脚本落盘即删,无残留面)。
@@ -565,10 +568,7 @@ pub async fn run_script_output(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&strip_transport_noise(
-        output.stdout.as_slice(),
-    ))
-    .to_string())
+    Ok(String::from_utf8_lossy(&strip_transport_noise(output.stdout.as_slice())).to_string())
 }
 
 /// wsl.exe 传输层噪声:NUL 残迹(UTF-16LE lossy 后)与 `wsl:`/`wsl.` 开头
@@ -588,10 +588,7 @@ fn strip_transport_noise(raw: &[u8]) -> Vec<u8> {
 
 /// 工作区路径 → 传输描述一步到位(db 读 + meta 形状解析都收敛在此,
 /// 调用方不再自行组合两步查找)。
-pub fn transport_for_workspace(
-    db: &crate::db::Db,
-    workspace_path: &str,
-) -> Option<WslTransport> {
+pub fn transport_for_workspace(db: &crate::db::Db, workspace_path: &str) -> Option<WslTransport> {
     transport_from_meta_json(workspace_meta_json(db, workspace_path).as_deref())
 }
 
@@ -636,7 +633,12 @@ mod tests {
     fn script_maps_bin_cd_and_quotes_args() {
         let script = build_script(
             "/Users/x/.local/bin/omp",
-            &["-p".into(), "hello world".into(), "--resume".into(), "s-1".into()],
+            &[
+                "-p".into(),
+                "hello world".into(),
+                "--resume".into(),
+                "s-1".into(),
+            ],
             &[],
             &tp(),
         );
@@ -729,10 +731,7 @@ mod tests {
 
     #[test]
     fn script_exports_env_and_self_deletes() {
-        let envs = vec![(
-            "MAX_THINKING_TOKENS".to_string(),
-            "65536".to_string(),
-        )];
+        let envs = vec![("MAX_THINKING_TOKENS".to_string(), "65536".to_string())];
         let script = build_script("omp", &[], &envs, &tp());
         // 落盘即删(exec 下 trap 不触发,unlink 已打开 fd 的脚本仍然安全)
         assert!(script.contains("rm -f \"$0\""));
@@ -754,6 +753,8 @@ mod tests {
         let dashdash = args.iter().position(|a| a == "--").expect("missing --");
         // `--` 之后紧跟 destination,且 destination 之前没有任何非选项值
         assert_eq!(args[dashdash + 1], "dev@10.0.0.2");
-        assert!(args[..dashdash].iter().all(|a| a.starts_with('-') || !a.contains('@')));
+        assert!(args[..dashdash]
+            .iter()
+            .all(|a| a.starts_with('-') || !a.contains('@')));
     }
 }

@@ -1,49 +1,22 @@
-import { createElement, lazy, Suspense } from "react";
-import Puzzle from "lucide-react/dist/esm/icons/puzzle";
-import Store from "lucide-react/dist/esm/icons/store";
-import i18n from "@/lib/i18n";
-import { settingsRegistry } from "@ccgui/plugin-sdk";
 import { bootstrapPlugins, ipcBackend } from "./runtime/loader";
 import { BUILTIN_PLUGINS } from "./builtin";
 import { usePluginsStore } from "./manager/usePlugins";
 import { useMarketplaceStore } from "./marketplace/store";
 
-const PluginsSection = lazy(() => import("./manager/PluginsSection"));
-const MarketplaceSection = lazy(() => import("./marketplace/MarketplaceSection"));
-
 let started = false;
 
 /**
- * Plugin system entry (plan §4.1): registers the 插件管理 settings section
- * through the same registry plugins use (dogfood), then bootstraps the
- * loader — hardening, usage-event bridge, builtin + installed plugins.
- * Called once from App on mount; idempotent.
+ * Plugin system entry (plan §4.1): bootstraps the loader — hardening,
+ * usage-event bridge, builtin + installed plugins. Called once from App on
+ * mount; idempotent.
+ *
+ * 插件管理 / 插件市场 no longer register as settings sections: both live in
+ * the native plugin hub center tab (sidebar 插件 entry), while the settings
+ * 插件 group keeps just the sections plugins register themselves.
  */
 export function startPluginSystem(): void {
   if (started) return;
   started = true;
-  settingsRegistry.register({
-    id: "plugins",
-    key: "plugins",
-    label: () => i18n.t("plugins.managerTitle"),
-    icon: Puzzle,
-    group: "plugins",
-    order: 0,
-    component: function PluginsManagerPage() {
-      return createElement(Suspense, { fallback: null }, createElement(PluginsSection));
-    },
-  });
-  settingsRegistry.register({
-    id: "marketplace",
-    key: "marketplace",
-    label: () => i18n.t("plugins.marketTitle"),
-    icon: Store,
-    group: "plugins",
-    order: 1,
-    component: function MarketplacePage() {
-      return createElement(Suspense, { fallback: null }, createElement(MarketplaceSection));
-    },
-  });
   void bootstrapWithRetry()
     .then(() => usePluginsStore.getState().refresh())
     // Update hints (plan ADR-4): check at startup and once every 24h.
@@ -56,8 +29,9 @@ export function startPluginSystem(): void {
 }
 
 /** Backend list can lose the startup race (DB/bridge not ready when App
- *  mounts). Retry with backoff; if every attempt fails the manager store
- *  re-kicks bootstrap when 插件管理 is opened (pluginsBootstrapped gate). */
+ *  mounts). Retry with backoff; if every attempt fails the plugins store
+ *  re-kicks bootstrap when the hub asks for the installed list
+ *  (pluginsBootstrapped gate). */
 const BOOTSTRAP_RETRY_DELAYS_MS = [2000, 5000, 10_000];
 
 async function bootstrapWithRetry(): Promise<void> {
@@ -72,9 +46,10 @@ async function bootstrapWithRetry(): Promise<void> {
         `[plugins] bootstrap attempt ${attempt + 1} failed; retrying in ${delay}ms`,
         error,
       );
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, delay);
-      await promise;
+      // Not Promise.withResolvers: that is Chromium 119+, and a WebView2 that
+      // still lacks it throws inside this catch, which skips every later retry
+      // and leaves plugins unloaded until the hub is opened.
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 }

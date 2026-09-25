@@ -208,6 +208,30 @@ async function rightClick(row: HTMLElement) {
   });
 }
 
+it("renders a retrying streaming thread with a static status dot", async () => {
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[{
+          id: "a",
+          label: "a",
+          defaultOpen: true,
+          threads: [{
+            id: "omp/retry-1",
+            label: "重试会话",
+            time: "刚刚",
+            streaming: true,
+            retrying: true,
+          }],
+        }]}
+      />,
+    );
+  });
+
+  const dot = threadRow("重试会话").querySelector(".sidebar-thread-status");
+  expect(dot?.classList.contains("sidebar-thread-status-retrying")).toBe(true);
+});
+
 it("keeps hover actions to pin / rename / delete (archive is context-menu only)", async () => {
   const onThreadAction = vi.fn();
   await act(async () => {
@@ -445,3 +469,159 @@ it("keeps the blank-area menu off rows that own a context menu", async () => {
     ),
   ).toBe(false);
 });
+
+it("worktree 子行 hover ＋ 在该 worktree 下新建会话", async () => {
+  const onNewSessionInWorkspace = vi.fn();
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[
+          {
+            id: "a",
+            label: "a",
+            defaultOpen: true,
+            threads: [],
+            worktrees: [
+              {
+                id: "a::pr-1865",
+                label: "pr-1865-fix",
+                threads: [],
+                worktree: { branch: "pr-1865-fix", prNumber: 1865 },
+              },
+            ],
+          },
+        ]}
+        onNewSessionInWorkspace={onNewSessionInWorkspace}
+      />,
+    );
+  });
+
+  const childRow = node.querySelector<HTMLElement>('button[aria-label="pr-1865-fix"]');
+  if (!childRow) throw new Error("no worktree child row");
+  const plus = childRow.parentElement?.querySelector<HTMLElement>(
+    'button[aria-label="chat.newSession"]',
+  );
+  if (!plus) throw new Error("no new-session button on the worktree row");
+
+  await act(async () => plus.click());
+  expect(onNewSessionInWorkspace).toHaveBeenCalledWith("a::pr-1865");
+});
+
+it("WORKTREES 分组折叠走高度动画：内容随收起动画卸载后才离开 DOM", async () => {
+  // The bug: the group unmounted its rows the moment the header was clicked,
+  // so the list popped away with no height animation.
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[
+          {
+            id: "a",
+            label: "a",
+            defaultOpen: true,
+            threads: [],
+            worktrees: [
+              {
+                id: "a::pr-1865",
+                label: "pr-1865-fix",
+                threads: [{ id: "t-1", label: "线程一", time: "1m" }],
+                worktree: { branch: "pr-1865-fix", prNumber: 1865 },
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+  });
+
+  const region = worktreeDisclosure();
+  expect(region.className).toContain("grid-rows-[1fr]");
+
+  vi.useFakeTimers();
+  try {
+    await act(async () => rowFor("worktree.groupLabel").click());
+
+    // Collapsed now, but the rows stay mounted so the height can clip shut.
+    expect(region.className).toContain("grid-rows-[0fr]");
+    expect(region.className).toContain("transition-[grid-template-rows]");
+    expect(region.getAttribute("aria-hidden")).toBe("true");
+    expect(region.hasAttribute("inert")).toBe(true);
+    expect(region.querySelector('button[aria-label="pr-1865-fix"]')).toBeTruthy();
+
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(region.querySelector('button[aria-label="pr-1865-fix"]')).toBeNull();
+
+    await act(async () => rowFor("worktree.groupLabel").click());
+    expect(region.className).toContain("grid-rows-[1fr]");
+    expect(region.getAttribute("aria-hidden")).toBe("false");
+    expect(region.querySelector('button[aria-label="pr-1865-fix"]')).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("收起的 worktree 子行聚合显示运行中状态点，展开后让位给各线程行", async () => {
+  // 子行折叠时看不到线程行自己的呼吸点，不知道里面有没有会话在跑——
+  // 聚合点把这层信息提到子行上；展开后各线程行已有自己的点，聚合点退出。
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[
+          {
+            id: "a",
+            label: "a",
+            defaultOpen: true,
+            threads: [],
+            worktrees: [
+              {
+                id: "a::wt-run",
+                label: "wt-run",
+                threads: [
+                  { id: "t-run", label: "运行中会话", time: "", streaming: true },
+                  { id: "t-done", label: "已完成会话", time: "" },
+                ],
+                worktree: { branch: "wt-run" },
+              },
+              {
+                id: "a::wt-retry",
+                label: "wt-retry",
+                threads: [
+                  { id: "t-retry", label: "退避会话", time: "", streaming: true, retrying: true },
+                ],
+                worktree: { branch: "wt-retry" },
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+  });
+
+  const runRow = node.querySelector<HTMLElement>('button[aria-label="wt-run"]');
+  const retryRow = node.querySelector<HTMLElement>('button[aria-label="wt-retry"]');
+  if (!runRow || !retryRow) throw new Error("no worktree child rows");
+
+  // Collapsed children carry the aggregate dot; all-retrying degrades to the
+  // static variant, same as a thread row.
+  const runDot = runRow.querySelector(".sidebar-thread-status");
+  expect(runDot?.classList.contains("sidebar-thread-status-processing")).toBe(true);
+  expect(runDot?.classList.contains("sidebar-thread-status-retrying")).toBe(false);
+  const retryDot = retryRow.querySelector(".sidebar-thread-status");
+  expect(retryDot?.classList.contains("sidebar-thread-status-retrying")).toBe(true);
+
+  // Expanding hands the indicator back to the thread rows.
+  await act(async () => runRow.click());
+  expect(runRow.querySelector(".sidebar-thread-status")).toBeNull();
+  const threadDot = threadRow("运行中会话").querySelector(".sidebar-thread-status");
+  expect(threadDot?.classList.contains("sidebar-thread-status-processing")).toBe(true);
+});
+
+/** The innermost disclosure region holding the worktree child rows. */
+function worktreeDisclosure(): HTMLElement {
+  const regions = [...node.querySelectorAll<HTMLElement>('div[class*="grid-rows-"]')]
+    .filter((el) => el.textContent?.includes("pr-1865-fix"));
+  const region = regions[regions.length - 1];
+  if (!region) throw new Error("no worktree group disclosure");
+  return region;
+}

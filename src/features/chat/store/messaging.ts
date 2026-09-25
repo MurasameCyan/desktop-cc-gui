@@ -17,6 +17,7 @@ import {
   routeRun,
   rememberSettledRun,
   runRouting,
+  setRetryingFlag,
   setStreamingFlag,
   settleLiveRows,
   untrackRun,
@@ -32,6 +33,8 @@ import {
   upsertSessionMetaInto,
 } from "./engine-events";
 import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
+import { engineSupportsComputerUse } from "../computer-use";
+import type { SendOptions } from "./types";
 import { effectivePermission } from "./permissions";
 import {
   buildAgentBlock,
@@ -83,6 +86,7 @@ export function createMessagingActions(
   | "resendLastUser"
   | "queueMessage"
   | "removeQueued"
+  | "moveQueued"
   | "clearQueue"
   | "sendQueuedNow"
   | "interrupt"
@@ -107,6 +111,7 @@ export function createMessagingActions(
     tab: ActiveSession,
     prompt: string,
     images: string[],
+    options?: SendOptions,
   ) {
     const key = sessionKey(tab.engine, tab.sessionId, tab.workspacePath);
     const isCompaction = prompt === "/compact";
@@ -115,7 +120,7 @@ export function createMessagingActions(
     if (!isCompaction) patchSession(set, key, { preparing: true, interrupted: false });
     let settledKey = key;
     try {
-      const result = await sendSelectedPrompt(tab, prompt, images, isCompaction);
+      const result = await sendSelectedPrompt(tab, prompt, images, isCompaction, options);
       if (result) settledKey = result.key;
       return result?.sent ?? false;
     } catch (error) {
@@ -133,7 +138,7 @@ export function createMessagingActions(
     }
   }
 
-  async function sendSelectedPrompt(tab: ActiveSession, prompt: string, images: string[], isCompaction: boolean) {
+  async function sendSelectedPrompt(tab: ActiveSession, prompt: string, images: string[], isCompaction: boolean, options?: SendOptions) {
     if (!prompt.trim() && images.length === 0) return;
     // A pinned agent's instructions ride along as a tail block the
     // transcript keeps (the bubble strips it back out for display). Slash
@@ -170,6 +175,13 @@ export function createMessagingActions(
     }
     const engine = tab.engine;
     const key = sessionKey(engine, tab.sessionId, tab.workspacePath);
+    // Computer use asks for the driver; engines without an MCP-mount path
+    // would run the prompt text-only while the user believes the machine is
+    // under agent control. Refuse loudly instead of downgrading silently.
+    if (options?.computerUse && !engineSupportsComputerUse(get().engines, engine)) {
+      patchSession(set, key, { error: i18n.t("chat.cuaUnsupportedEngine") });
+      return;
+    }
     let context = await refreshExecutionSelection({ set, get }, tab);
     if (!context.selection || context.unavailableReason) throw new Error(context.unavailableReason ?? "Session has no execution selection");
     let sources = context.selection.modelSelection.source === "contribution" ? await ipc.listCliSources() : [];
@@ -211,6 +223,10 @@ export function createMessagingActions(
         activeEffort: effort,
         activeProvider: provider,
         runTokenPolicy: policy,
+        // 电脑操控 is per-send opt-in (never sticky: a later ordinary
+        // message must not silently regain machine control). The record only
+        // feeds resendLastUser, which repeats this very message.
+        activeComputerUse: options?.computerUse === true,
         // The tail indicator counts this reply, not the one before it.
         turnUsage: null,
       },
@@ -221,6 +237,12 @@ export function createMessagingActions(
     settleOrphanedRuns(set, routeRun(requestedRunId, key));
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
+    }
+    if (options?.computerUse) {
+      // Arm the global Esc-to-stop for this run: the escape hatch out of a
+      // machine-driving turn. Disarmed when the turn settles (onDone / a
+      // failed spawn), so the system-wide hotkey never outlives the run.
+      void ipc.computerUseSetActive?.(true)?.catch(() => {});
     }
     try {
       const result = await ipc.sendMessage({
@@ -235,6 +257,7 @@ export function createMessagingActions(
           engine,
           get().permission,
         ),
+        computerUse: options?.computerUse === true,
       });
       // Older backends choose their own id. Retire the provisional route.
       if (result.runId !== requestedRunId) {
@@ -353,6 +376,9 @@ export function createMessagingActions(
       runRouting.delete(requestedRunId);
       untrackRun(requestedRunId);
       dropRunUsage(requestedRunId);
+      if (options?.computerUse) {
+        void ipc.computerUseSetActive?.(false)?.catch(() => {});
+      }
       set((s) => ({
         streamingByKey: setStreamingFlag(s.streamingByKey, failedKey, false),
       }));
@@ -395,7 +421,7 @@ export function createMessagingActions(
         [key]: { ...(prev.bySession[key] ?? EMPTY_SESSION), queue: rest },
       },
     }));
-    void sendPrompt(tab, head.text, head.images).then((sent) => {
+    void sendPrompt(tab, head.text, head.images, { computerUse: head.computerUse }).then((sent) => {
       if (sent) return;
       set((state) => {
         const current = state.bySession[key];
@@ -408,15 +434,15 @@ export function createMessagingActions(
     drainQueue,
     markUnseenIfBackground,
 
-    send: async (prompt, images) => {
+    send: async (prompt, images, options) => {
       const { active } = get();
       if (!active) return;
       const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
       if (preparing.has(key) || compacting.has(key) || get().bySession[key]?.streaming) {
-        get().queueMessage(prompt, images);
+        get().queueMessage(prompt, images, options);
         return;
       }
-      await sendPrompt(active, prompt, images);
+      await sendPrompt(active, prompt, images, options);
     },
 
     respondToGrant: async (key, seq, accept) => {
@@ -487,10 +513,13 @@ export function createMessagingActions(
         s.openTabs.find(
           (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
         );
-      if (tab) await sendPrompt(tab, lastUser.text, lastUser.images ?? []);
+      if (tab)
+        await sendPrompt(tab, lastUser.text, lastUser.images ?? [], {
+          computerUse: s.bySession[key]?.activeComputerUse === true,
+        });
     },
 
-    queueMessage: (text, images) => {
+    queueMessage: (text, images, options) => {
       const { active } = get();
       if (!active || (!text.trim() && images.length === 0)) return;
       const key = sessionKey(
@@ -507,7 +536,13 @@ export function createMessagingActions(
               ...prev,
               queue: [
                 ...prev.queue,
-                { id: newId(), text, images, queuedAt: Date.now() },
+                {
+                  id: newId(),
+                  text,
+                  images,
+                  queuedAt: Date.now(),
+                  computerUse: options?.computerUse === true,
+                },
               ],
             },
           },
@@ -533,6 +568,35 @@ export function createMessagingActions(
               ...prev,
               queue: prev.queue.filter((item) => item.id !== id),
             },
+          },
+        };
+      });
+    },
+    /** Reorder one queued message a single step. The card paints newest
+     *  first, so "up" walks the row toward the end of the send order (sent
+     *  later) and "down" toward the head (sent sooner); a move past either
+     *  end is a no-op. */
+    moveQueued: (id, direction) => {
+      const { active } = get();
+      if (!active) return;
+      const key = sessionKey(
+        active.engine,
+        active.sessionId,
+        active.workspacePath,
+      );
+      set((s) => {
+        const prev = s.bySession[key];
+        if (!prev) return {};
+        const index = prev.queue.findIndex((item) => item.id === id);
+        if (index < 0) return {};
+        const target = direction === "up" ? index + 1 : index - 1;
+        if (target < 0 || target >= prev.queue.length) return {};
+        const queue = [...prev.queue];
+        [queue[index], queue[target]] = [queue[target], queue[index]];
+        return {
+          bySession: {
+            ...s.bySession,
+            [key]: { ...prev, queue },
           },
         };
       });
@@ -621,9 +685,11 @@ export function createMessagingActions(
               streaming: false,
               interrupted: true,
               turnStartedAt: null,
+              retry: null,
             },
           },
           streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+          retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
         };
       });
       // Registry is keyed by native session id once known; before that the

@@ -163,7 +163,8 @@ pub(crate) fn parse_acp_line(value: &Value) -> AcpLine {
                 .and_then(Value::as_str)
                 .unwrap_or("JSON-RPC error")
                 .to_string();
-            if let Some(detail) = err.get("data")
+            if let Some(detail) = err
+                .get("data")
                 .and_then(|data| data.get("details").or_else(|| data.get("message")))
                 .and_then(Value::as_str)
                 .and_then(|detail| detail.lines().next())
@@ -556,7 +557,12 @@ pub(crate) fn handle_fs_write(workspace_root: &Path, params: &Value) -> Result<V
     Ok(json!({}))
 }
 
-pub(crate) fn answer_agent_request(workspace_root: &Path, id: &Value, method: &str, params: &Value) -> Value {
+pub(crate) fn answer_agent_request(
+    workspace_root: &Path,
+    id: &Value,
+    method: &str,
+    params: &Value,
+) -> Value {
     match method {
         "session/request_permission" => match permission_auto_answer(params) {
             Ok(result) => jsonrpc_result_response(id, result),
@@ -635,7 +641,6 @@ fn assemble_prompt_blocks(
 
 // ==================== ACP process ====================
 
-
 pub(crate) struct AcpProcess {
     /// Shared with the registry: a parked question is answered by writing
     /// this child's stdin from `answer_question`, not from the read loop.
@@ -649,7 +654,11 @@ pub(crate) struct AcpProcess {
 }
 
 impl AcpProcess {
-    pub(crate) fn new(stdin: Arc<TokioMutex<Option<ChildStdin>>>, stdout: ChildStdout, workspace_root: PathBuf) -> Self {
+    pub(crate) fn new(
+        stdin: Arc<TokioMutex<Option<ChildStdin>>>,
+        stdout: ChildStdout,
+        workspace_root: PathBuf,
+    ) -> Self {
         Self {
             stdin,
             reader: BufReader::new(stdout),
@@ -699,8 +708,15 @@ impl AcpProcess {
             }
             _ => None,
         };
-        self.routed(method, params, timeout_dur, killed, cancel_session_id, &mut router)
-            .await
+        self.routed(
+            method,
+            params,
+            timeout_dur,
+            killed,
+            cancel_session_id,
+            &mut router,
+        )
+        .await
     }
 
     /// The read loop behind [`AcpProcess::request`]: session/update
@@ -724,7 +740,8 @@ impl AcpProcess {
         let id = self.next_id;
         self.next_id += 1;
         let expected_key = id.to_string();
-        self.write_line(&jsonrpc_request(id, method, params)).await?;
+        self.write_line(&jsonrpc_request(id, method, params))
+            .await?;
         let deadline = Instant::now() + timeout_dur;
         let drain_trailing = method == "session/prompt";
         let mut settled: Option<Value> = None;
@@ -874,14 +891,14 @@ pub(crate) fn spawn_piped_acp(
         .map_err(|error| format!("failed to spawn {label}: {error}"))?;
     #[cfg(windows)]
     let tree_guard = super::job::assign_kill_on_close(&child);
-    let (stdin, stdout, stderr) = match (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    {
-        (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
-        _ => {
-            let _ = child.start_kill();
-            return Err("missing stdio pipe after spawn".to_string());
-        }
-    };
+    let (stdin, stdout, stderr) =
+        match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+            (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
+            _ => {
+                let _ = child.start_kill();
+                return Err("missing stdio pipe after spawn".to_string());
+            }
+        };
     Ok(SpawnedAcp {
         child,
         acp: AcpProcess::new(
@@ -1100,13 +1117,21 @@ async fn handshake_and_prompt(
         .await?;
     if let Some(usage) = result.get("usage").filter(|usage| !usage.is_null()) {
         view.last_usage = Some(attach_context_window(usage.clone()));
-        core.dispatch_event(state, EngineEvent::Usage(attach_context_window(usage.clone())));
+        core.dispatch_event(
+            state,
+            EngineEvent::Usage(attach_context_window(usage.clone())),
+        );
     }
     Ok(())
 }
 
 /// One session/update notification projected to engine events.
-fn handle_session_update(core: &TurnCore, state: &mut TurnState, view: &mut TurnView, params: &Value) {
+fn handle_session_update(
+    core: &TurnCore,
+    state: &mut TurnState,
+    view: &mut TurnView,
+    params: &Value,
+) {
     match session_update_from_notification(params) {
         QoderSessionUpdate::AgentMessageChunk { text } => {
             if is_error_prefixed_text(&text) {
@@ -1188,7 +1213,6 @@ pub(crate) fn parse_models_from_session_new(result: &Value) -> Vec<QoderModelEnt
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-
         .filter_map(|entry| {
             let id = entry
                 .get("modelId")
@@ -1205,7 +1229,11 @@ pub(crate) fn parse_models_from_session_new(result: &Value) -> Vec<QoderModelEnt
                 .filter(|name| !name.is_empty() && *name != id)
                 .map(str::to_string);
             let is_default = current == Some(id.as_str());
-            Some(QoderModelEntry { id, name, is_default })
+            Some(QoderModelEntry {
+                id,
+                name,
+                is_default,
+            })
         })
         .collect();
     if current.is_none() {
@@ -1289,7 +1317,8 @@ mod tests {
             _ => panic!("expected notification"),
         }
         // method + id = the agent is asking US (permission, fs).
-        let request = json!({"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{}});
+        let request =
+            json!({"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{}});
         match parse_acp_line(&request) {
             AcpLine::AgentRequest { id, method, .. } => {
                 assert_eq!(id, json!(9));
@@ -1300,11 +1329,20 @@ mod tests {
         // String ids key responses too.
         assert_eq!(jsonrpc_id_key(&json!("req-1")).as_deref(), Some("req-1"));
         assert_eq!(jsonrpc_id_key(&json!(7)).as_deref(), Some("7"));
-        assert!(matches!(parse_acp_line(&json!({"hello":"world"})), AcpLine::Other));
-        assert!(matches!(parse_acp_line(&json!({"jsonrpc":"2.0"})) , AcpLine::Other));
-        let error = json!({"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"no such method"}});
+        assert!(matches!(
+            parse_acp_line(&json!({"hello":"world"})),
+            AcpLine::Other
+        ));
+        assert!(matches!(
+            parse_acp_line(&json!({"jsonrpc":"2.0"})),
+            AcpLine::Other
+        ));
+        let error =
+            json!({"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"no such method"}});
         match parse_acp_line(&error) {
-            AcpLine::Response { error: Some(error), .. } => {
+            AcpLine::Response {
+                error: Some(error), ..
+            } => {
                 assert_eq!(error.code, -32601);
                 assert_eq!(error.message, "no such method");
             }
@@ -1369,7 +1407,8 @@ mod tests {
             QoderSessionUpdate::Ignore
         );
         // Notifications wrap the update under params.update.
-        let wrapped = json!({"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"wrapped"}}});
+        let wrapped =
+            json!({"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"wrapped"}}});
         assert_eq!(
             session_update_from_notification(&wrapped),
             QoderSessionUpdate::AgentMessageChunk {
@@ -1412,7 +1451,10 @@ mod tests {
                 "request": {"prompt":"private conversation"}
             }
         }});
-        let AcpLine::Response { error: Some(error), .. } = parse_acp_line(&response) else {
+        let AcpLine::Response {
+            error: Some(error), ..
+        } = parse_acp_line(&response)
+        else {
             panic!("expected RPC error");
         };
         assert!(error.message.contains("Unknown model alias: missing-model"));

@@ -112,14 +112,15 @@ function dotOpacities(variant: "wave" | "spin", phase: number) {
   });
 }
 
-function DotsIndicator({ variant }: { variant: "wave" | "spin" }) {
+function DotsIndicator({ variant, animated }: { variant: "wave" | "spin"; animated: boolean }) {
   const [opacities, setOpacities] = useState<number[]>(DOTS_SEED);
 
   useEffect(() => {
     if (
-      typeof window !== "undefined" &&
-      window.matchMedia &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      !animated ||
+      (typeof window !== "undefined" &&
+        window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches)
     )
       return;
     let phase = 0;
@@ -128,7 +129,7 @@ function DotsIndicator({ variant }: { variant: "wave" | "spin" }) {
       setOpacities(dotOpacities(variant, phase));
     }, DOTS_TICK_MS);
     return () => window.clearInterval(id);
-  }, [variant]);
+  }, [animated, variant]);
 
   return (
     <span
@@ -147,7 +148,7 @@ function DotsIndicator({ variant }: { variant: "wave" | "spin" }) {
             width: DOTS_SIZE,
             height: DOTS_SIZE,
             opacity,
-            transition: `opacity ${DOTS_FADE_MS}ms ease`,
+            transition: animated ? `opacity ${DOTS_FADE_MS}ms ease` : undefined,
           }}
         />
       ))}
@@ -170,40 +171,53 @@ const STAR_LAYOUT = [
 const STAR_PATH = "M12 0C13 7 17 11 24 12C17 13 13 17 12 24C11 17 7 13 0 12C7 11 11 7 12 0Z";
 const STAR_BOX = STAR_SIZE * 1.5;
 
-// Fully static: the same tree on every render, so build it once.
-const STARS_INDICATOR = (
-  <span
-    aria-hidden
-    className="bui-agent-thinking-stars relative block shrink-0"
-    style={{ width: STAR_BOX, height: STAR_BOX }}
-  >
-    {STAR_LAYOUT.slice(0, STAR_COUNT).map((star, i) => {
-      const size = STAR_SIZE * star.scale;
-      return (
-        <svg
-          key={i}
-          viewBox="0 0 24 24"
-          className="bui-agent-thinking-star absolute"
-          style={{
-            width: size,
-            height: size,
-            left: `${star.x}%`,
-            top: `${star.y}%`,
-            marginLeft: -size / 2,
-            marginTop: -size / 2,
-            animationDuration: `${STAR_PERIOD_S}s`,
-            animationDelay: `${(i * STAR_PERIOD_S * 0.7) / STAR_COUNT}s`,
-          }}
-        >
-          <path d={STAR_PATH} fill="currentColor" />
-        </svg>
-      );
-    })}
-  </span>
-);
+const STATIC_STAR_STYLE: CSSProperties = {
+  animation: "none",
+  transform: "none",
+  opacity: 0.7,
+};
 
-function StarsIndicator() {
-  return STARS_INDICATOR;
+function buildStarsIndicator(staticState: boolean) {
+  return (
+    <span
+      aria-hidden
+      className="bui-agent-thinking-stars relative block shrink-0"
+      style={{ width: STAR_BOX, height: STAR_BOX }}
+    >
+      {STAR_LAYOUT.slice(0, STAR_COUNT).map((star, i) => {
+        const size = STAR_SIZE * star.scale;
+        return (
+          <svg
+            key={i}
+            viewBox="0 0 24 24"
+            className="bui-agent-thinking-star absolute"
+            style={{
+              width: size,
+              height: size,
+              left: `${star.x}%`,
+              top: `${star.y}%`,
+              marginLeft: -size / 2,
+              marginTop: -size / 2,
+              animationDuration: `${STAR_PERIOD_S}s`,
+              animationDelay: `${(i * STAR_PERIOD_S * 0.7) / STAR_COUNT}s`,
+              ...(staticState ? STATIC_STAR_STYLE : {}),
+            }}
+          >
+            <path d={STAR_PATH} fill="currentColor" />
+          </svg>
+        );
+      })}
+    </span>
+  );
+}
+
+// Build both variants once: retry mode uses a visible resting frame instead
+// of leaving each star at the animated keyframe's scale(0) start state.
+const STARS_INDICATOR = buildStarsIndicator(false);
+const STATIC_STARS_INDICATOR = buildStarsIndicator(true);
+
+function StarsIndicator({ animated }: { animated: boolean }) {
+  return animated ? STARS_INDICATOR : STATIC_STARS_INDICATOR;
 }
 
 /* --------------------------------------------------------------- infinity */
@@ -295,12 +309,12 @@ function ElapsedTimer({
 
 /* ----------------------------------------------------------------- loader */
 
-function VariantIndicator({ variant }: { variant: AgentThinkingVariant }) {
+function VariantIndicator({ variant, animated }: { variant: AgentThinkingVariant; animated: boolean }) {
   if (variant === "wave" || variant === "spin") {
-    return <DotsIndicator variant={variant} />;
+    return <DotsIndicator variant={variant} animated={animated} />;
   }
   if (variant === "stars") {
-    return <StarsIndicator />;
+    return <StarsIndicator animated={animated} />;
   }
   return <InfinityIndicator />;
 }
@@ -381,17 +395,22 @@ export function AgentThinking({
   retryDetail,
 }: AgentThinkingProps) {
   const color = TONE_COLORS[tone ?? VARIANT_TONE[variant]];
+  const animated = !retry;
 
   return (
     <div
       role="status"
-      className={cx("flex items-center gap-2.5", className)}
+      className={cx(
+        "flex items-center gap-2.5",
+        retry && "bui-agent-thinking-static",
+        className,
+      )}
       style={{ color, "--bui-agent-thinking-tone": color } as CSSProperties}
     >
-      <VariantIndicator variant={variant} />
+      <VariantIndicator variant={variant} animated={animated} />
       <span
         aria-label={label}
-        className={cx("text-body-medium", shimmer && "bui-agent-thinking-label")}
+        className={cx("text-body-medium", shimmer && animated && "bui-agent-thinking-label")}
       >
         {label}
       </span>
@@ -399,9 +418,9 @@ export function AgentThinking({
         showTimer={showTimer}
         startedAt={startedAt}
         durationFormatter={durationFormatter}
-        usage={usage}
         model={model}
         effort={effort}
+        usage={usage}
         retry={retry}
         retryDetail={retryDetail}
       />

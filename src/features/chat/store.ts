@@ -15,7 +15,11 @@ import type { ChatStore } from "./store/types";
 // Facade re-exports: callers keep importing everything from "../store".
 export { parseDraftSessionKey, sessionKey } from "./store/persistence";
 export type { ActiveSession } from "./store/persistence";
-export type { QueuedMessage, SessionState } from "./store/stream";
+export type {
+  QueuedMessage,
+  QueueMoveDirection,
+  SessionState,
+} from "./store/stream";
 export type { ChatStore } from "./store/types";
 export { effectivePermission } from "./store/permissions";
 export { AGENT_BLOCK_HEADER } from "./components/agent-block";
@@ -121,6 +125,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
     thinkingAutoCollapse: true,
     bySession: {},
     streamingByKey: {},
+    retryingByKey: {},
     unseen: {},
     drafts: {},
     pendingMention: null,

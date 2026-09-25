@@ -51,13 +51,18 @@ export function ModalShell({
   return (
     <ModalOverlay
       isOpen
+      // `isDismissable` belongs on the overlay: react-aria's `useOverlay`
+      // defaults it to false and `useModalOverlay` only reads it from the
+      // ModalOverlay — on the inner Modal it is silently ignored (the library
+      // warns in dev), which left outside-press dismissal dead for every
+      // dialog built on this shell.
+      isDismissable
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
       className="fixed inset-0 z-110 flex items-center justify-center bg-overlay-backdrop"
     >
       <Modal
-        isDismissable
         className={cx(
           "w-80 rounded-2lg border border-border-button-default bg-background-primary-default p-4 shadow-xl outline-none",
           className,
@@ -141,13 +146,16 @@ export function PromptDialog({
 interface ConfirmDialogProps {
   message: string;
   danger?: boolean;
+  /** Override for the confirm button's label when the action needs to be
+   *  spelled out (e.g. 一并归档). */
+  confirmLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
   /** Extra body content (e.g. the file list of the switch confirmation). */
   children?: ReactNode;
 }
 
-export function ConfirmDialog({ message, danger = false, onConfirm, onCancel, children }: ConfirmDialogProps) {
+export function ConfirmDialog({ message, danger = false, confirmLabel, onConfirm, onCancel, children }: ConfirmDialogProps) {
   const { t } = useTranslation();
   return (
     <ModalShell onClose={onCancel}>
@@ -160,7 +168,7 @@ export function ConfirmDialog({ message, danger = false, onConfirm, onCancel, ch
         {/* The confirm button takes the dialog's initial focus so Enter
          *  confirms instead of cancelling. */}
         <Button variant={danger ? "danger" : "primary"} size="small" autoFocus onClick={onConfirm}>
-          {t("common.confirm")}
+          {confirmLabel ?? t("common.confirm")}
         </Button>
       </div>
     </ModalShell>

@@ -1,36 +1,25 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getAppVersion, isWeb, setWebviewZoom } from "@/lib/platform";
+import { getAppVersion, isWeb } from "@/lib/platform";
 import Activity from "lucide-react/dist/esm/icons/activity";
 import Minus from "lucide-react/dist/esm/icons/minus";
 import Plus from "lucide-react/dist/esm/icons/plus";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
+import { ActionFeedbackIcon, useRunningFeedback } from "@/components/base/action-feedback";
 import { ipc, type AppMetrics } from "@/lib/ipc";
 import { listenScanProgress, type ScanProgress } from "@/lib/events";
-import { readStoredNumber, writeStored } from "@/lib/storage";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { cx } from "@/utils/cx";
 import { compareByOrder, pluginIdFromRegistryKey, statusBarRegistry, useRegistry } from "@ccgui/plugin-sdk";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
-import { ChangelogDialog } from "@/features/settings/ChangelogDialog";
-import { CHANGELOG_DATA, GITHUB_REPO_URL } from "@/version/changelog";
+import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
+import { useReleaseNotesTabStore } from "@/features/update/notes-tab";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
+import { PerformanceDiagnosticsDialog } from "@/features/settings/PerformanceDiagnostics";
 
-const ZOOM_KEY = "ccgui-next.zoom:v1";
-const ZOOM_MIN = 50;
-const ZOOM_MAX = 200;
-const ZOOM_STEP = 10;
+import { applyZoom, changeZoom, onZoomChange, readZoomPct, ZOOM_STEP } from "@/lib/zoom";
+
 const METRICS_POLL_MS = 3000;
-
-function readZoomPct(): number {
-  const raw = readStoredNumber(ZOOM_KEY, 100);
-  return raw >= ZOOM_MIN && raw <= ZOOM_MAX ? raw : 100;
-}
-
-function applyZoom(pct: number) {
-  writeStored(ZOOM_KEY, pct);
-  setWebviewZoom(pct / 100);
-}
 
 function formatMb(bytes: number): number {
   return Math.round(bytes / (1024 * 1024));
@@ -52,7 +41,7 @@ export function AppStatusBar() {
   const [zoomPct, setZoomPct] = useState(readZoomPct);
   const [sync, setSync] = useState<ScanProgress | null>(null);
   const [version, setVersion] = useState<string | null>(null);
-  const [showChangelog, setShowChangelog] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const pluginItems = useRegistry(statusBarRegistry);
   // zone (SDK 0.3.8): "start" chips render left-aligned ahead of the
   // builtin cluster; everything else keeps the legacy right-side slot.
@@ -62,11 +51,9 @@ export function AppStatusBar() {
   // Re-apply the persisted zoom on startup; Tauri does not restore it.
   useEffect(() => applyZoom(readZoomPct()), []);
 
-  const changeZoom = useCallback((next: number) => {
-    const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(next / ZOOM_STEP) * ZOOM_STEP));
-    setZoomPct(clamped);
-    applyZoom(clamped);
-  }, []);
+  // Follow zoom changes from every entry point (shortcuts below, Settings →
+  // 通用 → 外观 → 界面缩放) so the percent label never goes stale.
+  useEffect(() => onZoomChange(setZoomPct), []);
   // Zoom keys live in the shortcut runtime (defaults ⌘= / ⌘- / ⌘0,
   // configurable in Settings → Shortcuts). Web mode skips registration:
   // browsers own ⌘± natively. readZoomPct() keeps handlers stale-free.
@@ -80,7 +67,7 @@ export function AppStatusBar() {
       unOut();
       unReset();
     };
-  }, [changeZoom]);
+  }, []);
 
   useEffect(() => {
     void getAppVersion().then((v) => {
@@ -90,16 +77,19 @@ export function AppStatusBar() {
 
   useEffect(() => {
     let cancelled = false;
+    let polling = false;
     const poll = () => {
       // Skip ticks while the window is hidden (background tab / minimized):
       // the numbers are invisible anyway, so polling then is pure waste.
-      if (document.hidden) return;
+      if (document.hidden || polling) return;
+      polling = true;
       ipc
         .appMetrics()
         .then((m) => {
           if (!cancelled) setMetrics(m);
         })
-        .catch(() => {});
+        .catch(() => { if (!cancelled) setMetrics(null); })
+        .finally(() => { polling = false; });
     };
     void poll();
     const timer = setInterval(poll, METRICS_POLL_MS);
@@ -113,6 +103,9 @@ export function AppStatusBar() {
 
   const syncPct = sync && sync.total > 0 ? Math.round((sync.done / sync.total) * 100) : 0;
   const syncing = !!sync && !sync.finished;
+  // Spin while the rescan runs, check when it reports finished (same feedback
+  // as the git panel's refresh).
+  const syncFeedback = useRunningFeedback(syncing);
   const triggerSync = useCallback(() => {
     void ipc.rescanSessions().catch(() => {});
   }, []);
@@ -140,8 +133,11 @@ export function AppStatusBar() {
         </div>
       )}
       <div className="flex min-w-0 items-center gap-3">
-        <span
-          className="flex items-center gap-1"
+        <button
+          type="button"
+          onClick={() => setShowDiagnostics(true)}
+          aria-label={t("diagnostics.open")}
+          className="flex cursor-pointer items-center gap-1 rounded transition-colors hover:bg-background-tertiary-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-border-focus-ring"
           title={
             metrics
               ? t("statusbar.perfDetail", {
@@ -156,7 +152,7 @@ export function AppStatusBar() {
             {t("statusbar.performance")}
             {metrics ? ` ${formatMb(metrics.memoryBytes)} MB` : ""}
           </span>
-        </span>
+        </button>
 
         <span className="text-text-disabled">·</span>
 
@@ -203,7 +199,12 @@ export function AppStatusBar() {
           className={cx(iconButton, syncing && "cursor-default opacity-60")}
           onClick={triggerSync}
         >
-          <RefreshCw className={cx("size-3.5", syncing && "animate-spin")} aria-hidden />
+          <ActionFeedbackIcon
+            icon={RefreshCw}
+            feedback={syncFeedback}
+            spin
+            iconClassName="size-3.5"
+          />
         </button>
 
         {sync && (
@@ -248,22 +249,22 @@ export function AppStatusBar() {
             <span className="text-text-disabled">·</span>
             <button
               type="button"
-              aria-label={t("settings.versionHistory")}
-              title={t("settings.versionHistoryDesc")}
+              aria-label={t("changelog.title")}
+              title={t("commands.openReleaseNotes")}
               className="shrink-0 cursor-pointer rounded px-1 transition-colors hover:bg-background-tertiary-hover hover:text-text-secondary"
-              onClick={() => setShowChangelog(true)}
+              // 版本号打开版本更新页签：先清掉其他中心面（同插件入口），再打开/
+              // 聚焦更新说明页签（版本历史翻页入口已随弹窗下线，见
+              // ReleaseNotesPane）。
+              onClick={() => {
+                dismissCenterSurfaces();
+                useReleaseNotesTabStore.getState().openTab();
+              }}
             >
               v{version}
             </button>
           </>
         )}
-        {showChangelog && (
-          <ChangelogDialog
-            entries={CHANGELOG_DATA}
-            githubUrl={GITHUB_REPO_URL}
-            onClose={() => setShowChangelog(false)}
-          />
-        )}
+        {showDiagnostics && <PerformanceDiagnosticsDialog onClose={() => setShowDiagnostics(false)} />}
       </div>
     </div>
   );

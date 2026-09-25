@@ -31,7 +31,11 @@ impl EmbeddedRegistry {
     /// can't resolve it.
     fn display_line(&self, selector: &str) -> String {
         let bare = selector.strip_suffix("[1m]").unwrap_or(selector);
-        let id = self.alias_defaults.get(bare).map(String::as_str).unwrap_or(bare);
+        let id = self
+            .alias_defaults
+            .get(bare)
+            .map(String::as_str)
+            .unwrap_or(bare);
         match self.display_names.get(id) {
             Some(name) => format!("{name} · {id}"),
             None => id.to_string(),
@@ -248,10 +252,7 @@ pub(super) fn claude_models_remote(user_json: &str, local_json: &str) -> Vec<Eng
 /// unremapped aliases name the concrete model the CLI's embedded registry
 /// resolves them to, so the picker shows what a request actually runs.
 pub(super) fn claude_models(bin: Option<&std::path::Path>) -> Vec<EngineModel> {
-    claude_models_from(
-        read_cli_config(),
-        bin.and_then(embedded_registry).as_ref(),
-    )
+    claude_models_from(read_cli_config(), bin.and_then(embedded_registry).as_ref())
 }
 
 fn claude_models_from(
@@ -287,7 +288,9 @@ fn claude_models_from(
                 _ => (
                     Some(name.to_string()),
                     registry.and_then(|r| {
-                        r.alias_defaults.get(*id).map(|model_id| r.display_line(model_id))
+                        r.alias_defaults
+                            .get(*id)
+                            .map(|model_id| r.display_line(model_id))
                     }),
                 ),
             };
@@ -343,13 +346,25 @@ mod tests {
         let config = read_cli_config_from(&dir);
         std::fs::remove_dir_all(&dir).ok();
         // Overridden alias → custom id (what the picker names it).
-        assert_eq!(resolve_launch_model_from(&config, "opus"), "gemini-3.8-flash");
-        assert_eq!(resolve_launch_model_from(&config, "opus[1m]"), "gemini-3.8-flash");
+        assert_eq!(
+            resolve_launch_model_from(&config, "opus"),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(
+            resolve_launch_model_from(&config, "opus[1m]"),
+            "gemini-3.8-flash"
+        );
         // "default" → the CLI's configured default, override applied.
-        assert_eq!(resolve_launch_model_from(&config, "default"), "gemini-3.8-flash");
+        assert_eq!(
+            resolve_launch_model_from(&config, "default"),
+            "gemini-3.8-flash"
+        );
         // Unmapped aliases and raw ids pass through for the CLI to resolve.
         assert_eq!(resolve_launch_model_from(&config, "sonnet"), "sonnet");
-        assert_eq!(resolve_launch_model_from(&config, "claude-opus-5"), "claude-opus-5");
+        assert_eq!(
+            resolve_launch_model_from(&config, "claude-opus-5"),
+            "claude-opus-5"
+        );
         // Nothing configured: "default" stays an alias for the CLI's `best`.
         assert_eq!(
             resolve_launch_model_from(&CliModelConfig::default(), "default"),
@@ -450,24 +465,26 @@ mod tests {
             Some("claude-fable-5")
         );
         assert_eq!(
-            registry.display_names.get("claude-opus-5").map(String::as_str),
+            registry
+                .display_names
+                .get("claude-opus-5")
+                .map(String::as_str),
             Some("Opus 5")
         );
         assert_eq!(registry.best.as_deref(), Some("fable"));
         // Noise without the registry's shape contributes nothing.
-        assert!(parse_registry(br#"aliases:Qn(N(),cyg()),foo:{default:32000}"#)
-            .alias_defaults
-            .is_empty());
+        assert!(
+            parse_registry(br#"aliases:Qn(N(),cyg()),foo:{default:32000}"#)
+                .alias_defaults
+                .is_empty()
+        );
     }
 
     #[test]
     fn display_line_resolves_aliases_suffixes_and_unknowns() {
         let registry = fake_registry();
         assert_eq!(registry.display_line("opus"), "Opus 5 · claude-opus-5");
-        assert_eq!(
-            registry.display_line("opus[1m]"),
-            "Opus 5 · claude-opus-5"
-        );
+        assert_eq!(registry.display_line("opus[1m]"), "Opus 5 · claude-opus-5");
         // A raw id resolves to its display name; an unknown selector passes
         // through verbatim.
         assert_eq!(
@@ -513,4 +530,3 @@ mod tests {
         assert_eq!(models[0].description, None);
     }
 }
-

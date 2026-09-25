@@ -39,7 +39,8 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
     permission: None,
     additional_dirs: Vec::new(),
     provider_id: None,
-    computer_use: None, };
+    computer_use: None,
+    allowed_tools: None, };
     let bin = which::which(engine_id)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| engine_id.to_string());
@@ -118,7 +119,11 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
                 EngineEvent::Usage(u) => println!("  usage: {u}"),
                 EngineEvent::Error(e) => println!("  ERROR: {e}"),
                 EngineEvent::Warn(e) => println!("  warn: {e}"),
-                EngineEvent::Retry { attempt, max, message } => {
+                EngineEvent::Retry {
+                    attempt,
+                    max,
+                    message,
+                } => {
                     println!("  retry {attempt}/{max}: {message}");
                 }
                 EngineEvent::AttemptEnd { error } => {
@@ -135,8 +140,13 @@ async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
                 EngineEvent::QuestionSettled { request_id } => {
                     println!("  question settled: request_id={request_id}")
                 }
-                EngineEvent::ControlPermissionDeny { request_id, tool_name } => {
-                    println!("  control permission denied: tool={tool_name} request_id={request_id}")
+                EngineEvent::ControlPermissionDeny {
+                    request_id,
+                    tool_name,
+                } => {
+                    println!(
+                        "  control permission denied: tool={tool_name} request_id={request_id}"
+                    )
                 }
                 EngineEvent::Done { usage, .. } => {
                     println!("  done (usage: {})", usage.is_some());

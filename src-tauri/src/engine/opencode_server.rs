@@ -39,7 +39,9 @@ pub struct OpencodeServerState {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl OpencodeServerState {
@@ -124,17 +126,10 @@ pub(crate) async fn ensure_managed_server(state: &OpencodeServerState, req: &sup
 
 /// `GET /global/health` — one healthy probe means an opencode server.
 async fn healthy(origin: &str) -> bool {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(HEALTH_TIMEOUT)
-        .build()
-    else {
+    let Ok(client) = reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build() else {
         return false;
     };
-    let Ok(response) = client
-        .get(format!("{origin}/global/health"))
-        .send()
-        .await
-    else {
+    let Ok(response) = client.get(format!("{origin}/global/health")).send().await else {
         return false;
     };
     response

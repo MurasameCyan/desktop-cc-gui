@@ -2,8 +2,10 @@ import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { ConfirmDialog, ConfirmPopover, PromptDialog } from "@/components/dialogs";
 import { fileName, useFilesStore } from "@/features/files/store";
+import { WorktreeCreateDialog } from "@/features/worktree/WorktreeCreateDialog";
+import { DeleteWorktreeDialog } from "@/features/worktree/DeleteWorktreeDialog";
 import { useTerminalStore } from "@/features/terminal/store";
-import type { SessionMeta } from "@/lib/ipc";
+import { worktreeMetaOf, type SessionMeta } from "@/lib/ipc";
 import { useChatStore } from "./store";
 
 /** Modal dialogs owned by the chat page. */
@@ -15,6 +17,12 @@ export type ChatPageDialog =
   | { kind: "delete"; session: SessionMeta; anchor?: { x: number; y: number } }
   | { kind: "removeWorkspace"; workspaceId: string }
   | { kind: "workspaceAlias"; workspaceId: string }
+  /** 新建 worktree（目标是该 id 对应的父仓库工作区）。 */
+  | { kind: "createWorktree"; workspaceId: string }
+  /** 删除 worktree 子工作区的分级确认。 */
+  | { kind: "deleteWorktree"; workspaceId: string }
+  /** 归档带 worktree 子项的父工作区时的级联确认。 */
+  | { kind: "archiveWorkspace"; workspaceId: string }
   | { kind: "closeFile"; path: string };
 
 /** Session rename/delete, dirty-file close, and workspace removal
@@ -27,11 +35,12 @@ export function ChatPageDialogs({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const { renameSession, removeWorkspace, setWorkspaceAlias } = useChatStore(
+  const { renameSession, removeWorkspace, setWorkspaceAlias, setWorkspaceArchived } = useChatStore(
     useShallow((s) => ({
       renameSession: s.renameSession,
       removeWorkspace: s.removeWorkspace,
       setWorkspaceAlias: s.setWorkspaceAlias,
+      setWorkspaceArchived: s.setWorkspaceArchived,
     })),
   );
   const workspaces = useChatStore((s) => s.workspaces);
@@ -80,18 +89,94 @@ export function ChatPageDialogs({
           onCancel={onClose}
         />
       )}
-      {dialog?.kind === "removeWorkspace" && (
-        <ConfirmDialog
-          message={t("chat.confirmRemoveWorkspace")}
-          onConfirm={() => {
-            const workspace = workspaces.find((w) => w.id === dialog.workspaceId);
-            if (workspace) removeTerminalWorkspace(workspace.path);
-            onClose();
-            void removeWorkspace(dialog.workspaceId);
-          }}
-          onCancel={onClose}
-        />
-      )}
+      {dialog?.kind === "createWorktree" &&
+        (() => {
+          const parent = workspaces.find((w) => w.id === dialog.workspaceId);
+          return parent ? (
+            <WorktreeCreateDialog parent={parent} onClose={onClose} />
+          ) : null;
+        })()}
+      {dialog?.kind === "deleteWorktree" &&
+        (() => {
+          const workspace = workspaces.find((w) => w.id === dialog.workspaceId);
+          return workspace ? (
+            <DeleteWorktreeDialog workspace={workspace} onClose={onClose} />
+          ) : null;
+        })()}
+      {dialog?.kind === "removeWorkspace" &&
+        (() => {
+          const parent = workspaces.find((w) => w.id === dialog.workspaceId);
+          const children = workspaces.filter((w) => w.parentId === dialog.workspaceId);
+          const removeOne = async (id: string) => {
+            const target = workspaces.find((w) => w.id === id);
+            if (target) removeTerminalWorkspace(target.path);
+            await removeWorkspace(id);
+          };
+          // 级联提示（确认决策）：父行带 worktree 子项时列出受影响分支，
+          // 确认后先移除子项登记再移除父行；磁盘目录不动。
+          if (parent && children.length > 0) {
+            return (
+              <ConfirmDialog
+                danger
+                confirmLabel={t("worktree.cascadeConfirm")}
+                message={t("worktree.cascadeMessage", {
+                  name: parent.name,
+                  count: children.length,
+                })}
+                onConfirm={() => {
+                  onClose();
+                  void (async () => {
+                    // 顺序执行（非并行）：每次 removeWorkspace 都会整体刷新工作区
+                    // 列表，并行的刷新可能乱序返回，把已注销的兄弟行又写回 state。
+                    await children.reduce(
+                      (chain, child) => chain.then(() => removeOne(child.id)),
+                      Promise.resolve(),
+                    );
+                    await removeOne(parent.id);
+                  })();
+                }}
+                onCancel={onClose}
+              >
+                <ul className="mt-2 flex flex-col gap-0.5 text-caption-1-regular text-text-secondary">
+                  {children.map((child) => (
+                    <li key={child.id}>{worktreeMetaOf(child)?.branch ?? child.name}</li>
+                  ))}
+                </ul>
+              </ConfirmDialog>
+            );
+          }
+          return (
+            <ConfirmDialog
+              message={t("chat.confirmRemoveWorkspace")}
+              onConfirm={() => {
+                onClose();
+                void removeOne(dialog.workspaceId);
+              }}
+              onCancel={onClose}
+            />
+          );
+        })()}
+      {dialog?.kind === "archiveWorkspace" &&
+        (() => {
+          const parent = workspaces.find((w) => w.id === dialog.workspaceId);
+          const children = workspaces.filter((w) => w.parentId === dialog.workspaceId);
+          if (!parent || children.length === 0) return null;
+          return (
+            <ConfirmDialog
+              confirmLabel={t("worktree.cascadeArchiveConfirm")}
+              message={t("worktree.cascadeArchiveMessage", {
+                name: parent.name,
+                count: children.length,
+              })}
+              onConfirm={() => {
+                onClose();
+                for (const child of children) void setWorkspaceArchived(child.id, true);
+                void setWorkspaceArchived(parent.id, true);
+              }}
+              onCancel={onClose}
+            />
+          );
+        })()}
     </>
   );
 }

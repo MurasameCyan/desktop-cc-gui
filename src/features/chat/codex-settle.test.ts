@@ -16,6 +16,7 @@ vi.mock("@/lib/ipc", async () => ({
 vi.mock("@/lib/events", () => ({
   listenEngineEvents: vi.fn(async () => () => {}),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 // Node 26 ships a built-in `localStorage` that stays undefined unless the

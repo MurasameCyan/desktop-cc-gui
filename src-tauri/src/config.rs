@@ -264,7 +264,9 @@ pub(crate) fn resolve_provider(
     // Only the stored current id may be stale (the channel was deleted out
     // from under the config): fall back to the official config rather than
     // fail every send.
-    eprintln!("[config] current provider {id} not found for {engine}, falling back to official config");
+    eprintln!(
+        "[config] current provider {id} not found for {engine}, falling back to official config"
+    );
     Ok(None)
 }
 
@@ -716,9 +718,10 @@ mod tests {
         );
         assert!(find_provider(&section, "custom_1").is_err());
         // Exact id still wins over fuzzy candidates.
-        section
-            .providers
-            .insert("custom_1".to_string(), json!({"baseUrl": "https://exact.example"}));
+        section.providers.insert(
+            "custom_1".to_string(),
+            json!({"baseUrl": "https://exact.example"}),
+        );
         let (key, _) = find_provider(&section, "custom_1").unwrap().unwrap();
         assert_eq!(key, "custom_1");
     }

@@ -1,4 +1,6 @@
 import { ipc, type PluginInfo } from "@/lib/ipc";
+import i18n from "@/lib/i18n";
+import { buildAgentCatalog } from "../conversation/agent-catalog";
 import { getAppVersion } from "@/lib/platform";
 import { invoke } from "@/lib/transport";
 import {
@@ -52,6 +54,7 @@ export interface LoaderBackend extends PluginContextBackend {
 }
 
 export const ipcBackend: LoaderBackend = {
+  agentCatalog: (workspacePath) => buildAgentCatalog(ipc, workspacePath, (key) => i18n.t(key)),
   list: () => ipc.pluginList(),
   readFile: (id, name) => ipc.pluginReadFile(id, name),
   quarantine: (id, error) => ipc.pluginQuarantine(id, error),
@@ -115,17 +118,47 @@ export function getPluginState(id: string): PluginRuntimeState | undefined {
   return states.get(id)?.state;
 }
 
+/** Set while the document is going away; cleared if the page is restored from
+ *  the page cache. Nothing about a failure observed in that window is the
+ *  plugin's fault. */
+let pageUnloading = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    pageUnloading = true;
+  });
+  window.addEventListener("pageshow", () => {
+    pageUnloading = false;
+  });
+}
+
 function fail(handleCtxId: string, backend: LoaderBackend, error: unknown, quarantine: boolean) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[plugins] ${handleCtxId} failed:`, error);
-  if (quarantine) void backend.quarantine(handleCtxId, message).catch(() => {});
-  setState(handleCtxId, quarantine ? "quarantined" : "failed", message);
+  // Quarantine is sticky: every later boot skips a quarantined id until the
+  // user re-enables it. So persist it only for faults of the plugin itself —
+  // a load that fails while the document is being torn down (dev-server
+  // reload, window close) failed because the page went away, and the next
+  // boot re-attempts it anyway.
+  const persisted = quarantine && !pageUnloading;
+  if (persisted) void backend.quarantine(handleCtxId, message).catch(() => {});
+  setState(handleCtxId, persisted ? "quarantined" : "failed", message);
+}
+
+/** True for a module *transport* failure, false for anything the bundle itself
+ *  is answerable for: syntax errors keep their SyntaxError type and an
+ *  evaluation error keeps the plugin's own error, so only a failed/aborted
+ *  module fetch is retried and a throwing bundle is never re-evaluated. */
+function isModuleFetchFailure(error: unknown): boolean {
+  // WebKit rejects with TypeError "Importing a module script failed." /
+  // "Load failed"; Chromium with "Failed to fetch dynamically imported
+  // module: <url>".
+  return error instanceof TypeError;
 }
 
 // Dynamic import is irreplaceable here: the specifier is a blob URL minted
 // from bytes the Rust side read off disk — a static import cannot exist for
 // content only known at runtime (rule exception: plugin loading).
-async function importBlob(code: string): Promise<Record<string, unknown>> {
+async function importBlobOnce(code: string): Promise<Record<string, unknown>> {
   const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
   try {
     return await import(/* @vite-ignore */ url);
@@ -134,6 +167,22 @@ async function importBlob(code: string): Promise<Record<string, unknown>> {
     // URL string mapping. Reload creates a fresh blob URL, so no cache-key
     // collisions across reloads.
     URL.revokeObjectURL(url);
+  }
+}
+
+/** Import the bundle as an ESM module from a blob URL, with one retry on a
+ *  fresh blob URL: a module fetch can be aborted by transient host conditions
+ *  (page teardown, a blocked/aborted blob fetch) that say nothing about the
+ *  bundle, and quarantining on the first abort permanently disables a healthy
+ *  plugin. A persistent cause (blocked blob: CSP, missing bytes) fails both
+ *  attempts and still quarantines. */
+async function importBlob(code: string): Promise<Record<string, unknown>> {
+  try {
+    return await importBlobOnce(code);
+  } catch (error) {
+    if (!isModuleFetchFailure(error)) throw error;
+    console.warn("[plugins] module script fetch failed; retrying once", error);
+    return await importBlobOnce(code);
   }
 }
 

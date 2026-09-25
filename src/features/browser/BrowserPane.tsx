@@ -5,6 +5,7 @@ import Globe from "lucide-react/dist/esm/icons/globe";
 import RotateCw from "lucide-react/dist/esm/icons/rotate-cw";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ActionFeedbackIcon, useActionFeedback } from "@/components/base/action-feedback";
 import { openExternal } from "@/lib/platform";
 import { isWeb } from "@/lib/transport";
 import { cx } from "@/utils/cx";
@@ -134,6 +135,9 @@ export function BrowserPane({ tab, active }: { tab: BrowserTab; active: boolean 
   const placeholderRef = useRef<HTMLDivElement>(null);
   const [address, setAddress] = useState(tab.url);
   const [addressFocused, setAddressFocused] = useState(false);
+  // Same spin → check feedback as the app's other refresh actions.
+  const reloadAction = useActionFeedback({ spin: true });
+  const reloading = reloadAction.feedback === "running";
 
   useWebviewSync(tab.id, tab.url, active, placeholderRef);
 
@@ -185,10 +189,14 @@ export function BrowserPane({ tab, active }: { tab: BrowserTab; active: boolean 
           type="button"
           aria-label={t("browser.reload")}
           title={t("browser.reload")}
-          onClick={() => void browserReload(tab.id)}
-          className={TOOL_BUTTON}
+          disabled={reloading}
+          onClick={() => {
+            if (reloading) return;
+            void reloadAction.start(() => browserReload(tab.id));
+          }}
+          className={cx(TOOL_BUTTON, "disabled:cursor-default disabled:opacity-60")}
         >
-          <RotateCw className="size-4" aria-hidden />
+          <ActionFeedbackIcon icon={RotateCw} feedback={reloadAction.feedback} spin />
         </button>
         <input
           type="text"

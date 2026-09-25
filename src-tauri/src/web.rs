@@ -522,7 +522,7 @@ background:#a7e05f;animation:pulse 1.2s ease-in-out infinite}
 <p>授权后本页会自动进入，无需操作。</p>
 </div>
 </body></html>"#
-    .to_string()
+        .to_string()
 }
 
 /// Page + cookie for a device that still has to unlock.
@@ -551,7 +551,11 @@ async fn unlock_handler(
     let device = match cookie_value(&headers) {
         Some(id) => id,
         None => {
-            return unlock_response(unlock_page(Some("浏览器没有拿到设备标识，请重新打开链接")), "", true)
+            return unlock_response(
+                unlock_page(Some("浏览器没有拿到设备标识，请重新打开链接")),
+                "",
+                true,
+            )
         }
     };
     let submitted = form_field(&body, "key").unwrap_or_default().to_uppercase();
@@ -564,7 +568,11 @@ async fn unlock_handler(
         Ok(true) => {}
         Ok(false) => return unlock_response(unlock_page(Some("密钥不正确")), &device, false),
         Err(_) => {
-            return unlock_response(unlock_page(Some("无法读取本机设置，请重试")), &device, false)
+            return unlock_response(
+                unlock_page(Some("无法读取本机设置，请重试")),
+                &device,
+                false,
+            )
         }
     }
 

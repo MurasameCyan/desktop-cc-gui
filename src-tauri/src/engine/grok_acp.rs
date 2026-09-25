@@ -170,7 +170,11 @@ async fn handshake_and_prompt(
 ) -> Result<(), String> {
     acp.routed(
         "initialize",
-        if core.engine_id == "kimi" { super::kimi_acp::initialization() } else { initialize_params() },
+        if core.engine_id == "kimi" {
+            super::kimi_acp::initialization()
+        } else {
+            initialize_params()
+        },
         RPC_HANDSHAKE_TIMEOUT,
         killed,
         None,
@@ -205,7 +209,8 @@ async fn handshake_and_prompt(
                 None
             }
             AcpLine::AgentRequest { id, method, params }
-                if core.engine_id == "kimi" && method == "elicitation/create" => {
+                if core.engine_id == "kimi" && method == "elicitation/create" =>
+            {
                 super::kimi_acp::park_question(core, state, id, params)
             }
             // The ask is the user's line to answer: return None so the frame is
@@ -632,10 +637,16 @@ mod tests {
         let answers = json!({ "Which drinks?": ["Coffee", "Tea"] });
         let frame = answer_frame(&parked, Some(&answers)).unwrap();
         assert_eq!(frame["id"], json!("req-9"));
-        assert_eq!(frame["result"]["answers"]["Which drinks?"], json!(["Coffee", "Tea"]));
+        assert_eq!(
+            frame["result"]["answers"]["Which drinks?"],
+            json!(["Coffee", "Tea"])
+        );
         // The CLI accepts an accepted outcome with no answers at all.
         let frame = answer_frame(&json!({ "rpcId": 1 }), Some(&json!({}))).unwrap();
-        assert_eq!(frame["result"], json!({ "outcome": "accepted", "answers": {} }));
+        assert_eq!(
+            frame["result"],
+            json!({ "outcome": "accepted", "answers": {} })
+        );
     }
 
     #[test]
@@ -670,7 +681,10 @@ mod tests {
             .expect("the ask stays parked until the user answers");
         // The card payload the frontend renders, plus the context the answer
         // command reads (`input.get("grokAcp")`).
-        assert_eq!(parked["questions"], json!(normalize_questions(&ask_params())));
+        assert_eq!(
+            parked["questions"],
+            json!(normalize_questions(&ask_params()))
+        );
         // The sink batches; flush first or the event would still be pending.
         core.sink.flush();
         let emitted = emitter.0.lock().unwrap().join(" ");
@@ -682,7 +696,16 @@ mod tests {
         // An ask with nothing to render answers itself instead of parking a
         // card the CLI would wait on until the prompt times out.
         assert!(park_question(&core, &mut state, &json!(8), &json!({ "questions": [] })).is_some());
-        assert_eq!(registry.get("test-run").unwrap().questions.lock().unwrap().len(), 1);
+        assert_eq!(
+            registry
+                .get("test-run")
+                .unwrap()
+                .questions
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -695,15 +718,23 @@ mod tests {
                 "type": "string", "title": "选择", "oneOf": [{"const": "A"}, {"const": "B"}]
             }}
         }});
-        assert!(super::super::kimi_acp::park_question(&core, &mut state, &json!(8), &params).is_none());
+        assert!(
+            super::super::kimi_acp::park_question(&core, &mut state, &json!(8), &params).is_none()
+        );
         let entry = registry.get("test-run").unwrap();
         let parked = entry.questions.lock().unwrap()["8"].clone();
         assert_eq!(parked["questions"][0]["allowOther"], false);
-        let frame = super::super::kimi_acp::answer_frame(&parked["kimiAcp"], Some(&json!({"选哪种？": "B"}))).unwrap();
+        let frame = super::super::kimi_acp::answer_frame(
+            &parked["kimiAcp"],
+            Some(&json!({"选哪种？": "B"})),
+        )
+        .unwrap();
         assert_eq!(frame["result"]["content"], json!({"q0": "B"}));
         core.sink.flush();
         assert!(emitter.0.lock().unwrap().join(" ").contains("kimiAcp"));
-        let decline = super::super::kimi_acp::park_question(&core, &mut state, &json!(9), &json!({})).unwrap();
+        let decline =
+            super::super::kimi_acp::park_question(&core, &mut state, &json!(9), &json!({}))
+                .unwrap();
         assert_eq!(decline["result"]["action"], "decline");
         assert_eq!(entry.questions.lock().unwrap().len(), 1);
     }

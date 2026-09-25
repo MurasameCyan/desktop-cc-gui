@@ -101,6 +101,6 @@ describe("AgentLimitsCard", () => {
     const refreshBtn = container.querySelector<HTMLButtonElement>("[data-testid='refresh-usage-btn']");
     expect(refreshBtn?.disabled).toBe(true);
     expect(refreshBtn?.textContent).toContain("刷新中…");
-    expect(refreshBtn?.querySelector(".animate-spin")).not.toBeNull();
+    expect(refreshBtn?.querySelector(".animate-refresh-spin")).not.toBeNull();
   });
 });

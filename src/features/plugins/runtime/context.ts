@@ -20,9 +20,11 @@ import {
   timelineRowRegistry,
   sidebarNavRegistry,
   centerTabRegistry,
+  conversationModeRegistry,
 } from "@ccgui/plugin-sdk";
 import type {
   Disposer,
+  PluginAgentCatalogEntry,
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
@@ -30,6 +32,7 @@ import type {
 } from "@ccgui/plugin-sdk";
 import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
+import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { addPluginWorkspace, openPluginSession } from "./workspace-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
@@ -50,6 +53,7 @@ export interface PluginStorageBackend {
  *  (grant-checked below, then routed through the host's transport by the
  *  loader's IPC-backed implementation). */
 export interface PluginContextBackend extends PluginStorageBackend {
+  agentCatalog?(workspacePath: string): Promise<PluginAgentCatalogEntry[]>;
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -144,6 +148,14 @@ export function createPluginContext(
     version: manifest.version,
     react: React,
     ui: {
+      registerConversationMode(def) {
+        requirePermission("ui:conversation-mode");
+        return track(conversationModeRegistry.register({
+          id: scopedPluginId(id, def.key),
+          label: () => runAsPlugin(def.label),
+          component: def.component,
+        }));
+      },
       registerSettingsSection(def) {
         requirePermission("ui:settings-section");
         const key = scopedPluginId(id, def.key);
@@ -318,6 +330,9 @@ export function createPluginContext(
         if (!centerTabRegistry.get(tabId)) {
           throw new Error(`[plugins] "${id}" opened unregistered center tab ${tabId}`);
         }
+        // 插件页签置前：其他中心面（浏览器/文件/插件中心/工作台/差异）让位；
+        // 否则经由插件侧栏入口打开时，页签开了、画面还停在原地。
+        dismissCenterSurfaces();
         usePluginTabsStore.getState().openTab(tabId);
       },
     },
@@ -449,8 +464,16 @@ export function createPluginContext(
       },
     },
     agent: {
+      async catalog(workspacePath) {
+        requirePermission("agent");
+        if (!backend.agentCatalog) throw new Error("Plugin agent catalog is unavailable on this host");
+        return backend.agentCatalog(workspacePath);
+      },
       start(def) {
         requirePermission("agent");
+        if (def.requestId !== undefined && !/^[a-fA-F0-9]{32}$/.test(def.requestId)) {
+          throw new Error("Plugin agent requestId must contain exactly 32 hexadecimal characters");
+        }
         return backend.bridgeInvoke("plugin_agent_start", {
           pluginId: id,
           engine: def.engine,
@@ -459,11 +482,13 @@ export function createPluginContext(
           model: def.model ?? null,
           providerId: def.providerId ?? null,
           sessionId: def.sessionId ?? null,
+          readOnly: def.readOnly ?? false,
+          requestId: def.requestId ?? null,
         }) as Promise<{ runId: string; sessionId: string | null }>;
       },
       async interrupt(runId) {
         requirePermission("agent");
-        await backend.bridgeInvoke("plugin_agent_interrupt", { pluginId: id, runId });
+        return await backend.bridgeInvoke("plugin_agent_interrupt", { pluginId: id, runId }) as boolean;
       },
     },
     bridge: {

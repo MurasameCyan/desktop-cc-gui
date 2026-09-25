@@ -106,7 +106,7 @@ export function computeDiffLines(oldStr?: string, newStr?: string): DiffLine[] {
     newEnd >= startCommon &&
     oldLines[oldEnd] === newLines[newEnd]
   ) {
-    suffixLines.unshift({
+    suffixLines.push({
       type: "ctx",
       text: oldLines[oldEnd],
       oldLineNo: oldEnd + 1,
@@ -124,7 +124,7 @@ export function computeDiffLines(oldStr?: string, newStr?: string): DiffLine[] {
     lines.push({ type: "add", text: newLines[j], newLineNo: newIdx++ });
   }
 
-  return [...lines, ...suffixLines];
+  return [...lines, ...suffixLines.reverse()];
 }
 
 /** Parse unified patch format (e.g. @@ ... @@). */
@@ -164,22 +164,6 @@ export interface EditLineStat {
   deletions: number;
 }
 
-/** Diff-line set for one edit-tool payload. Precedence mirrors
- * FileDiffViewer so the pill and the per-tool diff header always agree:
- * an explicit patch wins, then a whole-file `content` write (pure
- * additions), else the old/new string pair. */
-function diffLinesForArgs(edit: EditArgs): DiffLine[] {
-  if (edit.patch) return parsePatchLines(edit.patch);
-  if (edit.content !== undefined) {
-    return edit.content.split("\n").map((text, i) => ({
-      type: "add" as const,
-      text,
-      newLineNo: i + 1,
-    }));
-  }
-  return computeDiffLines(edit.oldString, edit.newString);
-}
-
 /** Added/removed line tally for one edit-tool call's arguments, or null when
  * the args carry no recognizable edit payload. */
 export function countEditLines(args: unknown): EditLineStat | null {
@@ -187,11 +171,33 @@ export function countEditLines(args: unknown): EditLineStat | null {
   if (!edit) return null;
   let additions = 0;
   let deletions = 0;
-  for (const line of diffLinesForArgs(edit)) {
-    if (line.type === "add") additions++;
-    else if (line.type === "del") deletions++;
+  if (edit.patch) {
+    for (const line of edit.patch.split("\n")) {
+      if (line.startsWith("+")) additions++;
+      else if (line.startsWith("-")) deletions++;
+    }
+    return { additions, deletions };
   }
-  return { additions, deletions };
+  if (edit.content !== undefined) {
+    return { additions: edit.content.split("\n").length, deletions: 0 };
+  }
+  const oldLines = edit.oldString === undefined ? [] : edit.oldString.split("\n");
+  const newLines = edit.newString === undefined ? [] : edit.newString.split("\n");
+  if (edit.oldString !== undefined && !edit.newString) {
+    return { additions: 0, deletions: oldLines.length };
+  }
+  if (edit.newString !== undefined && !edit.oldString) {
+    return { additions: newLines.length, deletions: 0 };
+  }
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
+  let oldEnd = oldLines.length;
+  let newEnd = newLines.length;
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+  return { additions: newEnd - start, deletions: oldEnd - start };
 }
 
 /**
@@ -204,22 +210,34 @@ export function countEditLines(args: unknown): EditLineStat | null {
  * last call's.
  */
 export function deriveEditLineStats(messages: Message[]): Map<string, EditLineStat> {
-  const stats = new Map<string, EditLineStat>();
-  for (const message of messages) {
-    if (message.role !== "tool" || !message.path) continue;
-    if (!isEditToolLabel(message.text)) continue;
-    // Tool rows also record non-file targets (xd:// device endpoints, URLs)
-    // — real file paths never carry a URI scheme.
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(message.path)) continue;
-    const stat = countEditLines(message.args);
-    if (!stat) continue;
-    const prev = stats.get(message.path);
-    if (prev) {
-      prev.additions += stat.additions;
-      prev.deletions += stat.deletions;
-    } else {
-      stats.set(message.path, stat);
+  return createEditLineStatsBuilder()(messages);
+}
+
+export function createEditLineStatsBuilder() {
+  const cache = new WeakMap<Message, EditLineStat | null>();
+  let previous: Message[] = [];
+  let stats = new Map<string, EditLineStat>();
+  return (messages: Message[]): Map<string, EditLineStat> => {
+    const edits = messages.filter(message => message.role === "tool" && message.path &&
+      isEditToolLabel(message.text) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(message.path));
+    if (edits.length === previous.length && edits.every((message, index) => message === previous[index])) return stats;
+    const next = new Map<string, EditLineStat>();
+    for (const message of edits) {
+      let stat = cache.get(message);
+      if (stat === undefined) {
+        stat = countEditLines(message.args);
+        cache.set(message, stat);
+      }
+      if (!stat) continue;
+      const path = message.path!;
+      const accumulated = next.get(path);
+      next.set(path, {
+        additions: (accumulated?.additions ?? 0) + stat.additions,
+        deletions: (accumulated?.deletions ?? 0) + stat.deletions,
+      });
     }
-  }
-  return stats;
+    previous = edits;
+    stats = next;
+    return stats;
+  };
 }

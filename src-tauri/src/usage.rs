@@ -233,12 +233,20 @@ mod tests {
         insert(&conn, now, 3);
 
         assert_eq!(
-            summarize(&conn, 365, 0).unwrap().iter().map(|r| r.input).sum::<i64>(),
+            summarize(&conn, 365, 0)
+                .unwrap()
+                .iter()
+                .map(|r| r.input)
+                .sum::<i64>(),
             3,
             "the 400-day-old turn is past a 365-day window",
         );
         assert_eq!(
-            summarize(&conn, 500, 0).unwrap().iter().map(|r| r.input).sum::<i64>(),
+            summarize(&conn, 500, 0)
+                .unwrap()
+                .iter()
+                .map(|r| r.input)
+                .sum::<i64>(),
             10,
             "a wider window is no longer clamped to 365 days",
         );

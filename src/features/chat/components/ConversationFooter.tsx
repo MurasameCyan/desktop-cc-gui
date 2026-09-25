@@ -8,7 +8,7 @@ import {
 import { MessageQueue } from "@/components/application/ai-chat/message-queue";
 import type { ContextSegment } from "@/components/application/agent-limits/agent-limits-card";
 import type { BranchInfo, Workspace } from "@/lib/ipc";
-import type { ActiveSession, QueuedMessage } from "../store";
+import type { ActiveSession, QueuedMessage, QueueMoveDirection } from "../store";
 import { useChatStore } from "../store";
 import { ImageLightbox } from "@/components/base/image-lightbox";
 import { imageMetaText } from "@/utils/image-meta";
@@ -248,7 +248,9 @@ function FooterStatusBar({
     try {
       await refreshSessionUsage();
     } finally {
-      setTimeout(() => setRefreshing(false), 400);
+      // No minimum-visible-busy delay here: the refresh button's feedback
+      // finishes the spin lap (and checks) on its own.
+      setRefreshing(false);
     }
   }, [active, refreshing, refreshSessionUsage]);
 
@@ -310,6 +312,7 @@ export function ConversationFooter({
   workspaces,
   queue,
   onRemoveQueued,
+  onMoveQueued,
   onSendQueuedNow,
   onClearQueued,
   imageError,
@@ -346,6 +349,7 @@ export function ConversationFooter({
   workspaces: Workspace[];
   queue: QueuedMessage[];
   onRemoveQueued: (id: string) => void;
+  onMoveQueued: (id: string, direction: QueueMoveDirection) => void;
   onSendQueuedNow: (id: string) => void;
   onClearQueued?: () => void;
   imageError: string | null;
@@ -416,7 +420,7 @@ export function ConversationFooter({
             </span>
           </div>
         )}
-        <MessageQueue queue={queue} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
+        <MessageQueue queue={queue} onRemove={onRemoveQueued} onMove={onMoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
         <ErrorBanner message={imageError} onDismiss={onDismissImageError} />
         <ErrorBanner message={branchError} onDismiss={onDismissBranchError} />
         <AttachmentChips

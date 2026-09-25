@@ -62,3 +62,13 @@ describe("app settings cache", () => {
     ]);
   });
 });
+
+describe("git tree batch", () => {
+  it("sends all directory levels through one command and preserves the response", async () => {
+    const levels = [{ path: "C:/workspace", files: ["src"], directories: ["src"] }];
+    const result = { repositories: [], fileColors: { "C:/workspace": { src: "modified" } } };
+    invoke.mockResolvedValue(result);
+    await expect(ipc.gitTreeStatus(levels)).resolves.toBe(result);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("git_tree_status", { levels });
+  });
+});

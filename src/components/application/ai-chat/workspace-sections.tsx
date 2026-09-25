@@ -189,6 +189,7 @@ export function WorkspaceSection({
   onAddWorkspace,
   onRemoveWorkspace,
   onNewSessionInWorkspace,
+  onNewWorktree,
   onReorderWorkspaces,
   onToggleGroup,
   onRepoContextMenu,
@@ -213,6 +214,8 @@ export function WorkspaceSection({
   onAddWorkspace?: () => void;
   onRemoveWorkspace?: (id: string) => void;
   onNewSessionInWorkspace?: (id: string) => void;
+  /** WORKTREES group ＋ / context-menu entry: open the create dialog. */
+  onNewWorktree?: (workspaceId: string) => void;
   onReorderWorkspaces?: (orderedIds: string[]) => void;
   onToggleGroup?: (groupId: string) => void;
   /** Right-click on a repo header row (workspace context menu). */
@@ -266,6 +269,10 @@ export function WorkspaceSection({
             onThreadContextMenu={onThreadContextMenu}
             onRemove={onRemoveWorkspace}
             onNewSession={onNewSessionInWorkspace}
+            onNewWorktree={onNewWorktree}
+            onRepoContextMenu={onRepoContextMenu}
+            isRepoExpanded={isRepoExpanded}
+            onToggleRepo={onToggleRepo}
             onContextMenu={
               onRepoContextMenu && repo.id
                 ? (event) => onRepoContextMenu(event, repo.id!)

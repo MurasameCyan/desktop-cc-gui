@@ -10,9 +10,9 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use axum::response::IntoResponse;
 use parking_lot::Mutex;
 use serde::Deserialize;
-use axum::response::IntoResponse;
 use tauri::Manager;
 
 const OVERLAY_LABEL: &str = "cu-cursor";
@@ -49,7 +49,9 @@ static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 /// Base URL the MCP child posts cursor/session events to (None before init,
 /// e.g. unit tests — env is then simply omitted from MCP server entries).
 pub fn control_base() -> Option<String> {
-    MANAGER.get().map(|m| format!("http://127.0.0.1:{}", m.port))
+    MANAGER
+        .get()
+        .map(|m| format!("http://127.0.0.1:{}", m.port))
 }
 
 pub fn control_token() -> Option<String> {
@@ -136,8 +138,7 @@ fn start_server() -> Result<(), String> {
             let Some(manager) = MANAGER.get() else { return };
             let idle_too_long = {
                 let inner = manager.inner.lock();
-                inner.visible
-                    && inner.last_event.elapsed() > Duration::from_secs(IDLE_HIDE_SECS)
+                inner.visible && inner.last_event.elapsed() > Duration::from_secs(IDLE_HIDE_SECS)
             };
             if idle_too_long {
                 hide();
@@ -156,9 +157,7 @@ async fn session_handler(
     axum::http::StatusCode::OK
 }
 
-async fn cursor_handler(
-    axum::Json(payload): axum::Json<CursorPayload>,
-) -> axum::http::StatusCode {
+async fn cursor_handler(axum::Json(payload): axum::Json<CursorPayload>) -> axum::http::StatusCode {
     show_at(payload.x, payload.y);
     axum::http::StatusCode::OK
 }
@@ -302,10 +301,25 @@ fn hide() {
     }
 }
 
-/// Window teardown: the overlay goes down with the app, but drop the armed
-/// state explicitly so a future main window starts clean.
+/// Window teardown: the overlay dies with the main window. Hiding was not
+/// enough — Tauri exits when the last window is *destroyed*, so a hidden
+/// overlay kept the process (and its already-swept engine children) alive
+/// windowless after a confirmed quit. Drop the armed state too so a future
+/// main window starts clean.
 pub fn shutdown() {
-    hide();
+    let Some(manager) = MANAGER.get() else { return };
+    {
+        let mut inner = manager.inner.lock();
+        inner.visible = false;
+        inner.generation += 1;
+    }
+    if let Some(app) = APP.get() {
+        if let Some(win) = app.get_webview_window(OVERLAY_LABEL) {
+            on_main(move || {
+                let _ = win.destroy();
+            });
+        }
+    }
 }
 #[cfg(test)]
 mod tests {

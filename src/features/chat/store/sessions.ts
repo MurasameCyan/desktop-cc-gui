@@ -6,7 +6,7 @@ import {
   type Workspace,
 } from "@/lib/ipc";
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
-import { listenEngineEvents, listenSessionsChanged } from "@/lib/events";
+import { listenEngineEvents, listenSessionsChanged, listenComputerUseEscape } from "@/lib/events";
 import { errorText } from "@/lib/errors";
 import { writeStored } from "@/lib/storage";
 import { subscribeTauriEvent } from "@/hooks/use-tauri-event";
@@ -146,6 +146,12 @@ export function createSessionActions(
         subscribeTauriEvent(() =>
           listenSessionsChanged(() => void get().refreshSessions()),
         ),
+        // Global Esc during a computer-use run: the backend arms that hotkey
+        // only while a run is active, so this fires exactly when the user
+        // needs the escape hatch out of a machine-driving turn.
+        subscribeTauriEvent(() =>
+          listenComputerUseEscape(() => void get().interrupt()),
+        ),
       );
       // Settings' CLI enable switch / channel edits: re-filter history and
       // picker options without a restart.
@@ -244,11 +250,13 @@ export function createSessionActions(
         const drafts = { ...s.drafts };
         const unseen = { ...s.unseen };
         const streamingByKey = { ...s.streamingByKey };
+        const retryingByKey = { ...s.retryingByKey };
         for (const key of Object.keys(archivedSessionKeys)) {
           delete bySession[key];
           delete drafts[key];
           delete unseen[key];
           delete streamingByKey[key];
+          delete retryingByKey[key];
         }
         const openTabs = s.openTabs.filter(
           (tab) =>
@@ -270,6 +278,7 @@ export function createSessionActions(
           drafts,
           unseen,
           streamingByKey,
+          retryingByKey,
           openTabs,
           active,
         };
@@ -460,14 +469,23 @@ export function createSessionActions(
         // Permanent delete: the cached session state is dead weight.
         const bySession = { ...s.bySession };
         const drafts = { ...s.drafts };
+        const streamingByKey = { ...s.streamingByKey };
+        const retryingByKey = { ...s.retryingByKey };
         delete bySession[key];
         delete drafts[key];
+        // Deleting a running session must clear its flat-map flags too:
+        // nothing re-scans a deleted key later (archive is swept by
+        // refreshSessions; a delete is gone for good).
+        delete streamingByKey[key];
+        delete retryingByKey[key];
         return {
           sessions: s.sessions.filter(
             (x) => !(x.engine === engine && x.sessionId === sessionId),
           ),
           bySession,
           drafts,
+          streamingByKey,
+          retryingByKey,
           unseen: omitKey(s.unseen, key),
         };
       });

@@ -97,5 +97,21 @@ export function createRootCacheStore<T>({
     });
   }
 
-  return { useStore, prune };
+  /** Mark every cached root stale without dropping its rows: the next
+   *  `ensure()` refetches immediately (stale entries stay visible meanwhile).
+   *  Used when a mutation changed what the picker would list — installing a
+   *  skill must not wait out the TTL. */
+  function invalidate() {
+    useStore.setState((s) => {
+      const roots = Object.keys(s.byRoot);
+      if (roots.length === 0) return {};
+      const byRoot: Record<string, RootCache<T>> = {};
+      for (const root of roots) {
+        byRoot[root] = { ...s.byRoot[root], fetchedAt: 0 };
+      }
+      return { byRoot };
+    });
+  }
+
+  return { useStore, prune, invalidate };
 }

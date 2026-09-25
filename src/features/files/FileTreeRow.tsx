@@ -1,9 +1,13 @@
 import { memo, useCallback, useMemo, type MouseEvent } from "react";
+import { useTranslation } from "react-i18next";
 import Loader2 from "lucide-react/dist/esm/icons/loader-2";
 import Plus from "lucide-react/dist/esm/icons/plus";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
+import { ActionFeedbackIcon, useRunningFeedback } from "@/components/base/action-feedback";
 import { cx } from "@/utils/cx";
 import type { DirEntry, FileTreeColor, RepositorySummary } from "@/lib/ipc";
 import { getFileTreeIconSvg } from "./fileIcons";
+import { useFilesStore } from "./store";
 
 export interface VisibleNode extends DirEntry {
   path: string;
@@ -23,9 +27,42 @@ function repositoryLabel(repo: RepositorySummary): string {
     : `${repo.branch}${repo.changed > 0 ? ` M${repo.changed}` : ""}${repo.untracked > 0 ? ` ?${repo.untracked}` : ""}`;
 }
 
+/** Root-row hover action: re-read the whole tree from disk. Feedback is
+ *  store-driven (not click-driven): a refresh can be started by a git action
+ *  or a directory-error retry too, and this button must spin for those. Rows
+ *  re-render on every store update, so the subscription lives in this small
+ *  child that only the root row mounts. */
+function TreeRootRefreshButton() {
+  const { t } = useTranslation();
+  const refreshing = useFilesStore((s) => s.refreshing);
+  const feedback = useRunningFeedback(refreshing);
+  return (
+    <button
+      type="button"
+      aria-label={t("common.refresh")}
+      title={t("common.refresh")}
+      disabled={refreshing}
+      onClick={(e) => {
+        e.stopPropagation();
+        void useFilesStore.getState().refreshTree();
+      }}
+      className="hidden size-5 shrink-0 cursor-pointer items-center justify-center rounded text-foreground-icon-tertiary hover:bg-background-primary-active hover:text-text-primary group-hover:flex focus-visible:flex disabled:opacity-50"
+    >
+      <ActionFeedbackIcon
+        icon={RefreshCw}
+        feedback={feedback}
+        iconClassName="size-3.5"
+        spin
+      />
+    </button>
+  );
+}
+
 interface TreeRowProps {
   node: VisibleNode;
   selected: boolean;
+  /** Workspace-root row: carries the tree-wide refresh (hover-revealed). */
+  isRoot: boolean;
   onToggleDir: (path: string) => void;
   onOpenFile: (path: string) => void;
   onSelectDir: (path: string) => void;
@@ -38,6 +75,7 @@ interface TreeRowProps {
 export const TreeRow = memo(function TreeRow({
   node,
   selected,
+  isRoot,
   onToggleDir,
   onOpenFile,
   onSelectDir,
@@ -138,6 +176,7 @@ export const TreeRow = memo(function TreeRow({
           </span>
         ) : null}
       </button>
+      {isRoot && <TreeRootRefreshButton />}
       <button
         type="button"
         aria-label={mentionLabel}

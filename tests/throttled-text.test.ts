@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ThrottledText, type ThrottleClock } from "../src/hooks/throttled-text.ts";
+import { nextParseInterval, streamParseInterval } from "../src/hooks/throttled-text.ts";
 function clock() {
   let now = 0, nextId = 0;
   const timers = new Map<number, { at: number; run: () => void }>();
@@ -37,6 +38,19 @@ test("completion, longer replacement and truncation cancel obsolete tails", () =
   c.advance(200);
   assert.equal(t.read(), "短🙂");
   assert.equal(c.pending(), 0);
+});
+test("parse interval backs off with the measured commit cost, bounded", () => {
+  // Comfortable commits keep the length-based cadence.
+  assert.equal(nextParseInterval(streamParseInterval(2_000), 6), 32);
+  assert.equal(nextParseInterval(streamParseInterval(20_000), 10), 128);
+  // A commit that ate the frame budget gets room next time.
+  assert.equal(nextParseInterval(32, 30), 60);
+  assert.equal(nextParseInterval(64, 45), 90);
+  // …but never more than the cap: the reveal holds back text anyway.
+  assert.equal(nextParseInterval(128, 400), 160);
+  // Unknown/unmeasurable commit cost keeps the base cadence.
+  assert.equal(nextParseInterval(32, 0), 32);
+  assert.equal(nextParseInterval(32, Number.NaN), 32);
 });
 test("idle arrivals publish immediately; cancel/remount preserves the pending deadline", () => {
   const c = clock(), t = new ThrottledText("", c.api);

@@ -78,6 +78,8 @@ git tag 1.0.0 && git push origin 1.0.0
 # 6. 上架：向索引仓库提 PR（见 §10）
 ```
 
+> **只想自己用、不想先建仓库？** 插件中心页头「创建插件」会用内置 skill 在一次会话里生成可直接安装的插件目录（`manifest.json` + `main.js`；Tier-0 只需 `manifest.json` + `styles.css`），不依赖模板仓库和构建工具；回到插件中心「从本地目录安装」选该目录即可，改完重新安装会热重载。要上架时再按下文流程把目录整理成仓库。
+
 ## 4. 插件仓库结构规范
 
 ### 4.1 必须满足的仓库布局
@@ -146,7 +148,8 @@ ccgui-plugin-hello/
       //                                                              ^ secret 字段仅写入不回显
     }
   },
-  "screenshots": ["docs/screenshot-1.png"],   // ≤ 5 张，市场详情页展示
+  "icon": "docs/icon.png",                  // 可选：市场方形图标，见 §5.1
+  "screenshots": ["docs/screenshot-1.png"], // 可选：≤ 5 张，市场详情页展示，见 §5.1；数组顺序 = 展示顺序
   "keywords": ["usage", "token"]               // ≤ 8 个，市场搜索
 }
 ```
@@ -160,6 +163,38 @@ ccgui-plugin-hello/
 | `minAppVersion` 真实 | CI 会检查插件用到的 SDK API 在该宿主版本是否已存在 |
 | `permissions` 最小化 | CI 对比代码实际行为与声明，多余声明会在 PR 中评论要求删减 |
 | `description` 诚实 | 功能描述与实际行为不符 = 拒审 |
+
+### 5.1 市场展示素材（icon / screenshots，均可选）
+
+两个字段是可选的展示素材，**不填也能上架**：
+
+- 缺 `icon`：市场列表/详情页用插件名首字母的确定性渐变瓷砖（同一 id 每台机器配色一致），面板页签回退同理。
+- 缺 `screenshots`：详情页不渲染图集，README 直接顶到标题下方。
+
+**图片放哪里**：放在插件仓库里，用相对路径引用；推荐统一放 `docs/`，README 也能直接贴同一张图。也接受绝对 `https://` URL，但仓库内相对路径更稳（不依赖第三方图床）。
+
+```jsonc
+// manifest.json
+"icon": "docs/icon.png",
+"screenshots": [
+  "docs/screenshot-1.png",   // 第一张是详情页首屏（hero），放最能说明功能的一张
+  "docs/screenshot-2.png"
+]
+```
+
+**素材要求**：
+
+| 项 | 规则 |
+|---|---|
+| `icon` | 正方形；PNG / SVG / WebP / JPG；建议 ≥ 128×128（256 更稳）；不要带白边/透明大边距 |
+| `screenshots` | ≤ 5 张，数组顺序即展示顺序；PNG / JPG / WebP / GIF / SVG；建议宽度 ≥ 1200，界面截图用 16:9～16:10 |
+| 路径 | 相对仓库根、不逃逸（`..`/绝对路径/反斜杠被拒绝）；单条 ≤ 1024 字符 |
+
+**图片在默认分支（HEAD）上按路径读取，不锁 Release tag**：改进或替换同名文件后，用户刷新市场/详情页即可看到新图，无需发版。因此路径要稳定，不要用带哈希的构建产物名。
+
+**`icon` 同时是宿主侧的面板页签回退图**：聊天右侧面板的插件页签在插件没注册 `icon` 时用这张图（宿主 `plugin_read_artwork` 读本地文件）。市场安装只落地 Release 附件（三件套，见 §10.2），不会带 `docs/` 目录，所以宿主在安装/更新时会按 manifest 声明的**相对路径**把索引里的这张图写进插件目录——**发布包里不需要内含图片文件**；用绝对 https URL 则不落地、直接联网加载。想让页签回退显示品牌图，manifest 要声明相对路径的 `icon`。
+
+**如何进入市场**：manifest 是唯一事实源，索引仓机器人登记新版本时会把 `icon` / `screenshots` 镜像进 `plugins/<id>.json`（App 实际读的是索引）。只改进素材、不改版本的场景可以直接向索引仓提一个只改这两个字段的 PR。
 
 ## 6. 插件 SDK API 参考
 
@@ -195,7 +230,7 @@ interface PluginContext {
 
   ui: {
     registerSettingsSection(d: SettingsSectionDef): Disposer;   // 设置页新 section
-    registerPanelTab(d: PanelTabDef): Disposer;                 // 右侧面板新 tab
+    registerPanelTab(d: PanelTabDef): Disposer;                 // 右侧面板新 tab（页签条只渲染 icon，label 作 title / 可访问名）
     registerComposerSlot(slot: 'addMenu' | 'cliMenu' | 'permissionMenu', d: SlotDef): Disposer;
     registerStatusBarItem(d: StatusBarItemDef): Disposer;
     registerCommand(d: CommandDef): Disposer;                   // 命令面板（⌘K）
@@ -232,8 +267,8 @@ interface PluginContext {
 
 | 事件 topic | 载荷 | 所需权限 |
 |---|---|---|
-| `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起） | `events` |
-| `usage://done`（SDK 0.3.8 起） | 同上形状，`kind: "done"`；`data.usage` 携带该轮最终用量——claude/grok 等不发独立 usage 事件的引擎只经此上报，其它引擎用作轮结束信号 | `events` |
+| `usage://updated` | 完整 EngineEventPayload `{ runId, sessionId, engine, seq, kind: "usage", data, ts?, genMs? }`；`data` 为引擎原始 usage JSON（字段因引擎而异，如 claude 的 `cache_read_input_tokens`、codex 的 `cached_input_tokens`、pi/omp 的 `cacheRead`）；`ts` 为宿主发射时刻 Unix 毫秒（SDK 0.3.8 起）；`genMs` 为宿主实测的生成窗口毫秒（SDK 0.3.15 起，仅 `usage`/`done` 事件携带，工具执行与等待不计入） | `events` |
+| `usage://done`（SDK 0.3.8 起） | 同上形状，`kind: "done"`；`data.usage` 携带该轮最终用量——claude/grok 等不发独立 usage 事件的引擎只经此上报，其它引擎用作轮结束信号；`genMs` 为该轮生成窗口合计 | `events` |
 | `session://activated`（SDK 0.3.8 起） | `{ engine, sessionId }`；pending 标签 `sessionId` 为 null，无活动标签两者皆 null | `events` |
 | `composer://draft` | `{ text }`；草稿变化/清空/会话切换均发射 | `events` |
 
@@ -414,19 +449,27 @@ minisign -Sm dist/main.js -p your-plugin.pub   # main.js.minisig 一并传到 Re
 2. 在 `community-plugins.json` 追加一条（保持按 id 字典序）：
 
 ```json
-{ "id": "usage-stats", "repo": "zhangsan/ccgui-plugin-usage-stats" }
+{ "id": "usage-stats", "repo": "zhangsan/ccgui-plugin-usage-stats", "name": "用量统计", "description": "统计各引擎 token 用量与花费", "author": "zhangsan" }
 ```
 
-3. 新增 `plugins/usage-stats.json`：
+3. 新增 `plugins/usage-stats.json`（`icon` / `screenshots` 由 manifest 镜像而来，机器人登记新版本时自动写入；首次上架照抄 manifest 的值即可，都不填就省略）：
 
 ```json
 {
   "id": "usage-stats",
-  "name": "用量统计",
-  "author": "zhangsan",
-  "description": "统计各引擎 token 用量与花费",
-  "keywords": ["usage", "token"],
-  "signingPubkey": null
+  "repo": "zhangsan/ccgui-plugin-usage-stats",
+  "tier": "js",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.2",
+  "sdkVersion": "^0.3",
+  "permissions": ["storage", "ui:settings-section"],
+  "sha256": {
+    "main.js": "<64 位小写 hex>",
+    "manifest.json": "<64 位小写 hex>",
+    "styles.css": "<64 位小写 hex>"
+  },
+  "icon": "docs/icon.png",
+  "screenshots": ["docs/screenshot-1.png"]
 }
 ```
 
@@ -439,7 +482,7 @@ minisign -Sm dist/main.js -p your-plugin.pub   # main.js.minisig 一并传到 Re
 
 ### 10.2 上架后用户侧流程（你无需关心，供理解）
 
-App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三件套 → 校验 SHA256 → staging 目录 → 健康检查（冷加载 activate 一次）→ 原子替换生效。任一步失败，已装版本不受影响。
+App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三件套 → 校验 SHA256 → 按 manifest 的 `icon` 从默认分支补落品牌图（失败只跳过）→ staging 目录 → 健康检查（冷加载 activate 一次）→ 原子替换生效。任一步失败，已装版本不受影响。
 
 ### 10.3 版本更新
 
@@ -447,6 +490,10 @@ App 市场页 → Rust 拉索引 → 用户点安装 → 从 Release 下载三�
 2. 向索引仓提「版本登记 PR」（只改 `plugins/<id>.json` 无代码变更时，机器人可自动合并）。
 3. 权限有新增 → 转人工审核，且老用户升级时会看到权限 diff 确认。
 4. App 端每 24h 比对索引版本，向用户提示可更新。
+
+> 「版本登记 PR」里的 `updatedAt` 取该 Release 的发布时间（RFC 3339 UTC，如 `2026-09-20T08:30:00Z`）；机器人开 PR 时自动写入，CI 只校验格式。App 详情页用它显示「最近更新时间」，值缺失只是不显示这一行。
+>
+> 同一 PR 还会带上 manifest 里的 `icon` / `screenshots`（见 §5.1）：改了素材路径就随下一次发版自动进索引；只换图内容（路径不变）则连发版都不需要。
 
 ### 10.4 下架
 

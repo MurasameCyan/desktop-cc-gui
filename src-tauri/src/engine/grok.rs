@@ -1,5 +1,5 @@
 use super::{
-    command_for_binary, images, safe_prompt_arg, BuiltCommand, Engine, EngineEvent, SendRequest,
+    images, safe_prompt_arg, BuiltCommand, Engine, EngineEvent, SendRequest,
     Transport,
 };
 use serde_json::Value;
@@ -532,7 +532,12 @@ impl Engine for GrokEngine {
             cmd.arg("-m");
             cmd.arg(model);
         }
-        if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        if let Some(effort) = req
+            .effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
             cmd.arg("--effort");
             cmd.arg(effort);
         }
@@ -572,7 +577,12 @@ impl Engine for GrokEngine {
             cmd.arg("-m");
             cmd.arg(model);
         }
-        if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+        if let Some(effort) = req
+            .effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
             cmd.arg("--effort");
             cmd.arg(effort);
         }
@@ -650,7 +660,10 @@ impl Engine for GrokEngine {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                let usage = value.get("usage").cloned().map(|u| attach_context_window(u));
+                let usage = value
+                    .get("usage")
+                    .cloned()
+                    .map(|u| attach_context_window(u));
                 out.push(EngineEvent::Done { session_id, usage });
             }
             "error" => {
@@ -675,17 +688,22 @@ mod tests {
 
     #[test]
     fn build_command_passes_effort_flag() {
-        let req = SendRequest { execution: None, selection: None, session_id: Some("s1".into()),
-        prompt: "hi".into(),
-        images: vec![],
-        workspace: PathBuf::from("/tmp"),
-        model: Some("grok-3".into()),
-        effort: Some("high".into()),
-        service_tier: None,
-        permission: None,
-        additional_dirs: vec![],
-        provider_id: None,
-        computer_use: None, };
+        let req = SendRequest {
+            session_id: Some("s1".into()),
+            prompt: "hi".into(),
+            images: vec![],
+            workspace: PathBuf::from("/tmp"),
+            model: Some("grok-3".into()),
+            effort: Some("high".into()),
+            service_tier: None,
+            permission: None,
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+            execution: None,
+            selection: None,
+            allowed_tools: None,
+        };
         let built = GrokEngine.build_command(&req, "grok").unwrap();
         let args: Vec<String> = built
             .command

@@ -1,6 +1,19 @@
 /** Presentation-only cursor: stored messages always retain the complete text.
- * Pacing follows the observed input cadence, capped at 240ms; done/hidden/reduced-motion
- * paths bypass animation. A timer also catches up when rAF is suspended.
+ *
+ * The cursor is anchored to the TAIL of the text — a `holdback` of trailing
+ * characters still hidden — instead of an absolute prefix index. Markdown
+ * re-parsing rewrites the rendered text constantly (syntax markers are
+ * consumed: `# `, `- `, backticks, `**`, link targets), so a prefix cursor
+ * had to reset whenever the text changed shape, and at high token rates that
+ * reset dumped the whole unrevealed backlog in a single frame (measured:
+ * 20–62 chars/frame at 200 tok/s, up to 140 at 400 tok/s; only ≤15 at
+ * 40 tok/s, which is why slow streams never showed it).
+ *
+ * The holdback is drained linearly so everything received is on screen by
+ * `REVEAL_MAX_LAG_MS`: a provider burst (OMP writes ~100 characters every
+ * ~144ms at 200 tok/s) is spread across the frames of its own arrival
+ * cadence, and continuous output advances at the arrival rate with a bounded
+ * lag. Done/hidden/reduced-motion paths bypass the animation entirely.
  */
 export interface RevealClock {
   now(): number;
@@ -16,17 +29,53 @@ const browserClock: RevealClock = {
   timeout: (callback, ms) => setTimeout(callback, ms),
   clearTimeout: id => clearTimeout(id),
 };
+
+/** Upper bound on how long received text may stay hidden. Every burst is
+ *  drained by this deadline, so the display never lags more than this. */
+export const REVEAL_MAX_LAG_MS = 240;
+/** Shortest spread for one burst: below this the drain reads as a jump, not
+ *  as flowing text (the old fixed 80ms drain is the floor, not the rule). */
+const MIN_LAG_MS = 80;
+/** A backlog this large is a wholesale dump (tab restore, session switch,
+ *  first paint of a long snapshot), not a stream: show it at once instead of
+ *  animating for seconds. */
+const MAX_HOLDBACK = 600;
+/** No frame for this long means rAF is suspended (occluded window, background
+ *  tab): settle rather than leaving text half-revealed behind the scenes. */
+const STALL_MS = 100;
+
+/** A wholesale swap shares almost nothing with what came before: replaying a
+ *  different message character by character is not "smooth", it is wrong.
+ *  Only the head can diverge during markdown re-parsing (a construct at the
+ *  start of the text completing), so a generous head threshold is enough. */
+function isReplacement(previous: string, next: string): boolean {
+  if (!previous || !next) return false;
+  const limit = Math.min(previous.length, next.length);
+  let common = 0;
+  while (common < limit && previous[common] === next[common]) common += 1;
+  return common < Math.min(24, limit * 0.5);
+}
+
 export class StreamReveal {
   private text = "";
+  /** Published visible prefix of `text`; Infinity = historical instance that
+   *  has not received a live update yet (everything is already visible). */
   private visible: number;
-  private from = 0;
-  private started = 0;
-  private lastFrame = 0;
-  private lastArrival: number | undefined;
+  /** Trailing characters already rendered but not published yet. */
+  private holdback = 0;
+  /** Wall-clock time by which the current holdback must be fully revealed. */
+  private deadline = 0;
+  /** Measured arrival: cadence (ms between text changes) and rate (characters
+   *  per ms). A burst is spread over the cadence that produced it, so the
+   *  drain finishes as the next burst lands instead of leaving the text
+   *  frozen in between; a rate-matching drain keeps a long fast stream from
+   *  accumulating unbounded lag. */
   private cadence = 80;
-  private duration = 80;
+  private rate = 0;
+  private lastArrival: number | undefined;
   private frame: number | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private lastTick = 0;
   private listeners = new Set<{ start: number; end: number; notify: () => void }>();
   private clock: RevealClock;
   constructor(live: boolean, clock: RevealClock = browserClock) {
@@ -50,58 +99,106 @@ export class StreamReveal {
     }
   }
   update(text: string, animate: boolean) {
-    // Repeated renders of the same snapshot must not restart the animation.
     if (text === this.text) {
-      if (!animate) this.finish();
+      if (!animate) {
+        this.finish();
+        return;
+      }
+      // A pending drain must survive a cancelled frame loop (effect cleanup on
+      // HMR/Fast Refresh, StrictMode's double effect, a remount that keeps the
+      // controller). Re-arm it without moving the deadline, so an unchanged
+      // snapshot can never leave half-revealed text on screen.
+      if (this.holdback > 0) this.run(this.clock.now());
       return;
     }
     const now = this.clock.now();
-    const append = text.startsWith(this.text);
-    if (append && this.lastArrival !== undefined) {
-      const gap = now - this.lastArrival;
-      // Ignore same-batch events. Bound long provider pauses so they cannot
-      // turn into seconds of artificial display lag on the next chunk.
-      if (gap >= 16) this.cadence = this.cadence * 0.5 + Math.min(gap, 220) * 0.5;
-    } else if (!append) {
-      this.cadence = 80;
-    }
-    this.lastArrival = now;
+    const previous = this.text;
     this.text = text;
-    if (!animate || !append || this.visible === Infinity) {
+    if (!animate || this.visible === Infinity || isReplacement(previous, text)) {
       this.finish();
       return;
     }
-    if (this.visible >= text.length) return;
-    if (this.frame !== undefined) this.clock.cancelFrame(this.frame);
-    this.from = this.visible;
-    // A fixed 80ms drain left an empty queue between OMP's ~144ms bursts.
-    // Spread normal bursts over their arrival cadence; give larger bursts
-    // more room, while keeping a strict upper bound on presentation delay.
-    this.duration = Math.min(240, Math.max(80, this.cadence * 1.1,
-      Math.min(240, (text.length - this.visible) * 6)));
-    this.started = now;
-    const tick = () => {
-      this.frame = undefined;
-      this.lastFrame = this.clock.now();
-      const fraction = Math.min(1, (this.clock.now() - this.started) / this.duration);
-      this.publish(Math.floor(this.from + (this.text.length - this.from) * fraction));
-      if (fraction < 1) this.frame = this.clock.frame(tick);
-      else this.cancel();
-    };
-    this.frame = this.clock.frame(tick);
+    // The rendered text may change shape without being a literal extension
+    // (markdown consumed `**`, `# `, a link target…). The new characters are
+    // what needs revealing — not the whole snapshot — so track the cursor
+    // relative to the end and let a reshape move it with the text.
+    const gained = text.length - previous.length;
+    this.holdback = Math.max(0, this.holdback + gained);
+    if (this.holdback > MAX_HOLDBACK) {
+      this.finish();
+      return;
+    }
+    if (gained > 0 && this.lastArrival !== undefined) {
+      const gap = now - this.lastArrival;
+      // Sub-frame gaps are part of one provider batch, not a cadence.
+      if (gap >= 16) {
+        this.cadence = this.cadence * 0.5 + Math.min(gap, 220) * 0.5;
+        this.rate = this.rate > 0 ? this.rate * 0.5 + (gained / gap) * 0.5 : gained / gap;
+      }
+    }
+    this.lastArrival = now;
+    // Text may only be pulled back by text that actually disappeared.
+    if (this.text.length < this.visible) this.publish(this.text.length);
+    if (this.holdback <= 0) {
+      this.cancel();
+      return;
+    }
+    // Never drain faster than the arrival cadence (that would empty the queue
+    // and stall between bursts) nor faster than the measured rate can feed
+    // (that would burn the whole burst in one frame); both are bounded by
+    // MAX_LAG so the display never lags more than that.
+    const spread = this.rate > 0
+      ? Math.max(this.cadence * 1.1, this.holdback / this.rate)
+      : REVEAL_MAX_LAG_MS;
+    this.deadline = now + Math.min(REVEAL_MAX_LAG_MS, Math.max(MIN_LAG_MS, spread));
+    this.run(now);
+  }
+  /** Start (or keep) the single drain loop plus its stalled-frame watchdog.
+   *  One continuous loop per burst beats restarting an animation per commit:
+   *  restarts recompute the pacing and produce uneven steps. */
+  private run(now: number) {
+    if (this.frame === undefined) {
+      this.lastTick = now;
+      this.frame = this.clock.frame(() => this.tick());
+    }
     if (this.timer === undefined) {
-      this.lastFrame = this.started;
       const watchdog = () => {
         this.timer = undefined;
-        const idle = this.clock.now() - this.lastFrame;
-        if (idle >= 100) this.finish();
-        else this.timer = this.clock.timeout(watchdog, 100 - idle);
+        const idle = this.clock.now() - this.lastTick;
+        if (idle >= STALL_MS) {
+          this.finish();
+          return;
+        }
+        this.timer = this.clock.timeout(watchdog, STALL_MS - idle);
       };
-      this.timer = this.clock.timeout(watchdog, 100);
+      this.timer = this.clock.timeout(watchdog, STALL_MS);
     }
+  }
+  /** Drain at the rate that clears the holdback exactly at `deadline`. The
+   *  release is fractional, so a small burst still lands one character at a
+   *  time over its whole cadence instead of emptying the queue in one frame. */
+  private tick() {
+    this.frame = undefined;
+    const now = this.clock.now();
+    const remaining = this.deadline - now;
+    if (this.holdback <= 0.5 || remaining <= 0) {
+      this.holdback = 0;
+      this.publish(this.text.length);
+      this.cancel();
+      return;
+    }
+    const dt = Math.max(0, Math.min(now - this.lastTick, remaining));
+    this.lastTick = now;
+    this.holdback = Math.max(0, this.holdback - (this.holdback * dt) / remaining);
+    // Never step backwards inside the loop; only shrinking text may do that
+    // (handled by update()).
+    const target = this.text.length - Math.round(this.holdback);
+    if (target > this.visible) this.publish(target);
+    this.frame = this.clock.frame(() => this.tick());
   }
   finish() {
     this.cancel();
+    this.holdback = 0;
     this.publish(this.text.length);
   }
   cancel() {
@@ -125,6 +222,14 @@ export function visibleWindow(text: string, count: number, limit: number) {
   return createVisibleTextReader(text).window(count, limit);
 }
 
+/** Same contract as `visibleWindow`, but the window starts on a LINE boundary.
+ * Pre-wrapped thinking text re-wraps when its first character changes, so a
+ * character cut makes the whole paragraph shift; dropping whole rows keeps
+ * the block's line count stable while the cursor drains a burst. */
+export function visibleLineWindow(text: string, count: number, limit: number) {
+  return createVisibleTextReader(text).lineWindow(count, limit);
+}
+
 /** One segmentation handle per text snapshot, shared by all reveal frames.
  * In particular, long thinking text must not recreate both full-text and
  * prefix segmentation handles on every frame. Boundaries still use the
@@ -145,6 +250,17 @@ export function createVisibleTextReader(text: string) {
       const start = boundary(end - limit);
       // Without grapheme support, show complete text rather than split emoji.
       return text.slice(start > end - limit ? 0 : start, end);
+    },
+    lineWindow(count: number, limit: number): { text: string; truncated: boolean } {
+      const end = boundary(count);
+      if (end <= limit) return { text: text.slice(0, end), truncated: false };
+      const cut = end - limit;
+      const newline = text.indexOf("\n", cut);
+      // No line boundary inside the window (one enormous line) or the only
+      // newline after the cut is past the revealed cursor: fall back to a
+      // grapheme-safe character cut — there is no row to drop as a whole.
+      const start = newline === -1 || newline >= end ? boundary(cut) : newline + 1;
+      return { text: text.slice(start, end), truncated: true };
     },
   };
 }

@@ -70,12 +70,16 @@ pub(crate) fn assign_kill_on_close(child: &tokio::process::Child) -> Option<Arc<
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         );
         if configured.is_err() {
-            eprintln!("[engine] SetInformationJobObject failed; orphan sweep disabled for this run");
+            eprintln!(
+                "[engine] SetInformationJobObject failed; orphan sweep disabled for this run"
+            );
             let _ = CloseHandle(job);
             return None;
         }
         if AssignProcessToJobObject(job, process).is_err() {
-            eprintln!("[engine] AssignProcessToJobObject failed; orphan sweep disabled for this run");
+            eprintln!(
+                "[engine] AssignProcessToJobObject failed; orphan sweep disabled for this run"
+            );
             let _ = CloseHandle(job);
             return None;
         }

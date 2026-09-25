@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isWeb } from "./transport";
+import { isWeb, listen } from "./transport";
 
 /**
  * App-close confirmation ("二次确认"). The window close button used to kill
@@ -7,6 +7,11 @@ import { isWeb } from "./transport";
  * terminal. Here the CloseRequested event is intercepted, a ConfirmDialog
  * (CloseConfirmDialogHost in components/dialogs.tsx) is raised, and only an
  * explicit confirm destroys the window.
+ *
+ * macOS Cmd+Q / `osascript … quit` never fire CloseRequested: the backend's
+ * quit guard (src-tauri/src/quit_guard.rs) cancels those system quits while a
+ * run is live and re-raises the same dialog through `app://exit-requested`.
+ * The event name is pinned against the Rust constant by close-confirm.test.ts.
  *
  * Store shape mirrors lib/grant.ts: a stable boolean snapshot for
  * useSyncExternalStore, with subscribe/current/answer-style accessors.
@@ -47,10 +52,15 @@ export function confirmAppClose(): void {
   void getCurrentWindow().destroy();
 }
 
+/** The macOS quit guard cancelled a Cmd+Q / AppleScript quit because runs
+ *  were in flight; ask through the same dialog as the window X. */
+const EXIT_REQUESTED_EVENT = "app://exit-requested";
+
 let installed = false;
 
-/** Intercept the main window's close button. Idempotent; no-op in the
- *  web-access browser bridge, where closing a tab needs no confirmation. */
+/** Intercept the main window's close button and the backend's cancelled-quit
+ *  signal. Idempotent; no-op in the web-access browser bridge, where closing
+ *  a tab needs no confirmation. */
 export function installCloseConfirm(): void {
   if (installed || isWeb) return;
   installed = true;
@@ -58,4 +68,5 @@ export function installCloseConfirm(): void {
     event.preventDefault();
     setPending(true);
   });
+  void listen(EXIT_REQUESTED_EVENT, () => setPending(true));
 }

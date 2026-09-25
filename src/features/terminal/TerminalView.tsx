@@ -1,9 +1,11 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { IDisposable, Terminal } from "@xterm/xterm";
 import { useTranslation } from "react-i18next";
+import { isMacPlatform } from "@/features/shortcuts/shortcuts";
 import { ipc } from "@/lib/ipc";
 import { loadXterm, type XtermModules } from "./xterm-loader";
-import { TERMINAL_FONT_FAMILY, terminalTheme } from "./appearance";
+import { terminalFontFamily, terminalTheme } from "./appearance";
+import { FONT_CHANGE_EVENT } from "@/features/settings/font";
 import { createPathLinkProvider } from "./links";
 import { TerminalContextMenu, type TerminalMenuState } from "./TerminalContextMenu";
 import {
@@ -58,17 +60,23 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
     let linkDisposable: IDisposable | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let themeObserver: MutationObserver | null = null;
+    let fontListener: (() => void) | null = null;
     let disposed = false;
     try {
       const { Terminal, FitAddon, WebglAddon } = xterm;
       const term = new Terminal({
-        fontFamily: TERMINAL_FONT_FAMILY,
+        fontFamily: terminalFontFamily(),
         fontSize: 12,
         cursorBlink: true,
         scrollback: 5000,
         theme: terminalTheme(),
         // Option-as-meta so word jumps (⌥←/⌥→) reach readline on macOS.
         macOptionIsMeta: true,
+        // Option+click is the reveal gesture on macOS (links.ts); xterm's
+        // default alt-click-moves-cursor would fire for the same click and
+        // move the shell cursor to the clicked cell. Keep the feature where
+        // it cannot collide (Windows/Linux reveal with Ctrl+click).
+        altClickMovesCursor: !isMacPlatform(),
       });
       termRef = term;
       liveTermRef.current = term;
@@ -113,7 +121,8 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
       safeFit();
       void openSession();
 
-      // Absolute paths in output become click-to-reveal links (see links.ts).
+      // Absolute paths in output become modifier-click-to-reveal links
+      // (see links.ts).
       linkDisposable = term.registerLinkProvider(
         createPathLinkProvider({
           term,
@@ -162,6 +171,13 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
         attributes: true,
         attributeFilter: ["class"],
       });
+      // Follow 设置 → 通用 → 外观 → 代码字体 changes live.
+      const onFontChange = () => {
+        term.options.fontFamily = terminalFontFamily();
+        safeFit();
+      };
+      window.addEventListener(FONT_CHANGE_EVENT, onFontChange);
+      fontListener = onFontChange;
     } catch (e: unknown) {
       setError(String(e));
     }
@@ -173,6 +189,7 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
       linkDisposable?.dispose();
       resizeObserver?.disconnect();
       themeObserver?.disconnect();
+      if (fontListener) window.removeEventListener(FONT_CHANGE_EVENT, fontListener);
       if (termRef) {
         setTerminalWriter(id, null);
         termRef.dispose();

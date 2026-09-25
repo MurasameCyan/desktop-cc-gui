@@ -1,12 +1,13 @@
 import type { IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 import { isPathUnder, pathExistsOnDisk } from "@/features/chat/file-link-resolution";
+import { isMacPlatform } from "@/features/shortcuts/shortcuts";
 
 /**
  * Absolute-path links for the terminal dock. Build tools print artifact
  * paths one per line ("Finished 2 bundles at: …"); turning those into
- * click-to-reveal links is the point. Unlike chat markdown — which anchors
- * relative paths at the workspace index — a shell prints arbitrary prose,
- * so only absolute POSIX / Windows-drive paths are considered.
+ * modifier-click-to-reveal links is the point. Unlike chat markdown — which
+ * anchors relative paths at the workspace index — a shell prints arbitrary
+ * prose, so only absolute POSIX / Windows-drive paths are considered.
  *
  * Spaces are allowed inside a candidate ("CC GUI 项目/…"), so the regex
  * deliberately over-captures trailing prose; the existence probe then trims
@@ -157,9 +158,25 @@ function locate(log: LogicalLine, index: number): { x: number; y: number } {
 }
 
 /**
+ * Reveal-in-file-manager is a modifier gesture: a plain click lands on
+ * printed output far too easily — selecting text, clicking back into the
+ * window — to let it throw open a Finder window. macOS uses Option (the
+ * terminal already treats Option as meta); Windows and Linux use Ctrl,
+ * matching Windows Terminal and GNOME Terminal. Without the modifier the
+ * link still underlines on hover, so the target stays visible before
+ * committing to the click.
+ */
+export function holdsRevealModifier(
+  event: Pick<MouseEvent, "altKey" | "ctrlKey">,
+  mac: boolean = isMacPlatform(),
+): boolean {
+  return mac ? event.altKey : event.ctrlKey;
+}
+
+/**
  * Link provider: every visible row is scanned for absolute-path candidates;
  * each candidate resolves (async, cached) to its longest on-disk prefix and
- * becomes a click-to-reveal link spanning that prefix only.
+ * becomes a modifier-click-to-reveal link spanning that prefix only.
  */
 export function createPathLinkProvider(options: {
   term: Terminal;
@@ -204,7 +221,9 @@ export function createPathLinkProvider(options: {
             range,
             text: path,
             decorations: { pointerCursor: true, underline: true },
-            activate: () => onActivate(path),
+            activate: (event) => {
+              if (holdsRevealModifier(event)) onActivate(path);
+            },
           });
         });
         callback(links.length > 0 ? links : undefined);

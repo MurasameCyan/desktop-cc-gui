@@ -51,6 +51,7 @@ import { type MentionEntry } from "@/components/application/ai-chat/mention-file
 import { type AgentConfig, type CustomPromptEntry, type SlashCommandEntry } from "@/lib/ipc";
 import { useSelectedAgent } from "@/features/agents/selected-agent";
 import { useChatStore } from "@/features/chat/store";
+import { useMcpPanel } from "@/features/mcp/panel";
 import { joinPath } from "@/features/files/store";
 
 export interface UseComposerPickersArgs {
@@ -213,9 +214,16 @@ export function useComposerPickers({
   );
   /** Replace the active `/query` trigger with the picked command
    *  (+ trailing space). Plain text, no chip: the CLI expands `/name args`
-   *  itself when the prompt is sent. */
+   *  itself when the prompt is sent. The `/mcp` app command acts on the
+   *  click instead — it opens a panel, not a prompt. */
   const handleSlashSelect = useCallback(
     (entry: SlashCommandEntry) => {
+      if (entry.kind === "app" && entry.name === "mcp") {
+        setSlash(null);
+        editableRef.current?.focus();
+        useMcpPanel.getState().openPanel();
+        return;
+      }
       const el = editableRef.current;
       if (!el) return;
       setSlash(null);

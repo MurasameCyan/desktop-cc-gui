@@ -35,6 +35,12 @@ pub struct PluginInfo {
     /// Unix seconds, matching kvTombstones in the same state file.
     pub installed_at: i64,
     pub min_app_version: Option<String>,
+    /// Market artwork declared by the installed manifest: a square icon and
+    /// the detail gallery, as repo-relative paths or absolute https URLs.
+    /// Empty when the manifest carries none or the paths were unusable —
+    /// the UI then keeps its deterministic letter tile / no gallery.
+    pub icon: Option<String>,
+    pub screenshots: Vec<String>,
 }
 
 /// plugins.json — tolerant reads: a missing/empty file means "no plugins".

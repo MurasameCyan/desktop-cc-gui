@@ -224,9 +224,12 @@ async fn qoder_catalog(engine: &'static str) -> Result<EngineCatalog, String> {
 async fn dsh_catalog() -> Result<EngineCatalog, String> {
     let settings = crate::settings::read_settings().unwrap_or_default();
     let origin = crate::dsh_host::configured_origin(&settings);
-    let catalog = crate::dsh_host::host_call(&origin, "session/modelCatalog", serde_json::json!({}))
-        .await
-        .map_err(|_| format!("DSH host 未运行（{origin}）。在设置 → DeepSeek Harness 里启动后再试。"))?;
+    let catalog =
+        crate::dsh_host::host_call(&origin, "session/modelCatalog", serde_json::json!({}))
+            .await
+            .map_err(|_| {
+                format!("DSH host 未运行（{origin}）。在设置 → DeepSeek Harness 里启动后再试。")
+            })?;
     Ok(EngineCatalog::authoritative(flatten_llm_models(
         &catalog,
         catalog.get("default"),
@@ -237,7 +240,10 @@ async fn dsh_catalog() -> Result<EngineCatalog, String> {
 /// description, default}]}], default: {provider, model}}` → flat catalog
 /// entries with `provider/model` selector ids. The host's current model
 /// (`default`) or the group-marked default leads.
-fn flatten_llm_models(catalog: &serde_json::Value, describe: Option<&serde_json::Value>) -> Vec<EngineModel> {
+fn flatten_llm_models(
+    catalog: &serde_json::Value,
+    describe: Option<&serde_json::Value>,
+) -> Vec<EngineModel> {
     let current = describe.and_then(|value| {
         let provider = value.get("provider")?.as_str()?.trim();
         let model = value.get("model")?.as_str()?.trim();
@@ -274,7 +280,9 @@ fn flatten_llm_models(catalog: &serde_json::Value, describe: Option<&serde_json:
                 continue;
             }
             let id = format!("{provider}/{model_id}");
-            if default_id.is_none() && model.get("default").and_then(serde_json::Value::as_bool) == Some(true) {
+            if default_id.is_none()
+                && model.get("default").and_then(serde_json::Value::as_bool) == Some(true)
+            {
                 default_id = Some(id.clone());
             }
             models.push(EngineModel {
@@ -316,12 +324,11 @@ async fn codex_catalog() -> EngineCatalog {
             // a configured 1M window). max_context_window alone is capability,
             // not the window this request actually uses.
             if let Some(window) = configured.as_ref().and_then(|model| model.context_window) {
-                for model in &mut models { model.context_window = Some(window); }
+                for model in &mut models {
+                    model.context_window = Some(window);
+                }
             }
-            return EngineCatalog::authoritative(with_default_first(
-                models,
-                configured,
-            ));
+            return EngineCatalog::authoritative(with_default_first(models, configured));
         }
     }
     EngineCatalog::authoritative(codex::codex_config_model().into_iter().collect())
@@ -382,8 +389,7 @@ async fn pi_family_catalog(engine: &str) -> EngineCatalog {
         if let Ok(models) = pi::run_list_models(&bin, extra).await {
             if !models.is_empty() {
                 return EngineCatalog::authoritative(pi::merge_configured_models(
-                    models,
-                    configured,
+                    models, configured,
                 ));
             }
         }
@@ -514,7 +520,10 @@ pub(super) fn promote_default(models: &mut Vec<EngineModel>, default: Option<&st
 /// The frontend auto-selects the first catalog entry when the user has no
 /// stored pick, so the CLI's effective default leads: moved to the front
 /// when already listed, prepended when the catalog doesn't name it.
-pub(super) fn with_default_first(models: Vec<EngineModel>, default: Option<EngineModel>) -> Vec<EngineModel> {
+pub(super) fn with_default_first(
+    models: Vec<EngineModel>,
+    default: Option<EngineModel>,
+) -> Vec<EngineModel> {
     let Some(default) = default else {
         return models;
     };

@@ -3,7 +3,11 @@ import { createPluginContext, type PluginContextBackend } from "./context";
 import type { PluginManifest } from "@ccgui/plugin-sdk";
 
 const client = vi.hoisted(() => ({ web: false }));
-vi.mock("@/lib/transport", () => ({ get isWeb() { return client.web; } }));
+vi.mock("@/lib/transport", () => ({
+  get isWeb() { return client.web; },
+  invoke: vi.fn(async () => null),
+  listen: vi.fn(async () => () => {}),
+}));
 
 function context(permissions: string[], web = false) {
   client.web = web;

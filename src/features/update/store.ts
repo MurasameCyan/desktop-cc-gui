@@ -5,6 +5,7 @@ import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { isWeb } from "@/lib/transport";
 import { getAppVersion } from "@/lib/platform";
+import { useReleaseNotesTabStore } from "./notes-tab";
 
 export type UpdateStage =
   | "idle"
@@ -16,10 +17,29 @@ export type UpdateStage =
   | "latest"
   | "error";
 
+/**
+ * 发现新版本时从更新清单抓下来的说明快照（Tauri manifest 的 notes）。升级后
+ * 首启宣布的版本不写这里：那个场景没有待更新版本，版本号来自 `notes-tab` 的
+ * unreadVersion，正文读本地版本记录（见 upgrade-announcement.ts）。
+ */
+export interface ReleaseNotesSnapshot {
+  version: string;
+  /** ISO publish date from the manifest, when it has one. */
+  date?: string;
+  /** Release notes markdown; absent when the manifest carries none. */
+  body?: string;
+}
+
 interface UpdateStore {
   stage: UpdateStage;
   /** Version of the pending update, when one was found. */
   version?: string;
+  /**
+   * 最近一次发现新版本时的说明快照。**不随 `dismiss` 清空**：更新说明页签
+   * （ReleaseNotesPane）在用户点了「稍后」之后仍要能继续读这份说明，只有
+   * 下一次检测到别的版本才会被覆盖。
+   */
+  notesRelease?: ReleaseNotesSnapshot;
   /** Latest release on the server, shown on the "up to date" result so the
    *  user can see what the check compared against. `check()` returns null
    *  when current, so this comes from a separate manifest probe. */
@@ -42,6 +62,14 @@ interface UpdateStore {
 // update server is unreachable the promise never settles and the UI would
 // sit on "checking" forever. Treat a timeout as a failed check.
 const CHECK_TIMEOUT_MS = 15_000;
+
+/** Download progress 0–100, null when the total size is unknown. Shared by
+ *  every surface that renders the download stage (toast, settings row). */
+export function downloadPercent(downloadedBytes: number, totalBytes?: number): number | null {
+  return totalBytes && totalBytes > 0
+    ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
+    : null;
+}
 
 /** Mirrors `LatestReleaseInfo` in src-tauri/src/updater.rs. */
 interface LatestReleaseInfo {
@@ -151,9 +179,13 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       set({
         stage: "available",
         version: update.version,
+        notesRelease: { version: update.version, date: update.date, body: update.body },
         latestVersion: undefined,
         latestPubDate: undefined,
       });
+      // 发现新版本 → 把更新说明开成中心页签（浮层提示照旧；关掉提示只收起
+      // 提示本身，页签是用户可以自己关的面）。
+      useReleaseNotesTabStore.getState().openTab();
     } catch (error) {
       if (isStale()) return;
       const message = error instanceof Error ? error.message : String(error);

@@ -34,6 +34,7 @@ vi.mock("@/lib/events", () => ({
     },
   ),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const WS = "/tmp/ws";
@@ -196,5 +197,52 @@ describe("queued messages after a turn settles", () => {
     await vi.waitFor(() => expect(queueOf().map((item) => item.text)).toEqual(["继续", "再看一遍"]));
     expect(ipc.sendMessage).toHaveBeenCalledTimes(1);
     expect(useChatStore.getState().bySession[KEY].error).toContain("spawn failed");
+  });
+});
+
+describe("queued message reorder", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    useChatStore.setState({
+      active: TAB,
+      activeEngine: "claude",
+      openTabs: [TAB],
+      bySession: {
+        [KEY]: {
+          ...EMPTY_SESSION,
+          streaming: true,
+          queue: ["继续", "再看一遍", "再改一版"].map((text, index) => ({
+            id: `q-${index + 1}`,
+            text,
+            images: [],
+            queuedAt: index,
+          })),
+        },
+      },
+    });
+  });
+
+  /** Screen directions: the card paints newest-first, so "down" walks a row
+   *  toward the head of the send order and "up" toward its tail. */
+  it("moves a row one step toward the head when asked down", () => {
+    useChatStore.getState().moveQueued("q-3", "down");
+
+    expect(queueOf().map((item) => item.id)).toEqual(["q-1", "q-3", "q-2"]);
+  });
+
+  it("moves a row one step toward the tail when asked up", () => {
+    useChatStore.getState().moveQueued("q-1", "up");
+
+    expect(queueOf().map((item) => item.id)).toEqual(["q-2", "q-1", "q-3"]);
+  });
+
+  it("ignores moves past either end and unknown ids", () => {
+    const { moveQueued } = useChatStore.getState();
+    moveQueued("q-1", "down");
+    moveQueued("q-3", "up");
+    moveQueued("q-404", "up");
+
+    expect(queueOf().map((item) => item.id)).toEqual(["q-1", "q-2", "q-3"]);
   });
 });

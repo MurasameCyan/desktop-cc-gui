@@ -4,6 +4,7 @@ import Download from "lucide-react/dist/esm/icons/download";
 import Check from "lucide-react/dist/esm/icons/check";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import { useTranslation } from "react-i18next";
+import { ActionFeedbackIcon, useRunningFeedback } from "@/components/base/action-feedback";
 import { Button } from "@/components/base/buttons/button";
 import type { CliVersionStatus } from "@/lib/ipc";
 import { openExternal } from "@/lib/platform";
@@ -29,6 +30,9 @@ export function CliHeaderActions({ engine }: { engine: EngineId }) {
   const { t } = useTranslation();
   const { status, loading, error, updating, refresh } = useCliVersionStatus(engine);
   const updateFlow = useCliUpdateFlow(engine);
+  // Store-driven: the probe also runs on mount, and the button should read as
+  // busy whenever one is in flight, whoever started it.
+  const refreshFeedback = useRunningFeedback(loading || updating);
 
   return (
     <div className="flex min-w-0 shrink-0 items-center gap-2" title={error ?? undefined}>
@@ -44,12 +48,17 @@ export function CliHeaderActions({ engine }: { engine: EngineId }) {
         iconOnly
         size="small"
         variant="ghost"
-        leadingIcon={RefreshCw}
         aria-label={t("settings.cliRefresh")}
         disabled={loading || updating}
-        className={loading ? "[&_svg]:animate-spin" : undefined}
         onClick={refresh}
-      />
+      >
+        <ActionFeedbackIcon
+          icon={RefreshCw}
+          feedback={refreshFeedback}
+          spin
+          iconClassName="size-[18px]"
+        />
+      </Button>
       <span className="inline-flex h-8 shrink-0 items-stretch overflow-hidden rounded-lg border border-border-button-default bg-background-primary-default shadow-xs">
         <VersionStatusSegment status={status} error={error} />
         <LifecycleButton

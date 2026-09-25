@@ -22,8 +22,8 @@ pub mod market;
 mod state;
 pub(crate) mod storage;
 
-pub use state::{KV_TOMBSTONE_TTL_SECS, PluginInfo, PluginRecord, PluginsState};
 pub(crate) use state::plugin_enabled_permissions;
+pub use state::{PluginInfo, PluginRecord, PluginsState, KV_TOMBSTONE_TTL_SECS};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -105,7 +105,9 @@ fn uninstall_with_storage_at(
             db.plugin_kv_delete_all(id)?;
             state.kv_tombstones.remove(id);
         } else {
-            state.kv_tombstones.insert(id.to_string(), state::now_secs());
+            state
+                .kv_tombstones
+                .insert(id.to_string(), state::now_secs());
         }
         state::write_state(state_path, &state)?;
     }
@@ -122,7 +124,13 @@ pub fn plugin_uninstall(
     id: String,
     delete_data: bool,
 ) -> Result<(), String> {
-    uninstall_at(&db, &state::plugins_dir(), &state::state_path(), &id, delete_data)
+    uninstall_at(
+        &db,
+        &state::plugins_dir(),
+        &state::state_path(),
+        &id,
+        delete_data,
+    )
 }
 
 fn set_enabled_at(
@@ -167,6 +175,16 @@ pub fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, String
     // too — they belong to the quarantined plugin's runtime.
     crate::plugin_caps::kill_tracked_children(&id);
     Ok(fs::info_for(&state::plugins_dir(), &id, &record))
+}
+
+/// Artwork bytes for the installed-plugin UI (the market/installed row icon
+/// and the detail gallery), returned as a data URL: the webview needs no
+/// filesystem access, `~/.ccgui-next` stays behind the asset protocol's deny
+/// list, and only files shipped by that very plugin can be read.
+#[tauri::command]
+pub fn plugin_read_artwork(id: String, path: String) -> Result<String, String> {
+    manifest::require_valid_id(&id)?;
+    fs::artwork_data_url(&state::plugins_dir(), &id, &path)
 }
 
 #[tauri::command]

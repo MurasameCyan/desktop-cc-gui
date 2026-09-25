@@ -15,6 +15,9 @@ pub const ENGINE_EVENT_NAME: &str = "engine://event";
 /// 插件 agent 轮次的事件流名（plugin_caps::plugin_agent_start）：独立于
 /// 聊天引擎流，前端插件运行时监听此名并路由回属主插件。
 pub const PLUGIN_AGENT_EVENT_NAME: &str = "plugin-agent://event";
+/// 任务工作台 agent 节点的事件流名（mission::mission_agent_start）：与
+/// 聊天和插件流隔离，前端 mission runtime 按 run id 路由回对应节点。
+pub const MISSION_AGENT_EVENT_NAME: &str = "mission-agent://event";
 pub const SESSIONS_CHANGED_EVENT: &str = "sessions://changed";
 pub const SCAN_PROGRESS_EVENT: &str = "scan://progress";
 pub const INSTALL_PROGRESS_EVENT: &str = "plugin://install-progress";

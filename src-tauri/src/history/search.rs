@@ -77,12 +77,14 @@ pub struct MessageSearchPage {
     /// Sessions still awaiting (re)indexing at query time. While >0 the hit
     /// list can grow without the query changing.
     pub pending: i64,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Sort {
-    Relevance,
-    Recency,
+    /// Microseconds spent on the query itself (FTS/LIKE scan + snippet
+    /// build). The bookkeeping counts (pending sessions, corpus size) run
+    /// outside this clock: they measure the index, not the search, and the
+    /// palette's stats line quotes this number as the search time.
+    pub elapsed_us: u64,
+    /// Messages in the content index — the corpus the query ran against.
+    /// Paired with `elapsed_us` in the palette's "searched N messages" line.
+    pub total_messages: i64,
 }
 
 // ==================== Indexer ====================
@@ -145,6 +147,14 @@ fn pending_count(db: &crate::db::Db) -> Result<i64, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Messages currently in the content index: the corpus a query runs
+/// against, reported next to the search duration.
+fn message_count(db: &crate::db::Db) -> Result<i64, String> {
+    let conn = db.0.lock();
+    conn.query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+
 /// Write the fts_state row shared by the success and failure paths.
 fn upsert_stamp(
     conn: &rusqlite::Connection,
@@ -178,10 +188,7 @@ fn upsert_stamp(
 
 /// Sessions-row stat, re-checked under SCAN_LOCK before any stamp: a file
 /// rewritten mid-parse must not be stamped at the new stat.
-fn stat_unchanged(
-    conn: &rusqlite::Connection,
-    row: &PendingSession,
-) -> Result<bool, String> {
+fn stat_unchanged(conn: &rusqlite::Connection, row: &PendingSession) -> Result<bool, String> {
     let current: Option<(i64, i64)> = conn
         .query_row(
             "SELECT file_size, file_mtime_ms FROM sessions WHERE engine=?1 AND session_id=?2",
@@ -404,10 +411,7 @@ fn find_from(haystack: &[char], needle: &[char], from: usize) -> Option<usize> {
 /// Go-side content snippet.
 fn like_snippet(text: &str, needles: &[Vec<char>]) -> Vec<SnippetPart> {
     let lower = lower_chars(text);
-    let first = needles
-        .iter()
-        .filter_map(|n| find_from(&lower, n, 0))
-        .min();
+    let first = needles.iter().filter_map(|n| find_from(&lower, n, 0)).min();
     let Some(first) = first else {
         // Row matched in SQL but not here (exotic case fold): show the head.
         let head: String = text.chars().take(SNIPPET_RADIUS * 2).collect();
@@ -418,11 +422,7 @@ fn like_snippet(text: &str, needles: &[Vec<char>]) -> Vec<SnippetPart> {
     };
     let start = first.saturating_sub(SNIPPET_RADIUS);
     let end = (first + SNIPPET_RADIUS * 2).min(lower.len());
-    let window: String = text
-        .chars()
-        .skip(start)
-        .take(end - start)
-        .collect();
+    let window: String = text.chars().skip(start).take(end - start).collect();
     let window_lower = lower_chars(&window);
 
     // Mark every occurrence of every token inside the window; overlaps keep
@@ -496,14 +496,9 @@ struct RawHit {
 fn fts_search(
     db: &crate::db::Db,
     tokens: &[&str],
-    sort: Sort,
     limit: u32,
     offset: u32,
 ) -> Result<Vec<RawHit>, String> {
-    let order = match sort {
-        Sort::Relevance => "b.rank ASC, s.updated_at DESC",
-        Sort::Recency => "s.updated_at DESC",
-    };
     let sql = format!(
         "WITH matched AS (
              SELECT rowid, bm25(messages_fts) AS rank
@@ -525,7 +520,7 @@ fn fts_search(
          JOIN sessions s ON s.engine = b.engine AND s.session_id = b.session_id
          LEFT JOIN workspaces w ON w.path = s.workspace_path
          WHERE b.rn = 1
-         ORDER BY {order}, b.engine, b.session_id
+         ORDER BY b.rank ASC, s.updated_at DESC, b.engine, b.session_id
          LIMIT ?2 OFFSET ?3"
     );
     let conn = db.0.lock();
@@ -582,10 +577,8 @@ fn like_search(
         tokens.len() + 1,
         tokens.len() + 2,
     );
-    let mut params: Vec<rusqlite::types::Value> = tokens
-        .iter()
-        .map(|t| like_pattern(t).into())
-        .collect();
+    let mut params: Vec<rusqlite::types::Value> =
+        tokens.iter().map(|t| like_pattern(t).into()).collect();
     params.push((limit as i64 + 1).into());
     params.push((offset as i64).into());
     let conn = db.0.lock();
@@ -613,32 +606,34 @@ fn like_search(
 
 /// Blocking search body (spawn_blocking in the command): FTS with bm25 +
 /// snippet() for 3+-char tokens, LIKE with a Rust-side snippet otherwise.
+/// Order is fixed: bm25 relevance (recency as the tie-break) on the FTS
+/// path, recency on the LIKE path (short tokens carry no ranking signal).
 pub fn search(
     db: &crate::db::Db,
     query: &str,
-    sort: &str,
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<MessageSearchPage, String> {
     let trimmed = query.trim();
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let offset = offset.unwrap_or(0);
+    // Reporting, not searching: the corpus count happens before the elapsed
+    // clock starts (same for the pending count after it stops).
+    let total_messages = message_count(db)?;
     if trimmed.is_empty() {
         return Ok(MessageSearchPage {
             hits: vec![],
             has_more: false,
             pending: pending_count(db)?,
+            elapsed_us: 0,
+            total_messages,
         });
     }
+    let started = std::time::Instant::now();
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-    let sort = if sort == "recency" {
-        Sort::Recency
-    } else {
-        Sort::Relevance
-    };
     let needles: Vec<Vec<char>> = tokens.iter().map(|t| lower_chars(t)).collect();
     let raw = if fts_safe(&tokens) {
-        fts_search(db, &tokens, sort, limit, offset)?
+        fts_search(db, &tokens, limit, offset)?
     } else {
         // Short tokens have no ranking signal; recency is the honest order.
         like_search(db, &tokens, limit, offset)?
@@ -666,10 +661,13 @@ pub fn search(
             }
         })
         .collect();
+    let elapsed_us = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
     Ok(MessageSearchPage {
         hits,
         has_more,
         pending: pending_count(db)?,
+        elapsed_us,
+        total_messages,
     })
 }
 
@@ -677,16 +675,13 @@ pub fn search(
 pub async fn search_messages(
     state: tauri::State<'_, crate::AppState>,
     query: String,
-    sort: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<MessageSearchPage, String> {
     let db = Arc::clone(&state.db);
-    tauri::async_runtime::spawn_blocking(move || {
-        search(&db, &query, sort.as_deref().unwrap_or("relevance"), limit, offset)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || search(&db, &query, limit, offset))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -741,14 +736,21 @@ mod tests {
         let scratch = Scratch::new();
         let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
         insert_session(&db, "s1", 100);
-        insert_message(&db, "s1", 1, "assistant", "So do not commit; report. 已生成 v1.0.5 版本记录，详见更新日志");
+        insert_message(
+            &db,
+            "s1",
+            1,
+            "assistant",
+            "So do not commit; report. 已生成 v1.0.5 版本记录，详见更新日志",
+        );
 
-        let page = search(&db, "已生成 v1.0.5 版本记录", "relevance", None, None).unwrap();
+        let page = search(&db, "已生成 v1.0.5 版本记录", None, None).unwrap();
         assert_eq!(page.hits.len(), 1);
         assert_eq!(page.hits[0].session_id, "s1");
+        assert_eq!(page.total_messages, 1, "corpus count the query ran against");
         assert!(marked_text(&page.hits[0]).contains("已生成"));
         // Substring across punctuation is a trigram strength.
-        let page = search(&db, "1.0.5", "relevance", None, None).unwrap();
+        let page = search(&db, "1.0.5", None, None).unwrap();
         assert_eq!(page.hits.len(), 1);
     }
 
@@ -764,14 +766,18 @@ mod tests {
         insert_message(&db, "s3", 1, "user", "只有提交这个词");
 
         // 2-char tokens would silently match nothing in trigram FTS.
-        let page = search(&db, "提交 代码", "relevance", None, None).unwrap();
+        let page = search(&db, "提交 代码", None, None).unwrap();
         let ids: Vec<&str> = page.hits.iter().map(|h| h.session_id.as_str()).collect();
         assert_eq!(ids, ["s2", "s1"], "recency order, both tokens required");
-        assert!(page.hits[0].snippet.iter().any(|p| p.marked && p.text.contains("提交")));
+        assert_eq!(page.total_messages, 3);
+        assert!(page.hits[0]
+            .snippet
+            .iter()
+            .any(|p| p.marked && p.text.contains("提交")));
     }
 
     #[test]
-    fn one_hit_per_session_and_recency_sort() {
+    fn one_hit_per_session_and_relevance_ties_break_by_recency() {
         let scratch = Scratch::new();
         let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
         insert_session(&db, "old", 100);
@@ -780,9 +786,15 @@ mod tests {
         insert_session(&db, "new", 200);
         insert_message(&db, "new", 1, "user", "搜索目标关键词 only");
 
-        let page = search(&db, "搜索目标关键词", "recency", None, None).unwrap();
+        // All three matches score identically, so bm25 ties and the
+        // updated_at tie-break decides: newest session first.
+        let page = search(&db, "搜索目标关键词", None, None).unwrap();
         let ids: Vec<&str> = page.hits.iter().map(|h| h.session_id.as_str()).collect();
-        assert_eq!(ids, ["new", "old"], "one row per session, newest first");
+        assert_eq!(
+            ids,
+            ["new", "old"],
+            "one row per session, newest first on a tie"
+        );
     }
 
     #[test]
@@ -791,17 +803,16 @@ mod tests {
         let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
         insert_session(&db, "s1", 100);
         insert_message(&db, "s1", 1, "user", "删除后不可见的独特内容");
-        db.0
-            .lock()
+        db.0.lock()
             .execute("DELETE FROM sessions WHERE session_id='s1'", [])
             .unwrap();
-        let page = search(&db, "删除后不可见", "relevance", None, None).unwrap();
+        let page = search(&db, "删除后不可见", None, None).unwrap();
         assert!(page.hits.is_empty());
-        let count: i64 = db
-            .0
-            .lock()
-            .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
-            .unwrap();
+        assert_eq!(page.total_messages, 0, "cascade emptied the corpus too");
+        let count: i64 =
+            db.0.lock()
+                .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+                .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -847,7 +858,7 @@ mod tests {
 
         assert_eq!(index_pending(&db).unwrap(), 1);
         assert_eq!(pending_count(&db).unwrap(), 0);
-        let page = search(&db, "索引管道", "relevance", None, None).unwrap();
+        let page = search(&db, "索引管道", None, None).unwrap();
         assert_eq!(page.hits.len(), 1);
         assert!(page.pending == 0);
 
@@ -860,14 +871,13 @@ mod tests {
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         register_file_session(&db, "s1", &path);
         assert_eq!(index_pending(&db).unwrap(), 1);
-        let page = search(&db, "追加的新消息", "relevance", None, None).unwrap();
+        let page = search(&db, "追加的新消息", None, None).unwrap();
         assert_eq!(page.hits.len(), 1);
         // Old content stays (replace-then-insert keeps one copy).
-        let count: i64 = db
-            .0
-            .lock()
-            .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
-            .unwrap();
+        let count: i64 =
+            db.0.lock()
+                .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+                .unwrap();
         assert_eq!(count, 2);
     }
 
@@ -928,7 +938,7 @@ mod tests {
         }
         assert_eq!(index_pending(&db).unwrap(), 4);
         assert_eq!(pending_count(&db).unwrap(), 0);
-        let page = search(&db, "可索引的正常内容", "relevance", None, None).unwrap();
+        let page = search(&db, "可索引的正常内容", None, None).unwrap();
         assert_eq!(page.hits.len(), 4);
     }
 
@@ -938,24 +948,36 @@ mod tests {
         assert_eq!(
             parts,
             vec![
-                SnippetPart { text: "a".into(), marked: false },
-                SnippetPart { text: "b".into(), marked: true },
-                SnippetPart { text: "c".into(), marked: false },
+                SnippetPart {
+                    text: "a".into(),
+                    marked: false
+                },
+                SnippetPart {
+                    text: "b".into(),
+                    marked: true
+                },
+                SnippetPart {
+                    text: "c".into(),
+                    marked: false
+                },
             ]
         );
         // Marker chars already present in content cannot forge highlight
         // state beyond their own toggle.
         let parts = split_marks("\u{1}\u{2}x");
-        assert_eq!(parts, vec![SnippetPart { text: "x".into(), marked: false }]);
+        assert_eq!(
+            parts,
+            vec![SnippetPart {
+                text: "x".into(),
+                marked: false
+            }]
+        );
     }
 
     #[test]
     fn like_snippet_marks_all_tokens_case_insensitively() {
         let needles = vec![lower_chars("error"), lower_chars("超时")];
-        let parts = like_snippet(
-            "请求失败：Error 连接超时，重试后仍然 error 不断",
-            &needles,
-        );
+        let parts = like_snippet("请求失败：Error 连接超时，重试后仍然 error 不断", &needles);
         let marked: String = parts
             .iter()
             .filter(|p| p.marked)

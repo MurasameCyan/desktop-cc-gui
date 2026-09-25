@@ -1,10 +1,10 @@
 /**
- * Release notes shown in Settings → About → 版本记录 (ChangelogDialog).
- * Newest first; add an entry at release time. Content is bilingual — the
- * dialog shows both when available, ordered by the active UI language.
+ * Release notes shown in the release-notes center tab (ReleaseNotesPane).
+ * Newest first; add an entry at release time. Content is bilingual —
+ * the tab shows both when available, ordered by the active UI language.
  */
 
-/** Repo the dialog's Star banner links to; shared with Settings → About. */
+/** Repo the release-notes tab links to for the Star banner / about page. */
 export const GITHUB_REPO_URL = "https://github.com/zhukunpenglinyutong/desktop-cc-gui";
 
 export interface ChangelogEntry {
@@ -16,7 +16,210 @@ export interface ChangelogEntry {
   };
 }
 
+/** 版本号比较：两边都去掉可选前缀 v，忽略大小写。 */
+export function sameVersion(a: string, b: string): boolean {
+  return a.trim().replace(/^v/i, "").toLowerCase() === b.trim().replace(/^v/i, "").toLowerCase();
+}
+
+/** 本地版本记录里与 `version` 同名的条目；没有就是没有——不回落相邻版本，
+ *  否则会把 v1.0.7 的说明挂在 v1.0.8 的标题下。 */
+export function changelogEntryFor(version: string): ChangelogEntry | undefined {
+  return CHANGELOG_DATA.find((entry) => sameVersion(entry.version, version));
+}
+
 export const CHANGELOG_DATA: ChangelogEntry[] = [
+  {
+    version: "1.0.9",
+    date: "2026-09-24",
+    content: {
+      zh: `✨ 新功能
+- **Worktree 子工作区**：侧栏父仓库行下新增「Worktrees · n」分组，worktree 作为子工作区挂在里面（子行主名是分支名，可展开各自的会话线程，也可直接在子目录里开新会话）；创建对话框按「新分支（默认）/ 已有分支 / 从 PR 创建」三种来源，PR 支持编号或链接，即交即走并在分组顶部显示可取消、可重试的三态进度行（校验 / fetch / 创建 / 注册逐段替换，失败按原因给重试或改名 / 修复指引）；「新分支」的 base 默认取父工作区当前检出分支（main / master 改用远程同名分支），用户手选后不再被晚到的状态改写；删除走分级确认（未提交文件、未推送提交、是否已合入 base 三项预检，默认保留本地分支，有进行中的会话或终端任务会额外提示）；父工作区移除 / 归档时先列出受影响的 worktree 再确认（只移除侧栏登记，磁盘目录不动）；目录已从磁盘消失或已被 git 锁定的 worktree 在侧栏明示，锁定项禁用删除并给出原因
+- **崩溃不再白屏**：三层兜底——启动占位 + 8 秒 watchdog（bundle 加载失败或 React 挂载前崩溃时显示原因与重新加载）、全局 error / unhandledrejection 捕获、顶层 React 错误边界；崩溃页给出具体错误原因、可展开的技术详情，以及重新加载 / 复制错误信息 / 退出应用；崩溃报告只在本地留存（内存环形 + localStorage 最近一条），不自动上传。ResizeObserver loop、Script error 这类浏览器自身噪音只在诊断环里每条记一次，不再每隔几分钟弹一次全屏崩溃页，也不会被下次启动当成启动失败原因
+- **桌面宠物（Codex v2 宠物包）**：独立透明置顶小窗，只有宠物图像本身接收点击（左键拖动、右键在 50% / 75% / 100% / 125% / 150% 五档间循环缩放并立即持久化，键盘 Enter / Space 与右键同效，其余区域鼠标穿透不挡桌面操作）；状态气泡玻璃拟态，有活动会话时每 1.8 秒在会话间轮播（失败 / 等待确认优先于运行中，刚完成的会话短暂显示「已完成」，两行截断显示会话名 + 状态）；位置与大小持久化，恢复前校验仍落在已连接的显示器内；设置「常规」里可导入 / 移除 Codex 宠物包（pet.json 与 spritesheet.webp 同目录）、切换角色与大小，导入先读头尺寸并限制清单 / 图集大小，移除走危险确认
+- **升级后首启自动宣布新版本**：应用版本比上次运行真的前进、且本地版本记录里有该版本时，首启自动把「版本更新」开成中心页签并标记未读（页签强调色圆点 + 页头「新版本」胶囊，关掉页签即视为已读）；首次安装只写基线不弹，版本没变、降级、版本号认不出、本地没有该版本条目都不弹，每个版本只宣布一次；待更新版本不写未读标记，那条路径已有浮层与「立即更新」
+- **任务详情下钻**：运行状态条的任务模块可点进单条任务查看详情与执行情况（任务内容、所属阶段、执行状态、阻塞原因与长说明），面板内返回，打开详情时焦点落在返回按钮
+- **AskUserQuestion 多题逐题确认**：单选选项改用圆形标记、多选改用方形复选标记；单选答完自动跳到下一道未答题；非末题的多选题显示「确认本题并继续」保存本题选择，仅最后一道多选题给「提交」，全部答完再统一提交
+- **Git 分支选择器列出远程跟踪分支**：变更面板与状态栏共用同一份分支列表，在本地分支之后列出 origin/x 并标中性「远程分支」徽标（跳过 origin/HEAD 符号引用），刚 fetch 到的分支可搜可切；检出远程分支时物化为同名本地跟踪分支——已存在就切过去，绝不用远程 tip 覆盖本地提交
+- **设置支持筛选与单项编辑 OMP 自定义供应商**：供应商列表新增搜索框；单项编辑只替换该供应商的配置块，其余供应商、注释与顺序保持原样，定位不到配置块时拒绝保存并提示改用完整编辑器；删除自定义供应商加危险确认并写清后果
+- **OMP 订阅授权新增 Google Antigravity 登录**：可发起 google-antigravity 登录并显示凭证授权状态，保留 google-gemini-cli 以兼容旧的 Google Code Assist 登录
+- **OpenCode 权限模式支持 bypass**：serve 驱动下 bypass 对 permission.asked 回「always」（该会话内记住批准，等价于 run --auto；配置里显式 deny 的规则照旧生效），权限选择器不再把 bypass 置灰
+- **电脑操控（入口暂未开放）**：Codex 引擎用 -c mcp_servers.… 在进程级挂载电脑操控驱动，不写用户 config，崩溃也不会把驱动留在配置里；不支持的引擎在发送前明确拒绝而不是静默当普通对话，远程（WSL 发行版）工作区同样拒绝；虚拟光标运行期全程显示、模型无法关闭，全局 Esc 急停只在该回合武装。设置页与斜杠菜单入口暂时隐藏，输入框仍可手动输入 /ccgui-cua 任务
+
+🐛 修复
+- **模型刷新改为全局生效**：模型目录此前按工作区各自缓存，刷新只更新当前工作区；现按「上下文」分桶——本机共用一份目录（任一工作区刷新即对所有本地工作区生效），远端（WSL 发行版）工作区各留自己的桶，不会把本机目录串成远端模型
+- **重试退避期间不再和滚动抢合成器**：侧栏与页签的状态点、思考指示器在 provider 退避重试期间保持可见但停止动画（新增引用稳定的 retrying 映射，只在真正进出退避时改引用），中断与删除会话补齐 retry / streaming / retrying 清理，避免删除后 key 永久残留
+- **会话解析缓存把工具输出计入内存预算**：旧口径只算正文与图片，工具结果多的会话被低估数倍，128 MB 预算名存实亡；现递归计入 args / result / usage、todo、消息路径 / 模型 / 精力等字段，让预算真正封顶
+- **对话结束后子任务跨页丢失、子代理状态收敛与呼吸灯异常**：子任务与子代理行在回合结束后统一收敛为「已完成」，不再跨页后消失、卡在运行中或呼吸灯常亮
+- **元信息里的模型名不再带渠道与插件前缀**：统一只展示最后一段的纯净模型名
+- **输入框粘贴后一次撤销不再连坐**：粘贴走 insertHTML 单独占一个撤销步，不再把此前的输入一起删掉
+- **稀疏检出（sparse-checkout）不再误报删除**：文件树与变更列表按 index 的 skip-worktree 位过滤未物化文件，不再出现「几百个未提交变更 / −10 万行」；规则排除了全部文件导致空检出时，worktree 创建返回明确错误并清理半成品，不登记空工作区
+- **打包版插件样式不再被 CSP nonce 拦掉**：启动占位样式从 index.html 内联 style 移入 public/boot.css 外部文件——内联标签会让 Tauri 往 style-src 里加 nonce，使 'unsafe-inline' 失效，运行时注入的插件 CSS 全被拒（表现为插件照常激活、样式全丢）；并加守卫测试禁止 index.html 再出现内联 style / script
+- **插件 exec 子进程找不到解释器**：plugin_exec_run / spawn 按 CLI 搜索目录注入子进程 PATH（插件自己传的 PATH 保持优先、按顺序去重），修掉 #!/usr/bin/env node 这类 shim 在 launchd 式 PATH 下报 env: node not found、工具静默无输出的问题；引擎 spawn 路径同样补齐
+- **插件引导不再中断**：Tauri 2.11 的 __TAURI_INTERNALS__.invoke 是只读属性，硬赋值会抛错并让插件加载停在第 0 次重试；现按属性描述符安全替换，替换不了只告警不中断，缺失 Promise.withResolvers 的老 WebView2 也不再中断重试
+- **OMP Google 通道不再被拒**：Google API（google-generative-ai / google-gemini-cli / google-vertex）不再携带 Cloud Code Assist 不接受的通用推理字段，原生 thinkingConfig 保留
+- **聊天侧栏与 Git 变更列表的滚动和分页**：变更列表容器补 min-h-0 + overscroll-contain，吸顶摘要栏与分组头给出正确层级（不再被行盖住），行内按钮改 Tooltip；侧栏线程分页在重新展开时回到第一页，收起动画期间不再中途改页高
+- **Worktree 分组展开 / 收起补齐高度动画**：分组从条件渲染改为 grid-template-rows 1fr ⇄ 0fr 的 300ms 过渡（收起动画结束才卸载，期间区域 aria-hidden + inert），与子行动画一致，不再一帧内闪现
+
+🧹 内部优化
+- Rust 后端新增 git_worktree（列表 / 创建 / 取消 / 删除、已合并判定、PR 解析与 pull ref 检出）、pets（宠物包导入与解码限额）、pet_overlay（透明宠物窗口与命中测试）三个模块；workspaces 表加性迁移 kind / parent_id，旧版 workspaces.json 的 worktree 子项在父项落库后按 db id 挂回，目录已删的子项跳过
+- Windows 统一嵌入 manifest 并补 Win32_UI_WindowsAndMessaging 依赖；Windows CI 因 computer-use 依赖让 lib-test 可执行文件加载失败（0xc0000139）改为只做测试编译；git discard 测试固定 core.autocrlf=false
+- 移除拖拽授权链路（computer_use_drag_source 命令、tauri-plugin-drag 依赖与 drag:default 权限），macOS 授权只保留「打开系统设置」深链；宠物窗口加入 capabilities
+- 插件 SDK 文档补充 exec 子进程 PATH 注入契约并再生成 sdk-api.md；新增 tests/browser/sidebar-collapse.html 逐帧采样回归（分组与子行展开 / 收起各需 ≥3 个中间帧）；ui-ux-spec 更新至 v0.52（展开 / 收起动效 §2.4、桌面宠物 §4.3、AskUserQuestion 多题、Worktree 全链路、崩溃兜底、远程分支、电脑操控规则）
+- 文档：新增 worktree 交互设计稿与实现说明；重构抽离 GeneralSection / QuestionCard / RunStatusStrip / WorktreeCreateDialog / DeleteWorktreeDialog / PetOverlayApp / repo-tree / workspace-context-menu 的 hook 与子组件（行为不变）`,
+      en: `✨ Features
+- **Worktree sub-workspaces**: a "Worktrees · n" group under each repo row holds its worktrees as child workspaces (the child row is named after the branch, expands to its own session threads, and can start a new session right in that directory); the create dialog offers three sources — New branch (default) / Existing branch / From PR — with the PR form accepting a number or a URL, dispatched immediately with a cancellable, retryable three-state progress row at the top of the group (validate / fetch / create / register replace each other, and failures give a retry or rename/fix hint by reason); the New branch base defaults to the parent workspace's currently checked-out branch (falling back to the remote same-name branch for main/master) and is never rewritten by a late status update once the user picks one; deletion goes through a graded confirmation (uncommitted files, unpushed commits, and whether the branch is merged into its base are pre-checked; the local branch is kept by default, with live sessions or terminals called out); removing or archiving a parent workspace lists the affected worktrees first (sidebar registration only — disk contents are never touched), and a worktree whose directory is gone or that git has locked says so, with locked ones not deletable
+- **No more blank window on a crash**: three layers — a boot placeholder plus an 8-second watchdog (shows the reason and a reload when the bundle fails to load or React dies before mounting), global error / unhandledrejection capture, and a top-level React error boundary; the crash screen gives the concrete reason, expandable technical details, and Reload / Copy error / Quit, with reports kept locally only (in-memory ring plus the latest entry in localStorage) and never uploaded; browser noise such as ResizeObserver loop or Script error is logged once per message in the diagnostics ring, so it no longer pops the full-screen crash page every few minutes or gets mistaken for a failed start on the next launch
+- **Desktop pet (Codex v2 pet packages)**: a separate transparent, always-on-top window where only the pet image itself takes clicks (drag with the left button; right-click cycles 50% / 75% / 100% / 125% / 150% and persists immediately, Enter/Space does the same, and the rest stays click-through so the desktop stays usable); a glassy status bubble rotates between active sessions every 1.8s (failed / waiting-for-approval before running, a just-finished session briefly shows "Completed", session name + status truncated to two lines); position and scale persist and are validated against connected displays before being restored; Settings → General imports or removes Codex pet packages (pet.json and spritesheet.webp in one folder), switches character and size, reads the header before decoding and caps manifest/atlas size on import, and confirms removal
+- **First launch after an upgrade announces the new version**: when the app version really moved forward and the local changelog has an entry for it, the release-notes center tab opens automatically with an unread marker (accent dot on the tab plus a "New version" pill in the header, cleared by closing the tab); a first install only writes the baseline, and an unchanged version, a downgrade, an unparsable version, or a missing local entry never triggers it — each version is announced exactly once; a pending update found by the updater writes no marker, since that path already has its toast and "Update now"
+- **Task drill-down**: the run-status strip's task module opens a per-task detail view with the assignment, its phase, execution state, blocker reason, and long payloads, with an in-panel back button that takes focus
+- **AskUserQuestion multi-question flow**: single-choice options use round markers and multi-choice uses square checkboxes; a single-choice answer advances to the next unanswered question; a non-final multi-choice question shows "Confirm and continue" to save just that answer, only the final multi-choice question shows Submit, and the whole set is submitted together once complete
+- **Git branch picker lists remote-tracking branches**: the branch list shared by the changes panel and the status bar lists origin/x after the local branches with a neutral "Remote branch" badge (skipping symbolic refs such as origin/HEAD), so a freshly fetched branch is searchable and selectable; checking out a remote branch materializes a same-named local tracking branch — switching to it when it exists, never overwriting local commits with the remote tip
+- **OMP custom providers can be filtered and edited one at a time**: the provider list gains a search field, and per-provider editing replaces only that provider's block while every other provider, comment, and ordering stays as written; when the block cannot be located the save is refused and the full editor is suggested, and deleting a custom provider now asks for confirmation with the consequences spelled out
+- **OMP subscriptions add Google Antigravity login**: google-antigravity can be logged in and its credential status shown, with google-gemini-cli kept for the legacy Google Code Assist login
+- **OpenCode supports the bypass permission mode**: on the serve driver, bypass answers permission.asked with "always" (the server remembers approvals for the session — the equivalent of run --auto, while explicit deny rules in config still hold), and the permission picker no longer greys it out
+- **Computer use (entry not exposed yet)**: the Codex engine mounts the computer-use driver at process level via -c mcp_servers.… — nothing is written to the user's config, so a crash leaves no driver behind; engines that cannot receive the driver refuse the send up front instead of silently running a plain chat, and remote (WSL distro) workspaces are refused too; the virtual cursor is drawn for the whole run and cannot be disabled by the model, and the global Esc stop is armed only during that turn. The Settings page and slash-menu rows are hidden for now; /ccgui-cua task still works when typed
+
+🐛 Fixes
+- **Model refresh is global again**: the model catalog used to be cached per workspace, so refreshing only updated the one in view; it is now bucketed by context — all local workspaces share one catalog (a refresh in any of them updates them all), and each remote (WSL distro) workspace keeps its own bucket so local entries never leak into remote ones
+- **Retry backoff no longer fights the compositor**: the sidebar and tab status dots and the thinking indicators stay visible but stop animating during a provider retry backoff (via a reference-stable retrying map that only changes when the backoff really starts or ends), and interrupt/delete now clears retry / streaming / retrying flags so keys do not linger after a session is deleted
+- **The session-parse cache counts tool output in its memory budget**: the old accounting only measured text and images, underestimating tool-result-heavy sessions several times over and making the 128 MB budget meaningless; args, results, usage, todos, and message path/model/effort fields are now counted recursively so the cap actually holds
+- **Subtasks no longer vanish across pages after a turn ends**: subtask and subagent rows settle to "Completed" once the conversation ends instead of disappearing across pages, sticking at running, or leaving the breathing dot animating forever
+- **Model names in message metadata drop provider and plugin prefixes**: only the final path segment is shown
+- **One paste no longer takes the previous input with it on undo**: pasting goes through insertHTML and occupies its own undo step
+- **Sparse checkouts no longer report deletions**: the file tree and changes list filter non-materialized entries by the index skip-worktree bit, so a sparse checkout no longer shows "hundreds of uncommitted changes / −100,000 lines"; when the rules exclude everything and the checkout is empty, worktree creation returns an explicit error, cleans up the half-made directory, and does not register an empty workspace
+- **Packaged plugin styles are no longer blocked by the CSP nonce**: the boot placeholder moved from an inline style in index.html to the external public/boot.css — an inline tag makes Tauri add a nonce to style-src, which disables 'unsafe-inline' and rejects every runtime-injected stylesheet (plugins kept activating with all styling gone); a guard test now forbids inline style/script in index.html
+- **Plugin exec children could not find their interpreter**: plugin_exec_run / spawn inject the CLI search directories into the child PATH (appended after — and order-deduped with — any PATH the plugin supplied), fixing #!/usr/bin/env node shims that failed with "env: node: No such file or directory" under a launchd-style PATH and silently produced no output; the engine spawn path gets the same treatment
+- **Plugin bootstrap no longer aborts**: Tauri 2.11 defines __TAURI_INTERNALS__.invoke as a read-only property, and assigning to it threw and stopped plugin loading at the first retry; the wrapper is now installed through the property descriptor when possible and only warns when it cannot be, and a WebView2 without Promise.withResolvers no longer aborts the retry loop
+- **OMP's Google channel is no longer rejected**: Google APIs (google-generative-ai / google-gemini-cli / google-vertex) no longer carry the generic reasoning fields Cloud Code Assist rejects, while the native thinkingConfig is preserved
+- **Chat sidebar and Git changes list scroll and pagination**: the changes list container gains min-h-0 + overscroll-contain, the sticky summary bar and group headers get proper stacking (no longer hidden behind rows), row buttons use Tooltips, and sidebar thread pagination resets to page 0 on re-expand instead of changing page height mid-collapse
+- **The Worktree group animates like its children**: the group switched from conditional rendering to a 300ms grid-template-rows 1fr ⇄ 0fr transition (unmounting only after the collapse animation, with the region aria-hidden + inert), so it no longer pops in and out in a single frame
+
+🧹 Internal
+- Three new Rust modules: git_worktree (list / create / cancel / remove, merge checks, PR resolution and pull-ref checkout), pets (package import with decode caps), and pet_overlay (transparent window and hit testing); the workspaces table gains an additive kind / parent_id migration, and legacy workspaces.json worktree children are reattached to their parent's db id after it is inserted, skipping children whose directory is gone
+- Windows: a unified embedded manifest plus the Win32_UI_WindowsAndMessaging feature; Windows CI now only compiles the Rust tests because the computer-use dependencies make the lib-test executable fail to load on the runner (0xc0000139), and the git discard tests pin core.autocrlf=false
+- Removed the drag-to-authorize path (computer_use_drag_source, the tauri-plugin-drag dependency, and drag:default), leaving macOS authorization with only the "Open System Settings" deep link; the pet overlay window joins the capability set
+- Plugin SDK docs spell out the exec PATH injection contract and sdk-api.md is regenerated; a new tests/browser/sidebar-collapse.html samples frames of the group and child expand/collapse (≥3 intermediate frames each way); ui-ux-spec is up to v0.52 (expand/collapse motion §2.4, desktop pet §4.3, multi-question cards, the worktree chain, crash fallbacks, remote branches, and computer-use rules)
+- Docs: a new worktree interaction mockup and implementation notes; a refactor extracts hooks and subcomponents out of GeneralSection / QuestionCard / RunStatusStrip / WorktreeCreateDialog / DeleteWorktreeDialog / PetOverlayApp / repo-tree / workspace-context-menu without behavior changes`,
+    },
+  },
+  {
+    version: "1.0.8",
+    date: "2026-09-23",
+    content: {
+      zh: `✨ 新功能
+- **设置新增「能力扩展」分组**：Skills（我的 Skills / 发现 / 使用情况）与 MCP（配置 / 运行时）两个管理页，放在 CLI 管理之后；页面懒加载，普通设置页不扫描技能、不读 MCP 配置、不联网，支持 ?page=skills / ?page=mcp 深链；远程 Web 端只显示桌面端提示，不渲染无效界面
+- **Skills 覆盖全部已接入 CLI**：同步目标从 Claude / Codex 扩到 Kimi / Grok / PI / OMP / DeepSeek / Antigravity / Gemini / OpenCode / Qoder / Qoder CN / Hermes 与跨 agent 的 ~/.agents，各自尊重本 CLI 的 home 环境变量与设置页覆盖，home 不存在时隐去；「纳管」记录并保护用户本地来源目录，不再用受管副本覆盖它，更新前比对托管副本哈希，本地有修改时拒绝覆盖并要求显式确认；移除用户自己目录里的副本时如实返回「已保留」，不谎报已移除
+- **技能行与详情面板**：行内同步态改为可点的引擎图标（彩色 = 已同步、红点 = 副本丢失，且只渲染真有副本的引擎），点击即移除该引擎副本或重同步丢失的副本，未纳管技能自己目录里的副本禁用取消；详情页新增「活动情况」与带图标的「同步到」列表，「从所有 Agent 移除 / 更新 / 关闭」固定在面板底部，多引擎列表自带限高滚动
+- **技能发现页可看详情**：行主体点开对话框，按需回仓库读取 SKILL.md（描述 + 正文 + 安装），列表不预取以免撞限流；读不到时给出说明、仓库入口与重试；skills.sh 的 id 与仓库目录名按「同名 / 去仓库前缀 / 冒号转横线」对齐，修掉 vercel-labs 这类条目的 SKILL.md not found
+- **MCP 页覆盖全部引擎**：声明式来源表从 Claude / Codex 扩到 Kimi / Grok / OMP / OpenCode / Antigravity / Qoder / Qoder CN / dsh，PI 显式标注不内置 MCP；读取只解析文件、不启动 CLI；写入只对在本机真实 CLI 上验证过语义的来源开放（Grok 的 enabled + disabled_mcp_servers 双向同步、OpenCode 的 enabled），JSONC 因写入会丢注释降级为只读，其余来源返回可本地化的原因码；引擎行改用与 Skills 同形的 Chip + 品牌图标 + 配置条数，范围筛选（全部 / 配置 / 运行时），页签支持 ?page=mcp&engine=<id> 深链
+- **输入框 /mcp 面板**：斜杠选择器新增内置行，提交 /mcp 也直接弹出面板，按当前会话引擎列出配置与运行时清单，与设置页共用同一份 mcp_inventory 数据，可刷新、可启停可写来源，并可深链到设置页对应引擎
+- **MCP 连接状态检测**：后端按配置里的真实命令 / 地址启动或连接一次，完成 initialize + tools/list 握手后整组回收进程（stdio 25s / HTTP 12s 超时，命令与 env 一律从配置文件重新解析）；行内显示「已连接 · N 工具 / 需要登录 / 连接失败」徽标，支持单条检测与「检测全部」，详情弹窗给出原因、服务名、协议、工具名、耗时与检测时间；打开页面即自动检测，结果按「条目 id + 配置哈希」缓存 3 分钟、最多 4 个并行，配置改了只补变化的条目，停用条目不检测，标题行显示「状态更新于 HH:MM」
+- **Claude 用户级 / local MCP 就地启停**：写 ~/.claude.json 的 projects[工作区].disabledMcpServers，与 Claude Code TUI 的「停用（本项目）」同一把开关，不改服务定义；无活动工作区时降级只读并说明原因
+- **版本更新说明改为原生中心页签**：发现新版本自动打开该页签（排在页签条最尾，不抢已在视的插件中心 / 任务工作台），状态栏版本号与命令面板「查看版本更新说明」打开同一页签；正文优先渲染更新清单 notes，缺失时回落本地同版本条目，都没有时明说未附带说明；页头新增「检查更新」（转圈 → 对号，失败不出对号），结果行与设置页共用同一份文案，按版本翻页的旧版本记录弹窗随之下线
+- **大任务卡顿修复**：连续同 run 的工具事件按原顺序归并后再写 store（128 start + 128 args + 128 result 由 384 次写入降为 1 次），混合事件、终态与切换会话前先提交，文本与工具结果不丢；过程组有界展示（每页 40 项、默认最新页、读历史不被新增抢页，搜索命中可展开跳页）；未跟踪文件行统计限定 1 MiB / 100k 行，NUL 二进制、符号链接、FIFO 与超限文件返回 unknown，不再伪造截断后的精确值
+- **本地性能诊断**（默认开启，无自动上传）：原生独立线程低频采样系统 CPU / 内存 / swap、主进程与后代进程，并明确标注归属不明的 WebKit 候选；前端按 5 秒窗口聚合事件数、批处理与提交耗时、前台事件循环延迟与会话 / 消息规模，不逐 token 写日志；状态栏「性能」与设置入口打开同一只读弹窗，可复制摘要（12 KB 上限）或导出完整 JSON，偏好原子持久化并跨窗口广播，关闭即停止采样并清空记录；另引入 react-scan 作为可选渲染高亮面板（默认关闭，入口前先完成 hook）
+- **终端路径链接改为修饰键点击**：普通单击不再唤起文件管理器，macOS 用 ⌥+点击、Windows / Linux 用 Ctrl+点击（对齐 Windows Terminal / GNOME Terminal 的开链习惯），避免选中文本或点回终端时误触；右键菜单的「在访达中显示」保持不变
+- **插件会话模式（SDK 0.3.14）**：新增 ui:conversation-mode 扩展点与 ConversationModeHost 挂载点，插件可在会话内替换聊天内容区与输入框，并能报告忙碌以锁定宿主退出，活动标签关闭与替换草稿的引擎切换同样受阻断；只读规划与接力 MVP 的双节点状态机、交接协议放在独立 ESM 插件内，不侵入普通 chat store
+- **只读与请求身份（SDK 0.3.14）**：ctx.agent.catalog 返回清洗后的 Agent 目录（只含可用性、只读能力与渠道 / 模型 ID，不返回配置与凭据）；agent.start 支持 readOnly 与 requestId（调用前即可持久化预期 runId），interrupt 返回是否命中活动 run；只读能力以原生实现为准（fail-closed），目前仅 Pi 支持隔离只读调用，Codex 明确不宣称
+- **生成速度计量（SDK 0.3.15）**：usage / done 事件新增 genMs（宿主实测生成窗口毫秒数），只统计响应流打开到关闭，工具执行、用户等待与轮间空闲全部排除；插件按 output token ÷ genMs 即得不含工具等待的生成速度，字段缺失时回退旧的相邻报告口径，插件无需版本门槛
+
+🐛 修复
+- skills_hub_mutate 之前把整个参数包平铺传递，所有 mutation 都报 missing required key payload；现按 { action, payload } 拆分
+- Skills 详情面板：使用统计读取失败时显示「使用统计暂不可用」并把调用次数 / 上次使用显示为 —，不再误报「从未使用 / 尚未调用」
+- MCP 检测健壮性：一次 read 带回多行（日志 + 响应）时改用带缓冲的行读取，不再丢后续数据；本机回环地址绕开环境代理，不再因 HTTP_PROXY 变成 502；环境变量占位符（含 :- 默认值）按 CLI 习惯展开；缺 status 字段的响应不当作已连接，坏响应不再把列表画崩
+- 行内同步态只画真有副本的引擎：一份技能在 13 个引擎里通常只剩 1~2 个图标，不再每行铺淡图标
+
+🧹 内部优化
+- Rust 后端新增 mcp 模块（config / probe / runtime / 声明式 sources）与 skills_hub 模块（core / discover / fsutil / http / lifecycle），配套 34 项 mcp 与 29 项 skills_hub 单测；引擎 reader 统一收口生成窗口统计
+- 文档：新增能力扩展迁移（Skills / MCP）、性能修复与诊断、macOS 大任务 CPU 排查、计划-执行接力四份实施计划；plan-execute SOP V1 / V2 可交互原型与 jsdom 回归；ui-ux-spec 更新至 v0.42
+- SDK 契约变更同步再生成 sdk-api.md 与 SDK CHANGELOG，一致性测试随源码校验`,
+      en: `✨ Features
+- **New "Capabilities" group in Settings**: Skills (My Skills / Discover / Usage) and MCP (Config / Runtime) management pages, placed after CLI management; pages load lazily so ordinary settings pages never scan skills, read MCP configs, or go online, with ?page=skills / ?page=mcp deep links; a remote WebUI shows a desktop-only notice instead of dead controls
+- **Skills cover every integrated CLI**: sync targets grow from Claude / Codex to Kimi / Grok / PI / OMP / DeepSeek / Antigravity / Gemini / OpenCode / Qoder / Qoder CN / Hermes plus the cross-agent ~/.agents, each respecting its CLI's home env and Settings override and hidden when that home is missing; "adopt" records and protects the user's own source directory instead of overwriting it with a managed copy, updates compare the managed copy's hash and refuse to overwrite local edits without explicit confirmation, and removing a copy from the user's own directory reports "kept" instead of claiming it was deleted
+- **Skill rows and detail panel**: the inline sync state becomes clickable engine icons (colored = synced, red dot = orphaned, and only engines that actually have a copy render), where clicking removes that engine's copy or re-syncs a lost one, while a copy in the user's own directory cannot be cancelled; the detail page gains an activity summary and an icon list for "sync to", with "Remove from all agents / Update / Close" pinned at the bottom and the engine list scrolling on its own
+- **Discover page shows skill details**: clicking a row opens a dialog that fetches SKILL.md from the repo on demand (description + body + install) — the list never prefetches, which would hit rate limits — with an explanation, repo link, and retry when it cannot be read; skills.sh ids and repo directory names align by "same name / strip repo prefix / colon to dash", fixing SKILL.md not found for vercel-labs-style entries
+- **MCP page covers every engine**: the declarative source table grows from Claude / Codex to Kimi / Grok / OMP / OpenCode / Antigravity / Qoder / Qoder CN / dsh, with PI explicitly marked as not built-in; reading only parses files without launching CLIs; only sources whose semantics were verified against the real CLI are writable (Grok's enabled + disabled_mcp_servers two-way sync and OpenCode's enabled), JSONC files degrade to read-only because writing would drop comments, and every other source returns a localizable reason code; engine rows use the same Chip + brand icon + config count as Skills, with an all / config / runtime scope filter and ?page=mcp&engine=<id> deep links
+- **Composer /mcp panel**: the slash picker gains a built-in row and submitting /mcp opens the same panel, listing config and runtime entries for the current session's engine from the same mcp_inventory the Settings page uses, with refresh, enable/disable for writable sources, and a deep link back to Settings
+- **MCP connection probing**: the backend starts or connects once with the command/address from the config, performs an initialize + tools/list handshake, then kills the whole process group (25s stdio / 12s HTTP timeouts; command and env are always re-resolved from config files); rows show Connected · N tools / Login required / Connection failed badges with per-row and "check all" actions, and the detail dialog reports reason, service name, protocol, tool names, duration, and timestamp; opening a page probes automatically with results cached by entry id + config hash for 3 minutes and at most 4 probes in flight, re-probing only entries whose config changed, skipping disabled ones, and showing "status updated at HH:MM"
+- **Claude user/local MCP can be toggled in place**: enable/disable writes projects[workspace].disabledMcpServers in ~/.claude.json — the same switch as Claude Code TUI's "Disable (this project)" — leaving the server definitions untouched, and degrades to read-only with a reason when no workspace is active
+- **Release notes become a native center tab**: a new version opens the tab automatically (last in the tab strip, never stealing the plugin hub or task workbench already in view), and the status-bar version button and the command palette open the same tab; the body renders the update manifest's notes first, falls back to the matching local CHANGELOG_DATA entry, and says so explicitly when neither exists; the header gains an in-place Check for updates (spinner → check, no check on failure) sharing the Settings result line, and the old paged release-notes dialog retires
+- **Large-task jank fixes**: consecutive tool events of the same run are coalesced in order before hitting the store (128 start + 128 args + 128 result drop from 384 writes to 1), with mixed events, terminal states, and session switches flushing first so no text or tool result is lost; process groups render in bounded pages of 40 (newest first, reading history is never yanked back by new arrivals, and search hits can expand and jump); untracked-file line stats are capped at 1 MiB / 100k lines, with NUL binaries, symlinks, FIFOs, and over-limit files returning "unknown" instead of a fabricated exact count
+- **Local performance diagnostics** (on by default, never auto-uploaded): a dedicated native thread samples system CPU / memory / swap, the main process and its descendants, and clearly-labelled WebKit candidates at a low rate; the front end aggregates 5-second windows of event counts, batching and commit time, foreground event-loop delay, and session/message scale without logging per-token; the status bar's Performance entry and Settings open the same read-only dialog, which can copy a summary (12 KB cap) or export the full JSON — the preference persists atomically and broadcasts across windows, and turning it off stops sampling and clears records; react-scan is available as an optional render-highlight panel (off by default, hooked before first import)
+- **Terminal path links require a modifier**: a plain click no longer reveals in the file manager — macOS uses ⌥+click and Windows/Linux Ctrl+click (matching Windows Terminal / GNOME Terminal), avoiding accidental reveals while selecting text or clicking back into the terminal; the context-menu "Reveal in Finder" is unchanged
+- **Plugin conversation modes (SDK 0.3.14)**: a new ui:conversation-mode extension point and ConversationModeHost mount let a plugin replace the chat body and composer inside a session and report busy state to lock the host's exit, with active-tab close and draft engine switches blocked too; read-only planning and the relay MVP's two-node state machine and handoff protocol live in a separate ESM plugin and never touch the normal chat store
+- **Read-only and request identity (SDK 0.3.14)**: ctx.agent.catalog returns a sanitized agent directory (availability, read-only capability, and provider/model ids only — never config or credentials); agent.start accepts readOnly and requestId (so plugins can persist the expected run id before launching) and interrupt returns whether it hit an active run; read-only capability is native-backed and fail-closed, currently Pi only, and Codex explicitly does not claim it
+- **Generation-speed measurement (SDK 0.3.15)**: usage / done events now carry genMs, the host-measured generation window in milliseconds from stream open to close with tool execution, user waits, and inter-turn idle excluded; plugins compute output tokens ÷ genMs for a real generation speed and fall back to the old adjacent-report timing when the field is absent, so no plugin needs a version gate
+
+🐛 Fixes
+- skills_hub_mutate passed the whole argument bag flat, so every mutation failed with "missing required key payload"; it now splits into { action, payload }
+- The Skills detail panel shows "usage stats unavailable" and renders call count / last used as — on read failure instead of falsely reporting "never used / not yet called"
+- MCP probing robustness: a single read carrying multiple lines (log + response) now uses buffered line reads instead of dropping the remainder; loopback addresses bypass the environment proxy so HTTP_PROXY can no longer turn 127.0.0.1 into a 502; environment-variable placeholders (including :- defaults) expand the way CLIs do; a response missing status is no longer treated as connected, so a bad response cannot break the list
+- Inline sync state only draws engines that actually have a copy — a skill usually has 1–2 icons across 13 engines, not a row of dim placeholders
+
+🧹 Internal
+- Backend: new mcp module (config / probe / runtime / declarative sources) and skills_hub module (core / discover / fsutil / http / lifecycle) with 34 mcp and 29 skills_hub unit tests; the engine reader consolidates generation-window accounting
+- Docs: new plans for the skills/MCP migration, performance fixes and diagnostics, the macOS large-task CPU investigation, and the plan-execute relay; an interactive plan-execute SOP V1/V2 prototype with jsdom regression tests; ui-ux-spec updated to v0.42
+- SDK contract changes regenerate sdk-api.md and the SDK CHANGELOG, with a consistency test verifying them against the source`,
+    },
+  },
+  {
+    version: "1.0.7",
+    date: "2026-09-23",
+    content: {
+      zh: `✨ 新功能
+- **插件中心升级为原生页签**：插件管理与市场从设置页迁入中央页签（市场 / 已安装 / 详情 / 开发指南），侧栏新增「插件」入口；已安装列表可就地重新加载，插件更新后原地热重载，无需关开插件或重启应用
+- **插件市场重做**：分类 chips（带计数）与排序 / 搜索 / 刷新工具条，列表改表格（名称 / 开发者 / 安装量 / 版本 / 操作），整行可点进详情；支持官方与社区插件的标识和筛选，开发者头像改用 GitHub 真实头像
+- **插件详情整页化**：左正文 + 右 sticky 信息栏；截图轮播支持灯箱、方向键与加载失败占位，README 以与文件预览相同的安全姿态渲染（相对图片 / 链接补全为仓库地址）；权限默认展示前 4 项、可展开全部，「最近更新时间」读索引登记值
+- **插件图标与效果图**：索引与本地 manifest 均支持 icon / screenshots（索引优先、安装清单兜底），市场安装时把品牌图写入插件目录，插件页签与插件设置页导航离线也能取到图标；新增路径受限的 plugin_read_artwork 读取插件自有素材（符号链接逃逸与越界路径拒绝）
+- **「创建插件」与内置开发 skill**：插件中心页头一键开新会话并预填 /ccgui-plugin-creator（光标落到输入框末尾），AI 按内置指南生成可直接安装的插件目录；skill 随应用打包并同步进 Claude / Codex / ~/.agents，SDK 参考文档由源码生成并加一致性测试
+- **内测功能开关**（设置 → 其他 → 内测功能，默认关闭）：新增 betaFeatures 设置与开关页，「新建浏览器」入口按开关显隐
+- **设置页**：检查更新独立为模块并置于社区与反馈之前；有更新时提示浮在设置页之上，行内显示「发现新版本 vX」与「立即更新」，下载 / 安装阶段同步进度；导航改为 Codex 风格静态分组（侧栏 300px），CLI 管理 / 未安装 / 未启用三组标题可折叠（未安装 / 未启用默认收起，搜索与深链自动展开）
+- **聊天流式体验**：正文与思考面板按到达节奏逐帧揭示，不再整批闪现；思考区保留完整已揭示文本，去掉 2000 字尾窗导致的整行消失
+- **「已编辑」行数恢复逐位滚动**：新增 RollingStat odometer（纯 CSS transition，无 mask / blend-mode），从 0 起滚、位数增长时向左扩张，系统开启「减少动态效果」时直接跳变
+- **浮动滚动控件**：按滚轮方向显示「回到顶部 / 回到底部」，点击平滑滚动；流式长高不打断过渡，用户向上接管后不再回钉
+- **文件树刷新**移入工作区根行，悬停或键盘聚焦时出现，反馈仍是转圈 → 对号
+- **Git 树状态聚合**：新增 git_tree_status 一次扫描多级目录并缓存仓库状态，替代逐目录往返；变更面板接入并按可见性刷新
+- **会话搜索**：排序改为「标题 / 内容」通道过滤，后端固定 bm25 相关性 + 更新时间排序
+
+🐛 修复
+- 有会话运行时 ⌘Q / 系统退出被拦住：macOS applicationShouldTerminate 返回取消并复用既有二次确认，不再整端静默退出；退出时销毁 Computer Use 覆盖层窗口，避免无窗口悬挂
+- output_config.effort 只注入 anthropic-messages 请求，OpenAI / OpenRouter 不再收到 Anthropic 推理强度字段
+- 插件市场与详情页：已安装页也会拉取索引（图标 / 效果图不再只靠市场页）；右栏限高并可滚动到「链接」行；README 长代码行留在正文列内横向滚动；截图大图补关闭叉号并修好点空白关闭；官方徽标可点击跳转主页、不再被右栏拉成整行；「链接」三项各带目标图标；权限行改称「权限（CCGUI权限）」
+- 中心面切换统一清场：新建会话 / 点击会话 / 打开文件 / 新建浏览器 / 插件页签之间互斥，页签高亮与画面保持一致
+- 远程 Web 端：桥接 answer_question / git_discard / plugin_read_artwork，目录授权卡不再渲染无法生效的「允许访问」，改为原因说明与拒绝
+
+🧹 内部优化
+- 后端：任务工作台（流程编排 / 流程列表 / 收件箱与运行前执行环境选择）已落地，入口内测暂未放开、本版对所有用户隐藏；quit_guard 拦截退出；npm prefix 探测增加超时、输出上限与子进程回收（含 Windows 任务对象）；list_engines 移出 IPC 处理线程
+- 前端：新增 center-surfaces 中心面互斥与 action-feedback（运行 → 对勾）公共反馈；mission 调度 / 设置导航 / 插件详情与已安装行 / 变更面板等处把重复线性查找改为 Map 索引，大组件拆分子组件，清理 render 期 ref 写入与首挂 setState；已编辑行统计改为增量缓存
+- 文档与工程：新增 docs/ui-ux-spec.zh-CN.md（刷新 / 复制反馈、动效降级、刷新入口清单），插件开发指南补图标与效果图规范；pnpm plugin-skill:docs 由 TS AST 生成 SDK 参考并加一致性测试；Cargo.lock 与 package.json / Cargo.toml / tauri.conf.json 版本同步`,
+      en: `✨ Features
+- **Plugin hub becomes a native center tab**: plugin management and the marketplace move out of Settings into center tabs (Market / Installed / Detail / Guide) with a new Plugins entry in the sidebar; the installed list can be reloaded in place, and updated plugins hot-reload without toggling them off or restarting the app
+- **Marketplace rework**: category chips with counts plus a sort / search / refresh toolbar, and a table list (name / developer / installs / version / actions) where the whole row opens the detail page; official and community plugins are labelled and filterable, and developer avatars come from GitHub
+- **Full-page plugin detail**: README and screenshot carousel on the left, a sticky info rail on the right; the carousel supports a lightbox, arrow keys, and a failed-load placeholder, the README renders with the same safety posture as file preview (relative images/links resolve against the repo), permissions show the first four items with expand-all, and "last updated" reads the index timestamp
+- **Plugin icons and screenshots**: both the index and a local manifest accept icon / screenshots (index wins, install manifest is the fallback); marketplace installs write the brand image into the plugin directory so panel tabs and plugin settings nav show an icon offline, and the path-restricted plugin_read_artwork reads plugin-owned artwork (symlink escapes and out-of-tree paths rejected)
+- **"Create plugin" and a bundled dev skill**: the hub header opens a new session prefilled with /ccgui-plugin-creator (cursor lands at the end of the composer), where AI follows the bundled guide to generate an installable plugin directory; the skill ships with the app and syncs into Claude / Codex / ~/.agents, and the SDK reference is generated from source with a consistency test
+- **Beta features toggle** (Settings → Other → Beta features, off by default): a new betaFeatures setting page gates the new-browser entry
+- **Settings**: Check for updates becomes its own module ahead of Community & feedback; when an update exists the toast floats above Settings with an inline "vX available" and "Update now", showing download/install progress; the nav uses Codex-style static groups (300px rail) with collapsible CLI management / not-installed / disabled headers (the latter two start collapsed; search and deep links expand them)
+- **Streaming chat**: assistant text and the thinking panel reveal at the arrival rhythm instead of dumping whole batches, and the thinking panel keeps all revealed text (the 2000-character tail window that made lines vanish is gone)
+- **Edited-line stats roll digit by digit again**: a new RollingStat odometer (pure CSS transitions, no mask/blend-mode) starts from 0, grows leftward as digits are added, and snaps under reduced motion
+- **Scroll control**: the floating button follows the wheel direction between "back to top" and "back to bottom" and scrolls smoothly, without breaking while streaming content keeps growing or when the user takes over
+- **File-tree refresh** moves onto the workspace root row, appearing on hover or keyboard focus with the same spinner → check feedback
+- **Git tree status aggregation**: a new git_tree_status scans nested directories once and caches repo status, replacing per-directory round trips; the changes panel consumes it and refreshes on visibility
+- **Session search**: sorting becomes a Title / Content channel filter, with bm25 relevance plus updated_at order fixed on the backend
+
+🐛 Fixes
+- ⌘Q / system quit is now intercepted while runs are active: macOS applicationShouldTerminate is cancelled and reuses the existing confirmation instead of silently taking the whole app down, and the Computer Use overlay window is destroyed on quit so the process no longer hangs with no windows
+- output_config.effort is injected only into anthropic-messages requests, so OpenAI / OpenRouter no longer receive Anthropic's reasoning-effort field
+- Marketplace and detail page: the Installed tab now fetches the market index (icons/screenshots no longer depend on visiting the market); the info rail is height-capped and scrolls to the links row; long README code lines scroll inside the content column; the screenshot lightbox gains a close button and backdrop-click dismissal works; the official badge links to the profile and no longer stretches across the rail; the three link rows carry destination icons; the permissions row is renamed "Permissions (CCGUI)"
+- Center surfaces clear each other consistently: new session / session click / open file / new browser / plugin tabs are mutually exclusive, keeping tab highlight and visible content in sync
+- Remote WebUI: the bridge gains answer_question / git_discard / plugin_read_artwork, and the directory-grant card no longer offers an "Allow access" that cannot take effect — it explains why and refuses
+
+🧹 Internal
+- Backend: the task workbench (flow studio / flow list / inbox and pre-run execution environment) has landed, but its entry stays hidden for everyone in this release while in beta; quit_guard blocks quit; npm prefix probing gains a timeout, output cap, and subprocess reaping (including Windows job objects); list_engines moves off the IPC handler thread
+- Frontend: new center-surfaces mutual exclusion and the shared action-feedback (running → check) component; repeated linear lookups become Map indexes across mission scheduling, Settings nav, plugin detail/installed rows, and the changes panel; large components split; render-phase ref writes and first-mount setState removed; edited-line stats cache incrementally
+- Docs & tooling: new docs/ui-ux-spec.zh-CN.md (refresh/copy feedback, motion fallbacks, refresh-entry inventory) and icon/screenshot guidance in the plugin development guide; pnpm plugin-skill:docs generates the SDK reference from the TS AST with a consistency test; Cargo.lock and all three version files synced to 1.0.7`,
+    },
+  },
   {
     version: "1.0.6",
     date: "2026-09-22",

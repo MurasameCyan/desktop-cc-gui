@@ -88,6 +88,22 @@ function pill(label: string): Element {
 }
 
 describe("RunStatusStrip", () => {
+  it("does not reread a completed edit payload when assistant text grows", async () => {
+    const readContent = vi.fn(() => "one\ntwo");
+    const tool: Message = {
+      ...msg(1, "tool", "edit_file", "/ws/src/a.ts"),
+      args: { get content() { return readContent(); } },
+    };
+    seed([tool], true);
+    await renderStrip();
+    const reads = readContent.mock.calls.length;
+    expect(reads).toBeGreaterThan(0);
+    await act(async () => seed([tool, msg(2, "assistant", "more text")], true));
+    expect(readContent).toHaveBeenCalledTimes(reads);
+    await act(async () => seed([tool, msg(2, "assistant", "more text still arriving")], true));
+    expect(readContent).toHaveBeenCalledTimes(reads);
+  });
+
   it("restores older subagents with their session after switching and reopening", async () => {
     const brief = "# Target\nReview relay recovery.\n# Acceptance\nReconnect without toggling.";
     const history: Message[] = [
@@ -203,9 +219,15 @@ describe("RunStatusStrip", () => {
     seed(TURN, true);
     await renderStrip();
     expect(pill("子代理").textContent).toContain("0/1");
+    // The +/− numbers render as odometer digit columns, so the pill's text
+    // content is the 0-9 strip: read the semantic value instead.
     const edited = pill("已编辑");
-    expect(edited.textContent).toContain("+10");
-    expect(edited.textContent).toContain("−2");
+    const additions = edited.querySelector("[data-testid='run-status-edit-additions']");
+    const deletions = edited.querySelector("[data-testid='run-status-edit-deletions']");
+    expect(additions?.getAttribute("aria-label")).toBe("+10");
+    expect(additions?.getAttribute("data-value")).toBe("10");
+    expect(deletions?.getAttribute("aria-label")).toBe("−2");
+    expect(deletions?.getAttribute("data-value")).toBe("2");
   });
 
   it("opens panels single-open above the strip and closes on Esc", async () => {
@@ -480,5 +502,153 @@ describe("RunStatusStrip", () => {
     expect(panel).toContain("在输入框上方模块增加子代理任务信息与呼吸灯");
     expect(panel).toContain("已完成");
     expect(panel).not.toContain("待处理");
+  });
+
+  it("turns off breathing dots on both 任务 and 子代理 pills when streaming is false", async () => {
+    const messages: Message[] = [
+      msg(1, "user", "run tasks"),
+      {
+        seq: 2,
+        role: "tool",
+        text: "task · Dispatching 4 agents",
+        ts: null,
+        args: {
+          tasks: [
+            { name: "A", task: "Task A" },
+            { name: "B", task: "Task B" },
+            { name: "C", task: "Task C" },
+            { name: "D", task: "Task D" },
+          ],
+        },
+      },
+      {
+        seq: 3,
+        role: "tool",
+        text: "hub · Waiting for agents",
+        ts: null,
+        args: { op: "wait" },
+        result: {
+          details: {
+            jobs: [
+              { id: "A", status: "completed" },
+              { id: "B", status: "completed" },
+              { id: "C", status: "completed" },
+              { id: "D", status: "running" },
+            ],
+          },
+        },
+      },
+      todoMsg(4, {
+        replace: true,
+        items: [{ content: "单一任务", status: "active" }],
+      }),
+      msg(5, "assistant", "Turn finished."),
+    ];
+
+    // While streaming: both pills show breathing light
+    seed(messages, true);
+    await renderStrip();
+    expect(pill("任务").textContent).toContain("0/1");
+    expect(pill("子代理").textContent).toContain("3/4");
+    expect(container.querySelectorAll(".animate-ping").length).toBeGreaterThanOrEqual(2);
+
+    // When turn ends (streaming: false): breathing lights MUST turn off
+    await act(async () => seed(messages, false));
+    expect(pill("任务").textContent).toContain("0/1");
+    expect(pill("子代理").textContent).toContain("4/4");
+    expect(container.querySelector(".animate-ping")).toBeNull();
+
+    // Inside panel: when not live, active item displays 待处理 instead of 运行中
+    await click(pill("任务"));
+    const todoPanel = container.querySelector("[data-testid='run-status-todos']")?.textContent;
+    expect(todoPanel).toContain("待处理");
+    expect(todoPanel).not.toContain("运行中");
+  });
+
+  it("reads completed todo snapshot from message.result without pre-set message.todos", async () => {
+    const messages: Message[] = [
+      msg(1, "user", "complete todo"),
+      {
+        seq: 2,
+        role: "tool",
+        text: "todo",
+        ts: null,
+        args: { op: "init" },
+        result: {
+          details: {
+            phases: [
+              {
+                name: "phase1",
+                tasks: [{ content: "修复状态问题", status: "completed" }],
+              },
+            ],
+          },
+        },
+      },
+      msg(3, "assistant", "done"),
+    ];
+
+    seed(messages, false);
+    await renderStrip();
+    expect(pill("任务").textContent).toContain("1/1");
+    expect(container.querySelector(".animate-ping")).toBeNull();
+  });
+
+  it("drills down into task detail and execution status on click, and returns on back", async () => {
+    const messages: Message[] = [
+      msg(1, "user", "create task"),
+      {
+        seq: 2,
+        role: "tool",
+        text: "todo",
+        ts: null,
+        args: { op: "init" },
+        result: {
+          details: {
+            phases: [
+              {
+                name: "Diagnose",
+                tasks: [
+                  {
+                    content: "定位页面查询零条数原因",
+                    status: "completed",
+                    detail: "排查数据库连接池与实体映射",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      msg(3, "assistant", "done"),
+    ];
+
+    seed(messages, false);
+    await renderStrip();
+    await click(pill("任务"));
+
+    // Find the task row button and click it to drill down
+    const row = container.querySelector<HTMLButtonElement>("[data-todo-item-key]")!;
+    expect(row).not.toBeNull();
+    expect(row.textContent).toContain("定位页面查询零条数原因");
+    await click(row);
+
+    // Overlay is open
+    const overlay = container.querySelector("[data-testid='todo-detail-overlay']");
+    expect(overlay).not.toBeNull();
+    expect(overlay?.textContent).toContain("定位页面查询零条数原因");
+    expect(overlay?.textContent).toContain("Diagnose");
+    expect(overlay?.textContent).toContain("已完成");
+    expect(overlay?.textContent).toContain("排查数据库连接池与实体映射");
+
+    // Focus moved to back button
+    const back = container.querySelector<HTMLButtonElement>("[aria-label='返回任务列表']");
+    expect(document.activeElement).toBe(back);
+
+    // Click back to return to the task list
+    await click(back!);
+    expect(container.querySelector("[data-testid='todo-detail-overlay']")).toBeNull();
+    expect(container.querySelectorAll("[data-todo-item-key]")).toHaveLength(1);
+    expect(document.activeElement?.getAttribute("data-todo-item-key")).toBe("定位页面查询零条数原因");
   });
 });

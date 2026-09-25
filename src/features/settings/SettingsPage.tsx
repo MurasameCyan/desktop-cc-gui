@@ -1,7 +1,6 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import {
   SettingsShell,
   type SettingsNavGroup,
@@ -12,11 +11,18 @@ import {
   useRegistry,
 } from "@ccgui/plugin-sdk";
 import { PluginBoundary } from "@/features/plugins/boundary/PluginBoundary";
+import { pluginSettingsNavIcon } from "@/features/plugins/hub/PluginSettingsNavIcon";
 import { useChatStore } from "@/features/chat/store";
 import { ENGINE_IDS, type EngineId } from "./providers";
 import { CliHeaderActions } from "./CliHeaderActions";
-import { readStoredJson, writeStored } from "@/lib/storage";
-// Side-effect import: registers all builtin sections into settingsRegistry.
+import {
+  orderByStoredKeys,
+  useCliNavOrder,
+  writeCliNavOrder,
+} from "@/lib/cli-nav-order";
+import { settingsSearchEntries } from "./settings-search";
+// Side-effect import: registers all builtin sections into settingsRegistry
+// (and their page-internal search rows, see ./sections).
 import "./sections";
 
 /** Rail meta for known nav groups (label + rail order). A group the SDK adds
@@ -29,32 +35,13 @@ const GROUP_META: Record<string, { labelKey: string; order: number }> = {
   system: { labelKey: "settings.groupSystem", order: 0 },
   plugins: { labelKey: "settings.groupPlugins", order: 1 },
   cli: { labelKey: "settings.cliManage", order: 2 },
-  workspace: { labelKey: "settings.groupWorkspace", order: 3 },
-  misc: { labelKey: "settings.groupMisc", order: 4 },
+  capabilities: { labelKey: "settings.groupCapabilities", order: 3 },
+  workspace: { labelKey: "settings.groupWorkspace", order: 4 },
+  misc: { labelKey: "settings.groupMisc", order: 5 },
 };
 const KNOWN_GROUP_COUNT = Object.keys(GROUP_META).length;
-/** localStorage key for the user's CLI 管理 rail order (section keys). */
-const CLI_NAV_ORDER_KEY = "ccgui-next.settingsCliNavOrder:v1";
-
-const readCliNavOrder = (): string[] =>
-  readStoredJson(CLI_NAV_ORDER_KEY, (value) =>
-    Array.isArray(value) && value.every((k) => typeof k === "string")
-      ? (value as string[])
-      : null,
-  ) ?? [];
-
-/** Items in the user's stored order; keys absent from the stored list (new
- *  engines) keep their registry order at the end — Array.sort is stable. */
-const orderByStoredKeys = <T extends { key: string }>(
-  items: T[],
-  keys: string[],
-): T[] => {
-  const rank = new Map(keys.map((key, index) => [key, index]));
-  return [...items].sort(
-    (a, b) =>
-      (rank.get(a.key) ?? keys.length) - (rank.get(b.key) ?? keys.length),
-  );
-};
+// The rail order lives in @/lib/cli-nav-order, shared with the composer CLI
+// picker so both surfaces follow the same drag order.
 
 /** Unknown page params fall back to General. */
 const renderPage = (key: string) => {
@@ -97,7 +84,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sections = useRegistry(settingsRegistry);
-  const [cliNavOrder, setCliNavOrder] = useState<string[]>(readCliNavOrder);
+  const cliNavOrder = useCliNavOrder();
   /** Engine enable states; the chat store refreshes them on every CLI config
    *  change, so toggling a CLI's enable switch moves its rail row live. An
    *  empty list (probe still running or failed) means "don't split" — never
@@ -133,7 +120,7 @@ export default function SettingsPage() {
       const item = {
         key: def.key,
         label: def.label(),
-        icon: def.icon ?? Puzzle,
+        icon: pluginSettingsNavIcon(def),
       };
       const bucket = byGroup.get(def.group);
       if (bucket) bucket.push(item);
@@ -155,15 +142,13 @@ export default function SettingsPage() {
         const meta = GROUP_META[group];
         const order = meta?.order ?? KNOWN_GROUP_COUNT + index;
         if (group !== "cli") {
-          // Every rail group collapses (chevron heading); the choice
-          // persists via the group id. All start expanded.
+          // Every rail group is a static Codex-style section (muted heading,
+          // always-visible items) — no collapse state to carry.
           return [
             {
               id: group,
               label: meta ? t(meta.labelKey) : group,
               order,
-              collapsible: true,
-              defaultExpanded: true,
               items,
             },
           ];
@@ -210,10 +195,12 @@ export default function SettingsPage() {
             id: "cli",
             label: meta ? t(meta.labelKey) : group,
             order,
+            items: enabledItems,
+            // The rail, the 未安装 bucket and the 未启用 bucket fold; the two
+            // buckets start folded so the installed-and-enabled CLIs stay in
+            // view, while the main rail starts open.
             collapsible: true,
             defaultExpanded: true,
-            showCount: true,
-            items: enabledItems,
             // The CLI 管理 rail is drag-sortable; the order persists across
             // sessions (localStorage) and new engines append at the end. A
             // reorder only covers the enabled rows — the stored list keeps
@@ -224,22 +211,23 @@ export default function SettingsPage() {
                 ...disabledItems.map((item) => item.key),
                 ...uninstalledItems.map((item) => item.key),
               ];
-              setCliNavOrder(next);
-              writeStored(CLI_NAV_ORDER_KEY, JSON.stringify(next));
+              writeCliNavOrder(next);
             },
             dragHandleLabel: t("settings.cliDrag"),
           },
         ];
-        // Bucket order: 未安装 sorts before 未启用; both start collapsed to
-        // keep the rail quiet.
+        // Bucket order: 未安装 sorts before 未启用; both are folded buckets
+        // that unfold on click (and stay visible on the mobile rail, which
+        // has no headings to toggle). `nested` tucks each bucket under the
+        // CLI 管理 rail with a tighter gap than a full section gets.
         if (uninstalledItems.length > 0) {
           rail.push({
             id: "cli-missing",
             label: t("settings.cliNotInstalledGroup"),
             order: order + 0.5,
-            collapsible: true,
-            showCount: true,
             items: uninstalledItems,
+            collapsible: true,
+            nested: true,
           });
         }
         if (disabledItems.length > 0) {
@@ -247,9 +235,9 @@ export default function SettingsPage() {
             id: "cli-disabled",
             label: t("settings.cliDisabledGroup"),
             order: order + 0.6,
-            collapsible: true,
-            showCount: true,
             items: disabledItems,
+            collapsible: true,
+            nested: true,
           });
         }
         return rail;
@@ -267,6 +255,7 @@ export default function SettingsPage() {
 
   return (
     <SettingsShell
+      key={pageParam}
       onClose={() => navigate("/")}
       defaultPage={pageParam}
       ariaLabel={t("settings.title")}
@@ -274,6 +263,7 @@ export default function SettingsPage() {
       titles={titles}
       renderPage={renderPage}
       renderHeaderActions={renderHeaderActions}
+      searchEntries={settingsSearchEntries()}
     />
   );
 }

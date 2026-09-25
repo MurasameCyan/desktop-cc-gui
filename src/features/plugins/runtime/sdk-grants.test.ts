@@ -8,11 +8,12 @@ import {
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
 
 describe("isKnownPermission", () => {
-  it("accepts every base permission (30 项)", () => {
+  it("accepts every base permission (31 项)", () => {
     for (const p of Object.keys(KNOWN_PERMISSIONS)) {
       expect(isKnownPermission(p)).toBe(true);
     }
-    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(30);
+    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(31);
+    expect(isKnownPermission("ui:conversation-mode")).toBe(true);
   });
 
   it("accepts well-shaped network: grants (bare host / port / port range)", () => {

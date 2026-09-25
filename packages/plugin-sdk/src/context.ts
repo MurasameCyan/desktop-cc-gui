@@ -24,6 +24,23 @@ export interface ExternalSessionRow {
   remotePath?: string;
 }
 
+export type PluginConversationProps = {
+  conversationId: string;
+  workspacePath: string;
+  language: string;
+  onExit: () => void;
+  setExitBlocked?: (blocked: boolean) => void;
+};
+
+export interface PluginAgentCatalogEntry {
+  engine: string;
+  label: string;
+  available: boolean;
+  readOnly: boolean;
+  providers: { id: string; label: string }[];
+  models: { id: string; label: string }[];
+}
+
 export interface PluginContext {
   pluginId: string;
   version: string;
@@ -33,6 +50,11 @@ export interface PluginContext {
    *  ctx.react 容器（双段挂载模式，import-map 共享是 P0-3 后续）。 */
   react: typeof React;
   ui: {
+    registerConversationMode(def: {
+      key?: string;
+      label: () => string;
+      component: ComponentType<PluginConversationProps>;
+    }): Disposer;
     registerSettingsSection(def: {
       /** Optional sub-key; the settings page key becomes
        *  `plugin:<id>` or `plugin:<id>:<key>`. */
@@ -66,8 +88,10 @@ export interface PluginContext {
       component: ComponentType<ModelEntryProps>;
       order?: number;
     }): Disposer;
-    /** Chat right-panel tab; renders with the active workspace path
-     *  (plan §4.2 #4). */
+    /** Chat right-panel tab (plan §4.2 #4); renders with the active
+     *  workspace path. The strip renders plugin tabs icon-only, so `icon` is
+     *  the visible identity — without one the tab falls back to the plugin's
+     *  artwork / letter tile, and the label stays a title/accessible name. */
     registerPanelTab(def: {
       key?: string;
       label: () => string;
@@ -234,6 +258,7 @@ export interface PluginContext {
    *  delta | tool | usage | done | error …）。桌面专属（isWeb 下不可用的
    *  插件要自呈现）。 */
   agent: {
+    catalog(workspacePath: string): Promise<PluginAgentCatalogEntry[]>;
     /** 启动一个 agent 轮次；返回的 runId 用于事件过滤与 interrupt。 */
     start(def: {
       engine: string;
@@ -245,12 +270,14 @@ export interface PluginContext {
       providerId?: string;
       /** 引擎相关的会话续接 id（如 pi 的 --session-id）：同一 id 续上轮。 */
       sessionId?: string;
+      readOnly?: boolean;
+      requestId?: string;
     }): Promise<{ runId: string; sessionId: string | null }>;
     /** 中断本插件启动的 run（run id 属主前缀由宿主强制）。 */
-    interrupt(runId: string): Promise<void>;
+    interrupt(runId: string): Promise<boolean>;
   };
   /** 通用能力出口（0.3.0 起；旧的 `cmd:<command>` 逐命令授权机制已删除）。
-   *  仅四条命令，`pluginId` 由宿主自动注入（插件无需也不能传）：
+   *  仅下列命令，`pluginId` 由宿主自动注入（插件无需也不能传）：
    *
    *  - `plugin_http_request` `{ method, url, headers?, body? }` →
    *    `{ status, body }`：url 限 http/https，host(+端口) 须命中 manifest 的
@@ -258,12 +285,19 @@ export interface PluginContext {
    *    （形状与放行规则见 spec/permissions.json）。
    *  - `plugin_exec_run` `{ bin, args, env?, timeoutMs? }` →
    *    `{ code, stdout, stderr }`：bin 须命中 `exec:<bin>` 授权（裸名，无路径）。
+   *    子进程 PATH 由宿主注入为"插件 env 的 PATH（如有，保持优先）+ 宿主 CLI
+   *    搜索目录（进程 PATH + 常见安装位置）"，保证 `#!/usr/bin/env node`
+   *    类 shim 能找到解释器；插件无法借 env 完全锁死 PATH。
    *  - `plugin_exec_spawn` `{ bin, args, env?, lifecycle? }` → void：
    *    同授权；成功时 resolve 为 void（Rust 返回 ()），失败 reject。
+   *    PATH 注入语义同 `plugin_exec_run`。
    *    lifecycle 缺省 "detached"（用户级服务，活过插件）；"plugin" =
    *    附属进程，宿主跟踪，插件禁用/卸载时自动 kill。
    *  - `plugin_exec_kill` `{}` → `{ killed: number }`：kill 本插件全部
    *    lifecycle="plugin" 子进程（配置变更改名重启用；需任意 exec: 授权）。
+   *  - `plugin_agent_start` / `plugin_agent_interrupt`（0.3.13 起）：
+   *    与 `ctx.agent` 同一能力（需 `agent` 授权）——引擎管线由宿主接管，
+   *    run id 属主前缀在 Rust 侧强制。
    *
    *  授权未命中的调用在 JS 侧即 reject（不打 IPC）；Rust 侧对授权与插件
    *  启用态另有强制（纵深防御）。 */

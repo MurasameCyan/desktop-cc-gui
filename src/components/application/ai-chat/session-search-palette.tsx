@@ -19,6 +19,29 @@ const CONTENT_DEBOUNCE_MS = 300;
 /** Content search needs at least this many chars; title match runs always. */
 const CONTENT_MIN_CHARS = 2;
 
+/** Stable empties: lane filters reuse them so an unchanged list keeps its
+ *  identity across renders instead of allocating a fresh array. */
+const EMPTY_MATCHES: SessionMatch[] = [];
+const EMPTY_HITS: MessageSearchHit[] = [];
+
+/** Backend stats for the strip under the input: the query's own wall time
+ *  (microseconds) and the message count it searched. */
+interface SearchStats {
+  elapsedUs: number;
+  totalMessages: number;
+}
+
+/** Duration chip for the stats line: sub-10ms keeps one decimal so a
+ *  sub-millisecond FTS query does not collapse to "0 ms", whole ms below a
+ *  second, seconds with two decimals past that. */
+export function formatSearchDuration(elapsedUs: number): string {
+  if (!Number.isFinite(elapsedUs) || elapsedUs <= 0) return "0 ms";
+  const ms = elapsedUs / 1000;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  if (ms >= 10) return `${Math.round(ms)} ms`;
+  return `${ms.toFixed(1)} ms`;
+}
+
 interface SessionMatch {
   id: string;
   label: string;
@@ -32,8 +55,12 @@ interface SessionMatch {
  * Session quick-search palette (sidebar strip icon / ⌘L). Two lanes: title
  * matches are instant and local; message-content hits come from the
  * backend's FTS5 trigram index (debounced, stale responses dropped by a
- * request counter). Empty query lists the most recent sessions in sidebar
- * order. Enter/click jumps to the session; Esc or a backdrop press closes.
+ * request counter). A stats strip under the input reports the backend
+ * query's own wall time and the indexed-message corpus it ran against.
+ * The 标题 / 内容 chips are inclusive lane filters — both pressed shows both
+ * lanes, un-pressing one narrows to the other. Empty query lists the most
+ * recent sessions in sidebar order. Enter/click jumps to the session; Esc
+ * or a backdrop press closes.
  *
  * Dialog mechanics (native <dialog>, backdrop press-to-close, window-level
  * key navigation) mirror the ⌘K command palette.
@@ -54,9 +81,18 @@ export function SessionSearchPalette({
   useBrowserOcclusion(open);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const [sort, setSort] = useState<"relevance" | "recency">("relevance");
+  // Lane filters (标题 / 内容). Both on is the default: title matches first,
+  // then content hits.
+  const [showTitle, setShowTitle] = useState(true);
+  const [showContent, setShowContent] = useState(true);
   const [contentHits, setContentHits] = useState<MessageSearchHit[]>([]);
   const [contentPending, setContentPending] = useState(0);
+  // Stats strip state: the last completed query's numbers, whether a query
+  // is being awaited, and whether the last one failed. Cleared with the
+  // lane so a leftover number can never label a query it did not run.
+  const [contentStats, setContentStats] = useState<SearchStats | null>(null);
+  const [contentLoading, setContentLoading] = useState(false);
+  const [contentFailed, setContentFailed] = useState(false);
   // Invalidate in-flight content responses: Tauri invoke cannot be
   // aborted, so a monotonically increasing request id drops late arrivals
   // (agentsview's requestVersion — the AbortController equivalent here).
@@ -66,7 +102,7 @@ export function SessionSearchPalette({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const trimmedQuery = query.trim();
 
-  const matches = useMemo<SessionMatch[]>(() => {
+  const titleMatches = useMemo<SessionMatch[]>(() => {
     const normalized = query.trim().toLocaleLowerCase();
     const out: SessionMatch[] = [];
     for (const repo of repos) {
@@ -94,38 +130,81 @@ export function SessionSearchPalette({
     }
     return out;
   }, [repos, query]);
+  // The chips only exist once the content lane can be live (≥2 chars); under
+  // that the stored filter is not applied, so a hidden chip can never blank
+  // the list out from under the user.
+  const filtersLive = trimmedQuery.length >= CONTENT_MIN_CHARS;
+  const showTitleRows = !filtersLive || showTitle;
+  const titleRows = showTitleRows ? titleMatches : EMPTY_MATCHES;
   // Content lane: debounced backend FTS. Title matches above are free;
-  // this fires at most once per 300ms pause and only for ≥2 chars.
+  // this fires at most once per 300ms pause, only for ≥2 chars, and only
+  // while the 内容 chip is pressed.
   useEffect(() => {
-    if (!open || trimmedQuery.length < CONTENT_MIN_CHARS) {
-      setContentHits([]);
+    if (!open || !showContent || trimmedQuery.length < CONTENT_MIN_CHARS) {
+      // Bump the sequence too: an in-flight response must not repopulate a
+      // lane the user just switched off.
+      requestSeq.current += 1;
+      setContentHits(EMPTY_HITS);
       setContentPending(0);
+      setContentStats(null);
+      setContentLoading(false);
+      setContentFailed(false);
       return;
     }
     const seq = ++requestSeq.current;
+    // Debounce window included: from the first keystroke the strip says a
+    // search is running, not what the previous query found.
+    setContentLoading(true);
+    setContentFailed(false);
     const timer = setTimeout(() => {
       ipc
-        .searchMessages(trimmedQuery, sort, CONTENT_LIMIT, 0)
+        .searchMessages(trimmedQuery, CONTENT_LIMIT, 0)
         .then((page) => {
           if (requestSeq.current !== seq) return;
           setContentHits(page.hits);
           setContentPending(page.pending);
+          setContentStats({
+            elapsedUs: page.elapsedUs,
+            totalMessages: page.totalMessages,
+          });
+          setContentLoading(false);
         })
         .catch(() => {
           if (requestSeq.current !== seq) return;
           setContentHits([]);
+          setContentStats(null);
+          setContentLoading(false);
+          setContentFailed(true);
         });
     }, CONTENT_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [open, trimmedQuery, sort]);
+  }, [open, trimmedQuery, showContent]);
 
-  // A session matching by title is not repeated as a content hit.
+  // A session matching by title is not repeated as a content hit — but only
+  // while the title rows are actually on screen.
   const content = useMemo(() => {
+    if (!showContent) return EMPTY_HITS;
     if (contentHits.length === 0) return contentHits;
-    const titled = new Set(matches.map((m) => m.id));
+    if (!showTitleRows) return contentHits;
+    const titled = new Set(titleRows.map((m) => m.id));
     return contentHits.filter((h) => !titled.has(`${h.engine}/${h.sessionId}`));
-  }, [matches, contentHits]);
-  const rowCount = matches.length + content.length;
+  }, [showContent, showTitleRows, titleRows, contentHits]);
+  const rowCount = titleRows.length + content.length;
+
+  // Inclusive filter toggles: un-pressing the last pressed chip flips both
+  // back on (an all-off filter could only ever show an empty palette).
+  const toggleLane = (lane: "title" | "content") => {
+    const nextTitle = lane === "title" ? !showTitle : showTitle;
+    const nextContent = lane === "content" ? !showContent : showContent;
+    if (!nextTitle && !nextContent) {
+      setShowTitle(true);
+      setShowContent(true);
+    } else {
+      setShowTitle(nextTitle);
+      setShowContent(nextContent);
+    }
+    setActiveIndex(0);
+  };
 
   // Native <dialog>: keep the modal open state in sync with the prop.
   useEffect(() => {
@@ -144,6 +223,9 @@ export function SessionSearchPalette({
     if (open) {
       setQuery("");
       setActiveIndex(0);
+      // A fresh search starts with both lanes on, like the query reset.
+      setShowTitle(true);
+      setShowContent(true);
     }
   }
   // Focus is a DOM side effect, so it stays in an effect.
@@ -161,8 +243,8 @@ export function SessionSearchPalette({
   };
 
   const jumpRow = (index: number) => {
-    if (index < matches.length) jump(matches[index]);
-    else jumpContent(content[index - matches.length]);
+    if (index < titleRows.length) jump(titleRows[index]);
+    else jumpContent(content[index - titleRows.length]);
   };
 
   // Backdrop press-to-close (see CommandPalette for why this is a window
@@ -200,10 +282,23 @@ export function SessionSearchPalette({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, matches, content, activeIndex, onClose]);
+  }, [open, titleRows, content, activeIndex, onClose]);
 
   // The filtered list can shrink under the cursor; clamp the active row.
   const active = Math.min(activeIndex, Math.max(0, rowCount - 1));
+
+  // Content-lane status line under the input box. Running / failed / stats
+  // share one fixed row, so results never jump when it changes state.
+  const statsLine = contentLoading
+    ? t("chat.searchStatsLoading")
+    : contentFailed
+      ? t("chat.searchStatsFailed")
+      : contentStats
+        ? t("chat.searchStats", {
+            time: formatSearchDuration(contentStats.elapsedUs),
+            total: contentStats.totalMessages.toLocaleString(),
+          })
+        : "";
 
   // Keep the keyboard-highlighted row visible while arrowing through a
   // scrolled list. Section headers sit between option rows, so address by
@@ -237,35 +332,48 @@ export function SessionSearchPalette({
             }}
             placeholder={t("chat.searchSessions")}
             aria-label={t("chat.searchSessions")}
-            className="h-11 w-full bg-transparent text-body-medium text-text-primary outline-none placeholder:text-text-placeholder"
+            className="palette-search-field h-11 w-full bg-transparent text-body-medium text-text-primary outline-none placeholder:text-text-placeholder"
           />
-          {trimmedQuery.length >= CONTENT_MIN_CHARS && (
+          {filtersLive && (
             <div className="flex shrink-0 items-center gap-1">
-              {(["relevance", "recency"] as const).map((mode) => (
+              {(
+                [
+                  { key: "title", label: t("chat.searchScopeTitle"), on: showTitle },
+                  { key: "content", label: t("chat.searchScopeContent"), on: showContent },
+                ] as const
+              ).map((chip) => (
                 <button
-                  key={mode}
+                  key={chip.key}
                   type="button"
-                  aria-pressed={sort === mode}
-                  onClick={() => {
-                    setSort(mode);
-                    setActiveIndex(0);
-                  }}
+                  aria-pressed={chip.on}
+                  onClick={() => toggleLane(chip.key)}
                   className={cx(
                     "cursor-pointer rounded-2lg px-2 py-1 text-caption-1-medium outline-none transition-colors",
-                    sort === mode
+                    chip.on
                       ? "bg-background-secondary-default text-text-primary"
                       : "text-text-tertiary hover:bg-dropdown-item-hover-background",
                   )}
                 >
-                  {mode === "relevance" ? t("chat.sortByRelevance") : t("chat.sortByRecency")}
+                  {chip.label}
                 </button>
               ))}
             </div>
           )}
         </div>
+        {filtersLive && showContent && (
+          <div
+            role="status"
+            className={cx(
+              "border-b border-separator-border px-3 py-1.5 text-caption-1-medium",
+              contentFailed ? "text-text-error-primary" : "text-text-tertiary",
+            )}
+          >
+            {statsLine}
+          </div>
+        )}
         <PaletteResults
           listRef={listRef}
-          matches={matches}
+          matches={titleRows}
           content={content}
           contentPending={contentPending}
           queryLongEnough={trimmedQuery.length >= CONTENT_MIN_CHARS}
