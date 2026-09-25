@@ -334,6 +334,7 @@ pub(crate) fn install_from(
         write_state(state_path, &state)?;
         record
     };
+    crate::cli::invalidate_plugin(&id);
 
     Ok(info_for(plugins_dir, &id, &record))
 }

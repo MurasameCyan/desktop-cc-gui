@@ -254,7 +254,7 @@ impl Engine for CodexEngine {
     /// from [`apply_channel`] like any child; only the switch that enables the
     /// question tool has to be here.
     fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         apply_computer_use(&mut cmd, req)?;
         cmd.arg("app-server");
         // Without this the model never asks: it emits a plain agent message
@@ -312,7 +312,7 @@ impl Engine for CodexEngine {
         if req.computer_use == Some(true) {
             return Err("操作电脑不支持远程工作区(WSL):注入的是本机驱动".into());
         }
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("exec");
         let mut preassigned = None;
         if let Some(session_id) = req.session_id.as_deref() {
@@ -613,6 +613,8 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         }
     }

@@ -1,11 +1,10 @@
 //! Phase-1 plugin host: local-path install/uninstall/enable/disable, plugin
-//! file reads confined to the plugin directory, and per-plugin KV storage
-//! (db.rs `plugin_kv`). State lives in `~/.ccgui-next/plugins.json`; the
+//! file reads confined to the plugin directory, per-plugin KV storage and
+//! private document storage. State lives in `~/.ccgui-next/plugins.json`; the
 //! plugins themselves in `~/.ccgui-next/plugins/<id>/`.
 //!
-//! Uninstall data policy (plan §9.1): `delete_data=false` keeps the KV rows
-//! and records a tombstone; `plugin_list` purges rows whose tombstone is
-//! older than KV_TOMBSTONE_TTL_SECS.
+//! Uninstall keeps documents and their selected location unless delete_data is
+//! explicit. Retained KV rows expire after KV_TOMBSTONE_TTL_SECS; documents do not.
 //!
 //! Install is a staging/backup rename transaction (fs::install_from); a
 //! crash mid-swap leaves at worst a stale `.staging-`/`.backup-` dir, and
@@ -13,7 +12,7 @@
 //! back into place before proceeding.
 //!
 //! Layout: manifest.rs = manifest parse + permission whitelist; state.rs =
-//! plugins.json records + state lock; fs.rs = source-tree walk, the install
+//! plugins.json records + cross-process state lock; fs.rs = source-tree walk, the install
 //! transaction, and the manifest/record merge.
 
 pub(crate) mod asset_protocol;
@@ -120,8 +119,9 @@ fn uninstall_with_storage_at(
         }
         state::write_state(state_path, &state)?;
     }
-    // Services this plugin spawned with lifecycle="plugin" must not outlive
-    // the plugin itself.
+    // Revoke future CLI use, never accepted chat snapshots. Only separately
+    // tracked lifecycle="plugin" services are stopped by the existing hook.
+    crate::cli::invalidate_plugin(id);
     crate::plugin_caps::kill_tracked_children(id);
     Ok(())
 }
@@ -155,6 +155,7 @@ fn set_enabled_at(
         }
     })?;
     if !enabled {
+        crate::cli::invalidate_plugin(id);
         // Disabling takes effect immediately for lifecycle="plugin"
         // children too — they belong to the enabled plugin's runtime.
         crate::plugin_caps::kill_tracked_children(id);
@@ -177,6 +178,9 @@ pub async fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, 
             record.quarantined = true;
             record.last_error = Some(error.clone());
         })?;
+        // A quarantined plugin's published CLI contributions stop being usable
+        // with it; drop them so no later turn resolves against a dead plugin.
+        crate::cli::invalidate_plugin(&id);
         // Quarantine also stops this plugin's owned lifecycle processes.
         crate::plugin_caps::kill_tracked_children(&id);
         Ok(fs::info_for(&state::plugins_dir(), &id, &record))
@@ -421,7 +425,6 @@ mod tests {
         assert!(storage_read_guard(&state_path, "a").unwrap_err().contains("invalid plugin id"));
         assert!(storage_write_guard(&state_path, "a").unwrap_err().contains("invalid plugin id"));
     }
-
     #[test]
     fn uninstall_refuses_a_reparse_point_document_tree_before_removing_the_plugin() {
         use super::test_support::create_dir_link;

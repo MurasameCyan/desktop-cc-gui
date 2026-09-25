@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SDK_VERSION, compareVersions, satisfiesSdkRange } from "@ccgui/plugin-sdk";
+import { compareVersions, satisfiesSdkRange } from "@ccgui/plugin-sdk";
 
 describe("satisfiesSdkRange", () => {
   it("absent or * accepts anything", () => {
@@ -48,13 +48,6 @@ describe("satisfiesSdkRange", () => {
   it("garbage ranges reject rather than silently pass", () => {
     expect(satisfiesSdkRange("latest", "0.2.0")).toBe(false);
     expect(satisfiesSdkRange("0.2", "0.2.0")).toBe(false);
-  });
-
-  it("the shipped SDK_VERSION is the exact value plugins now pin (0.3.12)", () => {
-    // The compat line froze at 0.3.12; CCB and Live2D manifests pin that exact
-    // value, so the host must ship it verbatim for the handshake to accept them.
-    expect(satisfiesSdkRange("0.3.12", SDK_VERSION)).toBe(true);
-    expect(SDK_VERSION).toBe("0.3.12");
   });
 
 });

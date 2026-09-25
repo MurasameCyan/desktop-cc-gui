@@ -30,6 +30,8 @@ async fn main() {
 async fn run_one(engine_id: &str, workspace: &PathBuf) -> Result<(), String> {
     let engine = engine_by_id(engine_id).ok_or("unknown engine")?;
     let req = SendRequest {
+        execution: None,
+        selection: None,
         session_id: None,
         workspace: workspace.clone(),
         prompt: "Reply with exactly: ok".to_string(),

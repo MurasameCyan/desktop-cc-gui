@@ -273,7 +273,7 @@ describe("会话入口切回对话中心面", () => {
       sidebar.handleNewSession();
     });
     expectOnlyChatLeft();
-    expect(useChatStore.getState().active).toEqual({
+    expect(useChatStore.getState().active).toMatchObject({
       engine: "codex",
       sessionId: null,
       workspacePath: "/ws/a",

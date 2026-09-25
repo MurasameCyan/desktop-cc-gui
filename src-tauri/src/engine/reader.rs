@@ -7,7 +7,9 @@ use super::events::EngineEvent;
 use super::grok;
 #[cfg(windows)]
 use super::job;
-use super::registry::{kill_process_group, ProcessRegistry};
+#[cfg(unix)]
+use super::registry::kill_process_group;
+use super::registry::ProcessRegistry;
 use super::Engine;
 use crate::event_sink;
 use serde_json::Value;
@@ -143,6 +145,8 @@ pub(crate) struct TurnState {
     // engines (omp --print, codex exec); a future multi-turn-per-process
     // engine must reset this per turn instead.
     saw_any_output: bool,
+    observed_model: Option<String>,
+    observed_effort: Option<String>,
     pending_terminal: Option<(String, Value)>,
     exit_confirmed: bool,
     /// Start of the model-generation window currently open, if any.
@@ -163,6 +167,8 @@ impl TurnState {
             saw_error: false,
             attempt_error: None,
             saw_any_output: false,
+            observed_model: None,
+            observed_effort: None,
             pending_terminal: None,
             exit_confirmed: false,
             gen_open_since: None,
@@ -275,20 +281,31 @@ impl TurnState {
 /// host-stream runs ([`dsh_session::run_host_turn`]): the fields
 /// `dispatch_event` needs to route engine events to the UI sink and keep the
 /// registry's session aliasing in step.
+pub(crate) struct AcceptedExecution {
+    pub(crate) selection: Option<crate::cli::types::SessionExecutionContext>,
+    pub(crate) contribution: Option<Arc<crate::cli::ResolvedContribution>>,
+    pub(crate) db: Arc<crate::db::Db>,
+    pub(crate) emitters: Arc<crate::event_sink::BroadcastEmit>,
+}
 pub(crate) struct TurnCore {
     pub(crate) sink: Arc<event_sink::EventSink>,
     pub(crate) registry: Arc<ProcessRegistry>,
     pub(crate) engine_id: String,
     pub(crate) run_id: String,
+    pub(crate) execution: Option<AcceptedExecution>,
 }
 impl TurnCore {
     /// Adopt a native session id: rekey the registry entry (no overwrite) and
     /// remember it for subsequent event payloads.
     fn adopt_session_id(&self, state: &mut TurnState, id: &str, announce: bool) {
         if state.native_session_id.as_deref() == Some(id) {
+            self.adopt_selection(id);
+            self.persist_observations(state);
             return;
         }
         state.native_session_id = Some(id.to_string());
+        self.adopt_selection(id);
+        self.persist_observations(state);
         self.registry.rekey(&self.run_id, id.to_string());
         if announce {
             state.push(
@@ -298,6 +315,31 @@ impl TurnCore {
                 "session",
                 Value::String(id.to_string()),
             );
+        }
+    }
+
+    fn adopt_selection(&self, id: &str) {
+        let Some(execution) = &self.execution else { return; };
+        let Some(selection) = &execution.selection else { return; };
+        if selection.target.pending_id.is_none() { return; }
+        match crate::session_selection::adopt_pending(&execution.db, &selection.target, id) {
+            Ok(context) => {
+                use crate::event_sink::Emit;
+                if let Ok(raw) = serde_json::to_string(&context) { execution.emitters.emit_json("session://selection-changed", &raw); }
+            }
+            Err(_) => self.sink.push(serde_json::json!({"runId":self.run_id,"engine":self.engine_id,"kind":"warn","data":"Session selection could not be adopted; confirm it before sending again"})),
+        }
+    }
+
+    fn persist_observations(&self, state: &TurnState) {
+        let Some(accepted) = &self.execution else { return; };
+        let Some(context) = &accepted.selection else { return; };
+        let Some(id) = &state.native_session_id else { return; };
+        if state.observed_model.is_none() && state.observed_effort.is_none() { return; }
+        let mut target = context.target.clone();
+        target.session_id = Some(id.clone()); target.pending_id = None;
+        if crate::session_selection::record_observed(&accepted.db,&target,state.observed_model.as_deref(),state.observed_effort.as_deref()).is_err() {
+            eprintln!("[engine] cannot persist scoped CLI observations");
         }
     }
 
@@ -407,6 +449,8 @@ impl TurnCore {
             }
             EngineEvent::Error(error) => {
                 state.gen_end();
+                let error = self.execution.as_ref().and_then(|e| e.contribution.as_ref())
+                    .and_then(|c| c.material.as_ref()).map_or_else(|| error.clone(), |material| error.replace(material.value(), "[redacted]"));
                 state.saw_error = true;
                 crate::mcp::mark_run_ended(&self.run_id);
                 state.push(
@@ -574,20 +618,24 @@ impl TurnCore {
                 });
             }
             EngineEvent::Model(model) => {
+                state.observed_model = Some(model.clone());
+                self.persist_observations(state);
                 state.push(
                     &self.sink,
                     &self.run_id,
                     &self.engine_id,
-                    "model",
+                    if self.execution.as_ref().and_then(|e|e.selection.as_ref()).is_some() { "observed_model" } else { "model" },
                     Value::String(model),
                 );
             }
             EngineEvent::Effort(effort) => {
+                state.observed_effort = Some(effort.clone());
+                self.persist_observations(state);
                 state.push(
                     &self.sink,
                     &self.run_id,
                     &self.engine_id,
-                    "effort",
+                    if self.execution.as_ref().and_then(|e|e.selection.as_ref()).is_some() { "observed_effort" } else { "effort" },
                     Value::String(effort),
                 );
             }
@@ -644,6 +692,7 @@ pub(crate) struct RunContext {
     /// without this ring a failed run with empty stderr surfaces as a bare
     /// "exited with status" banner.
     pub(crate) stdout_plain_buf: Arc<Mutex<String>>,
+    pub(crate) deferred_prompt: Option<String>,
     /// Kill-on-close job guard: drops with this context at settle, sweeping
     /// any grandchild the CLI orphaned (Windows pwsh.exe/conhost.exe).
     #[cfg(windows)]
@@ -708,7 +757,13 @@ impl Drop for VirtualRunGuard {
 /// at startup is safe. Only these two known names are touched.
 pub fn sweep_staging_dirs() {
     let home = crate::paths::app_home();
-    for name in ["claude-staging", "grok-staging", "codex-plan-staging"] {
+    for name in [
+        "claude-staging",
+        "grok-staging",
+        "kimi-staging",
+        "provider-staging",
+        "codex-plan-staging",
+    ] {
         let dir = home.join(name);
         if dir.exists() {
             if let Err(error) = std::fs::remove_dir_all(&dir) {
@@ -788,15 +843,54 @@ pub(crate) async fn read_line_capped(
         }
     }
 }
+async fn bridge_handshake(ctx: &RunContext, reader: &mut BufReader<ChildStdout>, state: &mut TurnState, prompt: &str) -> Result<(), String> {
+    let accepted = ctx.core.execution.as_ref().ok_or("Missing accepted execution")?;
+    let contribution = accepted.contribution.as_ref().ok_or("Missing provider bridge profile")?;
+    let expected = super::contribution::BridgeSelection {
+        provider: super::contribution::provider_name(contribution), model: contribution.choice.selector.model_id().into(),
+        effort: accepted.selection.as_ref().and_then(|context|context.selection.as_ref()).and_then(|selection|selection.effort.clone()),
+    };
+    let mut commands = vec![serde_json::json!({"id":"ccgui-bound-model","type":"set_model","provider":expected.provider,"modelId":expected.model})];
+    if let Some(effort) = &expected.effort { commands.push(serde_json::json!({"id":"ccgui-bound-effort","type":"set_thinking_level","level":effort})); }
+    commands.push(serde_json::json!({"id":"ccgui-bound-state","type":"get_state"}));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    for command in commands {
+        if ctx.killed.load(std::sync::atomic::Ordering::SeqCst) { return Err("Provider handshake interrupted".into()); }
+        ctx.core.registry.write_line(&ctx.core.run_id, command.to_string()).await?;
+        let mut line = Vec::new();
+        loop {
+            let read = tokio::time::timeout_at(deadline, read_line_capped(reader, &mut line)).await
+                .map_err(|_| "Provider bridge handshake timed out; prompt was not sent")?
+                .map_err(|_| "Provider bridge pipe failed; prompt was not sent")?;
+            let LineRead::Line(bytes) = read else { return Err("Provider bridge closed before confirming selection".into()); };
+            let Ok(frame) = serde_json::from_slice::<Value>(&bytes) else { continue; };
+            if frame.get("id") == command.get("id") {
+                if frame.get("success").and_then(Value::as_bool) != Some(true) { return Err("CLI rejected the selected provider/model/effort; prompt was not sent".into()); }
+                if command["type"] == "get_state" {
+                    expected.verify(&frame["data"])?;
+                    if let Some(id) = frame.pointer("/data/sessionId").and_then(Value::as_str) { ctx.dispatch_event(state, EngineEvent::SessionId(id.into())); }
+                }
+                break;
+            }
+            let mut events = Vec::new();
+            ctx.engine_impl.parse_line(&String::from_utf8_lossy(&bytes), &mut events);
+            for event in events { ctx.dispatch_event(state, event); }
+            if state.saw_error { return Err("CLI failed during provider registration; prompt was not sent".into()); }
+        }
+    }
+    if ctx.killed.load(std::sync::atomic::Ordering::SeqCst) { return Err("Provider handshake interrupted".into()); }
+    ctx.core.registry.write_line(&ctx.core.run_id, prompt.to_string()).await
+}
+
 /// Read NDJSON stdout until EOF, dispatch events, then settle the turn:
 /// registry cleanup, temp-file cleanup, and the terminal done/error event.
 pub(crate) async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     let mut state = TurnState::new(ctx.preassigned_session_id.clone());
-    if let Some(model) = ctx.initial_model.clone() {
-        ctx.dispatch_event(&mut state, EngineEvent::Model(model));
-    }
-    if let Some(effort) = ctx.initial_effort.clone() {
-        ctx.dispatch_event(&mut state, EngineEvent::Effort(effort));
+    if let Some(id) = &ctx.preassigned_session_id { ctx.core.adopt_selection(id); }
+    // Request hints are not CLI observations and must never enter observed history.
+    if ctx.core.execution.as_ref().and_then(|accepted|accepted.selection.as_ref()).is_none() {
+        if let Some(model) = ctx.initial_model.clone() { ctx.dispatch_event(&mut state, EngineEvent::Model(model)); }
+        if let Some(effort) = ctx.initial_effort.clone() { ctx.dispatch_event(&mut state, EngineEvent::Effort(effort)); }
     }
     // codex reports usage into its own session log instead of the stdout
     // stream (the stream only carries it with `turn.completed`), so a long
@@ -806,6 +900,11 @@ pub(crate) async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
     // buffer across polls, so a tick landing mid-line consumes and drops
     // nothing, and one runaway line can't grow without bound.
     let mut reader = BufReader::new(stdout);
+    if let Some(prompt) = &ctx.deferred_prompt {
+        if let Err(error) = bridge_handshake(&ctx, &mut reader, &mut state, prompt).await {
+            ctx.dispatch_event(&mut state, EngineEvent::Error(error));
+        }
+    }
     let mut line_buf = Vec::new();
     let is_codex = ctx.core.engine_id == "codex";
     let mut usage_tail: Option<codex_usage::UsageTail> = None;
@@ -1098,7 +1197,9 @@ mod staging_tests {
             let mut child = command.spawn().unwrap();
             child.wait().await.unwrap();
             let ctx = RunContext {
+                deferred_prompt: None,
                 core: TurnCore {
+                    execution: None,
                     sink: event_sink::EventSink::new(Arc::new(Noop)),
                     registry: Arc::new(ProcessRegistry::default()),
                     engine_id: "grok".into(),
@@ -1162,27 +1263,23 @@ mod staging_tests {
         };
         registry.insert("run-abort".into(), entry.clone());
         registry.insert_alias("session-abort".into(), entry);
-        let ctx = RunContext {
-            core: TurnCore {
-                sink: event_sink::EventSink::new(Arc::new(Noop)),
-                registry: Arc::clone(&registry),
-                engine_id: "grok".into(),
-                run_id: "run-abort".into(),
-            },
-            engine_impl: Box::new(grok::GrokEngine),
-            pid: 4242,
-            preassigned_session_id: None,
-            initial_model: None,
-            initial_effort: None,
-            child: Arc::new(TokioMutex::new(child)),
-            killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cleanup_files: Vec::new(),
-            mcp_restore: None,
-            stderr_buf: Arc::new(Mutex::new(String::new())),
-            stdout_plain_buf: Arc::new(Mutex::new(String::new())),
-            #[cfg(windows)]
-            _tree_guard: None,
-        };
+        let ctx = RunContext { deferred_prompt: None, core: TurnCore { execution: None, sink: event_sink::EventSink::new(Arc::new(Noop)),
+        registry: Arc::clone(&registry),
+        engine_id: "grok".into(),
+        run_id: "run-abort".into(), },
+        engine_impl: Box::new(grok::GrokEngine),
+        pid: 4242,
+        preassigned_session_id: None,
+        initial_model: None,
+        initial_effort: None,
+        child: Arc::new(TokioMutex::new(child)),
+        killed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cleanup_files: Vec::new(),
+        mcp_restore: None,
+        stderr_buf: Arc::new(Mutex::new(String::new())),
+        stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+        #[cfg(windows)]
+        _tree_guard: None, };
         let task = tokio::spawn(async move {
             let _held = ctx;
             std::future::pending::<()>().await;
@@ -1271,6 +1368,7 @@ mod terminal_event_tests {
                     registry: Arc::new(ProcessRegistry::default()),
                     engine_id: engine.into(),
                     run_id: "pa-relay-test".into(),
+                    execution: None,
                 };
                 let mut state = TurnState::new(None);
                 core.dispatch_event(
@@ -1304,6 +1402,7 @@ mod terminal_event_tests {
             registry: Arc::new(ProcessRegistry::default()),
             engine_id: "pi".into(),
             run_id: "gen-ms-test".into(),
+            execution: None,
         };
         let mut state = TurnState::new(Some("session".into()));
         let tool_start = || EngineEvent::Message {
@@ -1357,6 +1456,7 @@ mod terminal_event_tests {
         for fail in [false, true] {
             let collector = Arc::new(Collector::default());
             let core = TurnCore {
+                execution: None,
                 sink: event_sink::EventSink::new(collector.clone()),
                 registry: Arc::new(ProcessRegistry::default()),
                 engine_id: "codex".into(),
@@ -1456,6 +1556,7 @@ mod terminal_event_tests {
                     registry: registry.clone(),
                     engine_id: "pi".into(),
                     run_id: run_id.into(),
+                    execution: None,
                 },
                 engine_impl: Box::new(crate::engine::pi_family::pi()),
                 pid,
@@ -1468,6 +1569,7 @@ mod terminal_event_tests {
                 mcp_restore: None,
                 stderr_buf: Arc::new(Mutex::new(String::new())),
                 stdout_plain_buf: Arc::new(Mutex::new(String::new())),
+                deferred_prompt: None,
             };
             let reader = tokio::spawn(run_reader(stdout, context));
             tokio::time::timeout(std::time::Duration::from_secs(3), async {

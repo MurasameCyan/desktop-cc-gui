@@ -84,7 +84,7 @@ pub(super) fn build_channel_command(req: &SendRequest, bin: &str) -> Result<Buil
 }
 
 fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<BuiltCommand, String> {
-    let mut cmd = command_for_binary(bin);
+    let mut cmd = super::command_for_request(req, bin);
     cmd.arg("--output-format");
     cmd.arg("stream-json");
     if KimiEngine.resolve_permission(req.permission.as_deref()) == "plan" {
@@ -242,6 +242,8 @@ mod channel_tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = KimiEngine.host_command(&req, "kimi").unwrap();
@@ -265,6 +267,8 @@ mod channel_tests {
             additional_dirs: vec![],
             provider_id: Some("plugin_model-switcher_probe".into()),
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let mut env = HashMap::from([

@@ -58,8 +58,8 @@ describe("ChatConversation mode integration", () => {
   const enter = () => act(() => [...container.querySelectorAll("button")].find((button) => button.textContent === "Relay")!.click());
 
   it("keeps busy draft tabs addressable through close, close-all and new-chat attempts", () => {
-    const draft: ActiveSession = { engine: "pi", sessionId: null, workspacePath: "/draft" };
-    const other: ActiveSession = { engine: "pi", sessionId: null, workspacePath: "/other" };
+    const draft: ActiveSession = { engine: "pi", sessionId: null, workspacePath: "/draft", pendingId: "draft-pending" };
+    const other: ActiveSession = { engine: "pi", sessionId: null, workspacePath: "/other", pendingId: "other-pending" };
     act(() => useChatStore.setState({ active: draft, activeEngine: "pi", openTabs: [draft, other] }));
     enter();
     const identity = modeProps.conversationId;

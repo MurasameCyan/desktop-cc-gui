@@ -14,9 +14,6 @@ import {
   drainPending,
   moveStreamingFlag,
   patchSession,
-  resolveSessionModel,
-  resolveSessionEffort,
-  resolveSessionProvider,
   routeRun,
   rememberSettledRun,
   runRouting,
@@ -35,10 +32,7 @@ import {
   patchGrantBySeq,
   registerPendingRunLifecycle,
   replayBufferedEngineEvents,
-  rememberModelForRun,
-  rememberEffortForRun,
   patchQuestionByRequestId,
-  rememberProviderForRun,
   settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./engine-events";
@@ -82,6 +76,7 @@ import type {
   StoreSet,
   StoreSubscribe,
 } from "./context";
+import { contributionModelId, contributionTokenPolicy, refreshExecutionSelection } from "./execution-selection";
 
 /**
  * Messaging: sending prompts (optimistic turn, native-id adoption, queue
@@ -130,6 +125,8 @@ export function createMessagingActions(
   // A replacement turn can reset the session's shared interrupted flag.
   // Keep cancellation attached to the send waiting on hooks or its ACK.
   const pendingSends = new Map<string, { cancelled: boolean }>();
+  const preparing = new Set<string>();
+  const compacting = new Set<string>();
 
   /**
    * Send a prompt to a specific tab. Unlike the public `send` action this is
@@ -142,6 +139,32 @@ export function createMessagingActions(
     images: string[],
     options?: SendOptions,
   ) {
+    const key = sessionKey(tab.engine, tab.sessionId, tab.workspacePath);
+    const isCompaction = prompt === "/compact";
+    if (preparing.has(key) && !isCompaction) return false;
+    if (!isCompaction) preparing.add(key);
+    if (!isCompaction) patchSession(set, key, { preparing: true, interrupted: false });
+    let settledKey = key;
+    try {
+      const result = await sendSelectedPrompt(tab, prompt, images, isCompaction, options);
+      if (result) settledKey = result.key;
+      return result?.sent ?? false;
+    } catch (error) {
+      patchSession(set, key, { error: errorText(error), interrupted: true });
+      return false;
+    } finally {
+      if (!isCompaction) {
+        preparing.delete(key);
+        // Clear the flag only where the session still lives; a migrated or
+        // settled turn (older backend reassigns the run id) deleted the
+        // pending key, and patchSession would resurrect it from EMPTY_SESSION.
+        if (get().bySession[settledKey]) patchSession(set, settledKey, { preparing: false });
+        queueMicrotask(() => drainQueue(settledKey));
+      }
+    }
+  }
+
+  async function sendSelectedPrompt(tab: ActiveSession, prompt: string, images: string[], isCompaction: boolean, options?: SendOptions) {
     if (!prompt.trim() && images.length === 0) return;
     // A pinned agent's instructions ride along as a tail block the
     // transcript keeps (the bubble strips it back out for display). Slash
@@ -185,58 +208,23 @@ export function createMessagingActions(
       patchSession(set, key, { error: i18n.t("chat.cuaUnsupportedEngine") });
       return;
     }
-    // Resolve BEFORE the optimistic rows land: the patch below writes
-    // activeModel, and a resolver reading it afterwards would see its own
-    // write instead of the session's history.
-    // The session's own model, not the engine default: continuing a
-    // conversation keeps running the model that conversation uses.
-    const model =
-      resolveSessionModel(tab, get().bySession[key], get().models[engine]) ||
-      null;
-    // Remember what this session runs, spelled as the picker spells it: the
-    // engine's own transcript keeps only the bare model name, so this record
-    // is what a restart or another client reads back (see
-    // ipc.rememberSessionModel). A brand-new session has no id yet — its
-    // `session` event carries the model instead.
-    if (model) {
-      if (tab.sessionId) {
-        void ipc
-          .rememberSessionModel(engine, tab.sessionId, model)
-          .catch(() => {});
-      } else {
-        rememberModelForRun(key, model);
-      }
+    let context = await refreshExecutionSelection({ set, get }, tab);
+    if (!context.selection || context.unavailableReason) throw new Error(context.unavailableReason ?? "Session has no execution selection");
+    let sources = context.selection.modelSelection.source === "contribution" ? await ipc.listCliSources() : [];
+    let policy = contributionTokenPolicy(context.selection.modelSelection, sources);
+    const used = parseUsage(get().bySession[key]?.usage)?.total;
+    if (!isCompaction && tab.sessionId && policy?.autoCompactionThresholdTokens && used !== undefined && used >= policy.autoCompactionThresholdTokens) {
+      await get().compactContext(key);
+      context = await refreshExecutionSelection({ set, get }, tab);
+      if (!context.selection || context.unavailableReason) throw new Error(context.unavailableReason ?? "Session has no execution selection");
+      sources = context.selection.modelSelection.source === "contribution" ? await ipc.listCliSources() : [];
+      policy = contributionTokenPolicy(context.selection.modelSelection, sources);
     }
-    const effort =
-      resolveSessionEffort(tab, get().bySession[key], get().efforts[engine]) ??
-      null;
-    // Remember the level the way the model is remembered: the picker follows
-    // the session, so a reopened session — here, in another window, or on the
-    // phone — keeps running the level it ran instead of the engine default.
-    if (effort) {
-      if (tab.sessionId) {
-        void ipc
-          .rememberSessionEffort?.(engine, tab.sessionId, effort)
-          ?.catch(() => {});
-      } else {
-        rememberEffortForRun(key, effort);
-      }
-    }
-    const provider =
-      resolveSessionProvider(
-        tab,
-        get().bySession[key],
-        get().providers[engine],
-      ) ?? null;
-    if (provider) {
-      if (tab.sessionId) {
-        void ipc
-          .rememberSessionProvider?.(engine, tab.sessionId, provider)
-          ?.catch(() => {});
-      } else {
-        rememberProviderForRun(key, provider);
-      }
-    }
+    if (get().bySession[key]?.interrupted) return { sent: false, key };
+    const selection = context.selection;
+    const model = contributionModelId(selection.modelSelection, sources);
+    const effort = selection.effort;
+    const provider = selection.modelSelection.source === "native" ? selection.modelSelection.channelId ?? null : null;
     // Optimistic user message.
     const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
     const hookRunId = newId();
@@ -268,6 +256,7 @@ export function createMessagingActions(
         activeModel: model,
         activeEffort: effort,
         activeProvider: provider,
+        runTokenPolicy: policy,
         // 电脑操控 is per-send opt-in (never sticky: a later ordinary
         // message must not silently regain machine control). The record only
         // feeds resendLastUser, which repeats this very message.
@@ -328,7 +317,7 @@ export function createMessagingActions(
       captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
     });
     // Refresh independently: a slow history read must not delay sending or Stop.
-    void get().refreshSessionUsage(key);
+    if (!isCompaction) void get().refreshSessionUsage(key);
     // Stop and early events must address the same lifecycle registered above.
     const requestedRunId = hookRunId;
     settleOrphanedRuns(set, routeRun(requestedRunId, key));
@@ -356,20 +345,17 @@ export function createMessagingActions(
       });
       const result = await ipc.sendMessage({
         runId: requestedRunId,
-        engine,
-        workspacePath: tab.workspacePath,
-        sessionId: tab.sessionId,
+        schemaVersion: 1,
+        target: context.target,
+        selectionVersion: selection.version,
         prompt,
         promptContributions,
         imagePaths: images.length ? images : null,
-        model,
-        effort,
         permission: effectivePermission(
           get().engines,
           engine,
           get().permission,
         ),
-        providerId: provider,
         computerUse: options?.computerUse === true,
       });
       confirmPromptContributions(promptContributions);
@@ -411,26 +397,12 @@ export function createMessagingActions(
           tab.workspacePath,
         );
         adoptNativeContributions(set, engine, tab.workspacePath, result.sessionId);
-        if (model) {
-          void ipc
-            .rememberSessionModel?.(engine, result.sessionId, model)
-            ?.catch(() => {});
-        }
-        if (effort) {
-          void ipc
-            .rememberSessionEffort?.(engine, result.sessionId, effort)
-            ?.catch(() => {});
-        }
-        if (provider) {
-          void ipc
-            .rememberSessionProvider?.(engine, result.sessionId, provider)
-            ?.catch(() => {});
-        }
         settleOrphanedRuns(set, routeRun(result.runId, newKey));
         set((s) => {
           const bySession = { ...s.bySession };
           if (bySession[key]) {
-            bySession[newKey] = bySession[key];
+            const newer = (bySession[newKey]?.executionSelection?.version ?? -1) > (bySession[key].executionSelection?.version ?? -1) ? bySession[newKey] : bySession[key];
+            bySession[newKey] = { ...bySession[key], executionSelection: newer.executionSelection, selectionUnavailableReason: newer.selectionUnavailableReason };
             if (newKey !== key) delete bySession[key];
           }
           // Stamp only the tab that owns this run; blanketing every pending
@@ -442,12 +414,13 @@ export function createMessagingActions(
                 stamped ||
                 t.engine !== engine ||
                 t.sessionId !== null ||
+                t.pendingId !== tab.pendingId ||
                 t.workspacePath !== tab.workspacePath
               ) {
                 return t;
               }
               stamped = true;
-              return { ...t, sessionId: result.sessionId, effort: undefined };
+              return { ...t, sessionId: result.sessionId, pendingId: undefined, model: undefined, effort: undefined, provider: undefined };
             }),
           );
           // Only the active tab adopts the native id on `active`; a
@@ -456,8 +429,9 @@ export function createMessagingActions(
             s.active &&
             s.active.engine === engine &&
             s.active.sessionId === null &&
+            s.active.pendingId === tab.pendingId &&
             s.active.workspacePath === tab.workspacePath
-              ? { ...s.active, sessionId: result.sessionId, effort: undefined }
+              ? { ...s.active, sessionId: result.sessionId, pendingId: undefined, model: undefined, effort: undefined, provider: undefined }
               : s.active;
           return {
             bySession,
@@ -520,6 +494,7 @@ export function createMessagingActions(
         // immutable run id belongs to this late acknowledgement.
         await ipc.interruptSession(result.runId).catch(() => false);
       }
+      return { sent: true, key: liveKey };
     } catch (error) {
       finishRunLifecycle(hookRunId, "failed", String(error));
       settleLaunch();
@@ -538,12 +513,13 @@ export function createMessagingActions(
         streaming: false,
         turnStartedAt: null,
       });
-      // The send never became a turn, so no engine event will report one:
-      // without this the rest of the queue waits for a settle that is not
-      // coming. Each drain consumes one item, so a run of failures empties
-      // the queue instead of looping.
+      // A failed selection/send parks the queue. Never drain subsequent
+      // prompts under a replacement credential or silently discard them.
+      // The outer sendPrompt still schedules a drain; drainQueue bails while
+      // `interrupted` is set, so nothing runs under the failed selection.
       void get().refreshSessionUsage(failedKey);
-      if (!get().bySession[failedKey]?.interrupted) drainQueue(failedKey);
+      patchSession(set, failedKey, { interrupted: true });
+      return { sent: false, key: failedKey };
     } finally {
       if (pendingSends.get(key) === pendingSend) pendingSends.delete(key);
     }
@@ -564,7 +540,7 @@ export function createMessagingActions(
   function drainQueue(key: string) {
     const s = get();
     const session = s.bySession[key];
-    if (!session || session.streaming || session.queue.length === 0) return;
+    if (!session || session.streaming || session.preparing || session.interrupted || session.queue.length === 0 || preparing.has(key) || compacting.has(key)) return;
     const tab = s.openTabs.find(
       (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
     );
@@ -576,8 +552,12 @@ export function createMessagingActions(
         [key]: { ...(prev.bySession[key] ?? EMPTY_SESSION), queue: rest },
       },
     }));
-    void sendPrompt(tab, head.text, head.images, {
-      computerUse: head.computerUse,
+    void sendPrompt(tab, head.text, head.images, { computerUse: head.computerUse }).then((sent) => {
+      if (sent) return;
+      set((state) => {
+        const current = state.bySession[key];
+        return current ? { bySession: { ...state.bySession, [key]: { ...current, queue: [head, ...current.queue], interrupted: true } } } : {};
+      });
     });
   }
 
@@ -587,7 +567,13 @@ export function createMessagingActions(
 
     send: async (prompt, images, options) => {
       const { active } = get();
-      if (active) await sendPrompt(active, prompt, images, options);
+      if (!active) return;
+      const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
+      if (preparing.has(key) || compacting.has(key) || get().bySession[key]?.streaming) {
+        get().queueMessage(prompt, images, options);
+        return;
+      }
+      await sendPrompt(active, prompt, images, options);
     },
 
     respondToGrant: async (key, seq, accept) => {
@@ -657,7 +643,7 @@ export function createMessagingActions(
       const tab =
         s.openTabs.find(
           (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
-        ) ?? s.active;
+        );
       if (tab)
         await sendPrompt(tab, lastUser.text, lastUser.images ?? [], {
           computerUse: s.bySession[key]?.activeComputerUse === true,
@@ -797,6 +783,7 @@ export function createMessagingActions(
         };
       });
       if (running) await get().interrupt();
+      patchSession(set, key, { interrupted: false });
       drainQueue(key);
     },
 
@@ -871,95 +858,46 @@ export function createMessagingActions(
     },
 
     compactContext: async (key?: string) => {
-      const { active, streamingByKey, openTabs } = get();
-      const targetKey =
-        key ??
-        (active
-          ? sessionKey(active.engine, active.sessionId, active.workspacePath)
-          : "");
-      if (!targetKey) return;
-      if (streamingByKey[targetKey]) return;
-      const targetTab =
-        openTabs.find(
-          (t) =>
-            sessionKey(t.engine, t.sessionId, t.workspacePath) === targetKey,
-        ) ?? active;
-      if (!targetTab) return;
-
-      // Manual-compaction flag: the tail status strip swaps to the compacting
-      // label for the whole run. Cleared in the finally below.
-      patchSession(set, targetKey, {
-        compaction: { automatic: false, startedAt: Date.now() },
+      const { active, openTabs, streamingByKey } = get();
+      const targetKey = key ?? (active ? sessionKey(active.engine, active.sessionId, active.workspacePath) : "");
+      const tab = openTabs.find((t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === targetKey);
+      if (!tab?.sessionId) throw new Error("Compaction requires an existing conversation");
+      if (streamingByKey[targetKey] || compacting.has(targetKey)) throw new Error("Conversation is busy");
+      compacting.add(targetKey);
+      const completion = Promise.withResolvers<void>();
+      // Attach a handler immediately; timeout may precede invoke's response.
+      void completion.promise.catch(() => {});
+      let started = false;
+      const unsubscribe = subscribe(() => {
+        const session = get().bySession[targetKey];
+        if (session?.streaming) started = true;
+        else if (started) {
+          if (session?.error || session?.interrupted) completion.reject(new Error(session.error ?? "Compaction was interrupted"));
+          else completion.resolve();
+        }
       });
-
-      // Track the compaction turn completion so callers (and UI) can await it.
-      let cleanup: (() => void) | undefined;
-      const completionPromise = new Promise<void>((resolve) => {
-        let started = false;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        const unsub = subscribe(() => {
-          const currentStreaming = get().streamingByKey;
-          const isStreaming = Boolean(
-            currentStreaming[targetKey] ||
-              (targetTab.sessionId &&
-                currentStreaming[
-                  sessionKey(
-                    targetTab.engine,
-                    targetTab.sessionId,
-                    targetTab.workspacePath,
-                  )
-                ]),
-          );
-          if (isStreaming) {
-            started = true;
-          } else if (started) {
-            done();
-          }
-        });
-
-        const done = () => {
-          if (timeoutId) clearTimeout(timeoutId);
-          unsub();
-          resolve();
-        };
-
-        timeoutId = setTimeout(done, 120_000);
-        cleanup = () => {
-          if (timeoutId) clearTimeout(timeoutId);
-          unsub();
-        };
-      });
-
+      const timer = setTimeout(() => completion.reject(new Error("Compaction timed out")), 120_000);
+      patchSession(set, targetKey, { interrupted: false, compaction: { automatic: false, startedAt: Date.now() } });
       try {
-        await sendPrompt(targetTab, "/compact", []);
+        if (!await sendPrompt(tab, "/compact", [])) throw new Error(get().bySession[targetKey]?.error ?? "Compaction failed");
+        await completion.promise;
+        const persisted = Promise.withResolvers<void>();
+        setTimeout(persisted.resolve, 400);
+        await persisted.promise;
+        const before = get().bySession[targetKey]?.usage;
+        const page = await loadHistoryPage(tab.engine, tab.sessionId, tab.workspacePath, 100);
+        const usage = [...page.messages].reverse().find((message) => message.usage)?.usage;
+        if (!usage) throw new Error("Compaction usage could not be refreshed");
+        if (get().bySession[targetKey]?.usage === before) patchSession(set, targetKey, { usage: mergeUsage(usage, before) });
       } catch (error) {
-        cleanup?.();
-        patchSession(set, targetKey, { compaction: null });
+        patchSession(set, targetKey, { error: errorText(error), interrupted: true });
         throw error;
-      }
-
-      await completionPromise;
-      // After compaction turn finishes, wait briefly for engine to persist session file,
-      // then refresh session usage snapshot.
-      await new Promise((r) => setTimeout(r, 400));
-      const latestTab =
-        get().openTabs.find(
-          (t) =>
-            sessionKey(t.engine, t.sessionId, t.workspacePath) === targetKey,
-        ) ?? get().active;
-      const finalKey = latestTab
-        ? sessionKey(
-            latestTab.engine,
-            latestTab.sessionId,
-            latestTab.workspacePath,
-          )
-        : targetKey;
-      await get().refreshSessionUsage(finalKey);
-      // The settle paths clear the flag as well; this covers the subscription
-      // timing out while the run keeps streaming in the background — the
-      // indicator then belongs to that turn, not to compaction.
-      if (get().bySession[targetKey]?.compaction?.automatic === false) {
+      } finally {
+        clearTimeout(timer);
+        unsubscribe();
+        compacting.delete(targetKey);
         patchSession(set, targetKey, { compaction: null });
+        if (!preparing.has(targetKey)) queueMicrotask(() => drainQueue(targetKey));
       }
     },
 

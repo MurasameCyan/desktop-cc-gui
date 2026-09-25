@@ -89,6 +89,7 @@ export function installHardening(): void {
         ),
       );
     }
+    // Consume before serialization can invoke plugin getters/toJSON.
     authorizedInvokeDepth = null;
     return original(cmd, args);
   };
@@ -100,6 +101,7 @@ export function installHardening(): void {
   // permission checks are unaffected. The warning stays one-shot.
   const descriptor = Object.getOwnPropertyDescriptor(internals, "invoke");
   const warnInactive = (error?: unknown) => {
+
     if (reportedUnwrappable) return;
     reportedUnwrappable = true;
     console.warn(

@@ -2,10 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type Mock } 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   createPluginContext,
-  DocumentStorageConflictError,
   injectBundleCss,
   type PluginContextBackend,
 } from "./context";
+import { DocumentStorageConflictError } from "./document-storage";
 import type { PluginContext } from "@ccgui/plugin-sdk";
 import {
   addMenuRegistry,
@@ -31,6 +31,10 @@ import { installHardening, runAsPlugin } from "./hardening";
 // composer.setDraft 的 store 落点由 composer-draft.test.ts 单独覆盖；
 // 这里只验证权限门与委派，不拉入 chat store 依赖链。
 vi.mock("./composer-draft", () => ({ setActiveComposerDraft: vi.fn() }));
+vi.mock("@/lib/transport", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/transport")>()),
+  isWeb: false,
+}));
 
 function fakeStorage(): PluginContextBackend & {
   data: Map<string, unknown>;

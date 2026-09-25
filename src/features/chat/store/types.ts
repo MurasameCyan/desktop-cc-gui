@@ -138,8 +138,7 @@ export interface ChatStore {
   setOmpServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   setModel: (engine: string, model: string) => Promise<void>;
-  /** Session-scoped channel. An existing conversation keeps the pick; only a
-   *  pending new-chat tab also updates the engine default for the next chat. */
+  /** Legacy native channel selection, committed as one versioned session record. */
   setProvider: (engine: string, providerId: string) => Promise<void>;
   /** Pin several engines' models at once (startup defaulting); one settings
    * write instead of one per engine. */

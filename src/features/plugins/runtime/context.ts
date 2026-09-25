@@ -6,6 +6,7 @@ import {
   addMenuRegistry,
   commandRegistry,
   composerSlotRegistry,
+  modelEntryRegistry,
   execGrantAllows,
   markdownRegistry,
   networkGrantAllows,
@@ -32,6 +33,7 @@ import type {
   PluginManifest,
   RegisteredWorkspace,
   WorkspaceMetadata,
+  SessionExecutionContext,
 } from "@ccgui/plugin-sdk";
 import {
   registerRuntimeSwitchHooks,
@@ -46,6 +48,9 @@ import { registerSessionSource } from "./session-source";
 import { directoryAssetUrl, fileAssetUrl, remoteAssetUrl } from "./asset-url";
 import { usePluginTabsStore } from "./center-tabs";
 import { runAsPlugin, withAuthorizedHostInvoke } from "./hardening";
+import { createCliCapabilities } from "./cli-capabilities";
+import { createDocumentStorage } from "./document-storage";
+import { subscribeCapabilityEvent } from "./capability-events";
 
 /** Storage transport the context talks to; the loader binds the IPC-backed
  *  implementation, tests bind fakes. */
@@ -111,20 +116,7 @@ export interface PluginHandle {
   disposers: Disposer[];
 }
 
-export class DocumentStorageConflictError extends Error {
-  readonly code = "DOCUMENT_STORAGE_CONFLICT";
 
-  constructor(readonly currentVersion: string | null) {
-    super(
-      `document storage version conflict (current: ${currentVersion ?? "missing"})`,
-    );
-    this.name = "DocumentStorageConflictError";
-  }
-}
-
-function sdkLocation(location: DocumentStorageLocationResponse) {
-  return { kind: location.kind, path: location.displayPath };
-}
 
 const REMOTE_CSS = /@import|url\(\s*['"]?https?:/i;
 
@@ -231,55 +223,7 @@ export function createPluginContext(
         return withAuthorizedHostInvoke(() => backend.workspaceMetadata(id));
       },
     },
-    documentStorage: {
-      async getLocation() {
-        requirePermission("plugin.storage");
-        return sdkLocation(await withAuthorizedHostInvoke(() => backend.documentStorageGetLocation(id)));
-      },
-      async selectLocation(kind) {
-        requirePermission("plugin.storage");
-        let customPath: string | null = null;
-        if (kind === "custom") {
-          customPath = await withAuthorizedHostInvoke(() => backend.pickDirectory());
-          if (customPath === null) throw new Error("document storage directory selection cancelled");
-        }
-        return sdkLocation(await withAuthorizedHostInvoke(() =>
-          backend.documentStorageSelectLocation(id, kind, customPath),
-        ));
-      },
-      async readText(relativePath) {
-        requirePermission("plugin.storage");
-        return withAuthorizedHostInvoke(() => backend.documentStorageReadText(id, relativePath));
-      },
-      async writeTextAtomic(relativePath, content, expectedVersion) {
-        requirePermission("plugin.storage");
-        const result = await withAuthorizedHostInvoke(() => backend.documentStorageWriteTextAtomic(
-          id,
-          relativePath,
-          content,
-          expectedVersion,
-        ));
-        if (result.status === "conflict") {
-          throw new DocumentStorageConflictError(result.currentVersion);
-        }
-        return { version: result.version };
-      },
-      async remove(relativePath, expectedVersion) {
-        requirePermission("plugin.storage");
-        const result = await withAuthorizedHostInvoke(() => backend.documentStorageRemove(
-          id,
-          relativePath,
-          expectedVersion ?? null,
-        ));
-        if (result.status === "conflict") {
-          throw new DocumentStorageConflictError(result.currentVersion);
-        }
-      },
-      async list(prefix) {
-        requirePermission("plugin.storage");
-        return withAuthorizedHostInvoke(() => backend.documentStorageList(id, prefix));
-      },
-    },
+    documentStorage: createDocumentStorage(id, backend, requirePermission),
     assets: {
       bundleUrl(relativePath) {
         requirePermission("assets:bundle");
@@ -388,6 +332,19 @@ export function createPluginContext(
             order: def.order,
           }),
         );
+      },
+      registerModelEntry(def) {
+        requirePermission("ui:model-entry");
+        if (!Array.isArray(def.engineIds) || def.engineIds.length === 0 ||
+            def.engineIds.some((engine) => typeof engine !== "string" || !engine.trim())) {
+          throw new Error("registerModelEntry requires non-empty engineIds");
+        }
+        return track(modelEntryRegistry.register({
+          id: scopedPluginId(id, def.key),
+          engineIds: [...new Set(def.engineIds)],
+          component: def.component,
+          order: def.order,
+        }));
       },
       registerPanelTab(def) {
         requirePermission("ui:panel-tab");
@@ -577,6 +534,7 @@ export function createPluginContext(
         await withAuthorizedHostInvoke(() => backend.delete(id, key));
       },
     },
+    cli: createCliCapabilities(id, backend, requirePermission, track),
     events: {
       on(topic, cb) {
         requirePermission("events");
@@ -617,6 +575,22 @@ export function createPluginContext(
           openPluginSession(id, engine, sessionId, workspacePath),
         );
       },
+      async getContext() {
+        requirePermission("host:session");
+        // Defer the chat-store dependency, as selectSession/setEffort do:
+        // plugin bootstrap can precede session-store initialization.
+        const bridge = await import("./session-selection");
+        return bridge.getPluginSessionContext();
+      },
+      async setSelection(target, selection, expectedVersion) {
+        requirePermission("host:session");
+        const bridge = await import("./session-selection");
+        return bridge.setPluginSessionSelection(target, selection, expectedVersion);
+      },
+      onSelectionChanged(callback) {
+        requirePermission("host:session");
+        return track(subscribeCapabilityEvent<SessionExecutionContext>("session://selection-changed", callback));
+      },
       refresh() {
         requirePermission("host:session");
         // 插件直写会话数据后的可见性补偿：走与宿主自身重命名/置顶一致的
@@ -631,7 +605,7 @@ export function createPluginContext(
         // 校验失败走 rejection（与 selectSession 一致）。store 侧拒绝未知
         // 会话键——错误的 workspacePath 不得经 patchSession 造出幽灵条目。
         return Promise.resolve().then(() =>
-          import("@/features/chat/store").then((m) =>
+          import("./session-selection").then((m) =>
             m.setPluginSessionEffort(engine, sessionId, workspacePath, effort),
           ),
         );

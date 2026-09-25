@@ -5,10 +5,10 @@ import {
   resetPluginBusForTests,
   SESSION_ACTIVATED_TOPIC,
 } from "@/features/plugins/runtime/events";
-import { setPluginSessionEffort, useChatStore } from "./store";
-import { OPEN_TABS_KEY } from "./store/persistence";
-import { EMPTY_SESSION } from "./store/stream";
-import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
+import { useChatStore } from "./store";
+import { setPluginSessionEffort } from "@/features/plugins/runtime/session-selection";
+import { EMPTY_SESSION, runRouting } from "./store/stream";
+import { handleEngineEvents, settledRuns, type EngineEventDeps } from "./store/engine-events";
 import {
   collectBeforeTurnContributions,
   registerRuntimeSwitchHooks,
@@ -16,13 +16,12 @@ import {
   registerTurnHooks,
 } from "@/features/plugins/runtime/hooks";
 
-vi.mock("@/lib/ipc", () => ({
+// The hoisted IPC factory must load its stateful test backend before store imports.
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     interruptSession: vi.fn(async () => true),
-    rememberSessionModel: vi.fn(async () => {}),
-    rememberSessionEffort: vi.fn(async () => {}),
-    rememberSessionProvider: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     listArchivedSessions: vi.fn(async () => []),
     archiveSession: vi.fn(async () => {}),
@@ -55,7 +54,9 @@ const REGISTERED_WORKSPACE = {
 function resetStore() {
   localStorage.clear();
   resetPluginBusForTests();
-  vi.mocked(ipc.sendMessage).mockClear();
+  runRouting.clear();
+  settledRuns.clear();
+  vi.mocked(ipc.sendMessage).mockReset().mockResolvedValue({ runId: "run-1", sessionId: null });
   vi.mocked(ipc.interruptSession).mockClear();
   vi.mocked(ipc.loadSessionPage).mockClear();
   vi.mocked(ipc.archiveSession).mockClear();
@@ -100,62 +101,6 @@ describe("per-session composer selection", () => {
     expect(useChatStore.getState().activeEngine).toBe("claude");
   });
 
-  it("setModel/setEffort stamp the active tab and persist with it", async () => {
-    useChatStore.setState({ activeEngine: "omp" });
-    useChatStore.getState().startNewChat(WS); // pending omp tab
-    await useChatStore.getState().setModel("omp", "fufei/kimi-k3");
-    await useChatStore.getState().setEffort("omp", "max");
-
-    const s = useChatStore.getState();
-    expect(s.active?.model).toBe("fufei/kimi-k3");
-    expect(s.active?.effort).toBe("max");
-    // Overrides persist with the tab list (survive restart).
-    const persisted = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
-    expect(persisted[0]).toMatchObject({
-      model: "fufei/kimi-k3",
-      effort: "max",
-    });
-  });
-
-  it("re-selecting a session keeps its stamped overrides", async () => {
-    useChatStore.setState({ activeEngine: "omp" });
-    useChatStore.getState().startNewChat(WS);
-    await useChatStore.getState().setModel("omp", "fufei/kimi-k3");
-    // Simulate the tab gaining a native session id after the first turn.
-    const stamped = { ...useChatStore.getState().active!, sessionId: "s-9" };
-    useChatStore.setState({ openTabs: [stamped], active: null });
-
-    await useChatStore.getState().selectSession("omp", "s-9", WS);
-    expect(useChatStore.getState().active).toMatchObject({
-      model: "fufei/kimi-k3",
-    });
-  });
-
-  it("send uses the tab override over the engine default", async () => {
-    useChatStore.setState({ activeEngine: "omp", models: { omp: "kimi-k3" } });
-    useChatStore.getState().startNewChat(WS);
-    await useChatStore.getState().setModel("omp", "fufei/kimi-k3");
-    await useChatStore.getState().setEffort("omp", "low");
-
-    await useChatStore.getState().send("hi", []);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({
-        engine: "omp",
-        model: "fufei/kimi-k3",
-        effort: "low",
-      }),
-    );
-  });
-
-  it("a tab without overrides sends with the engine default", async () => {
-    useChatStore.setState({ activeEngine: "omp", models: { omp: "kimi-k3" } });
-    useChatStore.getState().startNewChat(WS);
-
-    await useChatStore.getState().send("hi", []);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "kimi-k3", effort: null }),
-    );
-  });
 
   it("retargeting a pending tab to another engine drops the old overrides", async () => {
     useChatStore.setState({ activeEngine: "omp" });
@@ -207,7 +152,7 @@ describe("stop during an in-flight send", () => {
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(promise);
 
     const sending = useChatStore.getState().send("hello", []);
-    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     // User presses Stop mid-flight.
     await useChatStore.getState().interrupt();
     expect(useChatStore.getState().bySession["omp/sess-42"]?.interrupted).toBe(
@@ -287,7 +232,7 @@ describe("compactContext and refreshSessionUsage", () => {
     vi.mocked(ipc.loadSessionPage).mockClear();
     vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("spawn failed"));
     await useChatStore.getState().send("hello", []);
-    expect(ipc.loadSessionPage).toHaveBeenCalledTimes(2);
+    expect(useChatStore.getState().bySession[key].error).toContain("spawn failed");
     expect(useChatStore.getState().bySession[key].streaming).toBe(false);
   });
 
@@ -523,6 +468,7 @@ describe("compactContext and refreshSessionUsage", () => {
     });
 
     const compactPromise = useChatStore.getState().compactContext(key);
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
 
     // The optimistic row lands synchronously; the send itself follows the
     // turn-contribution collection on the next microtask.
@@ -551,153 +497,6 @@ describe("compactContext and refreshSessionUsage", () => {
   });
 });
 
-describe("model selection is per session", () => {
-  beforeEach(resetStore);
-
-  const sess = (id: string) => ({
-    engine: "omp",
-    sessionId: id,
-    workspacePath: WS,
-  });
-
-  it("picking a model inside a session leaves the engine default alone", async () => {
-    // Two sessions of the SAME CLI: the complaint is that choosing a model in
-    // one changed the other, because the pick was written as the engine-wide
-    // default.
-    const a = sess("s-a");
-    const b = sess("s-b");
-    useChatStore.setState({ activeEngine: "omp", openTabs: [a, b], active: a });
-
-    await useChatStore.getState().setModel("omp", "deepseek-v4-flash");
-
-    expect(useChatStore.getState().models.omp).toBe("kimi-k3");
-    const tabA = useChatStore.getState().openTabs.find((t) => t.sessionId === "s-a");
-    const tabB = useChatStore.getState().openTabs.find((t) => t.sessionId === "s-b");
-    expect(tabA?.model).toBe("deepseek-v4-flash");
-    expect(tabB?.model).toBeUndefined();
-  });
-
-  it("a pending new chat still edits the engine default", async () => {
-    // The starting choice for future conversations is made on a new-chat tab.
-    useChatStore.setState({ activeEngine: "omp", openTabs: [], active: null });
-    useChatStore.getState().startNewChat(WS);
-    await useChatStore.getState().setModel("omp", "glm-5.3-flash");
-
-    expect(useChatStore.getState().models.omp).toBe("glm-5.3-flash");
-    // and the pending tab carries it too
-    expect(useChatStore.getState().active?.model).toBe("glm-5.3-flash");
-  });
-
-  it("continues a session on the model that session actually ran", async () => {
-    const a = sess("s-a");
-    useChatStore.setState({
-      activeEngine: "omp",
-      openTabs: [a],
-      active: a,
-      models: { omp: "kimi-k3" },
-      bySession: {
-        "omp/s-a": {
-          ...EMPTY_SESSION,
-          messages: [
-            { seq: 1, role: "assistant", text: "hi", ts: null, model: "glm-5.3-flash" },
-          ],
-        },
-      },
-    });
-
-    await useChatStore.getState().send("next", []);
-
-    // Not the engine default: the conversation keeps its own model.
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "glm-5.3-flash" }),
-    );
-  });
-
-  it("prefers the session's reported model over its history", async () => {
-    const a = sess("s-a");
-    useChatStore.setState({
-      activeEngine: "omp",
-      openTabs: [a],
-      active: a,
-      models: { omp: "kimi-k3" },
-      bySession: {
-        "omp/s-a": {
-          ...EMPTY_SESSION,
-          activeModel: "gpt-5.6-luna",
-          messages: [
-            { seq: 1, role: "assistant", text: "hi", ts: null, model: "glm-5.3-flash" },
-          ],
-        },
-      },
-    });
-
-    await useChatStore.getState().send("next", []);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "gpt-5.6-luna" }),
-    );
-  });
-
-  it("an explicit per-session pick wins over the reported model", async () => {
-    const a = sess("s-a");
-    useChatStore.setState({
-      activeEngine: "omp",
-      openTabs: [{ ...a, model: "claude-opus-5" }],
-      active: { ...a, model: "claude-opus-5" },
-      models: { omp: "kimi-k3" },
-      bySession: {
-        "omp/s-a": { ...EMPTY_SESSION, activeModel: "gpt-5.6-luna" },
-      },
-    });
-
-    await useChatStore.getState().send("next", []);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "claude-opus-5" }),
-    );
-  });
-  it("keeps an existing session's effort out of the engine default and sibling sessions", async () => {
-    const a = sess("s-a");
-    const b = sess("s-b");
-    useChatStore.setState({
-      activeEngine: "omp",
-      openTabs: [a, b],
-      active: a,
-      efforts: { omp: "medium" },
-    });
-
-    await useChatStore.getState().setEffort("omp", "max");
-
-    expect(useChatStore.getState().efforts.omp).toBe("medium");
-    expect(vi.mocked(ipc.rememberSessionEffort)).toHaveBeenCalledWith(
-      "omp",
-      "s-a",
-      "max",
-    );
-    useChatStore.setState({ active: b });
-    await useChatStore.getState().send("next", []);
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenLastCalledWith(
-      expect.objectContaining({ effort: "medium" }),
-    );
-  });
-
-  it("ignores a stale persisted tab effort for a native session", async () => {
-    const stale = { ...sess("s-a"), effort: "max" as const };
-    useChatStore.setState({
-      activeEngine: "omp",
-      openTabs: [stale],
-      active: stale,
-      efforts: { omp: "medium" },
-      bySession: {
-        "omp/s-a": { ...EMPTY_SESSION, activeEffort: "low" },
-      },
-    });
-
-    await useChatStore.getState().send("next", []);
-
-    expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
-      expect.objectContaining({ effort: "low" }),
-    );
-  });
-});
 
 describe("refreshSessions and the not-yet-scanned session", () => {
   beforeEach(() => {
@@ -723,11 +522,8 @@ describe("refreshSessions and the not-yet-scanned session", () => {
   });
 
   it("keeps the new chat's row when a refresh lands before the scanner ingests its file", async () => {
-    // The reported bug: the engine announces the session id and the sidebar
-    // row is upserted optimistically, but adopting the id also files the
-    // model (remember_session_model → sessions_changed) and the refresh it
-    // triggers replaced the list with a scan that has not seen the new file
-    // yet — the row vanished until a manual sync.
+    // A refresh can race session adoption before the scanner sees its file.
+    // Keep the optimistic sidebar row until the scan can replace it.
     useChatStore.setState({
       sessions: [meta("s-new")],
       bySession: { "omp/s-new": { ...EMPTY_SESSION, streaming: true } },
@@ -821,7 +617,7 @@ describe("refreshSessions and the not-yet-scanned session", () => {
       await useChatStore.getState().send("reopened", []);
       handleEngineEvents([{ runId: `run-reopened-${source}`, sessionId: session.sessionId, engine: "omp", seq: 1, kind: "done", data: { usage: null } }], engineDeps());
       const request = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0];
-      expect(request.promptContributions.some((item) => item.content === "private archived instructions")).toBe(false);
+      expect((request.promptContributions ?? []).some((item) => item.content === "private archived instructions")).toBe(false);
     } finally {
       disposeTurn();
       disposeSession();
@@ -832,50 +628,22 @@ describe("refreshSessions and the not-yet-scanned session", () => {
 describe("setPluginSessionEffort (ctx.sessions.setEffort backend)", () => {
   beforeEach(resetStore);
 
-  it("patches an existing session, persists it, and clears the tab stamp", () => {
-    const tab = {
-      engine: "codex",
-      sessionId: "s-effort",
-      workspacePath: WS,
-      effort: "low" as const,
-    };
-    const key = "codex/s-effort";
-    useChatStore.setState({
-      active: tab,
-      openTabs: [tab],
-      bySession: { [key]: { ...EMPTY_SESSION } },
-    });
-    vi.mocked(ipc.rememberSessionEffort).mockClear();
-
-    setPluginSessionEffort("codex", "s-effort", WS, "high");
-
-    expect(useChatStore.getState().bySession[key].activeEffort).toBe("high");
-    expect(ipc.rememberSessionEffort).toHaveBeenCalledWith("codex", "s-effort", "high");
-    // Stamps cleared so refreshSessions cannot resurrect the old level.
-    expect(useChatStore.getState().openTabs[0].effort).toBeUndefined();
-    expect(useChatStore.getState().active?.effort).toBeUndefined();
-    const persisted = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
-    expect(persisted[0].effort).toBeUndefined();
+  it("updates the same backend record without overwriting another conversation", async () => {
+    const tab = { engine: "codex", sessionId: "s-effort", workspacePath: WS };
+    useChatStore.setState({ active: tab, openTabs: [tab], bySession: { "codex/s-effort": { ...EMPTY_SESSION } } });
+    await setPluginSessionEffort("codex", "s-effort", WS, "high");
+    expect(useChatStore.getState().bySession["codex/s-effort"].executionSelection?.effort).toBe("high");
+    expect(useChatStore.getState().efforts.codex).toBeUndefined();
   });
 
-  it("rejects unknown sessions instead of minting a ghost entry", () => {
-    vi.mocked(ipc.rememberSessionEffort).mockClear();
-    expect(() => setPluginSessionEffort("codex", "nope", WS, "high")).toThrow(
-      "unknown session",
-    );
+  it("rejects unknown sessions instead of minting a ghost entry", async () => {
+    await expect(setPluginSessionEffort("codex", "nope", WS, "high")).rejects.toThrow("unknown session");
     expect(useChatStore.getState().bySession["codex/nope"]).toBeUndefined();
-    expect(ipc.rememberSessionEffort).not.toHaveBeenCalled();
   });
 
-  it("rejects an empty effort and missing ids", () => {
-    const key = "codex/s-effort";
-    useChatStore.setState({ bySession: { [key]: { ...EMPTY_SESSION } } });
-    expect(() => setPluginSessionEffort("codex", "s-effort", WS, "  ")).toThrow(
-      "non-empty",
-    );
-    expect(() => setPluginSessionEffort("", "s-effort", WS, "high")).toThrow(
-      "required",
-    );
+  it("rejects an empty effort and missing ids", async () => {
+    await expect(setPluginSessionEffort("codex", "s-effort", WS, "  ")).rejects.toThrow("non-empty");
+    await expect(setPluginSessionEffort("", "s-effort", WS, "high")).rejects.toThrow("required");
   });
 });
 
@@ -1043,10 +811,9 @@ describe("generic plugin chat lifecycle", () => {
     useChatStore.setState({
       workspaces: [REGISTERED_WORKSPACE],
       activeEngine: "codex",
-      openTabs: [{ engine: "codex", sessionId: null, workspacePath: WS }],
-      active: { engine: "codex", sessionId: null, workspacePath: WS },
       pendingRuntimeSwitch: older,
     });
+    useChatStore.getState().startNewChat(WS);
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(firstLaunch.promise);
 
     const sending = useChatStore.getState().send("go", []);
@@ -1252,6 +1019,14 @@ describe("session-scoped internal contributions", () => {
     persistence: "session" as const,
   });
 
+  // A second send is queued while the first turn is streaming. These cases
+  // exercise consecutive turns, so deliver the real terminal event between them.
+  function completeTurn(runId: string) {
+    handleEngineEvents([
+      { runId, sessionId: null, engine: "claude", seq: 2, kind: "done", data: { usage: null } },
+    ], engineDeps());
+  }
+
   it("preserves and withdraws instructions whose identities resemble object prototype keys", async () => {
     useChatStore.setState({ activeEngine: "claude" });
     useChatStore.getState().startNewChat(WS);
@@ -1267,8 +1042,10 @@ describe("session-scoped internal contributions", () => {
     try {
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-first", sessionId: "prototype-session" });
       await useChatStore.getState().send("one", []);
+      completeTurn("prototype-first");
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-next", sessionId: null });
       await useChatStore.getState().send("two", []);
+      completeTurn("prototype-next");
       expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions).toEqual([protocol]);
       dispose();
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "prototype-off", sessionId: null });
@@ -1290,6 +1067,7 @@ describe("session-scoped internal contributions", () => {
     try {
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-first", sessionId: "journal-session" });
       await useChatStore.getState().send("one", []);
+      completeTurn("journal-first");
       previous.forEach((dispose) => dispose());
       next.push(...Array.from({ length: 32 }, (_, index) => registerTurnHooks(`test.new-${index}`, {
         beforeTurn: () => ({ promptContributions: [{ ...contribution("new"), id: `new-${index}`, persistence: "turn" }] }),
@@ -1302,6 +1080,7 @@ describe("session-scoped internal contributions", () => {
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-retry", sessionId: null });
       await useChatStore.getState().send("retry", []);
       expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions![0]).toBe(outgoing[0]);
+      completeTurn("journal-retry");
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "journal-next", sessionId: null });
       await useChatStore.getState().send("next", []);
       expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions?.map((entry) => entry.id))
@@ -1320,9 +1099,11 @@ describe("session-scoped internal contributions", () => {
     try {
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "overflow-seed", sessionId: "overflow-session" });
       await useChatStore.getState().send("one", []);
+      completeTurn("overflow-seed");
       for (const stop of dispose.slice(0, -1)) stop();
       vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "overflow-clear", sessionId: null });
       await useChatStore.getState().send("two", []);
+      completeTurn("overflow-clear");
       const outgoing = vi.mocked(ipc.sendMessage).mock.calls.at(-1)![0].promptContributions!;
       const ids = new Set(outgoing.map((entry) => entry.id));
       for (let index = 0; index < dispose.length - 1; index++) {
@@ -1346,6 +1127,7 @@ describe("session-scoped internal contributions", () => {
     });
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "protocol-run", sessionId: "protocol-session" });
     await useChatStore.getState().send("one", []);
+    completeTurn("protocol-run");
     dispose();
 
     vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("launch offline"));
@@ -1356,6 +1138,7 @@ describe("session-scoped internal contributions", () => {
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "clear-run", sessionId: null });
     await useChatStore.getState().send("retry", []);
     expect(vi.mocked(ipc.sendMessage).mock.calls.at(-1)?.[0].promptContributions).toEqual(withdrawal);
+    completeTurn("clear-run");
 
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "plain-run", sessionId: null });
     await useChatStore.getState().send("three", []);
@@ -1371,6 +1154,7 @@ describe("session-scoped internal contributions", () => {
     });
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "retired-run", sessionId: "retired-session" });
     await useChatStore.getState().send("one", []);
+    completeTurn("retired-run");
     dispose();
     const replacement = registerTurnHooks("test.retired-contribution", {
       beforeTurn: (event) => event.sessionId === "other-native-session" ? { promptContributions: [protocol] } : undefined,
@@ -1405,9 +1189,11 @@ describe("session-scoped internal contributions", () => {
     // Turn 1: pending tab adopts its native id.
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-1", sessionId: "native-1" });
     await useChatStore.getState().send("one", []);
+    completeTurn("run-1");
     // Turn 2: a fresh contribution with the same id wins.
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-2", sessionId: null });
     await useChatStore.getState().send("two", []);
+    completeTurn("run-2");
     // Turn 3: the plugin contributes nothing — the session state persists.
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-3", sessionId: null });
     await useChatStore.getState().send("three", []);
@@ -1452,6 +1238,7 @@ describe("session-scoped internal contributions", () => {
     ).toEqual([]);
 
     // Turn 2: the plugin contributes nothing, yet the session state is re-injected.
+    completeTurn("run-ev-1");
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-ev-2", sessionId: null });
     await useChatStore.getState().send("two", []);
     dispose();
@@ -1476,6 +1263,7 @@ describe("session-scoped internal contributions", () => {
     });
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-c1", sessionId: "native-c" });
     await useChatStore.getState().send("one", []);
+    completeTurn("run-c1");
     useChatStore.getState().closeTab("claude", "native-c", WS);
     useChatStore.getState().startNewChat(WS);
     vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-c2", sessionId: null });

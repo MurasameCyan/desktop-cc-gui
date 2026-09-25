@@ -9,6 +9,6 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "plugins/unified-provider/src/**/*.{test,spec}.{ts,tsx}"],
   },
 });

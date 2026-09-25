@@ -2,10 +2,7 @@ import { create } from "zustand";
 import { ipc, type SessionMeta, type SessionPage } from "@/lib/ipc";
 import {
   ENGINE_PREF_KEY,
-  persistTabs,
-  sessionKey,
 } from "./store/persistence";
-import { patchSession } from "./store/stream";
 import { readPermissionPref } from "./store/permissions";
 import { createTabActions } from "./store/tabs";
 import { createMessagingActions } from "./store/messaging";
@@ -71,7 +68,6 @@ function loadHistoryPage(
 export const useChatStore = create<ChatStore>((set, get) => {
   const {
     activateTab,
-    stampActiveTab,
     removeTab,
     forgetClosedTab,
     forgetClosedTabs,
@@ -104,7 +100,6 @@ export const useChatStore = create<ChatStore>((set, get) => {
   const preferenceActions = createPreferenceActions({
     set,
     get,
-    stampActiveTab,
   });
   const composerActions = createComposerActions({ set });
 
@@ -157,47 +152,6 @@ if (import.meta.env.DEV) {
     useChatStore;
 }
 
-/**
- * Plugin API backend (ctx.sessions.setEffort, host:session): patch an
- * EXISTING session's effort and persist it. Unknown keys are rejected — a
- * wrong workspacePath/sessionId must not mint a ghost EMPTY_SESSION entry
- * via patchSession. The owning tab's effort stamp is cleared (parity with
- * setEffort's session branch) so refreshSessions cannot resurrect the
- * pre-patch level.
- */
-export function setPluginSessionEffort(
-  engine: string,
-  sessionId: string,
-  workspacePath: string,
-  effort: string,
-): void {
-  const trimmed = effort.trim();
-  if (!trimmed) {
-    throw new Error("sessions.setEffort: effort must be non-empty");
-  }
-  if (!engine || !sessionId) {
-    throw new Error("sessions.setEffort: engine and sessionId are required");
-  }
-  const key = sessionKey(engine, sessionId, workspacePath);
-  const state = useChatStore.getState();
-  if (!state.bySession[key]) {
-    throw new Error(`sessions.setEffort: unknown session ${key}`);
-  }
-  patchSession(useChatStore.setState, key, { activeEffort: trimmed });
-  void ipc.rememberSessionEffort?.(engine, sessionId, trimmed)?.catch(() => {});
-  const clearStamp = <T extends { engine: string; sessionId: string | null; workspacePath: string; effort?: string }>(
-    t: T,
-  ): T =>
-    sessionKey(t.engine, t.sessionId, t.workspacePath) === key && t.effort !== undefined
-      ? { ...t, effort: undefined }
-      : t;
-  const openTabs = state.openTabs.map(clearStamp);
-  const active = state.active ? clearStamp(state.active) : state.active;
-  if (openTabs.some((t, i) => t !== state.openTabs[i]) || active !== state.active) {
-    useChatStore.setState({ openTabs, active });
-    persistTabs(openTabs, active);
-  }
-}
 
 // HMR swaps this module for a fresh store; without dispose the old module's
 // engine/session listeners keep firing into the dead store (and init on the

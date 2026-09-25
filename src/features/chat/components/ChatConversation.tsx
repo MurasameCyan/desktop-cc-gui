@@ -22,7 +22,7 @@ import {
 import { MessageTimeline } from "./MessageTimeline";
 import { ConversationFooter } from "./ConversationFooter";
 import { useComposerActions } from "./use-composer-actions";
-import { filterEngineOptions, orderEngineOptions } from "./engine-options";
+import { filterEngineOptions, orderEngineOptions, type EngineOption } from "./engine-options";
 import { useCliNavOrder } from "@/lib/cli-nav-order";
 import { ErrorBanner } from "./ErrorBanner";
 import { useBranchSwitcher } from "./use-branch-switcher";
@@ -35,6 +35,8 @@ import { EmptyState } from "@/components/base/empty-state";
 import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
+import { useExecutionChoices } from "./use-execution-choices";
+import { ModelEntry } from "@/features/plugins/boundary/model-entry";
 import { ConversationModePane, ConversationModePicker } from "@/features/plugins/conversation/ConversationModeHost";
 import { useConversationMode } from "@/features/plugins/conversation/use-conversation-mode";
 import { McpCommandPanel } from "@/features/mcp/McpCommandPanel";
@@ -128,7 +130,7 @@ function useConversationMenus({
   setCodexServiceTier,
   refreshModels,
   loadingEngines,
-  allowedEngines,
+  cliOptions,
 }: {
   engines: EngineInfo[];
   engineInfo: EngineInfo | undefined;
@@ -153,21 +155,13 @@ function useConversationMenus({
   setCodexServiceTier: (tier: OmpServiceTier) => Promise<void>;
   refreshModels: () => Promise<void>;
   loadingEngines: readonly string[];
-  /** 接管工作区(桥返回非 null):仅列允许表内引擎(null = 不过滤)。 */
-  allowedEngines: string[] | null;
+  /** Installed CLI rows, computed once by the caller so the builtin picker and
+   *  a plugin replacement entry always offer the same list. */
+  cliOptions: EngineOption[];
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // Disabled-in-settings CLIs leave the picker entirely. 接管工作区下:
-  // 列表只留桥给的允许表,可用态按列表内与否而不是本机 `command -v` ——
-  // 否则本机没装的 CLI 在接管工作区里永远灰点。
-  // 顺序跟随设置页 CLI 管理栏的拖拽排序(同一份 localStorage);设置页里
-  // 拖动时这里通过 useCliNavOrder 的 change 事件同步更新。
-  const cliNavOrder = useCliNavOrder();
-  const cliOptions = useMemo(
-    () => orderEngineOptions(filterEngineOptions(engines, allowedEngines, t), cliNavOrder),
-    [engines, allowedEngines, t, cliNavOrder],
-  );
+
   // Every CLI is switched off in settings: swap the picker for a placeholder
   // that deep-links to the CLI config page.
   const noEnabledEngines = engines.length > 0 && cliOptions.length === 0;
@@ -288,10 +282,10 @@ export const ChatConversation = memo(function ChatConversation({
   // array is subscribed inside SessionTimeline so stream deltas re-render
   // only that subtree — never the composer, queue bar, or status bar here.
   const streaming = useChatStore((s) =>
-    key ? (s.bySession[key]?.streaming ?? false) : false,
+    key ? Boolean(s.bySession[key]?.streaming || s.bySession[key]?.preparing) : false,
   );
   const sessionError = useChatStore((s) =>
-    key ? (s.bySession[key]?.error ?? null) : null,
+    key ? (s.bySession[key]?.error ?? s.bySession[key]?.selectionUnavailableReason ?? null) : null,
   );
   const dismissSessionError = useChatStore((s) => s.dismissSessionError);
   const queue = useChatStore((s) =>
@@ -300,11 +294,11 @@ export const ChatConversation = memo(function ChatConversation({
   const sessionUsage = useChatStore((s) =>
     key ? s.bySession[key]?.usage : undefined,
   );
-  const hasSession = useChatStore((s) => key in s.bySession);
+  const hasSession = useChatStore((s) => Boolean(active?.sessionId || s.bySession[key]?.messages.length || s.bySession[key]?.loading || s.bySession[key]?.streaming));
   const draft = useChatStore((s) => s.drafts[key] ?? "");
   const sendShortcut = useChatStore((s) => s.sendShortcut);
   // Engine/effort/model prefs: low-frequency, grouped into one shallow watch.
-  const { activeEngine, efforts, models, providers, ompServiceTier, codexServiceTier } = useChatStore(
+  const { activeEngine: preferredEngine, efforts, models, providers, ompServiceTier, codexServiceTier } = useChatStore(
     useShallow((s) => ({
       activeEngine: s.activeEngine,
       efforts: s.efforts,
@@ -314,6 +308,7 @@ export const ChatConversation = memo(function ChatConversation({
       providers: s.providers,
     })),
   );
+  const activeEngine = active?.engine ?? preferredEngine;
   const {
     setActiveEngine,
     setEffort,
@@ -388,26 +383,46 @@ export const ChatConversation = memo(function ChatConversation({
     () => Object.keys(pendingEngines),
     [pendingEngines],
   );
+  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
+  // null = 非接管工作区,按本机探针展示。
+  const uiHooks = useWorkspaceUIHooks();
+  const allowedEngines = useMemo(
+    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
+    () => workspaceAllowedEngines(active?.workspacePath),
+    [uiHooks, active?.workspacePath],
+  );
+  // One source of truth for the CLI rows: the builtin picker and a plugin
+  // replacement entry must offer exactly the same installed CLIs.
+  // 顺序跟随设置页 CLI 管理栏的拖拽排序(同一份 localStorage);设置页里
+  // 拖动时这里通过 useCliNavOrder 的 change 事件同步更新。
+  const cliNavOrder = useCliNavOrder();
+  const cliOptions = useMemo(
+    () => orderEngineOptions(filterEngineOptions(engines, allowedEngines, t), cliNavOrder),
+    [engines, allowedEngines, t, cliNavOrder],
+  );
+  const { entryProps, tokenPolicy } = useExecutionChoices(active, engines, catalogs, modelsByEngine, channelsByEngine, refreshModels, cliOptions, setActiveEngine);
+  const runTokenPolicy = useChatStore((s) => s.bySession[key]?.runTokenPolicy);
+  const runModel = useChatStore((s) => s.bySession[key]?.activeModel ?? undefined);
 
   const displayModel = displayModels[activeEngine];
   // Conversation-reported window (Codex token_count, Claude's modelUsage)
   // wins; a fresh session starts from the last window this engine+model was
   // seen reporting; the model catalog is the fallback for engines that never
   // report one, and the shared constant is the last resort.
-  const contextMax = resolveContextMax({
+  const contextMax = (streaming ? runTokenPolicy : tokenPolicy)?.contextWindowTokens ?? resolveContextMax({
     usage: sessionUsage,
     engine: activeEngine,
-    model: displayModel,
+    model: streaming ? runModel : displayModel,
     catalogWindow: (catalogs[activeEngine]?.models ?? []).find(
-      (m) => m.id === displayModel,
+      (m) => m.id === (streaming ? runModel : displayModel),
     )?.contextWindow,
   });
   const observedWindow = parseUsage(sessionUsage)?.contextWindow;
   useEffect(() => {
     if (observedWindow) {
-      rememberContextWindow(activeEngine, displayModel, observedWindow);
+      rememberContextWindow(activeEngine, runModel, observedWindow);
     }
-  }, [observedWindow, activeEngine, displayModel]);
+  }, [observedWindow, activeEngine, runModel]);
 
   const engineInfo = engines.find((e) => e.id === activeEngine);
   const supportsImages = engineInfo?.supportsImages ?? false;
@@ -434,20 +449,12 @@ export const ChatConversation = memo(function ChatConversation({
     supportsImages,
     composerInputRef,
   });
-  // 插件桥给出该工作区的引擎允许表(meta 形状留在插件侧,宿主不解释);
-  // null = 非接管工作区,按本机探针展示。
-  const uiHooks = useWorkspaceUIHooks();
-  const allowedEngines = useMemo(
-    // uiHooks 进依赖:插件 activate/热重载换 hooks 后允许表及时重算。
-    () => workspaceAllowedEngines(active?.workspacePath),
-    [uiHooks, active?.workspacePath],
-  );
   const { addMenu, cliMenu, permissionMenu, noEnabledEngines } =
     useConversationMenus({
       engines,
       engineInfo,
       activeEngine,
-      allowedEngines,
+      cliOptions,
       modelsByEngine,
       onPickFiles: handleAddAttachments,
       onPickSkills: handlePickSkills,
@@ -468,6 +475,7 @@ export const ChatConversation = memo(function ChatConversation({
       refreshModels,
       loadingEngines,
     });
+  const modelMenu = !noEnabledEngines && entryProps ? <ModelEntry {...entryProps} fallback={cliMenu} /> : cliMenu;
 
   if (active && conversationMode.exitBlocked && !conversationMode.mode) {
     return <EmptyState className="text-body-medium">{t("plugins.conversationMode.recoveryRequired")}</EmptyState>;
@@ -518,7 +526,7 @@ export const ChatConversation = memo(function ChatConversation({
         noEnabledEngines={noEnabledEngines}
         composerInputRef={composerInputRef}
         addMenu={addMenu}
-        cliMenu={<>{cliMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0} onSelect={conversationMode.onSelect} /></>}
+        cliMenu={<>{modelMenu}<ConversationModePicker disabled={!active || streaming || queue.length > 0} onSelect={conversationMode.onSelect} /></>}
         permissionMenu={permissionMenu}
         supportsImages={supportsImages}
         onPasteImages={pasteImages}

@@ -11,8 +11,10 @@ pub(super) struct FileLock {
 }
 
 pub(super) fn exclusive(path: &Path) -> Result<FileLock, String> {
+    super::storage::reject_linked_path(path)?;
     let parent = path.parent().ok_or_else(|| format!("lock has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    super::storage::reject_linked_path(path)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

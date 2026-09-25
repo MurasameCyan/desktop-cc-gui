@@ -345,13 +345,88 @@ interface PluginAssets {
 本地来源（包内、documentStorage、已授权目录）单文件上限 64 MiB；远程代理单次上限 8 MiB 且限时 30 秒——两个上限语义不同，大贴图集走本地来源，不要指望远程代理放行同样体积。每次读取都重新检查插件是否安装、启用、未隔离以及对应权限，响应禁止缓存；目录撤权、插件禁用/隔离/卸载后，旧 URL 不能继续读取资源。卸载始终清除目录授权（能力，不是用户数据）；documentStorage 文件和位置选择则沿用 `delete_data` 策略，不会因新增资源能力而自动删除用户保留的数据。
 
 非包内 HTML、JS、SVG、XML、CSS、PDF、wasm 等主动内容按 `application/octet-stream` 返回并带 `nosniff` / sandbox CSP，不可借资源代理扩大脚本执行能力。插件仍运行在宿主同一 JS realm；overlay 与资源门面是可审计能力面，不是新的强制沙箱边界。
+### 6.6 执行贡献与私有文档存储（0.3.13 起，桌面专属）
+
+这组能力面向「统一供应商」类插件：把 Provider/Endpoint/Model/Key 的业务模型
+投影成宿主可消费的**受控执行贡献**，并按会话持久化完整执行选择。所有敏感操作
+（Key、目标授权、原生配置写入）都经宿主确认，插件永远拿不到宿主凭据库句柄，
+Web 端一律不可用。
+
+**`ctx.documentStorage`（权限 `plugin.storage`）** —— 每插件隔离的私有文档存储，
+CAS 版本保护，junction/reparse 防护，卸载按策略保留/删除：
+
+```ts
+interface DocumentStorage {
+  getLocation(): Promise<{ kind: "data" | "program" | "custom"; path: string }>;
+  selectLocation(kind): Promise<{ kind; path }>;          // custom 打开宿主目录选择器，无任意路径
+  readText(relativePath): Promise<{ content: string; version: string } | null>;
+  writeTextAtomic(relativePath, content, expectedVersion: string | null): Promise<{ version }>;
+  remove(relativePath, expectedVersion?): Promise<void>;  // version 为不透明 CAS 令牌，原样回传
+  list(prefix?): Promise<string[]>;
+}
+```
+
+**`ctx.cli`（分级权限）** —— 执行贡献发布、目标授权、运行材料、模型发现、原生
+配置导入/应用。`sourceId` 由宿主加 `plugin:<id>:<localId>` 命名空间：
+
+| 分组 | 方法 | 权限 |
+|---|---|---|
+| 只读目录 | `getSource` / `listSources` / `onChanged` | `cli.read` |
+| 发布贡献 | `publishSource`（文档 CAS + 首发/更新校验）/ `unpublishSource` | `cli.contributions.write` |
+| 目标授权 | `requestTargetGrant`（宿主 dialog 确认，绑定插件/base URL/执行环境/Key 代次）/ `listTargetGrants` / `revokeTargetGrant` | `network.targets.request` |
+| 运行材料 | `registerRuntimeMaterial`（仅登记已绑定/正在选择的 Key）/ `onMaterialRequested` / `getCredentialUses` | `cli.runtime.sensitive` |
+| 模型发现 | `listModels`（official 复用引擎目录；authorized-endpoint 限大小/超时/重定向） | `cli.read` |
+| 原生配置读与导入 | `listConfigTargets` / `previewConfigImport`（仅脱敏 metadata）/ `confirmConfigImport`（宿主确认后仅交付选中的静态 Key） | `cli.config.read` |
+| 原生配置写 | `previewConfigPatch` / `applyConfigPatch` / `restoreConfigPatch`（同目录原子写 + 恢复前 CAS） | `cli.config.apply` |
+
+> 生命周期：插件禁用/隔离/卸载经宿主 `invalidate_plugin` 使贡献与敏感授权失效，
+> **不中断已接受的聊天回合**；升级引入的新敏感权限需用户重新批准，quarantined 视为不可用。
+
+**会话执行选择（`ctx.sessions`，权限 `host:session`）** —— 完整选择按「执行目标 +
+workspace + 会话身份」单条版本 CAS。`setEffort` 沿用既有签名，只改同一记录：
+
+```ts
+getContext(): Promise<SessionExecutionContext | null>;                          // 活动会话的完整目标+选择
+setSelection(target, selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+onSelectionChanged(cb: (context: SessionExecutionContext) => void): Disposer;
+setEffort(engine, sessionId, workspacePath, effort): Promise<void>;             // 未知会话/空 effort 以 rejection 失败
+```
+
+**替换模型入口（`ctx.ui.registerModelEntry`，权限 `ui:model-entry`）** —— 在匹配
+`engineIds` 的会话替换内建选择器；卸载/崩溃回退原入口，禁止并排第二选择器。组件
+只消费 `ModelEntryProps`（不透明、无明文 Key）：
+
+```ts
+ctx.ui.registerModelEntry({ engineIds: ["claude"], component: MyPicker, key?, order? });
+
+interface ModelEntryProps {
+  context: SessionExecutionContext;   // 当前目标 + 已保存选择 + 版本
+  choices: ExecutionChoice[];         // 原生渠道 + 已发布贡献，含 capabilities/tokenPolicy/unavailableReason
+  engines: EngineChoice[];            // 0.3.16 起：与宿主原入口同源的已安装、可用 CLI
+  loading: boolean;
+  onApply(selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+  onSelectEngine(engineId: string): Promise<void>; // 0.3.16 起：真正切换未开始会话的 CLI
+  onRefresh(): Promise<void>;
+}
+```
+
+`EngineChoice` 包含 `engineId`、`label`、`available`、`disabled` 与可选的
+`disabledReason`。只按 `choices` 筛选引擎不会改变会话的执行目标，必须调用
+`onSelectEngine`；已有会话、首轮请求准备/运行期间、过期会话上下文均拒绝切换。
+使用这两个新增参数的插件须声明 SDK `0.3.16`，不能沿用缺少该契约的旧握手版本。
+
+插件内的推理强度可用 `@ccgui/plugin-ui` 的 `EffortSlider`：传入从弱到强的
+`levels`、当前 `value` 与 `onValueChange`；`label`、`minLabel`、`maxLabel`
+负责显示文案。它只改变草稿，点击应用后才通过 `onApply` 原子提交完整选择。
+对于尚未设置强度的会话，插件应让显示档位与提交值一致；不支持强度的模型提交 `null`。
 
 ## 7. 权限规范
 
 | 权限 | 能力 | 审核强度 |
 |---|---|---|
-| `storage` | 使用 `ctx.storage` KV | 低 |
-| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer-status`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`） | 对应 UI 扩展点；`registerComposerSlot` 与 `registerComposerStatusItem` 共享 `ui:composer-status`，`openSettings` 复用 `ui:settings-section` | 低 |
+| `storage` | 使用 `ctx.storage` KV（每插件隔离，单键 ≤ 256KB） | 低 |
+| `plugin.storage` | 使用 `ctx.documentStorage` 私有文档存储：CAS 版本写、目录选择、junction/reparse 防护 | 中 |
+| `ui:*`（`ui:settings-section`、`ui:add-menu`、`ui:composer-status`、`ui:panel-tab`、`ui:status-bar`、`ui:page`、`ui:command`、`ui:markdown`、`ui:timeline-row`、`ui:workspace-menu`、`ui:session-menu`、`ui:sidebar-entry`、`ui:center-tab`、`ui:conversation-mode`、`ui:model-entry`） | 对应 UI 扩展点；`registerComposerSlot` 与 `registerComposerStatusItem` 共享 `ui:composer-status`，`openSettings` 复用 `ui:settings-section` | 低 |
 | `ui:overlay` | 常驻视口悬浮内容；不得遮挡宿主关键操作 | 中 |
 | `assets:bundle` | 读取本插件包内二进制资源和已审核脚本 | 中 |
 | `assets:directory` | 用户选择的每插件只读目录与范围内 reveal | 高（必须明确告知目录范围） |
@@ -362,8 +437,17 @@ interface PluginAssets {
 | `runtime.events.read` | 只读回合开始、结算及标准化运行时事实 | 中 |
 | `runtime.switch.observe` | 观察切换前后生命周期；失败不阻断切换 | 中 |
 | `workspace.metadata.read` | 读取稳定 workspace ID 与绝对路径 | 中 |
-| `plugin.storage` | 使用受控文档存储和位置选择 | 中 |
 | `prompt.contribute.internal` | 向有效 CLI 请求加入用户不可见的内部提示，并接收捕获的内部消息 | 高（安装时必须明确告知） |
+| `composer:draft` | `ctx.composer.setDraft` 写入活动会话草稿（替换语义，不触发发送） | 低 |
+| `host:session` | `ctx.sessions` 打开/恢复会话、完整执行选择读写、外部会话源登记 | 中 |
+| `host:workspace` / `host:workspace:remote` | `ctx.workspaces.add` 登记侧栏工作区；`:remote` 额外允许远程 meta（等效出网 + 远程执行导向） | 中 / 高 |
+| `agent` | `ctx.agent.start/interrupt` 经宿主引擎管线跑 agent 轮次（桌面专属） | 高 |
+| `cli.read` | `ctx.cli` 只读贡献目录与模型发现；端点发现另需目标授权 | 中 |
+| `cli.contributions.write` | `ctx.cli.publishSource/unpublishSource` 发布执行贡献（profiles/choices，文档 CAS 事务） | 高 |
+| `cli.runtime.sensitive` | `ctx.cli.registerRuntimeMaterial/onMaterialRequested/getCredentialUses` 登记运行时 Key、接收材料请求与读取使用引用 | 高（Key 只留受控内存与目标子进程，不入普通 store/日志） |
+| `network.targets.request` | `ctx.cli.requestTargetGrant/listTargetGrants/revokeTargetGrant` 管理端点、执行环境与 Key 代次的目标授权 | 高（请求经宿主 dialog 确认） |
+| `cli.config.read` | `ctx.cli.listConfigTargets/previewConfigImport` 脱敏预览；`confirmConfigImport` 在宿主确认后交付选中的静态 Key | 高（导入需提示明文双副本风险） |
+| `cli.config.apply` | `ctx.cli.previewConfigPatch/applyConfigPatch/restoreConfigPatch` 预览、写入与恢复受控原生配置 | 高（宿主确认） |
 | `network:none` / `network:<host>[:port或范围]` | 声明无网络，或授权宿主代理访问精确 host | 高 |
 | `exec:<bin>` | 授权宿主执行精确裸命令名 | 高 |
 

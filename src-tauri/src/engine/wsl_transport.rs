@@ -49,6 +49,139 @@ pub struct WslTransport {
     pub workspace: Option<String>,
 }
 
+pub(crate) fn transport_for_execution_target(db: &crate::db::Db, target: &crate::cli::types::ExecutionTarget) -> Result<WslTransport, String> {
+    let crate::cli::types::ExecutionTarget::Wsl { host_id, distro } = target else { return Err("Expected a WSL execution target".into()); };
+    let conn = db.0.lock();
+    let mut stmt = conn.prepare("SELECT meta FROM workspaces WHERE meta IS NOT NULL").map_err(|_| "Cannot resolve WSL target")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|_| "Cannot resolve WSL target")?;
+    let mut selected: Option<WslTransport> = None;
+    for row in rows {
+        let text = row.map_err(|_| "Cannot resolve WSL target")?;
+        let meta: serde_json::Value = serde_json::from_str(&text).map_err(|_| "Invalid workspace metadata")?;
+        if meta.pointer("/wsl/hostId").and_then(serde_json::Value::as_str) != Some(host_id.as_str()) || meta.pointer("/wsl/distro").and_then(serde_json::Value::as_str) != Some(distro.as_str()) { continue; }
+        let mut transport = from_workspace_meta(&meta).ok_or("Invalid WSL target connection metadata")?;
+        transport.workspace = None;
+        if selected.as_ref().is_some_and(|prior| prior.host != transport.host || prior.port != transport.port || prior.user != transport.user || prior.control_path != transport.control_path) {
+            return Err("Conflicting connection metadata for the WSL target".into());
+        }
+        selected = Some(transport);
+    }
+    selected.ok_or_else(|| "WSL target is not registered in this host".into())
+}
+
+/// Only trusted fixed program text belongs here. Secret/runtime data must use stdin.
+pub(crate) fn python_command(transport: &WslTransport, code: &str) -> Result<Command, String> {
+    let encoded: String = code.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+    let script = format!("exec(bytes.fromhex('{encoded}'))");
+    let mut command = base_ssh_command(transport);
+    command.arg(wsl_command_string(transport, &["python3", "-c", &script]));
+    command.kill_on_drop(true);
+    #[cfg(windows)] super::hide_console(&mut command);
+    Ok(command)
+}
+
+// One private packet is consumed before the CLI owns stdin. No runtime value
+// appears in a script, command line, inherited shell environment or stdout.
+const PRIVATE_LAUNCHER: &str = r#"import os,sys,json,tempfile,subprocess,shutil,signal,base64
+packet=bytearray()
+while True:
+ b=os.read(0,1)
+ if not b: raise SystemExit(63)
+ if b==b'\n': break
+ packet.extend(b)
+ if len(packet)>67108864: raise SystemExit(64)
+p=json.loads(packet)
+root=tempfile.mkdtemp(prefix='ccgui-run-')
+os.chmod(root,0o700)
+child=None
+def stop(sig,frame):
+ if child is not None:
+  try: os.killpg(child.pid,sig)
+  except ProcessLookupError: pass
+for sig in (signal.SIGHUP,signal.SIGTERM,signal.SIGINT): signal.signal(sig,stop)
+try:
+ paths={}
+ for i,f in enumerate(p['files']):
+  dest=os.path.join(root,str(i))
+  if f.get('directory'):
+   os.mkdir(dest,0o700)
+   for entry in f['entries']:
+    name=entry['path']
+    if name.startswith('/') or '..' in name.split('/'): raise ValueError('invalid staging path')
+    file=os.path.join(dest,name)
+    os.makedirs(os.path.dirname(file),mode=0o700,exist_ok=True)
+    fd=os.open(file,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    with os.fdopen(fd,'wb') as out: out.write(base64.b64decode(entry['data']))
+  else:
+   fd=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+   with os.fdopen(fd,'wb') as out: out.write(base64.b64decode(f['data']))
+  paths[f['path']]=dest
+ def mapped(value):
+  for old,new in sorted(paths.items(),key=lambda x:-len(x[0])):
+   if value==old: return new
+   if value.startswith(old+'/') or value.startswith(old+'\\'): return new+value[len(old):].replace('\\','/')
+  return value
+ env=dict(os.environ)
+ for k,v in p['env'].items():
+  for old in list(env):
+   if old.lower()==k.lower(): del env[old]
+  if v is not None: env[k]=mapped(v)
+ program=p['program']
+ if program.startswith('__RESOLVE__'):
+  name=program[len('__RESOLVE__'):]
+  import shlex
+  program=subprocess.check_output(['bash','-lc','command -v '+shlex.quote(name)],env=env,text=True).strip()
+ if not program: raise ValueError('CLI not found')
+ cwd=os.path.expanduser(p['workspace']) if p['workspace'] else None
+ child=subprocess.Popen([program]+[mapped(v) for v in p['args']],cwd=cwd,env=env,stdin=0,stdout=1,stderr=2,start_new_session=True)
+ raise SystemExit(child.wait())
+finally:
+ if child is not None and child.poll() is None:
+  stop(signal.SIGTERM,None)
+  try: child.wait(timeout=5)
+  except subprocess.TimeoutExpired: stop(signal.SIGKILL,None);child.wait()
+ shutil.rmtree(root)
+"#;
+
+pub(crate) fn wrap_private(command: Command, transport: &WslTransport, staging: &[PathBuf]) -> Result<(Wrapped, String), String> {
+    use base64::Engine;
+    let encode = |bytes: Vec<u8>| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mut files = Vec::new();
+    fn entries(root: &std::path::Path, current: &std::path::Path, out: &mut Vec<serde_json::Value>) -> Result<(), String> {
+        use base64::Engine;
+        for entry in std::fs::read_dir(current).map_err(|_| "Cannot read private staging")? {
+            let entry = entry.map_err(|_| "Cannot read private staging")?;
+            let kind = entry.file_type().map_err(|_| "Cannot read private staging")?;
+            if kind.is_symlink() { return Err("Remote staging cannot include local links".into()); }
+            if kind.is_dir() { entries(root, &entry.path(), out)?; } else if kind.is_file() {
+                let bytes = std::fs::read(entry.path()).map_err(|_| "Cannot read private staging")?;
+                out.push(serde_json::json!({"path":entry.path().strip_prefix(root).map_err(|_| "Invalid staging path")?.to_string_lossy().replace('\\',"/"),"data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+            }
+        }
+        Ok(())
+    }
+    for path in staging {
+        if path.is_dir() {
+            let mut content = Vec::new(); entries(path, path, &mut content)?;
+            files.push(serde_json::json!({"path":path.to_string_lossy(),"directory":true,"entries":content}));
+        } else {
+            files.push(serde_json::json!({"path":path.to_string_lossy(),"data":encode(std::fs::read(path).map_err(|_| "Cannot read private staging")?)}));
+        }
+    }
+    // Fixed bridge extensions are public code but must still exist in the target.
+    let args: Vec<String> = command.as_std().get_args().map(|a|a.to_string_lossy().into_owned()).collect();
+    for pair in args.windows(2) {
+        if pair[0] == "--extension" && !staging.iter().any(|p| PathBuf::from(&pair[1]).starts_with(p)) {
+            files.push(serde_json::json!({"path":pair[1],"data":encode(std::fs::read(&pair[1]).map_err(|_| "Cannot read bridge extension")?)}));
+        }
+    }
+    let env: std::collections::BTreeMap<String,Option<String>> = command.as_std().get_envs().map(|(k,v)|(k.to_string_lossy().into_owned(),v.map(|v|v.to_string_lossy().into_owned()))).collect();
+    let program = resolve_remote_program(&command.as_std().get_program().to_string_lossy(), transport);
+    let packet = serde_json::json!({"program":program,"args":args,"env":env,"workspace":transport.workspace,"files":files}).to_string()+"\n";
+    if packet.len()>64*1024*1024 { return Err("Remote execution staging exceeds 64 MiB".into()); }
+    Ok((Wrapped {command:python_command(transport, PRIVATE_LAUNCHER)?, cleanup_files:Vec::new(), skip_local_cwd:true}, packet))
+}
+
 /// 从工作区 `meta` JSON 提取传输描述;形状不符 = None(按本地工作区跑)。
 pub fn from_workspace_meta(meta: &serde_json::Value) -> Option<WslTransport> {
     let wsl = meta.get("wsl")?;

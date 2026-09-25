@@ -8,6 +8,8 @@ import type {
   ComposerSlotId,
   CommandFinishedEvent,
   CommandStartedEvent,
+  EngineChoice,
+  ModelEntryProps,
   Disposer,
   DocumentReadResult,
   DocumentStorage,
@@ -125,6 +127,8 @@ export type _DocumentWriteResult = Assert<Mutual<DocumentWriteResult, Pub.Docume
 export type _DocumentStorage = Assert<Mutual<DocumentStorage, Pub.DocumentStorage>>;
 export type _AssetDirectoryGrant = Assert<Mutual<AssetDirectoryGrant, Pub.AssetDirectoryGrant>>;
 export type _PluginAssets = Assert<Mutual<PluginAssets, Pub.PluginAssets>>;
+export type _ModelEntryProps = Assert<Mutual<ModelEntryProps, Pub.ModelEntryProps>>;
+export type _EngineChoice = Assert<Mutual<EngineChoice, Pub.EngineChoice>>;
 
 // --- 可选成员漂移 -----------------------------------------------------------
 // Mutual 的双向可赋值对「一侧新增**可选**字段/可选参数」不敏感（可选属性

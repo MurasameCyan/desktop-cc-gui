@@ -1,5 +1,5 @@
 use super::{
-    command_for_binary, images, push_session_id, BuiltCommand, Engine, EngineEvent, SendRequest,
+    images, push_session_id, BuiltCommand, Engine, EngineEvent, SendRequest,
 };
 use serde_json::Value;
 
@@ -279,7 +279,7 @@ impl Engine for PiFamilyEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         if let Some(tools) = req.allowed_tools.as_deref() {
             if self.id != "pi"
                 || tools.is_empty()
@@ -321,9 +321,9 @@ impl Engine for PiFamilyEngine {
             cmd.arg("--mode");
             cmd.arg("json");
         }
-        if let Some(model) = req.model.as_deref() {
-            cmd.arg("--model");
-            cmd.arg(model);
+        // Registration happens after native restoration; RPC confirms it before prompt.
+        if req.execution.is_none() {
+            if let Some(model) = req.model.as_deref() { cmd.arg("--model").arg(model); }
         }
         // Only explicit OpenAI-Codex selectors opt into this per-app preference.
         // Never leak it to pi, another provider or an unknown CLI default.
@@ -1691,6 +1691,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();
@@ -1728,6 +1730,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();
@@ -1777,6 +1781,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = engine.build_command(&req, "omp").unwrap();

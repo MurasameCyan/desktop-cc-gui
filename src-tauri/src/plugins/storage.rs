@@ -7,6 +7,99 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 
+pub(crate) fn reject_linked_path(path: &Path) -> Result<(), String> {
+    for component in path.ancestors() {
+        let metadata = match std::fs::symlink_metadata(component) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("PRIVATE_STORAGE_PATH_UNREADABLE".into()),
+        };
+        if metadata.file_type().is_symlink() { return Err("PRIVATE_STORAGE_LINKED_PATH_UNSUPPORTED: reparse point".into()); }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 { return Err("PRIVATE_STORAGE_LINKED_PATH_UNSUPPORTED: reparse point".into()); }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn private_directory(path: &Path) -> Result<(), String> {
+    reject_linked_path(path)?;
+    if !path.exists() {
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            if !parent.exists() { private_directory(parent)?; }
+        }
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
+        match builder.create(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("PRIVATE_STORAGE_DIRECTORY_FAILED".into()),
+        }
+    }
+    reject_linked_path(path)?;
+    if !path.is_dir() { return Err("PRIVATE_STORAGE_NOT_DIRECTORY".into()); }
+    restrict_private(path, true)
+}
+
+pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    reject_linked_path(path)?;
+    let parent = path.parent().ok_or("PRIVATE_STORAGE_INVALID_PATH")?;
+    if !parent.exists() { private_directory(parent)?; }
+    let temporary = parent.join(format!(".ccgui-private-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600).custom_flags(libc::O_NOFOLLOW); }
+        let mut file = options.open(&temporary).map_err(|_| "PRIVATE_STORAGE_STAGE_FAILED")?;
+        restrict_private(&temporary, false)?;
+        file.write_all(bytes).map_err(|_| "PRIVATE_STORAGE_WRITE_FAILED")?;
+        file.sync_all().map_err(|_| "PRIVATE_STORAGE_SYNC_FAILED")?;
+        drop(file);
+        reject_linked_path(path)?;
+        std::fs::rename(&temporary, path).map_err(|_| "PRIVATE_STORAGE_ATOMIC_REPLACE_FAILED")?;
+        #[cfg(unix)]
+        File::open(parent).and_then(|directory| directory.sync_all()).map_err(|_| "PRIVATE_STORAGE_SYNC_FAILED")?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
+}
+
+#[cfg(unix)]
+fn restrict_private(path: &Path, directory: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 })).map_err(|_| "PRIVATE_STORAGE_PRIVATE_PERMISSIONS_FAILED".into())
+}
+
+#[cfg(windows)]
+fn restrict_private(path: &Path, directory: bool) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    // OWNER RIGHTS applies to the owner of these newly-created staging files.
+    // A protected DACL removes inherited grants before any secret is written.
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(text: *const u16, revision: u32, descriptor: *mut *mut c_void, size: *mut u32) -> i32;
+        fn SetFileSecurityW(path: *const u16, information: u32, descriptor: *const c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" { fn LocalFree(memory: *mut c_void) -> *mut c_void; }
+    let sddl: Vec<u16> = if directory { "D:P(A;OICI;FA;;;OW)" } else { "D:P(A;;FA;;;OW)" }.encode_utf16().chain(Some(0)).collect();
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    unsafe {
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut descriptor, std::ptr::null_mut()) == 0 { return Err("PRIVATE_STORAGE_PRIVATE_PERMISSIONS_FAILED".into()); }
+        let success = SetFileSecurityW(path.as_ptr(), 0x8000_0004, descriptor) != 0;
+        LocalFree(descriptor);
+        if success { Ok(()) } else { Err("PRIVATE_STORAGE_PRIVATE_PERMISSIONS_FAILED".into()) }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct StorageRoots {
     pub(crate) data: PathBuf,
@@ -17,7 +110,8 @@ impl StorageRoots {
     fn system() -> Result<Self, String> {
         Ok(Self {
             data: crate::paths::app_home(),
-            program: crate::paths::program_dir()?,
+            program: std::env::current_exe().map_err(|error| error.to_string())?
+                .parent().ok_or("executable has no parent directory")?.to_path_buf(),
         })
     }
 }
@@ -166,7 +260,9 @@ fn plugin_root(base: &Path, id: &str) -> PathBuf {
 // the same kernel lock when their selected physical root is shared.
 fn document_lock_path(base: &Path, id: &str) -> Result<PathBuf, String> {
     let parent = base.join("plugin-data");
+    reject_linked_path(&parent)?;
     fs::create_dir_all(&parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    reject_linked_path(&parent)?;
     let parent = dunce::canonicalize(&parent)
         .map_err(|e| format!("canonicalize {}: {e}", parent.display()))?;
     Ok(parent.join(format!(".{id}.documents.lock")))
@@ -218,11 +314,13 @@ fn is_existing_base_writable(base: &Path) -> bool {
 }
 
 fn probe_writable(base: &Path) -> Result<(), String> {
+    reject_linked_path(base)?;
     if base.exists() && !base.is_dir() {
         return Err(format!("{}: not a directory", base.display()));
     }
     fs::create_dir_all(base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
     let probe = base.join(format!(".ccgui-write-probe-{}", uuid::Uuid::new_v4()));
+    reject_linked_path(base)?;
     let result = OpenOptions::new().write(true).create_new(true).open(&probe);
     match result {
         Ok(file) => {
@@ -274,6 +372,7 @@ fn select_location_at_with_writer(
     let mut state = super::state::read_state(state_path)?;
     let old_base = base_from_state(&state, roots, id)?;
     let old_root = plugin_root(&old_base, id);
+    reject_linked_path(&old_root)?;
     let new_root = plugin_root(&new_base, id);
 
     if roots_are_equivalent(&old_base, &new_base, id) {
@@ -526,7 +625,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     }
     let metadata = fs::symlink_metadata(source).map_err(|e| format!("stat {}: {e}", source.display()))?;
     if metadata.is_dir() {
-        fs::create_dir(destination).map_err(|e| format!("mkdir {}: {e}", destination.display()))?;
+        private_directory(destination)?;
         for entry in fs::read_dir(source).map_err(|e| format!("list {}: {e}", source.display()))? {
             let entry = entry.map_err(|e| e.to_string())?;
             copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
@@ -536,9 +635,8 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
     if !metadata.is_file() {
         return Err(format!("refusing storage migration: unsupported file type at {}", source.display()));
     }
-    fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(|e| format!("copy {} to {}: {e}", source.display(), destination.display()))
+    let bytes = fs::read(source).map_err(|e| format!("read {}: {e}", source.display()))?;
+    private_write(destination, &bytes)
 }
 
 fn remove_tree_if_exists(path: &Path) {
@@ -627,8 +725,9 @@ fn backup_path(target: &Path) -> PathBuf {
 
 fn checked_target(root: &Path, relative: &str, create_parents: bool) -> Result<PathBuf, String> {
     let relative = safe_relative_path(relative)?;
+    reject_linked_path(root)?;
     if create_parents {
-        fs::create_dir_all(root).map_err(|e| format!("mkdir {}: {e}", root.display()))?;
+        private_directory(root)?;
     }
     if !root.exists() {
         return Ok(root.join(relative));
@@ -637,7 +736,7 @@ fn checked_target(root: &Path, relative: &str, create_parents: bool) -> Result<P
     confine_to_root(root, &target)?;
     if create_parents {
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            private_directory(parent)?;
         }
     }
     Ok(target)
@@ -673,6 +772,36 @@ fn current_version(path: &Path) -> Result<Option<String>, String> {
     read_bytes(path).map(|bytes| bytes.map(|bytes| version_of(&bytes)))
 }
 
+/// Keep the state selection and physical document stable through publication.
+/// The callback may acquire CLI/database locks, but must not reenter storage.
+pub(crate) fn with_document_version<T>(
+    plugin_id: &str,
+    relative_path: &str,
+    expected_version: &str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_document_version_at(&super::state::state_path(), &StorageRoots::system()?, plugin_id, relative_path, expected_version, operation)
+}
+
+fn with_document_version_at<T>(
+    state_path: &Path,
+    roots: &StorageRoots,
+    plugin_id: &str,
+    relative_path: &str,
+    expected_version: &str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _state_guard = super::state::lock_state(state_path)?;
+    authorize(state_path, plugin_id)?;
+    let (_, base) = selected_base(state_path, roots, plugin_id)?;
+    let _root_guard = lock_document_root(&base, plugin_id)?;
+    let target = checked_target(&plugin_root(&base, plugin_id), relative_path, false)?;
+    if current_version(&target)?.as_deref() != Some(expected_version) {
+        return Err("CLI_DOCUMENT_VERSION_CONFLICT".into());
+    }
+    operation()
+}
+
 pub(crate) fn write_text_at(
     state_path: &Path,
     roots: &StorageRoots,
@@ -687,50 +816,22 @@ pub(crate) fn write_text_at(
     let _root_guard = lock_document_root(&base, id)?;
     let root = plugin_root(&base, id);
     let target = checked_target(&root, relative, true)?;
-    let current = current_version(&target)?;
+    let previous = read_bytes(&target)?;
+    let current = previous.as_deref().map(version_of);
     if current != expected_version {
         return Ok(WriteResult::Conflict { current_version: current });
     }
 
-    let tmp = target.with_file_name(format!(
-        ".{}.{}.tmp",
-        target.file_name().and_then(|n| n.to_str()).unwrap_or("document"),
-        uuid::Uuid::new_v4()
-    ));
-    // Re-validate immediately before mutating: the parent chain may have been
-    // swapped for a junction since `checked_target` ran.
+    // The old document remains readable until the atomic replacement succeeds;
+    // a failed write cannot leave a missing canonical file. Both snapshots are
+    // private before their bytes ever reach disk.
     confine_to_root(&root, &target)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    file.write_all(content.as_bytes())
-        .and_then(|_| file.flush())
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("flush {}: {e}", tmp.display()))?;
-    drop(file);
-
-    let backup = backup_path(&target);
-    if target.exists() {
-        if backup.exists() {
-            fs::remove_file(&backup).map_err(|e| format!("remove {}: {e}", backup.display()))?;
-        }
-        fs::rename(&target, &backup)
-            .map_err(|e| format!("backup {}: {e}", target.display()))?;
+    if let Some(previous) = previous {
+        let backup = backup_path(&target);
+        confine_to_root(&root, &backup)?;
+        private_write(&backup, &previous)?;
     }
-    if let Err(error) = fs::rename(&tmp, &target) {
-        if backup.exists() && !target.exists() {
-            let _ = fs::rename(&backup, &target);
-        }
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("replace {}: {error}", target.display()));
-    }
-    if let Some(parent) = target.parent() {
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
-    }
+    private_write(&target, content.as_bytes())?;
     Ok(WriteResult::Written { version: version_of(content.as_bytes()) })
 }
 
@@ -753,6 +854,7 @@ fn list_at(
     if !start.exists() {
         return Ok(Vec::new());
     }
+    confine_to_root(&root, &start)?;
     let canonical_root = fs::canonicalize(&root)
         .map_err(|e| format!("canonicalize {}: {e}", root.display()))?;
     let mut stack = vec![start];
@@ -999,6 +1101,7 @@ pub(crate) fn delete_plugin_documents(guard: &DocumentsGuard) -> Result<(), Stri
 /// on Windows `remove_dir_all` on a junction reaches outside the plugin root,
 /// so this scan runs before anything is removed.
 fn scan_for_reparse_points(root: &Path) -> Result<(), String> {
+    reject_linked_path(root)?;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         if is_reparse_point(&dir)? {
@@ -1051,7 +1154,7 @@ mod tests {
     fn gates_require_installed_enabled_clean_and_permissioned_plugin() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         assert!(authorize(&state_path, id).is_ok());
 
@@ -1075,27 +1178,27 @@ mod tests {
     fn roots_are_lazy_and_location_table_is_plugin_isolated() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.one");
+        enabled_state(&state_path, "vendor-one");
         let roots = roots(&scratch);
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.one").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(get_location_at(&state_path, &roots, "vendor-one").unwrap().kind, StorageLocationKind::Data);
         assert!(!roots.data.exists());
 
         let selected = select_location_at(
             &state_path,
             &roots,
-            "vendor.one",
+            "vendor-one",
             StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(scratch.path("chosen").to_string_lossy().into()) },
         ).unwrap();
-        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor.one"));
+        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor-one"));
         assert!(scratch.path("chosen").is_dir());
-        assert!(!scratch.path("chosen/plugin-data/vendor.one").exists());
+        assert!(!scratch.path("chosen/plugin-data/vendor-one").exists());
     }
 
     #[test]
     fn selecting_custom_moves_the_existing_document_tree() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "state/nested/doc.json", "document", None)
@@ -1124,7 +1227,7 @@ mod tests {
     fn non_identical_target_conflicts_without_mutating_either_root_or_selection() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "doc", "old", None).unwrap();
@@ -1155,7 +1258,7 @@ mod tests {
     fn identical_existing_target_is_accepted() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "nested/doc", "same", None).unwrap();
@@ -1190,7 +1293,7 @@ mod tests {
         ] {
             let scratch = Scratch::new();
             let state_path = scratch.path("plugins.json");
-            let id = "vendor.plugin";
+            let id = "vendor-plugin";
             enabled_state(&state_path, id);
             let roots = roots(&scratch);
             let old_custom = scratch.path("old-custom");
@@ -1247,7 +1350,7 @@ mod tests {
 
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         write_text_at(&state_path, &roots, id, "remove", "old", None).unwrap();
@@ -1318,7 +1421,7 @@ mod tests {
 
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let old_root = plugin_root(&roots.data, id);
@@ -1349,7 +1452,7 @@ mod tests {
     fn atomic_write_is_cas_and_keeps_rolling_backup() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
 
@@ -1369,7 +1472,7 @@ mod tests {
     fn concurrent_writers_have_one_winner_and_one_conflict() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let WriteResult::Written { version: initial } = write_text_at(&state_path, &roots, id, "doc", "zero", None).unwrap() else { panic!("initial write conflicted") };
@@ -1390,37 +1493,37 @@ mod tests {
     fn custom_location_and_file_listing_are_plugin_isolated() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.one");
+        enabled_state(&state_path, "vendor-one");
         let mut state = crate::plugins::state::read_state(&state_path).unwrap();
         let mut second = crate::plugins::state::PluginRecord::fresh("test", 1);
         second.permissions = vec!["plugin.storage".into()];
-        state.plugins.insert("vendor.two".into(), second);
+        state.plugins.insert("vendor-two".into(), second);
         crate::plugins::state::write_state(&state_path, &state).unwrap();
         let roots = roots(&scratch);
         let custom = scratch.path("custom");
-        for id in ["vendor.one", "vendor.two"] {
+        for id in ["vendor-one", "vendor-two"] {
             select_location_at(&state_path, &roots, id, StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(custom.to_string_lossy().into()) }).unwrap();
         }
-        write_text_at(&state_path, &roots, "vendor.one", "shared/file", "one", None).unwrap();
-        write_text_at(&state_path, &roots, "vendor.two", "shared/file", "two", None).unwrap();
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().unwrap().content, "one");
-        assert_eq!(list_at(&state_path, &roots, "vendor.one", Some("shared")).unwrap(), vec!["shared/file"]);
-        remove_with_version_at(&state_path, &roots, "vendor.one", "shared/file", None).unwrap();
-        assert!(read_text_at(&state_path, &roots, "vendor.one", "shared/file").unwrap().is_none());
-        assert_eq!(read_text_at(&state_path, &roots, "vendor.two", "shared/file").unwrap().unwrap().content, "two");
+        write_text_at(&state_path, &roots, "vendor-one", "shared/file", "one", None).unwrap();
+        write_text_at(&state_path, &roots, "vendor-two", "shared/file", "two", None).unwrap();
+        assert_eq!(read_text_at(&state_path, &roots, "vendor-one", "shared/file").unwrap().unwrap().content, "one");
+        assert_eq!(list_at(&state_path, &roots, "vendor-one", Some("shared")).unwrap(), vec!["shared/file"]);
+        remove_with_version_at(&state_path, &roots, "vendor-one", "shared/file", None).unwrap();
+        assert!(read_text_at(&state_path, &roots, "vendor-one", "shared/file").unwrap().is_none());
+        assert_eq!(read_text_at(&state_path, &roots, "vendor-two", "shared/file").unwrap().unwrap().content, "two");
     }
 
     #[test]
     fn invalid_or_unwritable_selection_never_falls_back() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        enabled_state(&state_path, "vendor.plugin");
+        enabled_state(&state_path, "vendor-plugin");
         let roots = roots(&scratch);
         let file = scratch.path("not-a-directory");
         std::fs::write(&file, "x").unwrap();
-        let result = select_location_at(&state_path, &roots, "vendor.plugin", StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(file.to_string_lossy().into()) });
+        let result = select_location_at(&state_path, &roots, "vendor-plugin", StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(file.to_string_lossy().into()) });
         assert!(result.is_err());
-        assert_eq!(get_location_at(&state_path, &roots, "vendor.plugin").unwrap().kind, StorageLocationKind::Data);
+        assert_eq!(get_location_at(&state_path, &roots, "vendor-plugin").unwrap().kind, StorageLocationKind::Data);
         assert!(!roots.data.exists());
     }
 
@@ -1428,7 +1531,7 @@ mod tests {
     fn remove_honors_optional_cas() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let WriteResult::Written { version } = write_text_at(&state_path, &roots, id, "doc", "one", None).unwrap() else { panic!("initial write conflicted") };
@@ -1446,7 +1549,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1464,7 +1567,7 @@ mod tests {
     fn remove_also_deletes_the_rolling_backup() {
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1501,7 +1604,7 @@ mod tests {
         use crate::plugins::test_support::create_dir_link;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1530,7 +1633,7 @@ mod tests {
         use crate::plugins::test_support::create_dir_link;
         let scratch = Scratch::new();
         let state_path = scratch.path("plugins.json");
-        let id = "vendor.plugin";
+        let id = "vendor-plugin";
         enabled_state(&state_path, id);
         let roots = roots(&scratch);
         let root = roots.data.join("plugin-data").join(id);
@@ -1545,6 +1648,63 @@ mod tests {
         assert!(error.contains("reparse point"), "unexpected: {error}");
         assert!(root.join("state/doc.json").exists(), "documents were removed anyway");
         assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn publication_requires_the_current_document_and_an_available_plugin() {
+        let scratch = Scratch::new();
+        let state_path = scratch.path("plugins.json");
+        let roots = roots(&scratch);
+        let id = "publication-test";
+        enabled_state(&state_path, id);
+        let WriteResult::Written { version: old } = write_text_at(&state_path, &roots, id, "registry.json", "old", None).unwrap() else { panic!("initial conflict") };
+        let WriteResult::Written { version: current } = write_text_at(&state_path, &roots, id, "registry.json", "current", Some(old.clone())).unwrap() else { panic!("update conflict") };
+        let called = std::cell::Cell::new(false);
+        assert!(with_document_version_at(&state_path, &roots, id, "registry.json", &old, || { called.set(true); Ok(()) }).is_err());
+        assert!(!called.get(), "stale publication callback ran");
+        assert_eq!(with_document_version_at(&state_path, &roots, id, "registry.json", &current, || Ok(42)).unwrap(), 42);
+        assert!(with_document_version_at(&state_path, &roots, id, "missing.json", &current, || { called.set(true); Ok(()) }).is_err());
+        super::super::state::update_record(&state_path, id, |record| record.quarantined = true).unwrap();
+        assert!(with_document_version_at(&state_path, &roots, id, "registry.json", &current, || { called.set(true); Ok(()) }).is_err());
+        assert!(!called.get(), "unavailable document or plugin published");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn documents_backups_and_migrations_remain_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        let state_path = scratch.path("plugins.json");
+        let roots = roots(&scratch);
+        let id = "privacy-test";
+        enabled_state(&state_path, id);
+        let WriteResult::Written { version } = write_text_at(&state_path, &roots, id, "nested/key", "secret", None).unwrap() else { panic!("initial conflict") };
+        write_text_at(&state_path, &roots, id, "nested/key", "new secret", Some(version)).unwrap();
+        let custom = scratch.path("custom");
+        select_location_at(&state_path, &roots, id, StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(custom.to_string_lossy().into_owned()) }).unwrap();
+        let root = plugin_root(&custom, id);
+        for path in [&root, &root.join("nested")] {
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        for path in [root.join("nested/key"), root.join("nested/key.bak")] {
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn linked_ancestor_cannot_create_a_document_root_outside_storage() {
+        let scratch = Scratch::new();
+        let state_path = scratch.path("plugins.json");
+        let roots = roots(&scratch);
+        let id = "ancestry-test";
+        enabled_state(&state_path, id);
+        let outside = scratch.path("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(&roots.data).unwrap();
+        assert!(crate::plugins::test_support::create_dir_link(&roots.data.join("plugin-data"), &outside));
+        assert!(write_text_at(&state_path, &roots, id, "key", "secret", None).is_err());
+        assert!(!outside.join(id).exists());
+        assert!(!outside.join(format!(".{id}.documents.lock")).exists());
     }
 }
 

@@ -43,6 +43,9 @@ import {
 } from "./session-utils";
 import type { ChatStore } from "./types";
 import type { LoadHistoryPage, StoreGet, StoreSet } from "./context";
+import type { SessionExecutionContext } from "@ccgui/plugin-sdk";
+import { listen } from "@/lib/transport";
+import { adoptExecutionContext, refreshExecutionSelection } from "./execution-selection";
 
 function omitKey(rec: Record<string, boolean>, key: string) {
   const next = { ...rec };
@@ -132,6 +135,7 @@ export function createSessionActions(
       if (get().initialized) return;
       set({ initialized: true });
       eventTeardowns.push(
+        subscribeTauriEvent(() => listen<SessionExecutionContext>("session://selection-changed", (event) => adoptExecutionContext({ set, get }, event.payload))),
         subscribeTauriEvent(() =>
           listenEngineEvents((events) =>
             handleEngineEvents(events, {
@@ -195,18 +199,7 @@ export function createSessionActions(
       );
       set({ openTabs: restoredTabs });
       const persistedActive = readPersistedActive();
-      const activeTab =
-        persistedActive &&
-        restoredTabs.some((t) =>
-          sameTab(
-            t,
-            persistedActive.engine,
-            persistedActive.sessionId,
-            persistedActive.workspacePath,
-          ),
-        )
-          ? persistedActive
-          : (restoredTabs[0] ?? null);
+      const activeTab = restoredTabs.find((t) => persistedActive && sameTab(t, persistedActive.engine, persistedActive.sessionId, persistedActive.workspacePath)) ?? restoredTabs[0] ?? null;
       if (activeTab) activateTab(activeTab);
       ipc
         .getAppSettings()
@@ -276,17 +269,6 @@ export function createSessionActions(
           delete unseen[key];
           delete streamingByKey[key];
           delete retryingByKey[key];
-        }
-        for (const meta of merged) {
-          const key = sessionKey(meta.engine, meta.sessionId, meta.workspacePath);
-          const current = bySession[key];
-          if (!current) continue;
-          bySession[key] = {
-            ...current,
-            activeModel: meta.model ?? current.activeModel,
-            activeEffort: meta.effort ?? current.activeEffort,
-            activeProvider: meta.provider ?? current.activeProvider,
-          };
         }
         const openTabs = s.openTabs.filter(
           (tab) =>
@@ -358,31 +340,8 @@ export function createSessionActions(
 
     selectSession: async (engine, sessionId, workspacePath) => {
       const key = sessionKey(engine, sessionId, workspacePath);
-      // The session remembers the model it ran, and our own record is the
-      // only place that carries the provider ("agentrouter qunyou/x", while
-      // the engine transcript keeps the bare "x"). Without it a session
-      // reopened here — after a restart, or in another window — showed the
-      // engine default and sent that instead.
-      const remembered = get().sessions.find(
-        (x) => x.engine === engine && x.sessionId === sessionId,
-      )?.model;
-      if (remembered && !get().bySession[key]?.activeModel) {
-        patchSession(set, key, { activeModel: remembered });
-      }
-      // Same for the reasoning level: the picker and the next send follow the
-      // session, so an unset level adopts the one this session last ran.
-      const rememberedEffort = get().sessions.find(
-        (x) => x.engine === engine && x.sessionId === sessionId,
-      )?.effort;
-      if (rememberedEffort && !get().bySession[key]?.activeEffort) {
-        patchSession(set, key, { activeEffort: rememberedEffort });
-      }
-      const rememberedProvider = get().sessions.find(
-        (x) => x.engine === engine && x.sessionId === sessionId,
-      )?.provider;
-      if (rememberedProvider && !get().bySession[key]?.activeProvider) {
-        patchSession(set, key, { activeProvider: rememberedProvider });
-      }
+      // Selection is loaded as a complete backend record below; transcript
+      // metadata never overrides it (including on another client's edits).
       const syncEngine = engine !== get().activeEngine;
       if (syncEngine) writeStored(ENGINE_PREF_KEY, engine);
       set((s) => {
@@ -392,7 +351,7 @@ export function createSessionActions(
           sameTab(t, engine, sessionId, workspacePath),
         );
         const tab: ActiveSession = stored
-          ? { ...stored, effort: undefined, provider: undefined }
+          ? { ...stored, model: undefined, effort: undefined, provider: undefined, pendingId: undefined }
           : { engine, sessionId, workspacePath };
         const openTabs = stored
           ? s.openTabs.map((t) => (t === stored ? tab : t))
@@ -409,6 +368,12 @@ export function createSessionActions(
         dispatchSessionRestored({ ...sessionLifecycleBase(get, { engine, sessionId, workspacePath }), sessionId });
       }
       emitSessionActivated(engine, sessionId);
+      const selectedTab = get().openTabs.find((t) => sameTab(t, engine, sessionId, workspacePath))!;
+      try {
+        await refreshExecutionSelection({ set, get }, selectedTab);
+      } catch (error) {
+        patchSession(set, key, { error: errorText(error) });
+      }
       const existing = get().bySession[key];
       if (existing && existing.messages.length > 0) return;
       patchSession(set, key, { loading: true });

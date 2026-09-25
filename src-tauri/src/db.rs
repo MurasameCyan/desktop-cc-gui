@@ -34,6 +34,14 @@ pub struct PluginWorkspaceSummary {
 pub struct Db(pub Mutex<Connection>);
 
 impl Db {
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> rusqlite::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&conn)?;
+        Ok(Self(Mutex::new(conn)))
+    }
+
     pub fn open() -> rusqlite::Result<Self> {
         Self::open_at(&crate::paths::db_path())
     }
@@ -255,6 +263,7 @@ impl Db {
         now: i64,
     ) -> Result<(), String> {
         let conn = self.0.lock();
+        reject_legacy_selection_write(&conn, engine, session_id)?;
         conn.execute(
             "INSERT INTO session_models(engine, session_id, model, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -277,6 +286,7 @@ impl Db {
         now: i64,
     ) -> Result<(), String> {
         let conn = self.0.lock();
+        reject_legacy_selection_write(&conn, engine, session_id)?;
         conn.execute(
             "INSERT INTO session_efforts(engine, session_id, effort, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -299,6 +309,7 @@ impl Db {
         now: i64,
     ) -> Result<(), String> {
         let conn = self.0.lock();
+        reject_legacy_selection_write(&conn, engine, session_id)?;
         conn.execute(
             "INSERT INTO session_providers(engine, session_id, provider_id, updated_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -571,6 +582,19 @@ pub fn plugin_list_workspaces(
         return Err(format!("{plugin_id}: missing workspace.metadata.read permission"));
     }
     db.workspace_list()
+}
+
+/// Old clients lack workspace, execution target and CAS. They cannot safely
+/// mutate any session that has entered the authoritative selection contract.
+fn reject_legacy_selection_write(conn: &Connection, engine: &str, session_id: &str) -> Result<(), String> {
+    let migrated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_execution_selections WHERE engine=?1 AND identity_kind='native' AND identity=?2)",
+        rusqlite::params![engine, session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if migrated {
+        return Err("session uses a complete execution selection; refresh the client and use versioned setSelection".into());
+    }
+    Ok(())
 }
 
 /// One-time import of the legacy desktop-cc-gui workspace list
@@ -875,6 +899,35 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             provider_id TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(engine, session_id)
+        );
+        -- Complete non-secret routing identity. Legacy per-field tables remain
+        -- readable until an explicit confirmation or deterministic migration.
+        CREATE TABLE IF NOT EXISTS session_execution_selections(
+            execution_target TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            identity_kind TEXT NOT NULL CHECK(identity_kind IN ('native','pending')),
+            identity TEXT NOT NULL,
+            selection_json TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version > 0),
+            PRIMARY KEY(execution_target, workspace_path, engine, identity_kind, identity)
+        );
+        CREATE TABLE IF NOT EXISTS session_pending_adoptions(
+            execution_target TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            pending_id TEXT NOT NULL,
+            native_id TEXT NOT NULL,
+            PRIMARY KEY(execution_target, workspace_path, engine, pending_id)
+        );
+        CREATE TABLE IF NOT EXISTS session_observations(
+            execution_target TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            observed_model TEXT,
+            observed_effort TEXT,
+            PRIMARY KEY(execution_target, workspace_path, engine, session_id)
         );
         -- Message bodies for full-text search. The transcript files stay
         -- the source of truth; this table is a derived index rebuilt by

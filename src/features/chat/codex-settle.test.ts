@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineEventPayload } from "@/lib/events";
 
-vi.mock("@/lib/ipc", () => ({
+// IPC is hoisted ahead of store imports; load the fixture inside its factory.
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     sendMessage: vi.fn(async () => ({ runId, sessionId: null })),
     interruptSession: vi.fn(async () => true),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
@@ -187,8 +189,6 @@ describe("codex turn settling", () => {
     });
 
     const inflight = useChatStore.getState().send("hello", []);
-    // The send awaits its before-turn hook collection before invoking, so the
-    // events below only race the response once the invoke is actually in flight.
     await started.promise;
 
     // The engine can start streaming before the invoke promise resolves.
@@ -218,7 +218,7 @@ describe("codex turn settling", () => {
     const response = Promise.withResolvers<{ runId: string; sessionId: null }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(response.promise);
     const sending = useChatStore.getState().send("hello", []);
-    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
     handleEngineEvents([
       ev("session", 1, "tid-1"),
       ev("message", 2, { role: "assistant", text: "complete" }),

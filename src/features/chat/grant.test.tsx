@@ -9,11 +9,10 @@ import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events"
 import { sessionKey } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
 
-vi.mock("@/lib/ipc", () => ({
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
-    rememberSessionModel: vi.fn(async () => {}),
-    rememberSessionEffort: vi.fn(async () => {}),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
@@ -127,6 +126,7 @@ describe("permission denial grant flow", () => {
       .getState()
       .respondToGrant(KEY, grantRows()[0].seq, true);
     useChatStore.setState({
+      openTabs: [{ engine: "claude", sessionId: "s-1", workspacePath: "/tmp/ws" }],
       active: { engine: "claude", sessionId: "s-1", workspacePath: "/tmp/ws" },
     });
     await useChatStore.getState().resendLastUser(KEY);

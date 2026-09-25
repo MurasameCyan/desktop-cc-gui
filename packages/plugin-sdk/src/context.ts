@@ -2,6 +2,8 @@ import type { ComponentType } from "react";
 import type * as React from "react";
 import type { Disposer } from "./manifest";
 import type { ComposerSlotId, SessionMenuTarget, WorkspaceMenuLabelValue } from "./registry";
+import type { CliCapabilities, ExecutionSelectionInput, ModelEntryProps, SessionExecutionContext, SessionExecutionTarget } from "./cli";
+import type { DocumentStorage } from "./document-storage";
 export interface WorkspaceMetadata {
   id: string;
   path: string;
@@ -208,42 +210,6 @@ export interface RuntimeSwitchHooks {
   afterSwitch?(event: RuntimeSwitchEvent): void | Promise<void>;
 }
 
-export type DocumentStorageLocationKind = "data" | "program" | "custom";
-
-export interface ResolvedDocumentStorageLocation {
-  kind: DocumentStorageLocationKind;
-  path: string;
-}
-
-export interface DocumentReadResult {
-  content: string;
-  /** Opaque compare-and-swap token. */
-  version: string;
-}
-
-export interface DocumentWriteResult {
-  /** Opaque token to use as expectedVersion for the next write. */
-  version: string;
-}
-
-export interface DocumentStorage {
-  getLocation(): Promise<ResolvedDocumentStorageLocation>;
-  /** Selecting custom opens the host directory picker. */
-  selectLocation(kind: DocumentStorageLocationKind): Promise<ResolvedDocumentStorageLocation>;
-  readText(relativePath: string): Promise<DocumentReadResult | null>;
-  /** expectedVersion=null requires the document not to exist. */
-  writeTextAtomic(
-    relativePath: string,
-    content: string,
-    expectedVersion: string | null,
-  ): Promise<DocumentWriteResult>;
-  /** Delete a document. Pass the opaque version from the last read to make
-   *  the delete conditional (CAS); omit it (or pass null) to delete
-   *  unconditionally. A stale version rejects with a conflict and leaves the
-   *  newer document in place. */
-  remove(relativePath: string, expectedVersion?: string | null): Promise<void>;
-  list(prefix?: string): Promise<string[]>;
-}
 
 export interface AssetDirectoryGrant {
   grantId: string;
@@ -268,7 +234,6 @@ export interface PluginAssets {
    * Paths use forward slashes and are relative to the directory root. */
   directoryUrl(grantId: string, relativePath: string): string;
 }
-
 
 /**
  * PluginContext（plan §5.2）：插件唯一能力门面。宿主 runtime/context.ts
@@ -360,6 +325,14 @@ export interface PluginContext {
       slot: ComposerSlotId;
       key?: string;
       component: ComponentType;
+      order?: number;
+    }): Disposer;
+    /** Replace the builtin model entry for these engines. Permission
+     * ui:model-entry; unregister/crash restores the builtin entry. */
+    registerModelEntry(def: {
+      key?: string;
+      engineIds: string[];
+      component: ComponentType<ModelEntryProps>;
       order?: number;
     }): Disposer;
     /** Chat right-panel tab (plan §4.2 #4); renders with the active
@@ -489,6 +462,8 @@ export interface PluginContext {
     set(key: string, value: unknown): Promise<void>;
     delete(key: string): Promise<void>;
   };
+  /** Typed execution contributions, grants and native configuration operations. */
+  cli: CliCapabilities;
   events: {
     on(topic: string, cb: (data: unknown) => void): Disposer;
     emit(topic: string, data: unknown): void;
@@ -520,6 +495,11 @@ export interface PluginContext {
    *  行被丢弃。返回 Disposer,插件卸载时自动注销。 */
   sessions: {
     selectSession(engine: string, sessionId: string, workspacePath: string): Promise<void>;
+    /** Complete active target/selection; null when no composer target exists. */
+    getContext(): Promise<SessionExecutionContext | null>;
+    /** Atomically change this target only. Stale expectedVersion rejects. */
+    setSelection(target: SessionExecutionTarget, selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+    onSelectionChanged(callback: (context: SessionExecutionContext) => void): Disposer;
     /** 请求宿主立即刷新会话目录（侧栏/标签页），0.3.7 起。
      *  插件绕过宿主直写会话数据（如 sqlite custom_title、转录 title 行）后
      *  调用——否则变更要等用户手动同步或下次常规刷新才可见。 */

@@ -62,7 +62,7 @@ describe("the picker follows the session, not a stale tab field", () => {
       openTabs: [tab],
       active: tab,
       efforts: ENGINE_DEFAULT,
-      bySession: { [KEY]: { ...EMPTY_SESSION, activeEffort: "low" } },
+      bySession: { [KEY]: { ...EMPTY_SESSION, activeEffort: "max", executionSelection: { version: 4, modelSelection: { source: "native", engineId: "omp", modelId: "model-a" }, effort: "low" } } },
     });
 
     await act(async () => root.render(<Probe />));
@@ -72,14 +72,14 @@ describe("the picker follows the session, not a stale tab field", () => {
     expect(shownEffort()).toBe("low");
   });
 
-  it("still honours a starting level chosen on a not-yet-created chat", async () => {
+  it("honours a pending conversation's backend record", async () => {
     const tab = { engine: "omp", sessionId: null, workspacePath: WS, effort: "high" as const };
     useChatStore.setState({
       activeEngine: "omp",
       openTabs: [tab],
       active: tab,
       efforts: ENGINE_DEFAULT,
-      bySession: {},
+      bySession: { [sessionKey("omp", null, WS)]: { ...EMPTY_SESSION, executionSelection: { version: 1, modelSelection: { source: "native", engineId: "omp", modelId: "model-b" }, effort: "high" } } },
     });
 
     await act(async () => root.render(<Probe />));
@@ -87,7 +87,7 @@ describe("the picker follows the session, not a stale tab field", () => {
     expect(shownEffort()).toBe("high");
   });
 
-  it("falls back to the engine default for a session that never recorded one", async () => {
+  it("does not pretend an unconfirmed session uses the foreground default", async () => {
     const tab = { engine: "omp", sessionId: SID, workspacePath: WS };
     useChatStore.setState({
       activeEngine: "omp",
@@ -99,6 +99,6 @@ describe("the picker follows the session, not a stale tab field", () => {
 
     await act(async () => root.render(<Probe />));
 
-    expect(shownEffort()).toBe("medium");
+    expect(shownEffort()).toBe("");
   });
 });

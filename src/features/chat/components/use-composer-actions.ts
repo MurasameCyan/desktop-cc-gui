@@ -105,7 +105,7 @@ export function useComposerActions({
         return;
       }
       if (appCommand?.command === "compact" && active.sessionId && !streaming) {
-        void compactContext();
+        void compactContext(sessionKey).catch(() => {}); // Failure is shown by the owning session's error banner.
         return;
       }
       if (appCommand?.command === "mcp") {

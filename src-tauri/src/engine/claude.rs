@@ -1,5 +1,5 @@
 use super::{
-    command_for_binary, images, push_session_id, tool_call_message_with_id,
+    images, push_session_id, tool_call_message_with_id,
     tool_call_patch_with_id, BuiltCommand, Engine, EngineEvent, SendRequest,
 };
 use serde_json::Value;
@@ -66,7 +66,7 @@ impl Engine for ClaudeEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("-p");
         cmd.arg("--input-format");
         cmd.arg("stream-json");
@@ -1645,6 +1645,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = engine.build_command(&request, "claude").unwrap();
@@ -1696,6 +1698,8 @@ mod tests {
             provider_id: None,
             computer_use: None,
             allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
+            execution: None,
+            selection: None,
         };
         let built = engine.build_command(&request, "claude").unwrap();
         let args: Vec<String> = built

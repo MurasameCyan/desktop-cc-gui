@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const CHILD_ADDRESS: &str = "CCGUI_STORAGE_TEST_ADDRESS";
 const TEST_NAME: &str = "plugins::storage::process_tests::independent_processes_enforce_cas";
-const PLUGIN: &str = "cas.test";
+const PLUGIN: &str = "cas-test";
 
 #[derive(Serialize, Deserialize)]
 struct Request {

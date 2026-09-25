@@ -5,6 +5,7 @@ import {
   runAsPlugin,
   withAuthorizedHostInvoke,
 } from "./hardening";
+import * as hardening from "./hardening";
 
 describe("hardening", () => {
   const originalInternals = window.__TAURI_INTERNALS__;
@@ -58,6 +59,18 @@ describe("hardening", () => {
       runAsPlugin(() => invoke("plugin_cmd")),
     ).rejects.toThrow(/blocked/);
     expect(nativeInvoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("grants only the checked host hop, not a nested plugin call or a second invoke", async () => {
+    const invoke = window.__TAURI_INTERNALS__!.invoke!;
+    const requests = runAsPlugin(() => hardening.withAuthorizedHostInvoke(() => ({
+      nested: runAsPlugin(() => invoke("nested_plugin")),
+      allowed: invoke("checked_sdk_operation"),
+      extra: invoke("unchecked_extra_operation"),
+    })));
+    await expect(requests.nested).rejects.toThrow(/blocked/);
+    await expect(requests.allowed).resolves.toBeNull();
+    await expect(requests.extra).rejects.toThrow(/blocked/);
   });
 
   it("runAsPlugin restores the host context even when plugin code throws", async () => {

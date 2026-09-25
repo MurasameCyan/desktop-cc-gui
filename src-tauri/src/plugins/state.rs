@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 pub const KV_TOMBSTONE_TTL_SECS: i64 = 30 * 24 * 3600;
 
 /// Serializes plugin state read→mutate→write and document root selection across
-/// threads and host processes. Lock order is state first, document roots second.
+/// threads and host processes. Lock order: plugin state, physical document roots,
+/// CLI state, database.
 /// The sidecar is never replaced alongside plugins.json or removed on uninstall.
 pub(super) fn lock_state(path: &Path) -> Result<super::file_lock::FileLock, String> {
     let mut name = path.file_name().ok_or_else(|| format!("state has no filename: {}", path.display()))?.to_os_string();
@@ -57,7 +58,7 @@ pub struct PluginsState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DocumentStorageSelection {
     pub(crate) kind: String,
     pub(crate) custom_path: Option<String>,
@@ -124,7 +125,7 @@ pub(crate) fn write_state(path: &Path, state: &PluginsState) -> Result<(), Strin
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let content = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
-    crate::settings::atomic_write(path, &content)
+    super::storage::private_write(path, content.as_bytes())
 }
 
 /// Mutate (or create) a record in an already-loaded state; the caller holds
@@ -139,8 +140,23 @@ pub(crate) fn mutate_record(
         .plugins
         .entry(id.to_string())
         .or_insert_with(|| PluginRecord::fresh(fresh_source, now_secs()));
+    let previous_permissions = record.permissions.clone();
     mutate(record);
+    // Installing new code must not silently turn a newly declared sensitive
+    // capability into an approved one. Explicit enable has no permission delta.
+    if record.permissions.iter().any(|permission| {
+        is_sensitive_permission(permission) && !previous_permissions.contains(permission)
+    }) {
+        record.enabled = false;
+        record.last_error = Some("New sensitive permissions require approval before enabling this plugin".into());
+    }
     record.clone()
+}
+
+fn is_sensitive_permission(permission: &str) -> bool {
+    matches!(permission,
+        "cli.contributions.write" | "cli.runtime.sensitive" | "network.targets.request"
+        | "cli.config.read" | "cli.config.apply")
 }
 
 /// Upsert helper shared by enable/quarantine: one locked
@@ -174,7 +190,7 @@ pub(crate) fn record_enabled_permissions(
         .plugins
         .get(id)
         .ok_or_else(|| format!("{id}: plugin is not installed"))?;
-    Ok((record.enabled, record.permissions.clone()))
+    Ok((record.enabled && !record.quarantined, record.permissions.clone()))
 }
 
 pub(crate) fn plugin_access(id: &str) -> Result<(bool, bool, Vec<String>), String> {
@@ -292,5 +308,41 @@ mod tests {
             record_enabled_permissions(&state_path, "usage-stats").unwrap();
         assert!(!enabled);
         assert_eq!(permissions, vec!["network:127.0.0.1:7680-7690"]);
+    }
+
+    #[test]
+    fn quarantined_plugins_cannot_use_enabled_permissions() {
+        let scratch = Scratch::new();
+        let path = scratch.path("plugins.json");
+        update_record(&path, "quarantined.plugin", |record| {
+            record.enabled = true;
+            record.quarantined = true;
+            record.permissions = vec!["host:session".into()];
+        }).unwrap();
+        let (enabled, permissions) = record_enabled_permissions(&path, "quarantined.plugin").unwrap();
+        assert!(!enabled);
+        assert_eq!(permissions, ["host:session"]);
+    }
+
+    #[test]
+    fn new_sensitive_permissions_require_reapproval_but_existing_grants_do_not() {
+        let mut state = PluginsState::default();
+        let mut old = PluginRecord::fresh("local", 1);
+        old.permissions = vec!["storage".into()];
+        state.plugins.insert("approval.plugin".into(), old);
+        let updated = mutate_record(&mut state, "approval.plugin", "local", |record| {
+            record.permissions.push("cli.runtime.sensitive".into());
+        });
+        assert!(!updated.enabled);
+        assert!(updated.last_error.is_some());
+        let approved = mutate_record(&mut state, "approval.plugin", "local", |record| {
+            record.enabled = true;
+            record.last_error = None;
+        });
+        assert!(approved.enabled);
+        let upgraded = mutate_record(&mut state, "approval.plugin", "local", |record| record.version = "2.0.0".into());
+        assert!(upgraded.enabled);
+        let expanded = mutate_record(&mut state, "approval.plugin", "local", |record| record.permissions.push("cli.config.apply".into()));
+        assert!(!expanded.enabled);
     }
 }

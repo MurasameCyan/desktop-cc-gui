@@ -13,8 +13,6 @@ import { ASK_OTHER_OPTION, askLoops } from "./store/ask-loop";
 vi.mock("@/lib/ipc", () => ({
   ipc: {
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
-    rememberSessionModel: vi.fn(async () => {}),
-    rememberSessionEffort: vi.fn(async () => {}),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),

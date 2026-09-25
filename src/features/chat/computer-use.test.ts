@@ -13,8 +13,24 @@ vi.mock("@/lib/ipc", () => ({
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     interruptSession: vi.fn(async () => true),
     computerUseSetActive: vi.fn(async () => {}),
-    rememberSessionModel: vi.fn(async () => {}),
-    rememberSessionEffort: vi.fn(async () => {}),
+    // 会话权威选择：send 先读/播种选择，读不到就直接抛错不发送。
+    getSessionSelection: vi.fn(async (target: { engineId: string }) => ({
+      target,
+      selection: {
+        modelSelection: { source: "native", engineId: target.engineId, modelId: null, channelId: null },
+        effort: null,
+        version: 1,
+      },
+    })),
+    setSessionSelection: vi.fn(async (target: { engineId: string }) => ({
+      target,
+      selection: {
+        modelSelection: { source: "native", engineId: target.engineId, modelId: null, channelId: null },
+        effort: null,
+        version: 1,
+      },
+    })),
+    listCliSources: vi.fn(async () => []),
     listSessions: vi.fn(async () => []),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null, subagentHistory: [] })),
     getAppSettings: vi.fn(async () => ({})),
@@ -81,7 +97,7 @@ describe("computer-use sends", () => {
     await useChatStore.getState().send("打开计算器", [], { computerUse: true });
     expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(
       expect.objectContaining({
-        engine: "omp",
+        target: expect.objectContaining({ engineId: "omp", workspacePath: WS }),
         prompt: "打开计算器",
         computerUse: true,
       }),
@@ -116,9 +132,7 @@ describe("computer-use sends", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0].computerUse).toBe(true);
 
-    // Drain it the way the queue does on user request. drainQueue fires the
-    // send without awaiting it, and the send itself awaits the beforeTurn
-    // hooks before reaching ipc, so the call lands a few microtasks later.
+    // Queue draining waits for the owner's selection and before-turn hooks.
     await useChatStore.getState().sendQueuedNow(queued[0].id);
     await vi.waitFor(() =>
       expect(vi.mocked(ipc.sendMessage)).toHaveBeenCalledWith(

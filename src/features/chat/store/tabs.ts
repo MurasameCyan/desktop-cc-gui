@@ -1,4 +1,5 @@
 import { writeStored } from "@/lib/storage";
+import { newId } from "@/lib/id";
 import {
   ENGINE_PREF_KEY,
   persistTabs,
@@ -6,7 +7,7 @@ import {
   sessionKey,
   type ActiveSession,
 } from "./persistence";
-import { moveRetryingFlag, moveStreamingFlag } from "./stream";
+import { EMPTY_SESSION, moveRetryingFlag, moveStreamingFlag } from "./stream";
 import { emitSessionActivated } from "@/features/plugins/runtime/events";
 import { dispatchSessionClosed } from "@/features/plugins/runtime/hooks";
 import { clearScopedContributions, sessionLifecycleBase } from "./lifecycle";
@@ -30,8 +31,6 @@ export interface TabDeps {
 export interface TabHelpers {
   /** Activate a tab: existing sessions lazy-load via selectSession, pending chats just set. */
   activateTab: (tab: ActiveSession | null) => void;
-  /** Stamp a per-tab composer override (model/effort) onto the active tab. */
-  stampActiveTab: (patch: Partial<ActiveSession>) => void;
   /** Remove a tab; when it was active, fall back to its nearest neighbor. */
   removeTab: (
     engine: string,
@@ -64,37 +63,17 @@ export function createTabActions(
     if (tab.sessionId)
       void get().selectSession(tab.engine, tab.sessionId, tab.workspacePath);
     else {
-      // A pending tab sends with its own engine, so the picker must follow it
-      // — otherwise the chip shows one CLI while sends go to another.
-      const syncEngine = tab.engine !== get().activeEngine;
-      if (syncEngine) writeStored(ENGINE_PREF_KEY, tab.engine);
-      set(
-        syncEngine
-          ? { active: tab, activeEngine: tab.engine }
-          : { active: tab },
-      );
-      persistTabs(get().openTabs, tab);
-      emitSessionActivated(tab.engine, null);
+      const pendingTab = tab.pendingId ? tab : { ...tab, pendingId: newId() };
+      const tabs = get().openTabs;
+      const existing = tabs.find((item) => sameTab(item, pendingTab.engine, null, pendingTab.workspacePath));
+      const openTabs = existing ? tabs.map((item) => item === existing ? pendingTab : item) : [...tabs, pendingTab];
+      if (pendingTab.engine !== get().activeEngine) writeStored(ENGINE_PREF_KEY, pendingTab.engine);
+      set({ active: pendingTab, activeEngine: pendingTab.engine, openTabs });
+      persistTabs(openTabs, pendingTab);
+      emitSessionActivated(pendingTab.engine, null);
     }
   }
 
-  /** Stamp a per-tab composer override (model/effort) onto the active tab, so
-   * the picker follows each session across tab switches. Persists with the
-   * tab list; no-op without an active tab. */
-  function stampActiveTab(patch: Partial<ActiveSession>) {
-    set((s) => {
-      const current = s.active;
-      if (!current) return {};
-      const active: ActiveSession = { ...current, ...patch };
-      const openTabs = s.openTabs.map((t) =>
-        sameTab(t, current.engine, current.sessionId, current.workspacePath)
-          ? active
-          : t,
-      );
-      persistTabs(openTabs, active);
-      return { openTabs, active };
-    });
-  }
 
   /** Reopen cache for closed tabs: keys whose bySession entry survives tab
    * close so selectSession skips a backend reload, most-recently-closed
@@ -174,7 +153,6 @@ export function createTabActions(
 
   return {
     activateTab,
-    stampActiveTab,
     removeTab,
     forgetClosedTab,
     forgetClosedTabs,
@@ -183,6 +161,9 @@ export function createTabActions(
       // One pending chat per workspace+engine: re-focus it instead of
       // piling up empty "new" tabs.
       set((s) => {
+        const key = sessionKey(s.activeEngine, null, workspacePath);
+        const previous = s.bySession[key];
+        const running = previous?.streaming || previous?.preparing;
         const existing = s.openTabs.find(
           (t) =>
             t.sessionId === null &&
@@ -193,6 +174,7 @@ export function createTabActions(
           engine: s.activeEngine,
           sessionId: null,
           workspacePath,
+          pendingId: running ? previous?.pendingId ?? newId() : newId(),
         };
         const openTabs = existing ? s.openTabs : [...s.openTabs, tab];
         const source = s.active;
@@ -210,7 +192,14 @@ export function createTabActions(
               }
             : s.pendingRuntimeSwitch;
         persistTabs(openTabs, tab);
-        return { openTabs, active: tab, pendingRuntimeSwitch };
+        return {
+          openTabs,
+          active: tab,
+          pendingRuntimeSwitch,
+          ...(!existing && !running
+            ? { bySession: { ...s.bySession, [key]: { ...EMPTY_SESSION, pendingId: tab.pendingId } } }
+            : {}),
+        };
       });
     },
 
@@ -242,9 +231,13 @@ export function createTabActions(
     },
 
     setActiveEngine: (engine) => {
-      const current = get().active;
-      if (current && getConversationModeState().isTabCloseBlocked(
-        sessionKey(current.engine, current.sessionId, current.workspacePath), current.workspacePath,
+      const selected = get().active;
+      if (selected?.sessionId === null) {
+        const session = get().bySession[sessionKey(selected.engine, null, selected.workspacePath)];
+        if (session?.streaming || session?.preparing) return;
+      }
+      if (selected && getConversationModeState().isTabCloseBlocked(
+        sessionKey(selected.engine, selected.sessionId, selected.workspacePath), selected.workspacePath,
       )) return;
       writeStored(ENGINE_PREF_KEY, engine);
       // Plugins follow the active engine through `session://activated`; the
@@ -273,7 +266,7 @@ export function createTabActions(
         const oldKey = sessionKey(active.engine, null, active.workspacePath);
         // First turn still in flight (native id not yet assigned): event
         // routing is keyed to the old engine, so leave the tab untouched.
-        if (s.bySession[oldKey]?.streaming) return { activeEngine: engine };
+        if (s.bySession[oldKey]?.streaming || s.bySession[oldKey]?.preparing) return { activeEngine: active.engine };
         const newKey = sessionKey(engine, null, active.workspacePath);
         const existing = s.openTabs.find(
           (t) =>
@@ -291,7 +284,7 @@ export function createTabActions(
         const bySession = { ...s.bySession };
         const drafts = { ...s.drafts };
         if (bySession[oldKey] && !bySession[newKey])
-          bySession[newKey] = bySession[oldKey];
+          bySession[newKey] = { ...bySession[oldKey], executionSelection: null, selectionUnavailableReason: null };
         delete bySession[oldKey];
         if (drafts[oldKey] !== undefined && drafts[newKey] === undefined) {
           drafts[newKey] = drafts[oldKey];
@@ -318,6 +311,7 @@ export function createTabActions(
           nextActive = {
             ...active,
             engine,
+            pendingId: newId(),
             model: undefined,
             effort: undefined,
             provider: undefined,

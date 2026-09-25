@@ -63,7 +63,7 @@ describe("creator chat entry", () => {
     const key = startCreatorChat(WORKSPACE.path);
 
     const state = useChatStore.getState();
-    expect(state.active).toEqual({
+    expect(state.active).toMatchObject({
       engine: "claude",
       sessionId: null,
       workspacePath: WORKSPACE.path,

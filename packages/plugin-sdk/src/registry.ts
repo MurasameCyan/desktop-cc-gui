@@ -1,6 +1,7 @@
 import { useSyncExternalStore, type ComponentType } from "react";
 import type { Components } from "react-markdown";
 import type { Disposer } from "./manifest";
+import type { ModelEntryProps } from "./cli";
 import type { PluginConversationProps } from "./context";
 
 export interface ConversationModeDef {
@@ -56,6 +57,15 @@ export interface ComposerSlotDef {
   slot: ComposerSlotId;
   component: ComponentType;
   /** Within-slot ordering; builtins are not part of the registry. */
+  order?: number;
+}
+
+/** A replacement, not an extra composer control. The host supplies the
+ * complete session selection and restores its entry on unload or failure. */
+export interface ModelEntryDef {
+  id: string;
+  engineIds: string[];
+  component: ComponentType<ModelEntryProps>;
   order?: number;
 }
 
@@ -264,6 +274,8 @@ export const addMenuRegistry = new Registry<AddMenuRowDef>();
 
 /** Composer toolbar slot registry (plan §4.2 #2). */
 export const composerSlotRegistry = new Registry<ComposerSlotDef>();
+
+export const modelEntryRegistry = new Registry<ModelEntryDef>();
 
 /** Chat right-panel tab registry (plan §4.2 #4). */
 export const panelTabRegistry = new Registry<PanelTabDef>();

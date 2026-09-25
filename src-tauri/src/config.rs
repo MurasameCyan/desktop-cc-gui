@@ -153,6 +153,38 @@ fn is_official_provider(id: &str) -> bool {
     id.is_empty() || id == LOCAL_PROVIDER_ID || id == LEGACY_LOCAL_CONFIG_TOML_ID
 }
 
+pub(crate) fn is_managed_provider(provider: &Value) -> bool {
+    provider.get("__ccguiManagedBy").is_some()
+}
+
+fn public_provider(provider: &Value) -> Value {
+    if !is_managed_provider(provider) {
+        return provider.clone();
+    }
+    serde_json::json!({
+        "name": provider.get("name").and_then(Value::as_str).unwrap_or("Managed channel"),
+        "readOnly": true,
+        "__ccguiManagedBy": {
+            "sourceId": provider.pointer("/__ccguiManagedBy/sourceId").and_then(Value::as_str),
+            "publicationRevision": provider.pointer("/__ccguiManagedBy/publicationRevision").and_then(Value::as_str),
+        },
+    })
+}
+
+fn guard_managed_channels(previous: &ProviderSection, next: &ProviderSection) -> Result<(), String> {
+    for (id, provider) in &previous.providers {
+        if is_managed_provider(provider) && next.providers.get(id) != Some(provider) {
+            return Err("CLI_CHANNEL_MANAGED: edit this channel in its owning plugin".into());
+        }
+    }
+    for (id, provider) in &next.providers {
+        if is_managed_provider(provider) && previous.providers.get(id) != Some(provider) {
+            return Err("CLI_CHANNEL_MANAGED: takeover requires confirmed published configuration".into());
+        }
+    }
+    Ok(())
+}
+
 /// Helper to find a provider in a section by exact id or by plugin prefix/suffix match.
 /// For example, "custom_123" matches "plugin_model-switcher_custom_123",
 /// and "plugin_model-switcher_custom_123" matches "custom_123".
@@ -204,17 +236,21 @@ pub(crate) fn resolve_provider(
     let section = config
         .section(engine)
         .ok_or_else(|| format!("unknown engine: {engine}"))?;
-    crate::provider_files::migrate_legacy(engine, section)?;
     let explicit = provider_id.map(str::trim).filter(|s| !s.is_empty());
     let id = explicit.unwrap_or_else(|| section.current.as_deref().unwrap_or("").trim());
     if id == DISABLED_PROVIDER_ID {
         return Err(format!("engine {engine} is disabled"));
     }
+    let selected = if is_official_provider(id) { None } else { find_provider(section, id)? };
+    if selected.is_some_and(|(_, provider)| is_managed_provider(provider)) {
+        return Err("CLI_CHANNEL_MANAGED: select the owning plugin contribution explicitly".into());
+    }
+    crate::provider_files::migrate_legacy(engine, section)?;
     if is_official_provider(id) {
         return Ok(None);
     }
 
-    if let Some((_matched_key, provider)) = find_provider(section, id)? {
+    if let Some((_matched_key, provider)) = selected {
         return Ok(Some(provider.clone()));
     }
 
@@ -238,7 +274,70 @@ pub(crate) fn resolve_provider(
 
 #[tauri::command]
 pub fn get_cli_config() -> Result<CliConfig, String> {
-    read_config()
+    let mut config = read_config()?;
+    for engine in ENGINES {
+        if let Some(section) = config.section_mut(engine) {
+            for provider in section.providers.values_mut() {
+                if is_managed_provider(provider) {
+                    *provider = public_provider(provider);
+                }
+            }
+        }
+    }
+    Ok(config)
+}
+
+/// Web clients receive a fresh display/model projection, never a redacted copy
+/// of the flexible legacy record (which can hide keys in arbitrary fields).
+pub fn get_cli_config_for_web() -> Result<CliConfig, String> {
+    let config = read_config()?;
+    let mut public = CliConfig::default();
+    for engine in ENGINES {
+        let source = config.section(engine).ok_or("unknown engine")?;
+        let target = public.section_mut(engine).ok_or("unknown engine")?;
+        target.current = source.current.clone();
+        target.disabled_from = source.disabled_from.clone();
+        for (id, provider) in &source.providers {
+            if is_managed_provider(provider) {
+                target.providers.insert(id.clone(), public_provider(provider));
+                continue;
+            }
+            let mut projection = serde_json::Map::new();
+            projection.insert("readOnly".into(), Value::Bool(true));
+            for field in ["name", "model"] {
+                if let Some(value) = provider.get(field).and_then(Value::as_str) {
+                    projection.insert(field.into(), Value::String(value.into()));
+                }
+            }
+            if engine == "codex" && !projection.contains_key("model") {
+                if let Some(model) = provider.pointer("/settingsConfig/config").and_then(Value::as_str)
+                    .and_then(|text| text.parse::<toml::Value>().ok())
+                    .and_then(|config| config.get("model").and_then(toml::Value::as_str).map(str::to_owned)) {
+                    projection.insert("model".into(), Value::String(model));
+                }
+            }
+            let mut models = serde_json::Map::new();
+            // Match providers.ts channelEnv precedence, but allow only model ids.
+            for env in [provider.get("env"), provider.pointer("/settingsConfig/env")] {
+                for (key, value) in env.and_then(Value::as_object).into_iter().flatten() {
+                    let recognized = match engine {
+                        "claude" => key == "ANTHROPIC_MODEL" || key.strip_prefix("ANTHROPIC_DEFAULT_")
+                            .and_then(|key| key.strip_suffix("_MODEL"))
+                            .is_some_and(|family| !family.is_empty() && family.bytes().all(|byte| byte.is_ascii_uppercase())),
+                        "kimi" => key == "KIMI_MODEL_NAME",
+                        "grok" => key == "GROK_MODEL",
+                        _ => false,
+                    };
+                    if recognized {
+                        if let Some(model) = value.as_str() { models.insert(key.clone(), Value::String(model.into())); }
+                    }
+                }
+            }
+            if !models.is_empty() { projection.insert("env".into(), Value::Object(models)); }
+            target.providers.insert(id.clone(), Value::Object(projection));
+        }
+    }
+    Ok(public)
 }
 
 /// Lock-free core of mutate_section: callers that already hold the
@@ -253,6 +352,7 @@ pub(crate) fn mutate_section_unlocked(
         .ok_or_else(|| format!("unknown engine: {engine}"))?;
     let previous = section.clone();
     mutate(section)?;
+    guard_managed_channels(&previous, section)?;
     crate::provider_files::migrate_legacy(engine, &previous)?;
     write_config(&config)
 }
@@ -365,7 +465,10 @@ fn set_current_provider_inner(
             && id != DISABLED_PROVIDER_ID
             && id != LEGACY_LOCAL_CONFIG_TOML_ID
         {
-            if let Some((matched_key, _)) = find_provider(section, &id)? {
+            if let Some((matched_key, provider)) = find_provider(section, &id)? {
+                if is_managed_provider(provider) {
+                    return Err("CLI_CHANNEL_MANAGED: select the owning plugin contribution explicitly".into());
+                }
                 section.current = Some(matched_key.to_string());
                 return Ok(());
             }
@@ -408,6 +511,49 @@ pub fn reorder_providers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn web_channel_projection_keeps_models_but_excludes_all_flexible_secret_fields() {
+        let _scratch = Scratch::new();
+        crate::paths::ensure_dirs().unwrap();
+        let mut config = CliConfig::default();
+        config.extra.insert("unknownSecret".into(), json!("top-secret"));
+        config.claude.providers.insert("channel".into(), json!({"name":"Relay", "apiKey":"key-secret", "unknown":"unknown-secret",
+            "env":{"ANTHROPIC_MODEL":"wire-model","MYSTERY":"env-secret"},
+            "settingsConfig":{"env":{"ANTHROPIC_AUTH_TOKEN":"auth-secret","ANTHROPIC_DEFAULT_OPUS_MODEL":"opus-wire"},"hooks":"hook-secret"}}));
+        config.codex.providers.insert("codex".into(), json!({"settingsConfig":{"config":"model = \"codex-wire\"\nsecret = \"toml-secret\"", "auth":{"tokens":"oauth-secret"}}}));
+        write_config(&config).unwrap();
+        let public = get_cli_config_for_web().unwrap();
+        let encoded = serde_json::to_string(&public).unwrap();
+        assert!(!encoded.contains("secret"));
+        assert_eq!(public.claude.providers["channel"]["name"], "Relay");
+        assert_eq!(public.claude.providers["channel"]["env"]["ANTHROPIC_MODEL"], "wire-model");
+        assert_eq!(public.claude.providers["channel"]["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "opus-wire");
+        assert_eq!(public.codex.providers["codex"]["model"], "codex-wire");
+    }
+
+    #[test]
+    fn managed_channels_are_secret_free_and_read_only_at_old_exits() {
+        let _scratch = Scratch::new();
+        crate::paths::ensure_dirs().unwrap();
+        let store = ConfigStore::default();
+        let managed = json!({"name":"Imported", "apiKey":"secret", "env":{"KEY":"secret"},
+            "__ccguiManagedBy":{"sourceId":"plugin:test:source","publicationRevision":"one"}});
+        let mut config = CliConfig::default();
+        config.claude.providers.insert("managed".into(), managed.clone());
+        config.claude.providers.insert("normal".into(), json!({"apiKey":"normal-secret"}));
+        write_config(&config).unwrap();
+        assert!(upsert_provider_inner(&store, "claude".into(), "managed".into(), json!({"apiKey":"new-secret"})).is_err());
+        assert!(delete_provider_inner(&store, "claude".into(), "managed".into()).is_err());
+        assert!(set_current_provider_inner(&store, "claude".into(), "managed".into()).is_err());
+        assert!(resolve_provider("claude", Some("managed")).is_err());
+        upsert_provider_inner(&store, "claude".into(), "normal".into(), json!({"apiKey":"allowed"})).unwrap();
+        let public = get_cli_config().unwrap();
+        assert!(!public.claude.providers["managed"].to_string().contains("secret"));
+        assert_eq!(public.claude.providers["managed"]["readOnly"], true);
+        assert_eq!(public.claude.providers["normal"]["apiKey"], "allowed");
+        assert_eq!(read_config().unwrap().claude.providers["managed"], managed);
+    }
 
     use crate::paths::HOME_ENV_LOCK;
 

@@ -1,7 +1,7 @@
 <!-- 由 src/features/plugins/skill/creator-skill-docs.ts 从源码生成，请勿手改。 -->
 <!-- 重新生成：pnpm plugin-skill:docs（测试 creator-skill-docs.test.ts 会断言本文件与源码一致）。 -->
 
-# CC GUI 插件 SDK 参考（SDK 0.3.12）
+# CC GUI 插件 SDK 参考（SDK 0.3.16）
 
 本文件由脚本从 `packages/plugin-sdk`（公共契约）与宿主运行时（权限门禁）派生，属于 `ccgui-plugin-creator` skill。
 字段、方法、权限以本文件为准：**文中没有的 API 一律视为不存在**，不要凭记忆猜测方法名或权限名。
@@ -54,6 +54,7 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 | `ctx.ui.registerSettingsSection` | `ui:settings-section` | — |
 | `ctx.ui.registerAddMenuRow` | `ui:add-menu` | — |
 | `ctx.ui.registerComposerSlot` | `ui:composer-status` | Extra control rendered beside a composer slot's builtin control (plan §4.2 #2). Permission `ui:composer-status` (shared with registerComposerStatusItem — both gate on the same composer-area grant; there is no separate `ui:composer` permission). |
+| `ctx.ui.registerModelEntry` | `ui:model-entry` | Replace the builtin model entry for these engines. Permission ui:model-entry; unregister/crash restores the builtin entry. |
 | `ctx.ui.registerPanelTab` | `ui:panel-tab` | Chat right-panel tab (plan §4.2 #4); renders with the active workspace path. The strip renders plugin tabs icon-only, so `icon` is the visible identity — without one the tab falls back to the plugin's artwork / letter tile, and the label stays a title/accessible name. |
 | `ctx.ui.registerStatusBarItem` | `ui:status-bar` | App status-bar chip (plan §4.2 #8). |
 | `ctx.ui.registerComposerStatusItem` | `ui:composer-status` | Composer status-row chip (permission `ui:composer-status`, 0.3.9): renders in the composer's status row (branch/context meter row), left group after the branch switcher. |
@@ -79,6 +80,9 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 | `ctx.workspaces.add` | `host:workspace`（`host:workspace:remote` 按需） | — |
 | `ctx.workspaces.list` | `workspace.metadata.read` | List registered workspaces without exposing UI-only metadata. |
 | `ctx.sessions.selectSession` | `host:session` | — |
+| `ctx.sessions.getContext` | `host:session` | Complete active target/selection; null when no composer target exists. |
+| `ctx.sessions.setSelection` | `host:session` | Atomically change this target only. Stale expectedVersion rejects. |
+| `ctx.sessions.onSelectionChanged` | `host:session` | — |
 | `ctx.sessions.refresh` | `host:session` | 请求宿主立即刷新会话目录（侧栏/标签页），0.3.7 起。 插件绕过宿主直写会话数据（如 sqlite custom_title、转录 title 行）后 调用——否则变更要等用户手动同步或下次常规刷新才可见。 |
 | `ctx.sessions.setEffort` | `host:session` | 修改已有会话的 effort 档位，0.3.10 起。直写宿主会话状态并持久化 （等价于用户在会话内切换档位，refreshSessions 不会回滚）。未知会话 或空 effort 以 rejection 失败——不会创建幽灵会话条目。 |
 | `ctx.sessions.registerSource` | `host:session` | — |
@@ -132,6 +136,8 @@ ui: {
   registerAddMenuRow(def: { key?: string; label(): string; description?(): string; icon?: ComponentType<{ className?: string }>; onSelect(): void }): Disposer;
   /** 权限：ui:composer-status */
   registerComposerSlot(def: { slot: ComposerSlotId; key?: string; component: ComponentType; order?: number }): Disposer;
+  /** 权限：ui:model-entry */
+  registerModelEntry(def: { key?: string; engineIds: string[]; component: ComponentType<ModelEntryProps>; order?: number }): Disposer;
   /** 权限：ui:panel-tab */
   registerPanelTab(def: { key?: string; label(): string; icon?: ComponentType<{ className?: string }>; component: ComponentType<{ workspacePath: string }>; order?: number }): Disposer;
   /** 权限：ui:status-bar */
@@ -239,6 +245,12 @@ sessions: {
   /** 权限：host:session */
   selectSession(engine: string, sessionId: string, workspacePath: string): Promise<void>;
   /** 权限：host:session */
+  getContext(): Promise<SessionExecutionContext | null>;
+  /** 权限：host:session */
+  setSelection(target: SessionExecutionTarget, selection: ExecutionSelectionInput, expectedVersion: number | null): Promise<SessionExecutionContext>;
+  /** 权限：host:session */
+  onSelectionChanged(callback: (context: SessionExecutionContext) => void): Disposer;
+  /** 权限：host:session */
   refresh(): Promise<void>;
   /** 权限：host:session */
   setEffort(engine: string, sessionId: string, workspacePath: string, effort: string): Promise<void>;
@@ -291,6 +303,7 @@ ctx.version: string;
 ctx.react: typeof React; // Shared host React instance: external bundles can't resolve bare imports, so they build host-tree components with `ctx.react.createElement`; 插件自己的子树用自带 React cre…
 ctx.documentStorage: DocumentStorage; // Isolated CAS text storage rooted under plugin-data/<plugin-id>.
 ctx.assets: PluginAssets;
+ctx.cli: CliCapabilities; // Typed execution contributions, grants and native configuration operations.
 ```
 
 ## 权限目录
@@ -300,6 +313,14 @@ ctx.assets: PluginAssets;
 | 权限 | 门禁的入口 |
 |---|---|
 | `storage` | `ctx.storage.get`、`ctx.storage.set`、`ctx.storage.delete` |
+| `plugin.storage` | `ctx.assets.documentUrl` |
+| `ui:model-entry` | `ctx.ui.registerModelEntry` |
+| `cli.read` | — |
+| `cli.contributions.write` | — |
+| `cli.runtime.sensitive` | — |
+| `network.targets.request` | — |
+| `cli.config.read` | — |
+| `cli.config.apply` | — |
 | `ui:settings-section` | `ctx.ui.registerSettingsSection`、`ctx.ui.openSettings` |
 | `ui:add-menu` | `ctx.ui.registerAddMenuRow` |
 | `ui:composer-status` | `ctx.ui.registerComposerSlot`、`ctx.ui.registerComposerStatusItem` |
@@ -321,7 +342,7 @@ ctx.assets: PluginAssets;
 | `events` | `ctx.events.on`、`ctx.events.emit` |
 | `network:none` | — |
 | `composer:draft` | `ctx.composer.setDraft` |
-| `host:session` | `ctx.sessions.selectSession`、`ctx.sessions.refresh`、`ctx.sessions.setEffort`、`ctx.sessions.registerSource` |
+| `host:session` | `ctx.sessions.selectSession`、`ctx.sessions.getContext`、`ctx.sessions.setSelection`、`ctx.sessions.onSelectionChanged`、`ctx.sessions.refresh`、`ctx.sessions.setEffort`、`ctx.sessions.registerSource` |
 | `host:workspace` | `ctx.workspaces.add` |
 | `host:workspace:remote` | `ctx.workspaces.add` |
 | `session.lifecycle.read` | `ctx.hooks.registerSessionHooks` |
@@ -329,7 +350,6 @@ ctx.assets: PluginAssets;
 | `runtime.switch.observe` | `ctx.hooks.registerRuntimeSwitchHooks` |
 | `prompt.contribute.internal` | `ctx.hooks.registerTurnHooks` |
 | `workspace.metadata.read` | `ctx.workspace.getMetadata`、`ctx.workspaces.list` |
-| `plugin.storage` | `ctx.documentStorage.getLocation`、`ctx.documentStorage.selectLocation`、`ctx.documentStorage.readText`、`ctx.documentStorage.writeTextAtomic`、`ctx.documentStorage.remove`、`ctx.documentStorage.list`、`ctx.assets.documentUrl` |
 | `assets:bundle` | `ctx.assets.bundleUrl` |
 | `assets:directory` | `ctx.assets.grantDirectory`、`ctx.assets.listDirectories`、`ctx.assets.revokeDirectory`、`ctx.assets.directoryUrl` |
 

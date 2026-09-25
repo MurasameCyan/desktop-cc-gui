@@ -134,7 +134,10 @@ fn stage(
         serde_json::to_vec(&settings).map_err(|_| "Cannot serialize Claude channel settings")?;
     std::fs::create_dir_all(directory)
         .map_err(|e| format!("create Claude staging directory: {e}"))?;
-    let path = directory.join(format!("channel-{}.json", uuid::Uuid::new_v4()));
+    let private = directory.join(uuid::Uuid::new_v4().to_string());
+    super::contribution::create_private_dir(&private)?;
+    built.cleanup_files.push(private.clone());
+    let path = private.join("settings.json");
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -145,7 +148,7 @@ fn stage(
     let mut file = options
         .open(&path)
         .map_err(|e| format!("create private Claude settings: {e}"))?;
-    built.cleanup_files.push(path.clone());
+    // The private directory (including partial writes) is already owned by built.
     file.write_all(&content)
         .map_err(|e| format!("write private Claude settings: {e}"))?;
     built.command.arg("--settings").arg(path);
@@ -222,8 +225,8 @@ mod tests {
                 "permissions": {"allow": ["Bash(rm:*)"]}}});
             let env = crate::provider_files::channel_env("claude", &provider).unwrap();
             stage(command, &provider, &env, Some("selected-model"), &directory).unwrap();
-            let path = &command.cleanup_files[0];
-            let settings: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let path = command.cleanup_files[0].join("settings.json");
+            let settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(
                 settings["env"]["ANTHROPIC_BASE_URL"],
                 format!("https://{name}.invalid")
@@ -282,7 +285,7 @@ mod tests {
         )
         .unwrap();
         let staged: Value =
-            serde_json::from_slice(&std::fs::read(&no_model.cleanup_files[0]).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(no_model.cleanup_files[0].join("settings.json")).unwrap()).unwrap();
         assert_eq!(staged["model"], "default");
         super::super::cleanup_staged_files(&no_model.cleanup_files);
 

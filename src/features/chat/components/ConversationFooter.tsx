@@ -233,10 +233,10 @@ function FooterStatusBar({
   const [refreshing, setRefreshing] = useState(false);
 
   const handleCompact = useCallback(async () => {
-    if (!active || streaming || compacting) return;
+    if (!active?.sessionId || streaming || compacting) return;
     setCompacting(true);
     try {
-      await compactContext();
+      await compactContext(sessionKey(active.engine, active.sessionId, active.workspacePath)).catch(() => {}); // Store exposes the failure on the owning conversation.
     } finally {
       setCompacting(false);
     }
@@ -287,7 +287,7 @@ function FooterStatusBar({
         onRefreshUsage={handleRefresh}
         compacting={compacting}
         refreshing={refreshing}
-        canCompact={Boolean(active) && !streaming && !compacting}
+        canCompact={Boolean(active?.sessionId) && !streaming && !compacting}
       />
     </div>
   );

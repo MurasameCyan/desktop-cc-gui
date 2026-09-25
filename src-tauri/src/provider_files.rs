@@ -93,6 +93,23 @@ fn targets(engine: &str) -> Vec<Target> {
     }
 }
 
+pub(crate) fn native_file_paths(engine: &str) -> Result<Vec<PathBuf>, String> {
+    let targets = targets(engine);
+    reject_unretired_legacy(&targets)?;
+    Ok(targets.into_iter().map(|target| target.path).collect())
+}
+
+fn reject_unretired_legacy(targets: &[Target]) -> Result<(), String> {
+    for target in targets {
+        if !target.backup.with_extension("migrated").exists()
+            && (target.backup.exists() || absent_marker(&target.backup).exists())
+        {
+            return Err("CLI_NATIVE_LEGACY_MANAGED: retire legacy materialization before importing; preview never migrates native files".into());
+        }
+    }
+    Ok(())
+}
+
 fn absent_marker(backup: &Path) -> PathBuf {
     backup.with_extension("absent")
 }
@@ -268,6 +285,7 @@ fn file_format(path: &Path) -> &'static str {
 /// stores edited by their own sections).
 #[tauri::command]
 pub fn official_config_read(engine: String) -> Result<Vec<OfficialConfigFile>, String> {
+    let _native_guard = crate::cli::native_config::raw_access_lock(&engine)?;
     let config = crate::config::read_config()?;
     let section = config
         .section(&engine)
@@ -300,6 +318,7 @@ pub fn official_config_write(
     engine: String,
     files: Vec<OfficialConfigDraft>,
 ) -> Result<(), String> {
+    let _native_guard = crate::cli::native_config::raw_access_lock(&engine)?;
     let _guard = store.0.lock().map_err(|e| e.to_string())?;
     let config = crate::config::read_config()?;
     let section = config
@@ -900,6 +919,20 @@ fn upsert_str(table: &mut Item, key: &str, val: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_preview_refuses_unretired_legacy_without_touching_files() {
+        let dir = std::env::temp_dir().join(format!("ccgui-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = Target { path: dir.join("live.json"), backup: dir.join("backup.json") };
+        std::fs::write(&target.path, "managed").unwrap();
+        std::fs::write(&target.backup, "original").unwrap();
+        assert!(reject_unretired_legacy(&[target]).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("live.json")).unwrap(), "managed");
+        assert_eq!(std::fs::read_to_string(dir.join("backup.json")).unwrap(), "original");
+        assert!(!dir.join("backup.migrated").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn legacy_section(provider: Value) -> crate::config::ProviderSection {

@@ -30,3 +30,5 @@ export * from "./context";
  * 的编译单元（含宿主 build 的 tsc 阶段）都把守卫拉进编译图——运行时零产物。
  */
 import "./contract-check";
+export * from "./cli";
+export * from "./document-storage";

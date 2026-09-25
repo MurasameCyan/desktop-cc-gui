@@ -46,12 +46,6 @@ fn ser<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, String> {
     r.and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EngineIdArgs {
-    engine: String,
-    id: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +63,7 @@ struct PluginReadArtworkArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PluginIdArgs {
+struct PluginMarketIdArgs {
     id: String,
 }
 
@@ -100,29 +94,32 @@ struct PluginAssetRevokeArgs {
     grant_id: String,
 }
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpsertProviderArgs {
-    engine: String,
-    id: String,
-    json: Value,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginIdArgs {
+    plugin_id: String,
 }
+
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReorderProvidersArgs {
-    engine: String,
-    ids: Vec<String>,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PluginSourceArgs {
+    plugin_id: String,
+    source_id: String,
 }
+
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetEngineEnabledArgs {
-    engine: String,
-    enabled: bool,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionTargetArgs {
+    target: crate::cli::SessionExecutionTarget,
 }
+
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HashArgs {
-    hash: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionSelectionArgs {
+    target: crate::cli::SessionExecutionTarget,
+    selection: crate::cli::ExecutionSelectionInput,
+    expected_version: Option<u64>,
 }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportCcSwitchFromPathArgs {
@@ -142,23 +139,18 @@ struct UpdateSettingsArgs {
     settings: crate::settings::AppSettings,
 }
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SendMessageArgs {
-    run_id: Option<String>,
-    engine: String,
-    workspace_path: String,
-    session_id: Option<String>,
-    prompt: String,
-    #[serde(default)]
-    prompt_contributions: Vec<crate::engine::PromptContribution>,
-    image_paths: Option<Vec<String>>,
-    model: Option<String>,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionEffortArgs {
+    target: crate::cli::SessionExecutionTarget,
+    #[serde(deserialize_with = "Option::deserialize")]
     effort: Option<String>,
-    permission: Option<String>,
-    provider_id: Option<String>,
-    /// Desktop-only feature; default keeps older web clients compatible.
-    #[serde(default)]
-    computer_use: Option<bool>,
+    expected_version: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SendMessageArgs {
+    request: crate::engine::SendMessageRequest,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,12 +171,6 @@ struct AnswerQuestionArgs {
 struct EngineArgs {
     engine: String,
     workspace: Option<String>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OfficialConfigWriteArgs {
-    engine: String,
-    files: Vec<crate::provider_files::OfficialConfigDraft>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,27 +252,6 @@ struct RenameSessionArgs {
     engine: String,
     session_id: String,
     title: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RememberModelArgs {
-    engine: String,
-    session_id: String,
-    model: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RememberEffortArgs {
-    engine: String,
-    session_id: String,
-    effort: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RememberProviderArgs {
-    engine: String,
-    session_id: String,
-    provider_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -518,113 +483,50 @@ pub(super) async fn dispatch(
     raw: Value,
 ) -> Result<Value, String> {
     match cmd {
-        // config
-        "get_cli_config" => ser(crate::config::get_cli_config()),
-        "upsert_provider" => {
-            let a: UpsertProviderArgs = parse_args(&raw)?;
-            ser(crate::config::upsert_provider(
-                app.state(),
-                a.engine,
-                a.id,
-                a.json,
-            ))
+        // Web gets display metadata, never raw native documents or credentials.
+        "get_cli_config" => ser(crate::config::get_cli_config_for_web()),
+        "upsert_provider" | "delete_provider" | "set_current_provider"
+        | "provider_file_paths" | "official_config_read" | "official_config_write"
+        | "reorder_providers" | "set_engine_enabled" | "check_cc_switch"
+        | "dismiss_cc_switch" | "import_cc_switch" | "import_cc_switch_from_path"
+        | "fetch_provider_models" | "update_app_settings" => {
+            Err("This operation requires the desktop client".into())
         }
-        "delete_provider" => {
-            let a: EngineIdArgs = parse_args(&raw)?;
-            ser(crate::config::delete_provider(app.state(), a.engine, a.id))
+        "remember_session_model" | "remember_session_effort" | "remember_session_provider" => {
+            Err("CCGUI_CLIENT_UPGRADE_REQUIRED: refresh the client to use versioned session selection".into())
         }
-        "set_current_provider" => {
-            let a: EngineIdArgs = parse_args(&raw)?;
-            ser(crate::config::set_current_provider(
-                app.state(),
-                a.engine,
-                a.id,
-            ))
+        "cli_list_sources" => ser(crate::cli::cli_list_sources(app.state())),
+        "plugin_cli_list_sources" => {
+            let a: PluginIdArgs = parse_args(&raw)?;
+            ser(crate::cli::plugin_cli_list_sources(app.state(), a.plugin_id))
         }
-        "provider_file_paths" => {
-            let a: EngineArgs = parse_args(&raw)?;
-            ser(Ok::<_, String>(crate::provider_files::provider_file_paths(
-                a.engine,
-            )))
+        "plugin_cli_get_source" => {
+            let a: PluginSourceArgs = parse_args(&raw)?;
+            ser(crate::cli::plugin_cli_get_source(app.state(), a.plugin_id, a.source_id))
         }
-        "official_config_read" => {
-            let a: EngineArgs = parse_args(&raw)?;
-            ser(crate::provider_files::official_config_read(a.engine))
+        "get_session_selection" => {
+            let a: SessionTargetArgs = parse_args(&raw)?;
+            ser(crate::session_selection::get_session_selection(app.state(), a.target))
         }
-        "official_config_write" => {
-            let a: OfficialConfigWriteArgs = parse_args(&raw)?;
-            ser(crate::provider_files::official_config_write(
-                app.state(),
-                a.engine,
-                a.files,
-            ))
+        "set_session_selection" => {
+            let a: SessionSelectionArgs = parse_args(&raw)?;
+            ser(crate::session_selection::set_session_selection(app.state(), a.target, a.selection, a.expected_version).await)
         }
-        "reorder_providers" => {
-            let a: ReorderProvidersArgs = parse_args(&raw)?;
-            ser(crate::config::reorder_providers(
-                app.state(),
-                a.engine,
-                a.ids,
-            ))
-        }
-        "set_engine_enabled" => {
-            let a: SetEngineEnabledArgs = parse_args(&raw)?;
-            ser(crate::config::set_engine_enabled(
-                app.state(),
-                a.engine,
-                a.enabled,
-            ))
-        }
-        // cc-switch interop
-        "check_cc_switch" => ser(crate::cc_switch::check_cc_switch().await),
-        "dismiss_cc_switch" => {
-            let a: HashArgs = parse_args(&raw)?;
-            ser(crate::cc_switch::dismiss_cc_switch(a.hash))
-        }
-        "import_cc_switch" => {
-            let a: EngineArgs = parse_args(&raw)?;
-            ser(crate::cc_switch::import_cc_switch(app.state(), a.engine))
-        }
-        "import_cc_switch_from_path" => {
-            let a: ImportCcSwitchFromPathArgs = parse_args(&raw)?;
-            ser(crate::cc_switch::import_cc_switch_from_path(
-                app.state(),
-                a.path,
-                a.engine,
-            ))
-        }
-        "fetch_provider_models" => {
-            let a: FetchProviderModelsArgs = parse_args(&raw)?;
-            ser(crate::provider_models::fetch_provider_models(a.base_url, a.api_key).await)
+        "set_session_effort" => {
+            let a: SessionEffortArgs = parse_args(&raw)?;
+            ser(crate::session_selection::set_session_effort(app.state(), a.target, a.effort, a.expected_version))
         }
         // settings
         "get_app_settings" => ser(crate::settings::get_app_settings()),
-        "update_app_settings" => {
-            let a: UpdateSettingsArgs = parse_args(&raw)?;
-            ser(crate::settings::update_app_settings(
-                app.clone(),
-                a.settings,
-            ))
-        }
         // engine
         "send_message" => {
-            let a: SendMessageArgs = parse_args(&raw)?;
-            ser(crate::engine::send_message(
-                app.state(),
-                a.engine,
-                a.workspace_path,
-                a.session_id,
-                a.prompt,
-                a.prompt_contributions,
-                a.image_paths,
-                a.model,
-                a.effort,
-                a.permission,
-                a.provider_id,
-                a.run_id,
-                a.computer_use,
-            )
-            .await)
+            let a: SendMessageArgs = parse_args(&raw).map_err(|_| {
+                "CCGUI_CLIENT_UPGRADE_REQUIRED: refresh the client to use versioned session selection".to_string()
+            })?;
+            if a.request.computer_use == Some(true) {
+                return Err("Computer use requires the desktop client".into());
+            }
+            ser(crate::engine::send_message(app.state(), a.request).await)
         }
         "interrupt_session" => {
             let a: SessionIdArgs = parse_args(&raw)?;
@@ -745,15 +647,6 @@ pub(super) async fn dispatch(
                 a.title,
             ))
         }
-        "remember_session_model" => {
-            let a: RememberModelArgs = parse_args(&raw)?;
-            ser(crate::history::reader::remember_session_model(
-                app.state(),
-                a.engine,
-                a.session_id,
-                a.model,
-            ))
-        }
         "add_workspace" => {
             let a: PathArgs = parse_args(&raw)?;
             ser(crate::history::reader::add_workspace(
@@ -770,24 +663,6 @@ pub(super) async fn dispatch(
                 crate::plugin_caps::plugin_add_workspace(app.state(), a.plugin_id, a.path, a.meta)
                     .await,
             )
-        }
-        "remember_session_effort" => {
-            let a: RememberEffortArgs = parse_args(&raw)?;
-            ser(crate::history::reader::remember_session_effort(
-                app.state(),
-                a.engine,
-                a.session_id,
-                a.effort,
-            ))
-        }
-        "remember_session_provider" => {
-            let a: RememberProviderArgs = parse_args(&raw)?;
-            ser(crate::history::reader::remember_session_provider(
-                app.state(),
-                a.engine,
-                a.session_id,
-                a.provider_id,
-            ))
         }
         "rescan_sessions" => {
             crate::history::reader::rescan_sessions(app.state());
@@ -1140,7 +1015,7 @@ pub(super) async fn dispatch(
         // the market page; plugin_install_from_marketplace stays desktop-only.
         "plugin_fetch_index" => ser(crate::plugins::market::plugin_fetch_index(false).await),
         "plugin_fetch_market_readme" => {
-            let a: PluginIdArgs = parse_args(&raw)?;
+            let a: PluginMarketIdArgs = parse_args(&raw)?;
             ser(crate::plugins::market::plugin_fetch_market_readme(a.id).await)
         }
         "plugin_check_updates" => ser(crate::plugins::market::plugin_check_updates().await),

@@ -2,6 +2,7 @@
 import { invoke, listen } from "./transport";
 import type { NativePerformanceDiagnostics } from "./performance-types";
 import { withGrantRetry } from "./grant";
+import type { ExecutionSelectionInput, PromptContribution, PublishedSource, SelectionSendRequest, SessionExecutionContext, SessionExecutionSelection, SessionExecutionTarget } from "@ccgui/plugin-sdk";
 
 // ==================== Shared types (mirror Rust serde camelCase) ====================
 
@@ -19,20 +20,22 @@ export interface SessionMeta {
   messageCount: number;
   pinned: boolean;
   customTitle: string | null;
-  /** Model this app last sent for the session ("provider/model"), absent when
-   * it never sent one — see ipc.rememberSessionModel. */
+  /** Legacy request retained only until a complete selection is confirmed. */
   model?: string | null;
-  /** Reasoning effort this app last sent for the session, absent when it never
-   *  recorded one — see ipc.rememberSessionEffort. */
+  /** Legacy effort; absence never authorizes a global-default fallback. */
   effort?: string | null;
   /** No local transcript (plugin session source, e.g. a WSL distro CLI):
    *  history replay routes through load_remote_session_page instead. */
   remote?: boolean;
   /** Absolute path of the transcript inside the distro (remote rows only). */
   remotePath?: string;
-  /** In-app channel this session last ran. Spawn injects that channel's env;
-   * native CLI files stay official. Absent until a send remembers one. */
+  /** Legacy host channel, separate from plugin-owned source identity. */
   provider?: string | null;
+  /** Backend-authoritative binding; runtime observations never overwrite it. */
+  executionSelection?: SessionExecutionSelection | null;
+  /** CLI-reported observations; they do not change the requested selection. */
+  observedModel?: string | null;
+  observedEffort?: string | null;
 }
 
 export type TodoStatus = "pending" | "active" | "complete" | "blocked" | "dropped";
@@ -286,6 +289,18 @@ export interface EngineCatalog {
    * not merge them — only `models` is selectable.
    */
   remote?: boolean;
+}
+
+export interface SendMessageRequest extends SelectionSendRequest {
+  runId?: string;
+  prompt: string;
+  /** Internal, user-invisible instructions collected from beforeTurn hooks.
+   *  The backend folds them into the effective CLI prompt; the transcript row
+   *  keeps only the user's own text. */
+  promptContributions?: PromptContribution[];
+  imagePaths?: string[] | null;
+  permission?: string | null;
+  computerUse?: boolean | null;
 }
 
 export interface SendResult {
@@ -1097,29 +1112,14 @@ export const ipc = {
   /** 立即重启应用（标题栏样式等需重启生效的设置项用）。 */
   restartApp: () => invoke<void>("restart_app"),
   // engine
-  sendMessage: (args: {
-    /** Route events before the send invocation resolves (older callers may omit). */
-    runId?: string;
-    engine: string;
-    workspacePath: string;
-    sessionId: string | null;
-    prompt: string;
-    promptContributions: Array<{
-      id: string;
-      content: string;
-      placement: "system-tail" | "request-tail";
-      visibility: "internal";
-      persistence: "turn" | "session";
-    }>;
-    imagePaths: string[] | null;
-    model: string | null;
-    effort: string | null;
-    permission: string | null;
-    providerId: string | null;
-    /** 电脑操控: hand the agent the app's screenshot/input driver for this
-     *  turn (see features/chat/computer-use.ts). */
-    computerUse?: boolean;
-  }) => invoke<SendResult>("send_message", args),
+  sendMessage: (request: SendMessageRequest) => invoke<SendResult>("send_message", { request }),
+  getSessionSelection: (target: SessionExecutionTarget) =>
+    invoke<SessionExecutionContext>("get_session_selection", { target }),
+  setSessionSelection: (target: SessionExecutionTarget, selection: ExecutionSelectionInput, expectedVersion: number | null) =>
+    invoke<SessionExecutionContext>("set_session_selection", { target, selection, expectedVersion }),
+  setSessionEffort: (target: SessionExecutionTarget, effort: string | null, expectedVersion: number | null) =>
+    invoke<SessionExecutionContext>("set_session_effort", { target, effort, expectedVersion }),
+  listCliSources: () => invoke<PublishedSource[]>("cli_list_sources"),
   interruptSession: (sessionId: string) =>
     invoke<boolean>("interrupt_session", { sessionId }),
   // 电脑操控 (computer use)
@@ -1235,19 +1235,6 @@ export const ipc = {
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
     invoke<void>("rename_session", { engine, sessionId, title }),
-  /** Remember the model id this session ran ("provider/model", as the picker
-   * spells it) — the engine's own transcript keeps only the bare name, so
-   * this is what survives a restart or another client. */
-  rememberSessionModel: (engine: string, sessionId: string, model: string) =>
-    invoke<void>("remember_session_model", { engine, sessionId, model }),
-  /** Remember the reasoning level a session ran, so reopening it — here, in
-   *  another window, or on the phone — keeps that level. */
-  rememberSessionEffort: (engine: string, sessionId: string, effort: string) =>
-    invoke<void>("remember_session_effort", { engine, sessionId, effort }),
-  /** Remember the in-app channel a session ran, so reopening it keeps that
-   *  channel without rewriting the CLI's own config file. */
-  rememberSessionProvider: (engine: string, sessionId: string, providerId: string) =>
-    invoke<void>("remember_session_provider", { engine, sessionId, providerId }),
   rescanSessions: () => invoke<void>("rescan_sessions"),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   addWorkspace: (path: string, meta?: Record<string, unknown>) =>

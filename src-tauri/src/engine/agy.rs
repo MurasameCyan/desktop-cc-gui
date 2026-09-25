@@ -1,5 +1,5 @@
 use super::{
-    command_for_binary, parse_tool_args_value, safe_prompt_arg, tool_call_message,
+    parse_tool_args_value, safe_prompt_arg, tool_call_message,
     tool_result_patch, BuiltCommand, Engine, EngineEvent, SendRequest,
 };
 use serde_json::Value;
@@ -55,7 +55,7 @@ impl Engine for AgyEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("--output-format");
         cmd.arg("stream-json");
         // Print mode defaults to 5m; agent turns with tools routinely exceed that.
@@ -274,6 +274,8 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         }
     }

@@ -4,6 +4,7 @@
 //! output arrives as `terminal://output` batches, close kills the session.
 
 use ccgui_next_lib::config::ConfigStore;
+use ccgui_next_lib::cli::CliState;
 use ccgui_next_lib::db::Db;
 use ccgui_next_lib::engine::ProcessRegistry;
 use ccgui_next_lib::event_sink::EventSink;
@@ -35,8 +36,12 @@ fn build_app(home: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
+    let db = Arc::new(Db::open_at(&home.join("app.db")).unwrap());
+    let emitters = ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone()));
+    let cli = Arc::new(CliState::new(db.clone(), emitters.clone()).unwrap());
     app.manage(AppState {
-        db: Arc::new(Db::open_at(&home.join("app.db")).unwrap()),
+        db,
+        cli,
         sink: EventSink::new(Arc::new(app.handle().clone())),
         terminal_sink: EventSink::with_name(Arc::new(app.handle().clone()), TERMINAL_OUTPUT_EVENT),
         plugin_sink: EventSink::with_name(
@@ -49,7 +54,7 @@ fn build_app(home: &std::path::Path) -> tauri::App<tauri::test::MockRuntime> {
         ),
         terminals: terminal::TerminalRegistry::default(),
         processes: Arc::new(ProcessRegistry::default()),
-        emitters: ccgui_next_lib::event_sink::BroadcastEmit::new(Arc::new(app.handle().clone())),
+        emitters,
         web: ccgui_next_lib::web::WebAccessState::default(),
         relay: ccgui_next_lib::relay::RelayState::default(),
         dsh_host: Arc::new(ccgui_next_lib::dsh_host::DshHostState::default()),

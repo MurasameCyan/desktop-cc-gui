@@ -8,15 +8,16 @@ import { EMPTY_SESSION } from "./store/stream";
  *  backend does: through the store's real wiring, queue drain included. */
 let deliver: ((events: EngineEventPayload[]) => void) | null = null;
 
-vi.mock("@/lib/ipc", () => ({
+// IPC is hoisted ahead of store imports; load the fixture inside its factory.
+vi.mock("@/lib/ipc", async () => ({
   ipc: {
+    ...(await import("./store/selection-test-backend")).createSelectionBackend(),
     listWorkspaces: vi.fn(async () => []),
     listSessions: vi.fn(async () => []),
     listArchivedSessions: vi.fn(async () => []),
     listEngines: vi.fn(async () => []),
     sendMessage: vi.fn(async () => ({ runId: `queued-run-${++runCounter}`, sessionId: null })),
     interruptSession: vi.fn(async () => true),
-    rememberSessionModel: vi.fn(async () => {}),
     loadSessionPage: vi.fn(async () => ({ messages: [], nextBefore: null })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
@@ -42,10 +43,7 @@ const TAB = { engine: "claude", sessionId: "s-1", workspacePath: WS };
 let runCounter = 0;
 let runId: string;
 
-/** Settle the turn and let the drain run. sendPrompt awaits its before-turn
- *  hook collection (microtask-only when no plugin registered a hook) before
- *  reaching `ipc.sendMessage`, so drain the microtask queue instead of taking
- *  a single tick — no wall-clock wait is involved. */
+/** Settle the turn, then wait for selection preflight and before-turn hooks. */
 async function settle(kind: "done" | "error", interrupted = false) {
   useChatStore.setState((s) => ({
     bySession: {
@@ -63,13 +61,7 @@ async function settle(kind: "done" | "error", interrupted = false) {
       data: kind === "done" ? { usage: null } : "400 upstream rejected the request",
     },
   ]);
-  for (let i = 0; i < 8; i += 1) await Promise.resolve();
-}
-/** Let a fire-and-forget drain reach `ipc.sendMessage`: `sendQueuedNow`
- *  starts the drain without awaiting it, and sendPrompt awaits its
- *  before-turn hook collection first. Microtasks only — no wall-clock wait. */
-async function flushDrain() {
-  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  if (!interrupted) await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
 }
 
 
@@ -114,6 +106,19 @@ describe("queued messages after a turn settles", () => {
     expect(queueOf()).toHaveLength(0);
   });
 
+  it("drains a background conversation using its newest selection rather than the foreground", async () => {
+    const other = { ...TAB, sessionId: "foreground" };
+    useChatStore.setState({ active: other, openTabs: [TAB, other] });
+    vi.mocked(ipc.getSessionSelection).mockImplementationOnce(async (target) => ({ target, selection: {
+      version: 19, effort: "high", modelSelection: { source: "contribution", engineId: "claude", sourceId: "plugin:provider:source", profileKey: "profile-a", modelKey: "model-a", credential: { credentialId: "key-a", credentialRevision: 3, name: "Key A" } },
+    } }));
+    await settle("done");
+    expect(ipc.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ target: expect.objectContaining({ sessionId: "s-1" }), selectionVersion: 19 }));
+    expect(useChatStore.getState().active).toBe(other);
+    expect(useChatStore.getState().bySession[KEY].executionSelection?.modelSelection).toMatchObject({ credential: { credentialId: "key-a", credentialRevision: 3 } });
+    expect(useChatStore.getState().bySession["claude/foreground"]).toBeUndefined();
+  });
+
   /** The reported bug: a turn that dies with an engine error is still over, so
    *  the messages typed behind it must go out instead of parking forever. */
   it("sends the oldest queued message when the turn fails", async () => {
@@ -150,7 +155,7 @@ describe("queued messages after a turn settles", () => {
     }));
 
     await useChatStore.getState().sendQueuedNow("q-2");
-    await flushDrain();
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
 
     expect(ipc.interruptSession).toHaveBeenCalled();
     await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
@@ -165,7 +170,7 @@ describe("queued messages after a turn settles", () => {
     }));
 
     await useChatStore.getState().sendQueuedNow("q-1");
-    await flushDrain();
+    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalled());
 
     expect(ipc.interruptSession).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledWith(
@@ -173,9 +178,7 @@ describe("queued messages after a turn settles", () => {
     ));
   });
 
-  /** A send that never becomes a turn reports no engine event, so the queue
-   *  has to keep moving on its own or the rest waits forever. */
-  it("keeps draining when the send itself fails", async () => {
+  it("parks and preserves queued messages when the send itself fails", async () => {
     vi.mocked(ipc.sendMessage).mockRejectedValueOnce(new Error("spawn failed"));
     useChatStore.setState((s) => ({
       bySession: {
@@ -192,11 +195,9 @@ describe("queued messages after a turn settles", () => {
 
     await settle("error");
 
-    await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(2));
-    expect(ipc.sendMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ prompt: "再看一遍" }),
-    );
-    expect(queueOf()).toHaveLength(0);
+    await vi.waitFor(() => expect(queueOf().map((item) => item.text)).toEqual(["继续", "再看一遍"]));
+    expect(ipc.sendMessage).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().bySession[KEY].error).toContain("spawn failed");
   });
 });
 

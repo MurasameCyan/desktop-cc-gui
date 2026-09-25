@@ -1,5 +1,6 @@
 import { readStoredJson, writeStored } from "@/lib/storage";
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
+import { newId } from "@/lib/id";
 
 /**
  * Tab/active-session persistence (localStorage) plus the session-key helpers
@@ -12,6 +13,8 @@ export interface ActiveSession {
   /** null => not yet created (first message not sent) */
   sessionId: string | null;
   workspacePath: string;
+  /** Stable backend identity before the CLI assigns a native session id. */
+  pendingId?: string;
   /** Per-tab model override; undefined => follow the engine's global default. */
   model?: string;
   /** Per-tab effort override; undefined => follow the engine's global default. */
@@ -81,9 +84,14 @@ export function persistTabs(
   openTabs: ActiveSession[],
   active: ActiveSession | null,
 ) {
-  writeStored(OPEN_TABS_KEY, JSON.stringify(openTabs));
-  if (active) writeStored(ACTIVE_SESSION_KEY, JSON.stringify(active));
+  writeStored(OPEN_TABS_KEY, JSON.stringify(openTabs.map(persistedTab)));
+  if (active) writeStored(ACTIVE_SESSION_KEY, JSON.stringify(persistedTab(active)));
   else localStorage.removeItem(ACTIVE_SESSION_KEY);
+}
+
+function persistedTab(tab: ActiveSession): ActiveSession {
+  return { engine: tab.engine, sessionId: tab.sessionId, workspacePath: tab.workspacePath,
+    ...(tab.sessionId === null ? { pendingId: tab.pendingId ?? newId() } : {}) };
 }
 
 /** Read a persisted JSON value, migrating the pre-versioned key on first read. */
@@ -119,7 +127,7 @@ export function readPersistedTabs(): ActiveSession[] {
   return dedupeTabs(
     readPersistedValue(OPEN_TABS_KEY, LEGACY_OPEN_TABS_KEY, (raw) =>
       Array.isArray(raw) ? raw.filter(isActiveSession) : null,
-    ) ?? [],
+    )?.map(persistedTab) ?? [],
   );
 }
 
@@ -127,6 +135,6 @@ export function readPersistedActive(): ActiveSession | null {
   return readPersistedValue(
     ACTIVE_SESSION_KEY,
     LEGACY_ACTIVE_SESSION_KEY,
-    (raw) => (isActiveSession(raw) ? raw : null),
+    (raw) => (isActiveSession(raw) ? persistedTab(raw) : null),
   );
 }

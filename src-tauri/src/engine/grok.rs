@@ -1,5 +1,5 @@
 use super::{
-    command_for_binary, images, safe_prompt_arg, BuiltCommand, Engine, EngineEvent, SendRequest,
+    images, safe_prompt_arg, BuiltCommand, Engine, EngineEvent, SendRequest,
     Transport,
 };
 use serde_json::Value;
@@ -20,6 +20,48 @@ pub(super) fn isolate_channel(
         &super::engine_home(Some("GROK_HOME"), ".grok"),
         &crate::paths::app_home().join("grok-staging"),
     )
+}
+
+pub(super) fn apply_profile(built: &mut BuiltCommand, req: &SendRequest, resolved: &crate::cli::ResolvedContribution) -> Result<(), String> {
+    use crate::cli::types::{CliProtocol, ProfileAuth};
+    // Preserve native hooks/skills/history but replace the entire selected
+    // model routing table, rather than inheriting native provider/auth fields.
+    isolate_channel(built, &serde_json::json!({"baseUrl":resolved.profile.base_url,"model":req.model}), req)?;
+    let directory = built.cleanup_files.last().ok_or("Missing private Grok directory")?;
+    let path = directory.join("config.toml");
+    let mut doc: toml::Table = toml::from_str(&std::fs::read_to_string(&path).map_err(|_| "Cannot read staged Grok config")?).map_err(|_| "Invalid staged Grok config")?;
+    let model_id = resolved.choice.selector.model_id();
+    let mut model = toml::Table::new();
+    model.insert("model".into(), toml::Value::String(model_id.into()));
+    model.insert("base_url".into(), toml::Value::String(resolved.profile.base_url.clone()));
+    model.insert("api_backend".into(), toml::Value::String(match resolved.profile.protocol {
+        CliProtocol::AnthropicMessages => "messages", CliProtocol::OpenaiResponses => "responses", CliProtocol::OpenaiChat => "chat_completions", CliProtocol::Gemini => return Err("Grok does not support Gemini".into()),
+    }.into()));
+    let material = resolved.material.as_ref().ok_or("Missing Grok runtime material")?;
+    built.command.env(super::contribution::KEY_ENV, material.value());
+    let mut headers = toml::Table::new();
+    if resolved.profile.auth == ProfileAuth::Bearer {
+        model.insert("env_key".into(), toml::Value::String(super::contribution::KEY_ENV.into()));
+    } else {
+        model.insert("env_key".into(), toml::Value::String("CCGUI_GROK_NO_BEARER".into()));
+        built.command.env_remove("CCGUI_GROK_NO_BEARER");
+        headers.insert("x-api-key".into(),toml::Value::String(super::contribution::KEY_ENV.into()));
+    }
+    if let Some(source) = resolved.profile.options.as_ref().and_then(|o|o.headers.as_ref()) {
+        for (index,(header,value)) in source.iter().enumerate() {
+            let key = format!("CCGUI_PROVIDER_HEADER_{index}"); built.command.env(&key,value);
+            headers.insert(header.clone(),toml::Value::String(key));
+        }
+    }
+    model.insert("env_http_headers".into(),toml::Value::Table(headers));
+    for (field,value) in [("context_window",resolved.choice.token_policy.context_window_tokens),("max_completion_tokens",resolved.choice.token_policy.max_output_tokens)] {
+        if let Some(value) = value { model.insert(field.into(),toml::Value::Integer(value.try_into().map_err(|_| "Grok token limit too large")?)); }
+    }
+    doc.insert("models".into(),toml::Value::Table([("default".into(),toml::Value::String(model_id.into()))].into_iter().collect()));
+    doc.insert("model".into(),toml::Value::Table([(model_id.into(),toml::Value::Table(model))].into_iter().collect()));
+    doc.remove("model_providers");
+    match std::fs::remove_file(directory.join("auth.json")) { Ok(()) => {}, Err(error) if error.kind()==std::io::ErrorKind::NotFound => {}, Err(_) => return Err("Cannot isolate Grok native authentication".into()) }
+    crate::plugins::storage::private_write(&path,toml::to_string(&doc).map_err(|_| "Cannot render Grok profile")?.as_bytes())
 }
 
 fn stage_channel(
@@ -74,16 +116,7 @@ fn stage_channel(
     let content = toml::to_string(&doc).map_err(|_| "Cannot serialize Grok channel config")?;
     std::fs::create_dir_all(directory).map_err(|e| format!("create grok staging dir: {e}"))?;
     let directory = directory.join(format!("grok-channel-{}", uuid::Uuid::new_v4()));
-    #[allow(unused_mut)]
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(&directory)
-        .map_err(|e| format!("create private grok home: {e}"))?;
+    super::contribution::create_private_dir(&directory)?;
     built.cleanup_files.push(directory.clone());
     // Copy configuration inputs, including managed policy and user extensions.
     // Never link these: CLI writes must stay private. Exclude runtime caches.
@@ -490,7 +523,7 @@ impl Engine for GrokEngine {
     /// auto-approval intent as the headless launch. The ACP session id comes
     /// from the CLI (`session/new`), so there is nothing to preassign.
     fn host_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("agent");
         // Same reason as the headless launch: an approval prompt nobody can
         // answer must never block the turn.
@@ -534,7 +567,7 @@ impl Engine for GrokEngine {
     }
 
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
-        let mut cmd = command_for_binary(bin);
+        let mut cmd = super::command_for_request(req, bin);
         cmd.arg("--output-format");
         cmd.arg("streaming-json");
         // The only verified headless behavior: without --always-approve the CLI
@@ -668,6 +701,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = GrokEngine.build_command(&req, "grok").unwrap();

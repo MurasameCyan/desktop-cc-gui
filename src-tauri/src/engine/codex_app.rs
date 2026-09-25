@@ -1208,12 +1208,10 @@ mod tests {
                 questions: Arc::new(Mutex::new(HashMap::new())),
             },
         );
-        let core = TurnCore {
-            sink: EventSink::new(emitter.clone()),
-            registry: Arc::clone(&registry),
-            engine_id: "codex".to_string(),
-            run_id: "test-run".to_string(),
-        };
+        let core = TurnCore { execution: None, sink: EventSink::new(emitter.clone()),
+        registry: Arc::clone(&registry),
+        engine_id: "codex".to_string(),
+        run_id: "test-run".to_string(), };
         (core, registry, emitter)
     }
 
@@ -1266,6 +1264,7 @@ mod tests {
             session_id: None,
             workspace: workspace.clone(),
             prompt: "not sent".into(),
+            prompt_contributions: Vec::new(),
             images: vec![],
             model: Some("probe".into()),
             effort: None,
@@ -1274,6 +1273,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         assert!(crate::engine::codex::CodexEngine
@@ -1348,6 +1349,7 @@ mod tests {
             session_id: None,
             workspace: directory.clone(),
             prompt: "hi".into(),
+            prompt_contributions: Vec::new(),
             images: vec![],
             model: None,
             effort: None,
@@ -1356,6 +1358,8 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            execution: None,
+            selection: None,
             allowed_tools: None,
         };
         let built = BuiltCommand {
