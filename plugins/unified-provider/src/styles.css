@@ -73,3 +73,42 @@
 @media (forced-colors: active) {
   .up-provider-row[aria-pressed="true"], .up-choice[aria-pressed="true"], .up-engine-row[aria-pressed="true"] { outline: 2px solid Highlight; }
 }
+
+/* 列表页：协议分栏 + 每行一个端点 */
+.up-page-title { font-size: 24px; font-weight: 700; margin: 0 0 20px; }
+.up-listbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.up-proto-tabs { display: flex; gap: 4px; flex-wrap: wrap; padding: 4px; border-radius: 999px; background: var(--color-background-secondary-default, #f5f6f8); }
+.up-proto-tab { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; border: 1px solid transparent; background: transparent; font: inherit; color: var(--color-text-secondary, #586574); }
+.up-proto-tab[aria-pressed="true"] { background: var(--color-background-primary-default, #fff); border-color: var(--color-separator-border, #d7dce2); color: var(--color-text-primary, #20252c); font-weight: 600; }
+.up-proto-tab:hover:not(:disabled) { color: var(--color-text-primary, #20252c); }
+.up-count { font-variant-numeric: tabular-nums; opacity: .7; }
+.up-mark { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; background: var(--color-background-tertiary-default, #e9edf2); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+.up-rows { display: grid; gap: 10px; }
+.up-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--color-separator-border, #d7dce2); border-radius: var(--radius-2lg, 12px); background: var(--color-background-primary-default, #fff); }
+.up-row-main { display: grid; gap: 2px; min-width: 0; }
+.up-row-name { font-weight: 600; overflow-wrap: anywhere; }
+.up-row-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.up-order { display: grid; gap: 2px; }
+
+/* 编辑弹窗 */
+.up-scrim { position: fixed; inset: 0; z-index: 40; display: grid; place-items: start center; overflow: auto; padding: 24px; background: #00000073; }
+.up-modal { width: min(1180px, 100%); padding: 20px 24px 24px; border: 1px solid var(--color-separator-border, #d7dce2); border-radius: var(--radius-2lg, 12px); background: var(--color-background-primary-default, #fff); box-shadow: var(--shadow-dropdown, 0 8px 32px #0003); }
+.up-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.up-modal-title { display: flex; align-items: center; gap: 10px; }
+.up-models { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+.up-model-toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
+.up-model-search { flex: 1 1 200px; }
+.up-model-list { display: grid; gap: 4px; max-height: 420px; overflow-y: auto; padding-right: 4px; }
+.up-model-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; }
+.up-model-row[aria-selected="true"] { border-color: var(--color-accent-500, #8473e1); background: var(--color-background-secondary-default, #f5f6f8); }
+.up-model-row:hover { background: var(--color-background-tertiary-hover, #e9edf2); }
+.up-model-name { min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; overflow-wrap: anywhere; }
+.up-model-total { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--color-separator-border, #d7dce2); }
+.up-chip { padding: 2px 6px; border-radius: 6px; background: var(--color-background-tertiary-default, #e9edf2); color: var(--color-text-secondary, #586574); font-size: 11px; white-space: nowrap; }
+.up-param-pane { padding: 16px; border: 1px solid var(--color-separator-border, #d7dce2); border-radius: var(--radius-2lg, 12px); background: var(--color-background-secondary-default, #f5f6f8); }
+.up-keyrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+@media (max-width: 960px) {
+  .up-models { grid-template-columns: minmax(0, 1fr); }
+  .up-row { grid-template-columns: auto minmax(0, 1fr); }
+  .up-scrim { padding: 12px; }
+}

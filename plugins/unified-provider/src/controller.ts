@@ -1,6 +1,6 @@
-import type { ConfigPatchPreview, DiscoveredModel, ExecutionSelectionInput, ModelDiscoveryResult, NativeConfigPreview, NativeConfigTarget, PluginContext, PublishedSource, RuntimeMaterialRequest } from "@ccgui/plugin-sdk";
-import { emptyRegistry, parseRegistry, registryView, validateRegistry, type Binding, type Registry, type RegistryView } from "./registry";
-import { credentialForBinding, credentialIdentity, projectRegistry, type RegistryProjection } from "./projection";
+import type { ConfigPatchPreview, DiscoveredModel, ExecutionSelectionInput, ExecutionTarget, ModelDiscoveryResult, NativeConfigPreview, NativeConfigTarget, PluginContext, PublishedSource, RuntimeMaterialRequest } from "@ccgui/plugin-sdk";
+import { emptyRegistry, endpointCredentials, parseRegistry, probeEngine, probeProfileKey, registryView, validateRegistry, type Binding, type Registry, type RegistryView } from "./registry";
+import { credentialForEndpoint, credentialIdentity, projectRegistry, type RegistryProjection } from "./projection";
 import { mergeImportedCandidates, type ImportDecision } from "./imports";
 
 export interface ControllerSnapshot {
@@ -10,6 +10,8 @@ export interface ControllerSnapshot {
   message: string;
   publication: PublishedSource | null;
 }
+/** 官方模板只取决于「CLI + 执行环境」，与端点地址无关。 */
+function templateKey(engineId: string, target: ExecutionTarget): string { return JSON.stringify([engineId, target]); }
 export class ProviderController {
   readonly sourceId: string;
   private registry = emptyRegistry();
@@ -60,15 +62,18 @@ export class ProviderController {
     if (this.busy) throw new Error("另一个保存操作正在进行");
     if (this.state.phase === "error" || this.state.phase === "loading") throw new Error("保存前请重新加载有效配置");
     if (expectedVersion !== this.version) { this.emit("conflict", "草稿已过期，请重新加载并核对修改后再保存。"); throw new Error("配置版本冲突"); }
-    const credentials = view.credentials.map((credential) => {
+    const next = validateRegistry({ ...structuredClone(view), credentials: this.mergeKeyValues(view, keyEdits), revision: this.registry.revision + 1 });
+    await this.persistAndPublish(next, expectedVersion);
+  }
+  /** 明文只在这里从编辑框回到 registry：其余流程一律只看身份与代次。 */
+  private mergeKeyValues(view: RegistryView, keyEdits: Readonly<Record<string, string>>): Registry["credentials"] {
+    return view.credentials.map((credential) => {
       const existing = this.registry.credentials.find((c) => c.id === credential.id);
       const value = keyEdits[credential.id] ?? existing?.value;
       if (!value) throw new Error("新增 Key 必须明确填写值");
-      if (existing && existing.providerId !== credential.providerId) throw new Error("Key 不能在不同供应商之间移动");
+      if (existing && existing.endpointId !== credential.endpointId) throw new Error("Key 不能在不同端点之间移动");
       return { ...credential, value, credentialRevision: existing ? existing.credentialRevision + (keyEdits[credential.id] !== undefined ? 1 : 0) : 1 };
     });
-    const next = validateRegistry({ ...structuredClone(view), credentials, revision: this.registry.revision + 1 });
-    await this.persistAndPublish(next, expectedVersion);
   }
   private async persistAndPublish(next: Registry, expectedVersion: string | null): Promise<void> {
     if (this.busy) throw new Error("另一个保存操作正在进行");
@@ -121,9 +126,9 @@ export class ProviderController {
     const uses = await this.ctx.cli.getCredentialUses(this.sourceId);
     await Promise.all(uses.map((use) => this.supplyMaterial(use)));
   }
-  templatesFor(binding: Binding): DiscoveredModel[] { return this.templates.get(JSON.stringify([binding.engineId, binding.executionTarget])) ?? []; }
-  async loadTemplates(binding: Binding, refresh = false): Promise<DiscoveredModel[]> {
-    const cacheKey = JSON.stringify([binding.engineId, binding.executionTarget]);
+  templatesFor(binding: Pick<Binding, "engineId" | "executionTarget">): DiscoveredModel[] { return this.templates.get(templateKey(binding.engineId, binding.executionTarget)) ?? []; }
+  async loadTemplates(binding: Pick<Binding, "engineId" | "executionTarget">, refresh = false): Promise<DiscoveredModel[]> {
+    const cacheKey = templateKey(binding.engineId, binding.executionTarget);
     if (!refresh && this.templates.has(cacheKey)) return this.templates.get(cacheKey)!;
     let result: ModelDiscoveryResult;
     try { result = await this.ctx.cli.listModels({ source: "official", engineId: binding.engineId, executionTarget: binding.executionTarget }); }
@@ -134,25 +139,73 @@ export class ProviderController {
     const merged = result.status === "partial" ? [...previous.filter((p) => !models.some((m) => m.templateRef?.modelId === p.templateRef?.modelId && m.templateRef?.revision === p.templateRef?.revision)), ...models] : models;
     this.templates.set(cacheKey, merged); return merged;
   }
-  async authorizeDraft(view: RegistryView, bindingId: string): Promise<RegistryView> {
+  /** 一个 CLI 线路的授权：端点地址 + 这条线路的执行环境 + 该端点全部启用的 Key。 */
+  async authorizeBindingDraft(view: RegistryView, bindingId: string): Promise<RegistryView> {
     const binding = view.bindings.find((b) => b.id === bindingId);
     const endpoint = view.endpoints.find((e) => e.id === binding?.endpointId);
-    if (!binding || !endpoint) throw new Error("请先为绑定选择端点");
-    const credentials = endpoint.auth === "none" ? [] : view.credentials.filter((c) => c.providerId === binding.providerId && c.enabled).map((c) => ({ credentialId: c.id, credentialRevision: c.credentialRevision, name: c.name, ...(c.remark ? { remark: c.remark } : {}) }));
-    const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials, purpose: "为所选 CLI 使用此供应商，并使用会话明确选定的 Key" });
+    if (!binding || !endpoint) throw new Error("请先为该 CLI 线路选择端点");
+    const grant = await this.ctx.cli.requestTargetGrant({
+      sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget,
+      credentials: this.grantCredentials(view, endpoint.id, endpoint.auth),
+      purpose: `使用端点“${endpoint.name}”的地址与它自己的 Key 运行 ${binding.engineId}`,
+    });
     const next = structuredClone(view); next.bindings.find((b) => b.id === bindingId)!.targetGrantId = grant.grantId; return next;
   }
-  async discover(bindingId: string, explicitCredentialId?: string): Promise<ModelDiscoveryResult> {
-    const binding = this.registry.bindings.find((b) => b.id === bindingId);
-    const profile = this.publication?.profiles.find((p) => p.profileKey === bindingId);
-    if (!binding || !profile || !this.publication || this.publication.documentVersion !== this.version) throw new Error("从端点发现模型前，请先保存、授权并发布此绑定");
-    const credential = profile.auth === "none" ? undefined : credentialForBinding(this.registry, binding, explicitCredentialId);
-    const cacheKey = JSON.stringify([bindingId, profile.protocol, profile.baseUrl, profile.executionTarget, credential?.id, credential?.credentialRevision]);
-    const result = await this.ctx.cli.listModels({ source: "authorized-endpoint", engineId: binding.engineId, executionTarget: binding.executionTarget, sourceId: this.sourceId, profileKey: binding.id, targetGrantId: profile.targetGrantId, protocol: profile.protocol, ...(credential ? { credentialUse: { sourceId: this.sourceId, credentialId: credential.id, credentialRevision: credential.credentialRevision, registryRevision: this.publication.documentVersion } } : {}) });
+  /** 拉取模型的授权：只覆盖端点自己的地址与 Key，不涉及任何 CLI 进程。 */
+  async authorizeEndpointDraft(view: RegistryView, endpointId: string): Promise<RegistryView> {
+    const endpoint = view.endpoints.find((e) => e.id === endpointId);
+    if (!endpoint) throw new Error("端点不存在，请重新加载草稿");
+    const grant = await this.ctx.cli.requestTargetGrant({
+      sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: { kind: "local" },
+      credentials: this.grantCredentials(view, endpoint.id, endpoint.auth),
+      purpose: `从端点“${endpoint.name}”读取它提供的模型列表`,
+    });
+    const next = structuredClone(view); next.endpoints.find((e) => e.id === endpointId)!.probeGrantId = grant.grantId; return next;
+  }
+  /** 授权必须覆盖将要发布的全部 Key 身份，否则宿主会在发请求前拒绝。 */
+  private grantCredentials(view: RegistryView, endpointId: string, auth: string) {
+    if (auth === "none") return [];
+    const credentials = endpointCredentials(view.credentials, endpointId).filter((c) => c.enabled);
+    if (!credentials.length) throw new Error("请先为该端点添加至少一个启用的 Key");
+    return credentials.map(credentialIdentity);
+  }
+  /** 「拉取模型」是一次完整动作：先把这个端点上缺的授权全部补齐（读取授权，以及它
+   *  每条启用 CLI 线路的目标授权——少一个，发布就会整份失败），保存并发布，再列模型。
+   *  宿主只接受已发布且已授权的目标，所以顺序不能省。 */
+  async pullEndpointModels(view: RegistryView, expectedVersion: string | null, keyEdits: Readonly<Record<string, string>>, endpointId: string, explicitCredentialId?: string): Promise<{ result: ModelDiscoveryResult; draft: RegistryView }> {
+    let authorized = view;
+    if (!authorized.endpoints.find((e) => e.id === endpointId)?.probeGrantId) authorized = await this.authorizeEndpointDraft(authorized, endpointId);
+    for (const binding of authorized.bindings.filter((b) => b.endpointId === endpointId && b.enabled && !b.targetGrantId)) {
+      authorized = await this.authorizeBindingDraft(authorized, binding.id);
+    }
+    await this.save(authorized, expectedVersion, keyEdits);
+    return { result: await this.discoverEndpoint(endpointId, explicitCredentialId), draft: registryView(this.registry) };
+  }
+  async discoverEndpoint(endpointId: string, explicitCredentialId?: string): Promise<ModelDiscoveryResult> {
+    const endpoint = this.registry.endpoints.find((e) => e.id === endpointId);
+    if (!endpoint || !this.publication || this.publication.documentVersion !== this.version) throw new Error("拉取模型前请先保存并发布该端点");
+    const profileKey = probeProfileKey(endpoint.id);
+    const profile = this.publication.profiles.find((p) => p.profileKey === profileKey);
+    if (!profile) throw new Error("该端点还没有可用于拉取模型的已发布目标。请确认端点已启用、已授权，并且认证端点至少有一个启用的 Key。");
+    const credential = profile.auth === "none" ? undefined : credentialForEndpoint(this.registry, endpoint, undefined, explicitCredentialId);
+    const cacheKey = JSON.stringify([endpointId, profile.protocol, profile.baseUrl, credential?.id, credential?.credentialRevision]);
+    const result = await this.ctx.cli.listModels({
+      source: "authorized-endpoint", engineId: probeEngine(endpoint.protocol), executionTarget: { kind: "local" },
+      sourceId: this.sourceId, profileKey, targetGrantId: profile.targetGrantId, protocol: profile.protocol,
+      ...(credential ? { credentialUse: { sourceId: this.sourceId, credentialId: credential.id, credentialRevision: credential.credentialRevision, registryRevision: this.publication.documentVersion } } : {}),
+    });
     const previous = this.discoveries.get(cacheKey);
     if (result.status === "failed" || result.status === "unsupported") return { ...result, models: previous?.models ?? result.models };
     const models = result.status === "partial" && previous ? [...previous.models.filter((p) => !result.models.some((m) => m.modelId === p.modelId)), ...result.models] : result.models;
     const merged = { ...result, models }; this.discoveries.set(cacheKey, merged); return merged;
+  }
+  /** 拉取回来的候选模型要落到每条 CLI 线路上，所以按线路取各自的官方模板。 */
+  async templatesForBindings(bindings: readonly Pick<Binding, "engineId" | "executionTarget">[], refresh = false): Promise<Record<string, DiscoveredModel[]>> {
+    const entries = await Promise.all(bindings.map(async (binding) => {
+      try { return [binding.engineId, await this.loadTemplates(binding, refresh)] as const; }
+      catch { return [binding.engineId, []] as const; }
+    }));
+    return Object.fromEntries(entries);
   }
   async listConfigTargets(): Promise<NativeConfigTarget[]> { return this.ctx.cli.listConfigTargets(); }
   async previewImport(targetId: string): Promise<NativeConfigPreview> { return this.ctx.cli.previewConfigImport(targetId); }
@@ -166,7 +219,11 @@ export class ProviderController {
     finally { for (const candidate of imported.candidates) delete candidate.value; }
     for (const binding of next.bindings.filter((b) => !b.targetGrantId && b.enabled)) {
       const endpoint = next.endpoints.find((e) => e.id === binding.endpointId)!;
-      const grant = await this.ctx.cli.requestTargetGrant({ sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget, credentials: endpoint.auth === "none" ? [] : next.credentials.filter((c) => c.providerId === binding.providerId && c.enabled).map(credentialIdentity), purpose: "授权导入的 CLI 供应商目标；原生文件不会改动" });
+      const grant = await this.ctx.cli.requestTargetGrant({
+        sourceId: this.sourceId, baseUrl: endpoint.baseUrl, executionTarget: binding.executionTarget,
+        credentials: endpoint.auth === "none" ? [] : endpointCredentials(next.credentials, endpoint.id).filter((c) => c.enabled).map(credentialIdentity),
+        purpose: "授权导入的 CLI 线路目标；原生文件不会改动",
+      });
       binding.targetGrantId = grant.grantId;
     }
     if (expectedVersion !== this.version || this.busy) throw new Error("确认导入期间配置已变化，请重新预览");
