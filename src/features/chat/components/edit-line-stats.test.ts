@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Message } from "@/lib/ipc";
-import { countEditLines, deriveEditLineStats } from "./edit-line-stats";
+import { computeDiffLines, countEditLines, createEditLineStatsBuilder, deriveEditLineStats } from "./edit-line-stats";
 
 function editRow(seq: number, path: string, args: unknown, text = "edit · Applying"): Message {
   return { seq, role: "tool", text, ts: null, path, args } as Message;
@@ -47,6 +47,32 @@ describe("countEditLines", () => {
 });
 
 describe("deriveEditLineStats", () => {
+  it("reuses unchanged tool statistics and aggregate identity during streaming", () => {
+    const build = createEditLineStatsBuilder();
+    const readContent = vi.fn(() => "a\nb");
+    const tool = editRow(1, "src/a.ts", { get content() { return readContent(); } });
+    const first = build([tool]);
+    const reads = readContent.mock.calls.length;
+    expect(reads).toBeGreaterThan(0);
+    expect(build([tool, { seq: 2, role: "assistant", text: "growing" } as Message])).toBe(first);
+    expect(readContent).toHaveBeenCalledTimes(reads);
+    expect(build([tool, editRow(3, "src/a.ts", { content: "c" })]).get("src/a.ts"))
+      .toEqual({ additions: 3, deletions: 0 });
+    expect(readContent).toHaveBeenCalledTimes(reads);
+    expect(first.get("src/a.ts")).toEqual({ additions: 2, deletions: 0 });
+  });
+
+  it("invalidates replaced messages, prepended history and removed tools without sharing sessions", () => {
+    const build = createEditLineStatsBuilder();
+    const tool = editRow(1, "a.ts", { content: "a" });
+    const first = build([tool]);
+    expect(build([{ ...tool, args: { content: "a\nb" } }]).get("a.ts")?.additions).toBe(2);
+    expect(build([editRow(0, "b.ts", { content: "old" }), tool]).size).toBe(2);
+    expect(build([]).size).toBe(0);
+    expect(createEditLineStatsBuilder()([editRow(1, "a.ts", { content: "other\nsession" })])
+      .get("a.ts")?.additions).toBe(2);
+    expect(first.get("a.ts")?.additions).toBe(1);
+  });
   it("counts gitignored paths git status never reports", () => {
     const stats = deriveEditLineStats([
       editRow(1, ".omp/docs/x.md", { old_string: "one\ntwo", new_string: "uno" }),
@@ -77,5 +103,41 @@ describe("deriveEditLineStats", () => {
       { seq: 2, role: "assistant", text: "write", ts: null } as Message,
     ]);
     expect(stats.size).toBe(0);
+  });
+});
+
+describe("large edit payloads", () => {
+  it("keeps suffix order without quadratic array prepends", () => {
+    const suffix = Array.from({ length: 2000 }, (_, index) => `line ${index}`).join("\n");
+    const prepend = vi.spyOn(Array.prototype, "unshift");
+    let lines: ReturnType<typeof computeDiffLines>;
+    let prepends: number;
+    try {
+      lines = computeDiffLines(`old\n${suffix}`, `new\n${suffix}`);
+      prepends = prepend.mock.calls.length;
+    } finally {
+      prepend.mockRestore();
+    }
+    expect(prepends).toBe(0);
+    expect(lines!.slice(0, 3)).toEqual([
+      { type: "del", text: "old", oldLineNo: 1 },
+      { type: "add", text: "new", newLineNo: 1 },
+      { type: "ctx", text: "line 0", oldLineNo: 2, newLineNo: 2 },
+    ]);
+    expect(lines!.at(-1)).toEqual({ type: "ctx", text: "line 1999", oldLineNo: 2001, newLineNo: 2001 });
+  });
+
+  it("matches the displayed diff counts for empty, Unicode, prefix and suffix cases", () => {
+    const inputs = [undefined, "", "中文🙂", "a\n", "a\nb", "x\na\nb", "a\nb\nx"];
+    for (const oldString of inputs) {
+      for (const newString of inputs) {
+        if (!oldString && !newString) continue;
+        const lines = computeDiffLines(oldString, newString);
+        expect(countEditLines({ old_string: oldString, new_string: newString })).toEqual({
+          additions: lines.filter(line => line.type === "add").length,
+          deletions: lines.filter(line => line.type === "del").length,
+        });
+      }
+    }
   });
 });

@@ -20,6 +20,7 @@ import {
   routeRun,
   rememberSettledRun,
   runRouting,
+  setRetryingFlag,
   setStreamingFlag,
   settleLiveRows,
   untrackRun,
@@ -42,6 +43,8 @@ import {
   upsertSessionMetaInto,
 } from "./engine-events";
 import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
+import { engineSupportsComputerUse } from "../computer-use";
+import type { SendOptions } from "./types";
 import { effectivePermission } from "./permissions";
 import {
   buildAgentBlock,
@@ -136,6 +139,7 @@ export function createMessagingActions(
     tab: ActiveSession,
     prompt: string,
     images: string[],
+    options?: SendOptions,
   ) {
     if (!prompt.trim() && images.length === 0) return;
     // A pinned agent's instructions ride along as a tail block the
@@ -173,6 +177,13 @@ export function createMessagingActions(
     }
     const engine = tab.engine;
     const key = sessionKey(engine, tab.sessionId, tab.workspacePath);
+    // Computer use asks for the driver; engines without an MCP-mount path
+    // would run the prompt text-only while the user believes the machine is
+    // under agent control. Refuse loudly instead of downgrading silently.
+    if (options?.computerUse && !engineSupportsComputerUse(get().engines, engine)) {
+      patchSession(set, key, { error: i18n.t("chat.cuaUnsupportedEngine") });
+      return;
+    }
     // Resolve BEFORE the optimistic rows land: the patch below writes
     // activeModel, and a resolver reading it afterwards would see its own
     // write instead of the session's history.
@@ -256,6 +267,10 @@ export function createMessagingActions(
         activeModel: model,
         activeEffort: effort,
         activeProvider: provider,
+        // 电脑操控 is per-send opt-in (never sticky: a later ordinary
+        // message must not silently regain machine control). The record only
+        // feeds resendLastUser, which repeats this very message.
+        activeComputerUse: options?.computerUse === true,
         // The tail indicator counts this reply, not the one before it.
         turnUsage: null,
       },
@@ -319,6 +334,12 @@ export function createMessagingActions(
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
     }
+    if (options?.computerUse) {
+      // Arm the global Esc-to-stop for this run: the escape hatch out of a
+      // machine-driving turn. Disarmed when the turn settles (onDone / a
+      // failed spawn), so the system-wide hotkey never outlives the run.
+      void ipc.computerUseSetActive?.(true)?.catch(() => {});
+    }
     try {
       // Read-only launch observation, after the lifecycle registration so a
       // fast engine's events cannot precede it, and before the send so the
@@ -348,6 +369,7 @@ export function createMessagingActions(
           get().permission,
         ),
         providerId: provider,
+        computerUse: options?.computerUse === true,
       });
       confirmPromptContributions(promptContributions);
       if (switchEvent) {
@@ -504,6 +526,9 @@ export function createMessagingActions(
       runRouting.delete(requestedRunId);
       untrackRun(requestedRunId);
       dropRunUsage(requestedRunId);
+      if (options?.computerUse) {
+        void ipc.computerUseSetActive?.(false)?.catch(() => {});
+      }
       set((s) => ({
         streamingByKey: setStreamingFlag(s.streamingByKey, failedKey, false),
       }));
@@ -550,16 +575,18 @@ export function createMessagingActions(
         [key]: { ...(prev.bySession[key] ?? EMPTY_SESSION), queue: rest },
       },
     }));
-    void sendPrompt(tab, head.text, head.images);
+    void sendPrompt(tab, head.text, head.images, {
+      computerUse: head.computerUse,
+    });
   }
 
   return {
     drainQueue,
     markUnseenIfBackground,
 
-    send: async (prompt, images) => {
+    send: async (prompt, images, options) => {
       const { active } = get();
-      if (active) await sendPrompt(active, prompt, images);
+      if (active) await sendPrompt(active, prompt, images, options);
     },
 
     respondToGrant: async (key, seq, accept) => {
@@ -630,10 +657,13 @@ export function createMessagingActions(
         s.openTabs.find(
           (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
         ) ?? s.active;
-      if (tab) await sendPrompt(tab, lastUser.text, lastUser.images ?? []);
+      if (tab)
+        await sendPrompt(tab, lastUser.text, lastUser.images ?? [], {
+          computerUse: s.bySession[key]?.activeComputerUse === true,
+        });
     },
 
-    queueMessage: (text, images) => {
+    queueMessage: (text, images, options) => {
       const { active } = get();
       if (!active || (!text.trim() && images.length === 0)) return;
       const key = sessionKey(
@@ -650,7 +680,13 @@ export function createMessagingActions(
               ...prev,
               queue: [
                 ...prev.queue,
-                { id: newId(), text, images, queuedAt: Date.now() },
+                {
+                  id: newId(),
+                  text,
+                  images,
+                  queuedAt: Date.now(),
+                  computerUse: options?.computerUse === true,
+                },
               ],
             },
           },
@@ -768,9 +804,11 @@ export function createMessagingActions(
               streaming: false,
               interrupted: true,
               turnStartedAt: null,
+              retry: null,
             },
           },
           streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+          retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
         };
       });
       // Registry is keyed by native session id once known; before that the

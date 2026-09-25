@@ -123,8 +123,9 @@
   --inset-shadow-xs:  inset 0 1px 1px 0 rgb(0 0 0 / 0.05);
   --inset-shadow-sm:  inset 0 2px 4px 0 rgb(0 0 0 / 0.05);
   /* Git refresh-button click feedback: one snappy lap per iteration. The
-   * swap-to-check timing in ChangesPanelHeader mirrors this duration
-   * (SPIN_MS), so the arrow is upright when the check replaces it. */
+   * swap-to-check timing in the shared action-feedback module mirrors this
+   * duration (SPIN_MS), so the arrow is upright when the check replaces it.
+   * Rules: docs/ui-ux-spec.zh-CN.md §4.1. */
   --animate-refresh-spin: refresh-spin 0.6s linear infinite;
   @keyframes refresh-spin {
     to { transform: rotate(360deg); }

@@ -8,6 +8,7 @@ import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import Search from "lucide-react/dist/esm/icons/search";
 import X from "lucide-react/dist/esm/icons/x";
 import { m } from "motion/react";
+import { ActionFeedbackIcon, useActionFeedback } from "@/components/base/action-feedback";
 import { CLI_DISPLAY_NAMES, inferModelEngine } from "@/components/foundations/icons/engine-brands";
 import { ChevronDownSmall } from "@/components/foundations/icons/chevrons";
 import { EngineIcon } from "@/components/foundations/icons/engine-icon";
@@ -285,10 +286,11 @@ function FlyoutEffortSection({
 }
 
 /** Header refresh button: re-probes provider configs and model catalogs,
- * spinning until the probe settles. */
+ * spinning until the probe settles and checking once it does. */
 function RefreshButton({ onRefresh }: { onRefresh: () => void | Promise<void> }) {
   const { t } = useTranslation();
-  const [refreshing, setRefreshing] = useState(false);
+  const refreshAction = useActionFeedback({ spin: true });
+  const refreshing = refreshAction.feedback === "running";
   return (
     <button
       type="button"
@@ -297,14 +299,15 @@ function RefreshButton({ onRefresh }: { onRefresh: () => void | Promise<void> })
       disabled={refreshing}
       onClick={() => {
         if (refreshing) return;
-        setRefreshing(true);
-        Promise.resolve(onRefresh()).finally(() => setRefreshing(false));
+        void refreshAction.start(() => Promise.resolve(onRefresh()));
       }}
       className="flex size-7 items-center justify-center rounded-lg text-foreground-icon-secondary hover:bg-background-secondary-hover hover:text-foreground-icon-primary disabled:cursor-default"
     >
-      <RefreshCw
-        className={cx("size-3.5", refreshing && "animate-spin")}
-        aria-hidden
+      <ActionFeedbackIcon
+        icon={RefreshCw}
+        feedback={refreshAction.feedback}
+        spin
+        iconClassName="size-3.5"
       />
     </button>
   );

@@ -29,7 +29,7 @@ const fixtureDisposers: Array<() => void> = [];
 function fakeDeps() {
   return {
     set: vi.fn(),
-    get: () => ({ bySession: {}, streamingByKey: {} }) as never,
+    get: () => ({ bySession: {}, streamingByKey: {}, retryingByKey: {} }) as never,
     drainQueue: vi.fn(),
     markUnseenIfBackground: vi.fn(),
     upsertSessionMeta: vi.fn(),
@@ -332,6 +332,7 @@ describe("assistant message snapshots", () => {
       models: { claude: "claude-test" },
       efforts: {},
       streamingByKey: {},
+      retryingByKey: {},
     };
     return {
       key,
@@ -485,6 +486,7 @@ describe("binding a run that outran the send result", () => {
       models: {},
       efforts: {},
       streamingByKey: { [key]: true },
+      retryingByKey: {},
     };
     const deps = {
       set: (update: (current: typeof state) => Partial<typeof state>) => Object.assign(state, update(state)),
@@ -536,6 +538,7 @@ describe("binding a run that outran the send result", () => {
       models: {},
       efforts: {},
       streamingByKey: { [key]: true },
+      retryingByKey: {},
     };
     const deps = {
       set: (update: (current: typeof state) => Partial<typeof state>) =>

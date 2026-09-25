@@ -41,6 +41,32 @@ describe("hardening", () => {
     }
   });
 
+  it("installs once when a configurable Tauri invoke becomes available", async () => {
+    vi.resetModules();
+    const previous = window.__TAURI_INTERNALS__;
+    const native = vi.fn(async () => null);
+    try {
+      delete window.__TAURI_INTERNALS__;
+      // A fresh module is required to exercise the process-global install flag.
+      const fresh = await import("./hardening");
+      fresh.installHardening();
+      const internals = {};
+      Object.defineProperty(internals, "invoke", { value: native, configurable: true });
+      window.__TAURI_INTERNALS__ = internals;
+      fresh.installHardening();
+      fresh.installHardening();
+      const invoke = window.__TAURI_INTERNALS__!.invoke!;
+      await expect(fresh.runAsPlugin(() =>
+        fresh.withAuthorizedHostInvoke(() => invoke("sdk_command")),
+      )).resolves.toBeNull();
+      await expect(fresh.runAsPlugin(() => invoke("direct_command"))).rejects.toThrow(/blocked/);
+      expect(native).toHaveBeenCalledTimes(1);
+    } finally {
+      window.__TAURI_INTERNALS__ = previous;
+      vi.resetModules();
+    }
+  });
+
   it("blocks direct Tauri IPC while plugin code is on the stack, allows host calls", async () => {
     const invoke = window.__TAURI_INTERNALS__!.invoke!;
 

@@ -2,7 +2,7 @@
 //! (bin = 插件探针写进 meta 的发行版内绝对路径),解析复用本机同名解析器。
 //! 所有远程 catalog 都带 remote 旗标:即使为空,前端也不得掺本机配置。
 
-use super::{EngineCatalog, EngineModel, pi};
+use super::{pi, EngineCatalog, EngineModel};
 
 use crate::engine::wsl_transport::WslTransport;
 
@@ -41,7 +41,10 @@ pub(super) async fn codex_catalog_remote(transport: &WslTransport) -> EngineCata
         }
     }
     EngineCatalog::authoritative_remote(
-        codex_config_model_remote(transport).await.into_iter().collect(),
+        codex_config_model_remote(transport)
+            .await
+            .into_iter()
+            .collect(),
     )
 }
 
@@ -57,9 +60,7 @@ pub(super) async fn kimi_catalog_remote(transport: &WslTransport) -> EngineCatal
         if !models.is_empty() {
             // 与本机 kimi_catalog 同语义:配置默认置顶(pick 重置以首项为
             // "CLI 实际默认",字母序兜底会重置到任意条目)。
-            return EngineCatalog::authoritative_remote(super::with_default_first(
-                models, default,
-            ));
+            return EngineCatalog::authoritative_remote(super::with_default_first(models, default));
         }
     }
     EngineCatalog::authoritative_remote(default.into_iter().collect())
@@ -138,7 +139,11 @@ fn remote_cwd(transport: &WslTransport) -> Option<String> {
 /// 探针写入的路径来自 `command -v` 输出(发行版内绝对路径),再过一遍
 /// 白名单防御:仅 `[A-Za-z0-9_./~-]`,违例返回空串让命令失败而非注入。
 fn shell_safe_bin(bin: &str) -> String {
-    if bin.is_empty() || bin.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '~'))) {
+    if bin.is_empty()
+        || bin
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '~')))
+    {
         return String::new();
     }
     bin.to_string()
@@ -150,7 +155,10 @@ mod tests {
 
     #[test]
     fn bin_allowlist_rejects_injection() {
-        assert_eq!(shell_safe_bin("/home/u/.local/bin/omp"), "/home/u/.local/bin/omp");
+        assert_eq!(
+            shell_safe_bin("/home/u/.local/bin/omp"),
+            "/home/u/.local/bin/omp"
+        );
         assert_eq!(shell_safe_bin("/x; rm -rf /"), "");
         assert_eq!(shell_safe_bin("/a b/c"), "");
         assert_eq!(shell_safe_bin(""), "");
@@ -173,7 +181,10 @@ mod tests {
         // catalog 脚本直排 `cd <cwd>`,违例 workspace 必须拿不到 cwd
         // (空 catalog),而不是拼进脚本(catalog 路径曾与 build_script
         // 白名单脱节,是注入面)。
-        assert_eq!(remote_cwd(&tp(Some("/home/dev/proj"))).as_deref(), Some("/home/dev/proj"));
+        assert_eq!(
+            remote_cwd(&tp(Some("/home/dev/proj"))).as_deref(),
+            Some("/home/dev/proj")
+        );
         assert_eq!(remote_cwd(&tp(None)).as_deref(), Some("~"));
         assert!(remote_cwd(&tp(Some("/home/dev/my proj"))).is_none());
         assert!(remote_cwd(&tp(Some("/x;id"))).is_none());

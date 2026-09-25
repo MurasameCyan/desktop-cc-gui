@@ -421,7 +421,12 @@ mod tests {
     #[test]
     fn noop_when_model_entry_already_declares_image() {
         let plan = plan_image_admission(
-            &describe(true, 3, profile_with_model(Some(json!(["text", "image"]))), None),
+            &describe(
+                true,
+                3,
+                profile_with_model(Some(json!(["text", "image"]))),
+                None,
+            ),
             &configurable(PI_AI_NS),
             "acme",
             "vision-1",

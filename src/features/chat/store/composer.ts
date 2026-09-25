@@ -20,6 +20,7 @@ export function createComposerActions(
   | "clearPendingMention"
   | "dismissActionError"
   | "dismissSessionError"
+  | "setSessionError"
 > {
   const { set } = deps;
 
@@ -42,6 +43,9 @@ export function createComposerActions(
     },
     dismissSessionError: (key) => {
       patchSession(set, key, { error: null });
+    },
+    setSessionError: (key, message) => {
+      patchSession(set, key, { error: message });
     },
   };
 }

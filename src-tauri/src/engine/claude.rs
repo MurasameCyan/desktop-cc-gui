@@ -59,6 +59,12 @@ impl Engine for ClaudeEngine {
         &["auto", "manual", "plan", "bypass"]
     }
 
+    /// 只读工具约束：claude 的 plan 模式会拒绝一切编辑/命令，再叠加
+    /// 逐次 --allowedTools 白名单与显式 --disallowedTools。
+    fn supports_tool_constraints(&self) -> bool {
+        true
+    }
+
     fn build_command(&self, req: &SendRequest, bin: &str) -> Result<BuiltCommand, String> {
         let mut cmd = command_for_binary(bin);
         cmd.arg("-p");
@@ -81,23 +87,41 @@ impl Engine for ClaudeEngine {
         // (headless -p cannot prompt mid-turn, so anything not listed here
         // gets denied outright).
         let mut preapproved: Vec<&str> = Vec::new();
-        match self.resolve_permission(req.permission.as_deref()) {
-            "bypass" => {
-                cmd.arg("--dangerously-skip-permissions");
+        if let Some(tools) = req.allowed_tools.as_deref() {
+            // 任务工作台的只读约束：plan 模式拒绝任何编辑/命令，再叠加
+            // 白名单；headless -p 下未列入 --allowedTools 的工具会被拒。
+            // 已知写工具额外显式 deny，防止模式解析差异。
+            cmd.arg("--permission-mode");
+            cmd.arg("plan");
+            cmd.arg("--allowedTools");
+            for tool in tools {
+                cmd.arg(tool);
             }
-            mode => {
-                cmd.arg("--permission-mode");
-                cmd.arg(match mode {
-                    "manual" => "default",
-                    "plan" => "plan",
-                    _ => "acceptEdits",
-                });
-                if mode == "auto" {
-                    // acceptEdits pre-approves file edits only; WebSearch and
-                    // WebFetch still ask, and headless -p cannot prompt, so
-                    // the CLI would deny every web call outright. Pre-approve
-                    // the two read-only network tools in auto mode.
-                    preapproved.extend(["WebSearch", "WebFetch"]);
+            cmd.arg("--disallowedTools");
+            for tool in ["Bash", "Edit", "Write", "NotebookEdit", "Task"] {
+                if !tools.iter().any(|allowed| allowed == tool) {
+                    cmd.arg(tool);
+                }
+            }
+        } else {
+            match self.resolve_permission(req.permission.as_deref()) {
+                "bypass" => {
+                    cmd.arg("--dangerously-skip-permissions");
+                }
+                mode => {
+                    cmd.arg("--permission-mode");
+                    cmd.arg(match mode {
+                        "manual" => "default",
+                        "plan" => "plan",
+                        _ => "acceptEdits",
+                    });
+                    if mode == "auto" {
+                        // acceptEdits pre-approves file edits only; WebSearch and
+                        // WebFetch still ask, and headless -p cannot prompt, so
+                        // the CLI would deny every web call outright. Pre-approve
+                        // the two read-only network tools in auto mode.
+                        preapproved.extend(["WebSearch", "WebFetch"]);
+                    }
                 }
             }
         }
@@ -172,7 +196,10 @@ impl Engine for ClaudeEngine {
         let mut seen_dirs = std::collections::HashSet::new();
         for dir in &req.additional_dirs {
             let dir = dir.trim();
-            if dir.is_empty() || dir == req.workspace.to_string_lossy() || !seen_dirs.insert(dir.to_string()) {
+            if dir.is_empty()
+                || dir == req.workspace.to_string_lossy()
+                || !seen_dirs.insert(dir.to_string())
+            {
                 continue;
             }
             cmd.arg("--add-dir");
@@ -215,6 +242,50 @@ impl Engine for ClaudeEngine {
                             .unwrap_or(0),
                         message: format_api_retry(&value),
                     });
+                } else if subtype == Some("init") {
+                    // `system/init` is the only place the CLI reports which MCP
+                    // servers it actually loaded. Capture it as an engine event
+                    // (session-scoped snapshot for the MCP settings page); its
+                    // `tools` list lets us attribute `mcp__<server>__<tool>`
+                    // names back to each server.
+                    let servers = value
+                        .get("mcp_servers")
+                        .or_else(|| value.get("mcpServers"))
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    let name = item
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|name| !name.is_empty())?;
+                                    let status = item
+                                        .get("status")
+                                        .and_then(Value::as_str)
+                                        .map(str::trim)
+                                        .filter(|status| !status.is_empty())
+                                        .map(str::to_string);
+                                    Some((name.to_string(), status))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if !servers.is_empty() {
+                        let tools = value
+                            .get("tools")
+                            .and_then(Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        out.push(EngineEvent::McpServers { servers, tools });
+                    }
                 } else if subtype == Some("compact_boundary") {
                     if let Some(post_tokens) = value
                         .get("compactMetadata")
@@ -232,15 +303,13 @@ impl Engine for ClaudeEngine {
                     }
                 }
             }
-            "stream_event" => {
-                parse_stream_event(
-                    &self.pending_tool_json,
-                    &self.tool_names,
-                    &self.tool_paths,
-                    &value,
-                    out,
-                )
-            }
+            "stream_event" => parse_stream_event(
+                &self.pending_tool_json,
+                &self.tool_names,
+                &self.tool_paths,
+                &value,
+                out,
+            ),
             "assistant" => {
                 // Full message snapshot; used as session-id and actual model source.
                 push_session_id(&value, "session_id", out);
@@ -279,9 +348,9 @@ impl Engine for ClaudeEngine {
                     // fall back to scraping the free-text error when the call
                     // was never seen (e.g. resumed transcript) or carries no
                     // path argument (e.g. Bash).
-                    let tool = id.as_ref().and_then(|id| {
-                        self.tool_names.lock().ok()?.get(id).cloned()
-                    });
+                    let tool = id
+                        .as_ref()
+                        .and_then(|id| self.tool_names.lock().ok()?.get(id).cloned());
                     let path = id
                         .as_ref()
                         .and_then(|id| self.tool_paths.lock().ok()?.get(id).cloned())
@@ -464,10 +533,15 @@ fn attach_reported_context_window(mut usage: Value, source: &Value) -> Value {
             if window <= 0 {
                 return None;
             }
-            let tokens: i64 = ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"]
-                .iter()
-                .filter_map(|key| model.get(*key).and_then(Value::as_i64))
-                .sum();
+            let tokens: i64 = [
+                "inputTokens",
+                "outputTokens",
+                "cacheReadInputTokens",
+                "cacheCreationInputTokens",
+            ]
+            .iter()
+            .filter_map(|key| model.get(*key).and_then(Value::as_i64))
+            .sum();
             Some((tokens, window))
         })
         .max_by_key(|(tokens, _)| *tokens);
@@ -531,7 +605,10 @@ fn looks_like_permission_denial(message: &str) -> bool {
 fn extract_absolute_path(text: &str) -> Option<String> {
     for token in text.split_whitespace() {
         let cleaned = token.trim_matches(|c: char| {
-            matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}' | '.')
+            matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}' | '.'
+            )
         });
         let bytes = cleaned.as_bytes();
         if cleaned.len() >= 3
@@ -578,7 +655,11 @@ fn tool_result_error_blocks(value: &Value) -> Vec<(Option<String>, String)> {
         if block.get("type").and_then(Value::as_str) != Some("tool_result") {
             continue;
         }
-        if !block.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+        if !block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             continue;
         }
         let text = tool_result_block_text(block);
@@ -597,8 +678,14 @@ fn tool_result_error_blocks(value: &Value) -> Vec<(Option<String>, String)> {
 /// Human-readable line for a `system/api_retry` event.
 fn format_api_retry(value: &Value) -> String {
     let attempt = value.get("attempt").and_then(Value::as_u64).unwrap_or(0);
-    let max = value.get("max_retries").and_then(Value::as_u64).unwrap_or(0);
-    let delay_ms = value.get("retry_delay_ms").and_then(Value::as_u64).unwrap_or(0);
+    let max = value
+        .get("max_retries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let delay_ms = value
+        .get("retry_delay_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let detail = value
         .get("error")
         .and_then(Value::as_str)
@@ -630,6 +717,9 @@ fn parse_stream_event(
         return;
     };
     match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => out.push(EngineEvent::Generation { active: true }),
+        // Decode window closes after the last block (tool arguments included).
+        Some("message_stop") => out.push(EngineEvent::Generation { active: false }),
         Some("content_block_delta") => parse_content_block_delta(pending, event, out),
         // Tool calls surface at block start with `input: {}`; the real
         // arguments stream in as `input_json_delta` and flush on stop.
@@ -771,6 +861,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn init_event_reports_mcp_servers_and_tools() {
+        let line = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "s-1",
+            "mcp_servers": [
+                { "name": "alpha", "status": "connected" },
+                { "name": "broken", "status": "failed" },
+                { "name": "  " }
+            ],
+            "tools": ["Bash", "mcp__alpha__search", 7]
+        })
+        .to_string();
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(&line, &mut out);
+        let (servers, tools) = out
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::McpServers { servers, tools } => Some((servers, tools)),
+                _ => None,
+            })
+            .expect("init must emit an MCP snapshot event");
+        assert_eq!(
+            servers,
+            &vec![
+                ("alpha".to_string(), Some("connected".to_string())),
+                ("broken".to_string(), Some("failed".to_string())),
+            ]
+        );
+        assert_eq!(
+            tools,
+            &vec!["Bash".to_string(), "mcp__alpha__search".to_string()]
+        );
+
+        // 没有 mcp_servers 的 init 不产生事件（不凭空造快照）。
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "s-2",
+                "mcp_servers": []
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(!out
+            .iter()
+            .any(|event| matches!(event, EngineEvent::McpServers { .. })));
+    }
+
+    #[test]
     fn assistant_message_reports_actual_thinking_effort() {
         let line = serde_json::json!({
             "type": "assistant",
@@ -781,7 +923,8 @@ mod tests {
         let mut out = Vec::new();
         ClaudeEngine::new().parse_line(&line, &mut out);
         assert!(
-            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "high")),
+            out.iter()
+                .any(|e| matches!(e, EngineEvent::Effort(level) if level == "high")),
             "got {out:?}"
         );
 
@@ -792,7 +935,8 @@ mod tests {
             &mut out,
         );
         assert!(
-            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "low")),
+            out.iter()
+                .any(|e| matches!(e, EngineEvent::Effort(level) if level == "low")),
             "got {out:?}"
         );
         let mut out = Vec::new();
@@ -800,7 +944,10 @@ mod tests {
             &serde_json::json!({ "type": "assistant", "thinking_effort": "  " }).to_string(),
             &mut out,
         );
-        assert!(!out.iter().any(|e| matches!(e, EngineEvent::Effort(_))), "got {out:?}");
+        assert!(
+            !out.iter().any(|e| matches!(e, EngineEvent::Effort(_))),
+            "got {out:?}"
+        );
     }
 
     #[test]
@@ -870,6 +1017,27 @@ mod tests {
             [EngineEvent::QuestionSettled { request_id }] => assert_eq!(request_id, "req-3"),
             other => panic!("expected settled event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stream_message_boundaries_open_and_close_the_generation_window() {
+        let engine = ClaudeEngine::new();
+        let start = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "message_start", "message": { "id": "msg_1" } }
+        })
+        .to_string();
+        let stop = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "message_stop" }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        engine.parse_line(&start, &mut out);
+        engine.parse_line(&stop, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], EngineEvent::Generation { active: true }));
+        assert!(matches!(&out[1], EngineEvent::Generation { active: false }));
     }
 
     #[test]
@@ -1173,7 +1341,10 @@ mod tests {
     #[test]
     fn tool_result_non_error_and_non_denial_stay_silent() {
         for (is_error, text) in [
-            (false, "Claude requested permissions to read from /etc, but you haven't granted it yet."),
+            (
+                false,
+                "Claude requested permissions to read from /etc, but you haven't granted it yet.",
+            ),
             (true, "file not found: /tmp/missing.txt"),
         ] {
             let line = serde_json::json!({
@@ -1362,9 +1533,13 @@ mod tests {
     /// explicit fallback instead of this layer inventing a number.
     #[test]
     fn result_without_a_reported_window_adds_nothing() {
-        for models in [None, Some(serde_json::json!({})), Some(serde_json::json!({
-            "m": { "inputTokens": 10, "contextWindow": 0 }
-        }))] {
+        for models in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({
+                "m": { "inputTokens": 10, "contextWindow": 0 }
+            })),
+        ] {
             let mut value = serde_json::json!({
                 "type": "result",
                 "subtype": "success",
@@ -1379,7 +1554,11 @@ mod tests {
             ClaudeEngine::new().parse_line(&value.to_string(), &mut out);
             match &out[0] {
                 EngineEvent::Done { usage, .. } => {
-                    assert!(usage.as_ref().expect("usage").get("model_context_window").is_none());
+                    assert!(usage
+                        .as_ref()
+                        .expect("usage")
+                        .get("model_context_window")
+                        .is_none());
                 }
                 _ => panic!("expected done event"),
             }
@@ -1406,7 +1585,10 @@ mod tests {
         ClaudeEngine::new().parse_line(&line, &mut out);
         match &out[0] {
             EngineEvent::Done { usage, .. } => {
-                assert_eq!(usage.as_ref().expect("usage")["model_context_window"], 500000);
+                assert_eq!(
+                    usage.as_ref().expect("usage")["model_context_window"],
+                    500000
+                );
             }
             _ => panic!("expected done event"),
         }
@@ -1463,6 +1645,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            allowed_tools: None,
         };
         let built = engine.build_command(&request, "claude").unwrap();
         let args: Vec<String> = built
@@ -1483,8 +1666,59 @@ mod tests {
             .collect();
         assert!(args.windows(2).any(|w| w == ["--effort", "ultra"]));
         assert_eq!(
-            built.command.as_std().get_envs().find(|(k, _)| *k == "CLAUDE_CODE_EFFORT_LEVEL").and_then(|(_, v)| v),
+            built
+                .command
+                .as_std()
+                .get_envs()
+                .find(|(k, _)| *k == "CLAUDE_CODE_EFFORT_LEVEL")
+                .and_then(|(_, v)| v),
             Some(std::ffi::OsStr::new("ultra"))
         );
+    }
+
+    /// 任务工作台只读节点：必须真正落到启动参数（plan 模式 + 白名单 +
+    /// 显式拒绝写工具），不允许只靠节点名假装。
+    #[test]
+    fn read_only_tool_constraints_force_plan_mode_and_whitelist() {
+        let engine = ClaudeEngine::new();
+        assert!(engine.supports_tool_constraints());
+        let request = SendRequest {
+            session_id: None,
+            prompt: "hi".into(),
+            prompt_contributions: Vec::new(),
+            images: vec![],
+            workspace: std::path::PathBuf::from("/tmp"),
+            model: None,
+            effort: None,
+            service_tier: None,
+            permission: Some("auto".into()),
+            additional_dirs: vec![],
+            provider_id: None,
+            computer_use: None,
+            allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
+        };
+        let built = engine.build_command(&request, "claude").unwrap();
+        let args: Vec<String> = built
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+        assert!(args.windows(2).any(|w| w == ["--allowedTools", "Read"]));
+        let deny_at = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("deny list");
+        for tool in ["Bash", "Edit", "Write", "NotebookEdit", "Task"] {
+            assert!(
+                args[deny_at + 1..].iter().any(|a| a == tool),
+                "{tool} must be explicitly denied"
+            );
+        }
+        // 普通权限参数不应同时出现（避免 mode 冲突）。
+        assert!(!args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
     }
 }

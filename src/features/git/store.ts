@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { ipc, type BranchInfo, type GitStatus } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
-import { useFilesStore } from "@/features/files/store";
 
 const TTL_MS = 30_000;
 
@@ -78,9 +77,9 @@ export const useGitStore = create<GitStore>((set, get) => {
         .catch(() => undefined);
       // The file tree's git badges/colors are stale after any mutation
       // (commit/stage/checkout); refreshTree re-walks every loaded level.
-      useFilesStore
-        .getState()
-        .refreshTree()
+      // 动态引入避免与 files/store 的模块环：文件抢到中心时也要关差异页签。
+      void import("@/features/files/store")
+        .then((m) => m.useFilesStore.getState().refreshTree())
         .catch(() => undefined);
     }
   };

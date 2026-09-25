@@ -9,7 +9,8 @@ import { setPluginSessionEffort, useChatStore } from "./store";
 import { OPEN_TABS_KEY } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
 import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
-import { registerTurnHooks } from "@/features/plugins/runtime/hooks";
+import { registerSessionHooks, registerTurnHooks } from "@/features/plugins/runtime/hooks";
+import { getConversationModeState } from "@/features/plugins/conversation/state";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
@@ -33,6 +34,7 @@ vi.mock("@/lib/ipc", () => ({
 vi.mock("@/lib/events", () => ({
   listenEngineEvents: vi.fn(async () => () => {}),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const WS = "/tmp/ws";
@@ -53,6 +55,7 @@ function resetStore() {
     archivedSessionKeys: {},
     bySession: {},
     streamingByKey: {},
+    retryingByKey: {},
     unseen: {},
     drafts: {},
     restoredSessionKeys: {},
@@ -166,6 +169,37 @@ describe("per-session composer selection", () => {
       useChatStore.getState().setActiveEngine("claude");
       expect(seen.length).toBe(afterRetarget);
     } finally {
+      dispose();
+    }
+  });
+
+  it("keeps the session lifecycle open while its conversation mode blocks closing", async () => {
+    const tab = { engine: "claude", sessionId: "mode-locked", workspacePath: WS };
+    const key = "claude/mode-locked";
+    const contributions = { [key]: { remembered: {}, resets: {}, overflowed: false } };
+    useChatStore.setState({ active: tab, openTabs: [tab], sessionContributions: contributions });
+    const modes = getConversationModeState();
+    const identity = modes.identity(key, WS, false);
+    modes.setExitBlocked(identity, "test.mode", true);
+    const closed = vi.fn();
+    const dispose = registerSessionHooks("test.mode-close", { onClosed: closed });
+    try {
+      useChatStore.getState().closeTab(tab.engine, tab.sessionId, WS);
+      await Promise.resolve();
+      expect(useChatStore.getState().openTabs).toEqual([tab]);
+      expect(useChatStore.getState().sessionContributions).toEqual(contributions);
+      expect(closed).not.toHaveBeenCalled();
+
+      modes.setExitBlocked(identity, "test.mode", false);
+      useChatStore.getState().closeTab(tab.engine, tab.sessionId, WS);
+      await Promise.resolve();
+      expect(useChatStore.getState().openTabs).toEqual([]);
+      expect(useChatStore.getState().sessionContributions).toEqual({});
+      expect(closed).toHaveBeenCalledTimes(1);
+      expect(closed).toHaveBeenCalledWith(expect.objectContaining({ engine: tab.engine, sessionId: tab.sessionId }));
+    } finally {
+      modes.setExitBlocked(identity, "test.mode", false);
+      modes.exit(identity);
       dispose();
     }
   });

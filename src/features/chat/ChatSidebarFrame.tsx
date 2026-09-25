@@ -30,9 +30,13 @@ export function ChatSidebarFrame({
   onRemoveWorkspace,
   onWorkspaceAlias,
   onSetWorkspaceArchived,
+  onNewWorktree,
+  onDeleteWorktree,
   onNewSessionInWorkspace,
   onNewSession,
   onNewBrowser,
+  onOpenPlugins,
+  onOpenMission,
   onReorderWorkspaces,
   onDropWorkspaceToSection,
   onCreateGroup,
@@ -56,10 +60,18 @@ export function ChatSidebarFrame({
   onRemoveWorkspace: (workspaceId: string) => void;
   onWorkspaceAlias: (workspaceId: string) => void;
   onSetWorkspaceArchived: (workspaceId: string, archived: boolean) => void;
+  /** 右键菜单/WORKTREES ＋：打开 worktree 创建对话框。 */
+  onNewWorktree: (workspaceId: string) => void;
+  /** worktree 子行右键菜单：打开删除确认。 */
+  onDeleteWorktree: (workspaceId: string) => void;
   onNewSessionInWorkspace: (workspaceId: string) => void;
   onNewSession: () => void;
   /** 新建浏览器 nav entry (desktop only; omitted in web-access mode). */
   onNewBrowser?: () => void;
+  /** 插件入口（原生插件中心中心页签）。 */
+  onOpenPlugins?: () => void;
+  /** 任务工作台入口（原生中心页签）。 */
+  onOpenMission?: () => void;
   onReorderWorkspaces: (orderedIds: string[]) => void;
   /** Workspace row dropped onto a group / 已归档 / ungrouped container. */
   onDropWorkspaceToSection: (workspaceId: string, targetSectionId: string | null) => void;
@@ -97,10 +109,14 @@ export function ChatSidebarFrame({
         onRemoveWorkspace={onRemoveWorkspace}
         onWorkspaceAlias={onWorkspaceAlias}
         onSetWorkspaceArchived={onSetWorkspaceArchived}
+        onNewWorktree={onNewWorktree}
+        onDeleteWorktree={onDeleteWorktree}
         archivedRepos={archivedRepos}
         onNewSessionInWorkspace={onNewSessionInWorkspace}
         onNewSession={onNewSession}
         onNewBrowser={onNewBrowser}
+        onOpenPlugins={onOpenPlugins}
+        onOpenMission={onOpenMission}
         onReorderWorkspaces={onReorderWorkspaces}
         onDropWorkspaceToSection={onDropWorkspaceToSection}
         onCreateGroup={onCreateGroup}

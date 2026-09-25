@@ -248,7 +248,9 @@ function FooterStatusBar({
     try {
       await refreshSessionUsage();
     } finally {
-      setTimeout(() => setRefreshing(false), 400);
+      // No minimum-visible-busy delay here: the refresh button's feedback
+      // finishes the spin lap (and checks) on its own.
+      setRefreshing(false);
     }
   }, [active, refreshing, refreshSessionUsage]);
 

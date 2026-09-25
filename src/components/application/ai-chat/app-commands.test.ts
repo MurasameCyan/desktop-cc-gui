@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ipc } from "@/lib/ipc";
-import { matchAppCommand } from "./app-commands";
+import { parseAppCommand, matchAppCommand } from "./app-commands";
 import { useChatStore } from "@/features/chat/store";
 import { handleEngineEvents, type EngineEventDeps } from "@/features/chat/store/engine-events";
 import { sessionKey } from "@/features/chat/store/persistence";
@@ -23,6 +23,7 @@ vi.mock("@/lib/ipc", () => ({
 vi.mock("@/lib/events", () => ({
   listenEngineEvents: vi.fn(async () => () => {}),
   listenSessionsChanged: vi.fn(async () => () => {}),
+  listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 
 const WS = "/tmp/ws";
@@ -54,10 +55,12 @@ describe("matchAppCommand", () => {
     useSlashCommandStore.setState({ byRoot: {} });
   });
 
-  it("matches bare /new and /compact only", () => {
+  it("matches bare /new, /compact and /mcp only", () => {
     expect(matchAppCommand("/new", WS)).toBe("new");
     expect(matchAppCommand("/clear", WS)).toBe("new");
     expect(matchAppCommand("  /compact  ", WS)).toBe("compact");
+    expect(matchAppCommand("/mcp", WS)).toBe("mcp");
+    expect(matchAppCommand("/mcp 参数", WS)).toBeNull();
     expect(matchAppCommand("/compact 聚焦改动", WS)).toBeNull();
     expect(matchAppCommand("/news", WS)).toBeNull();
     expect(matchAppCommand("hello /new", WS)).toBeNull();
@@ -76,6 +79,64 @@ describe("matchAppCommand", () => {
     });
     expect(matchAppCommand("/new", WS)).toBeNull();
     expect(matchAppCommand("/compact", WS)).toBe("compact");
+    expect(matchAppCommand("/mcp", WS)).toBe("mcp");
+  });
+});
+
+describe("parseAppCommand", () => {
+  beforeEach(() => {
+    useSlashCommandStore.setState({ byRoot: {} });
+  });
+
+  it("reads the task after /ccgui-cua as the argument", () => {
+    expect(parseAppCommand("/ccgui-cua 打开计算器算 1+1", WS)).toEqual({
+      command: "cua",
+      arg: "打开计算器算 1+1",
+    });
+    expect(parseAppCommand("  /ccgui-cua   截图   ", WS)).toEqual({
+      command: "cua",
+      arg: "截图",
+    });
+  });
+
+  it("keeps the bare form as an argument-less command", () => {
+    // Bare /ccgui-cua opens the setup page instead of sending.
+    expect(parseAppCommand("/ccgui-cua", WS)).toEqual({ command: "cua", arg: "" });
+  });
+
+  it("gives the argument-less commands no argument", () => {
+    expect(parseAppCommand("/new", WS)).toEqual({ command: "new", arg: "" });
+    expect(parseAppCommand("  /compact  ", WS)).toEqual({
+      command: "compact",
+      arg: "",
+    });
+    // Not an ARG_COMMANDS member: the CLI's own argument form still belongs
+    // to the engine.
+    expect(parseAppCommand("/compact 聚焦改动", WS)).toBeNull();
+    expect(parseAppCommand("/mcp 参数", WS)).toBeNull();
+  });
+
+  it("ignores lookalikes and mid-text slashes", () => {
+    expect(parseAppCommand("/ccgui-cua2 任务", WS)).toBeNull();
+    expect(parseAppCommand("/ccgui 任务", WS)).toBeNull();
+    expect(parseAppCommand("hello /ccgui-cua 任务", WS)).toBeNull();
+    expect(parseAppCommand("", WS)).toBeNull();
+  });
+
+  it("defers to a user-defined catalog command named ccgui-cua", () => {
+    useSlashCommandStore.setState({
+      byRoot: {
+        [WS]: {
+          entries: [
+            { name: "ccgui-cua", description: null, source: "workspace", kind: "command" },
+          ],
+          status: "ready",
+          fetchedAt: Date.now(),
+        },
+      },
+    });
+    expect(parseAppCommand("/ccgui-cua 任务", WS)).toBeNull();
+    expect(parseAppCommand("/ccgui-cua", WS)).toBeNull();
   });
 });
 

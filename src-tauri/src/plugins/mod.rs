@@ -114,7 +114,9 @@ fn uninstall_with_storage_at(
             db.plugin_kv_delete_all(id)?;
             state.kv_tombstones.remove(id);
         } else {
-            state.kv_tombstones.insert(id.to_string(), state::now_secs());
+            state
+                .kv_tombstones
+                .insert(id.to_string(), state::now_secs());
         }
         state::write_state(state_path, &state)?;
     }
@@ -179,6 +181,16 @@ pub async fn plugin_quarantine(id: String, error: String) -> Result<PluginInfo, 
         crate::plugin_caps::kill_tracked_children(&id);
         Ok(fs::info_for(&state::plugins_dir(), &id, &record))
     }).await.map_err(|e| e.to_string())?
+}
+
+/// Artwork bytes for the installed-plugin UI (the market/installed row icon
+/// and the detail gallery), returned as a data URL: the webview needs no
+/// filesystem access, `~/.ccgui-next` stays behind the asset protocol's deny
+/// list, and only files shipped by that very plugin can be read.
+#[tauri::command]
+pub fn plugin_read_artwork(id: String, path: String) -> Result<String, String> {
+    manifest::require_valid_id(&id)?;
+    fs::artwork_data_url(&state::plugins_dir(), &id, &path)
 }
 
 #[tauri::command]

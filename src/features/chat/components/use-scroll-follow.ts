@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   type MutableRefObject,
   type RefObject,
@@ -16,7 +17,9 @@ const BOTTOM_THRESHOLD_PX = 100;
 const TOUCH_IDLE_MS = 150;
 
 /** Tail-follow state and controls shared by the timeline's scroll consumers:
- *  the pin effects, the anchor rail and the jump-to-bottom button. */
+ *  the pin effects, the anchor rail and the floating edge-jump control. */
+export type ScrollEdge = "top" | "bottom";
+
 export interface ScrollFollow {
   /** Whether the viewport currently sits at the tail. */
   atBottomRef: MutableRefObject<boolean>;
@@ -24,7 +27,19 @@ export interface ScrollFollow {
   userPausedRef: MutableRefObject<boolean>;
   isFollowing: () => boolean;
   scrollToBottom: () => void;
+  /** Instant resume + pin (programmatic channel: send, fixtures) — no glide. */
   resumeFollow: () => void;
+  /** User-initiated edge jump from the floating control; both legs glide. */
+  scrollToEdge: (edge: ScrollEdge) => void;
+}
+
+/** Smooth edge jumps become instant jumps for motion-sensitive users. */
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 /** Stick-to-bottom intent model (ported from the reference chat UI): wheel-up
@@ -43,11 +58,26 @@ export function useScrollFollow({
   const atBottomRef = useRef(true);
   const userPausedRef = useRef(false);
   const autoScrollingRef = useRef(false);
+  // The floating control's smooth slide to the tail: programmatic pins stand
+  // down until it settles, or one stream flush mid-animation would hard-jump
+  // the viewport and cut the transition short.
+  const smoothPinRef = useRef(false);
+  const smoothPinTokenRef = useRef(0);
+  const smoothPinTimerRef = useRef<number | null>(null);
 
   const isFollowing = useCallback(
     () => atBottomRef.current && !userPausedRef.current,
     [],
   );
+
+  const cancelSmoothPin = useCallback(() => {
+    smoothPinTokenRef.current += 1;
+    smoothPinRef.current = false;
+    if (smoothPinTimerRef.current !== null) {
+      clearTimeout(smoothPinTimerRef.current);
+      smoothPinTimerRef.current = null;
+    }
+  }, []);
 
   // Pin by scrollTop, not scrollToIndex: index alignment recomputes offsets
   // from the virtualizer's measured sizes, so rows whose height is still
@@ -55,19 +85,69 @@ export function useScrollFollow({
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // A user-initiated smooth slide owns the viewport until it settles.
+    if (smoothPinRef.current) return;
     autoScrollingRef.current = true;
     el.scrollTop = el.scrollHeight - el.clientHeight;
     requestAnimationFrame(() => {
       autoScrollingRef.current = false;
     });
   }, [scrollRef]);
-  // Explicit jump-to-bottom: clears the wheel-up pause so the pin effects
-  // keep following afterwards (used by the floating back-to-bottom button).
+  // Explicit instant jump-to-bottom: clears the wheel-up pause so the pin
+  // effects keep following afterwards. The user-facing glide lives in
+  // scrollToEdge; programmatic callers (send, browser fixtures) want the
+  // viewport on the tail immediately.
   const resumeFollow = useCallback(() => {
+    cancelSmoothPin();
     userPausedRef.current = false;
     atBottomRef.current = true;
     scrollToBottom();
-  }, [scrollToBottom]);
+  }, [cancelSmoothPin, scrollToBottom]);
+  // Floating-control jump: wheel up asks for "top", wheel down for "bottom".
+  // Both glide; the bottom leg clears the wheel-up pause so the pin effects
+  // keep following afterwards, then hard-pins once the glide settles so
+  // content that grew mid-animation still lands on the true tail.
+  const scrollToEdge = useCallback(
+    (edge: ScrollEdge) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      cancelSmoothPin();
+      if (edge === "top") {
+        userPausedRef.current = true;
+        atBottomRef.current = false;
+        if (prefersReducedMotion()) el.scrollTop = 0;
+        else el.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      userPausedRef.current = false;
+      atBottomRef.current = true;
+      const top = Math.max(0, el.scrollHeight - el.clientHeight);
+      // Already at the tail (or nothing to scroll): a hard pin is the same frame.
+      if (prefersReducedMotion() || top - el.scrollTop <= 4) {
+        scrollToBottom();
+        return;
+      }
+      smoothPinRef.current = true;
+      const token = smoothPinTokenRef.current;
+      el.scrollTo({ top, behavior: "smooth" });
+      const finish = () => {
+        el.removeEventListener("scrollend", finish);
+        if (token !== smoothPinTokenRef.current) return;
+        cancelSmoothPin();
+        // A wheel-up mid-slide is the user taking over; don't yank them back.
+        if (userPausedRef.current) return;
+        scrollToBottom();
+      };
+      el.addEventListener("scrollend", finish, { once: true });
+      // scrollend is missing on older WebKit (and in jsdom): time-box the
+      // settle by distance, like the reference client does.
+      smoothPinTimerRef.current = window.setTimeout(
+        finish,
+        Math.min(1000, Math.max(350, Math.round((top - el.scrollTop) * 0.55))),
+      );
+    },
+    [scrollRef, cancelSmoothPin, scrollToBottom],
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -190,10 +270,12 @@ export function useScrollFollow({
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       if (wheelRaf) cancelAnimationFrame(wheelRaf);
       clearTouchIdle();
+      // Invalidate a glide still in flight so its settle cannot pin after unmount.
+      cancelSmoothPin();
     };
-  }, [scrollRef]);
+  }, [scrollRef, cancelSmoothPin]);
 
-  return { atBottomRef, userPausedRef, isFollowing, scrollToBottom, resumeFollow };
+  return { atBottomRef, userPausedRef, isFollowing, scrollToBottom, resumeFollow, scrollToEdge };
 }
 
 /** Keep the tail pinned while content grows: on append (when following), on
@@ -217,7 +299,7 @@ export function useTailPin({
   // Scroll to bottom when switching sessions (new page loaded) or when a new
   // message is appended while following the tail.
   const lastCountRef = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!scrollRef.current || count === 0) return;
     const grew = count > lastCountRef.current;
     const switched = lastCountRef.current === 0;
@@ -228,34 +310,25 @@ export function useTailPin({
   // Keep the tail pinned while stream rows grow, if the user is at bottom.
   // `items` changes identity on every flush, so this tracks both thinking
   // and text growth.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!scrollRef.current || !streaming || !isFollowing()) return;
-    const frame = requestAnimationFrame(() => {
-      if (isFollowing()) scrollToBottom();
-    });
-    return () => cancelAnimationFrame(frame);
+    scrollToBottom();
   }, [items, streaming, count, isFollowing, scrollToBottom, scrollRef]);
 
   // Rows re-measure after mount (tool calls render taller than the 72px
   // estimate); each measurement grows the virtual total height after the
   // count/items effects above already ran. Follow those late size changes
   // so the tail stays pinned while tools appear.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     const inner = el?.querySelector<HTMLElement>("[data-virtual-inner]");
     if (!el || !inner || typeof ResizeObserver === "undefined") return;
-    let raf = 0;
     const observer = new ResizeObserver(() => {
-      if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        if (isFollowing()) scrollToBottom();
-      });
+      if (isFollowing()) scrollToBottom();
     });
     observer.observe(inner);
     return () => {
       observer.disconnect();
-      if (raf) cancelAnimationFrame(raf);
     };
   }, [isFollowing, scrollToBottom, scrollRef]);
 }

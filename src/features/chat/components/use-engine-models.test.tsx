@@ -234,3 +234,59 @@ describe("useEngineModels probe dispatch", () => {
     ]);
   });
 });
+
+describe("useEngineModels refresh scope", () => {
+  it("刷新模型全局生效:本地工作区共用一份目录,刷新后切到别的工作区也是新目录", async () => {
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [{ id: "stale-m", provider: "pi" }],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+    // 两个本地工作区各探一次(靠首次应答认定是本地上下文),之后共用同一份目录。
+    await show([engineInfo("omp", true)], "/ws-a");
+    await show(null, "/ws-b");
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("stale-m");
+
+    vi.mocked(ipc.listEngineModels).mockClear();
+    vi.mocked(ipc.listEngineModels).mockResolvedValue({
+      models: [{ id: "fresh-m", provider: "pi" }],
+      authoritative: true,
+    } as unknown as EngineCatalog);
+    // 在 /ws-b 刷新 —— 修复前这里只更新当前工作区的桶,/ws-a 会一直停在旧目录。
+    await act(async () => {
+      await latest.refresh();
+    });
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("fresh-m");
+
+    // 回到另一个本地工作区读到的也是刷新后的目录。
+    await show(null, "/ws-a");
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("fresh-m");
+  });
+
+  it("远端(发行版)目录独立成桶,刷新时两个上下文一并更新", async () => {
+    const catalogFor = (ws?: string): EngineCatalog =>
+      ws === WS_REMOTE
+        ? ({ models: [{ id: "distro-m", provider: "pi" }], authoritative: true, remote: true } as EngineCatalog)
+        : ({ models: [{ id: "local-m", provider: "pi" }], authoritative: true } as EngineCatalog);
+    vi.mocked(ipc.listEngineModels).mockImplementation(async (_engine, ws) => catalogFor(ws));
+    await show([engineInfo("omp", true)], "/ws-local");
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("local-m");
+
+    await show(null, WS_REMOTE);
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("distro-m");
+
+    // 刷新:本地上下文 + 已缓存的远端上下文都在范围内。
+    vi.mocked(ipc.listEngineModels).mockImplementation(async (_engine, ws) =>
+      ws === WS_REMOTE
+        ? ({ models: [{ id: "distro-new", provider: "pi" }], authoritative: true, remote: true } as EngineCatalog)
+        : ({ models: [{ id: "local-new", provider: "pi" }], authoritative: true } as EngineCatalog),
+    );
+    await act(async () => {
+      await latest.refresh();
+    });
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("distro-new");
+
+    // 回到本地工作区:本地目录同样刷新过,且没有被发行版目录污染。
+    await show(null, "/ws-other");
+    expect(latest.catalogs.omp?.models[0]?.id).toBe("local-new");
+  });
+});

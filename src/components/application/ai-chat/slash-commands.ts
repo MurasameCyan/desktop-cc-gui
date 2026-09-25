@@ -51,7 +51,7 @@ export type RootCommands = RootCache<SlashCommandEntry>;
 
 const COMMANDS_TTL_MS = 60_000;
 
-const { useStore: useSlashCommandStore, prune: pruneSlashCommands } =
+const { useStore: useSlashCommandStore, prune: pruneSlashCommands, invalidate: invalidateSlashCommandCatalog } =
   createRootCacheStore<SlashCommandEntry>({
     fetch: (root) => ipc.listSlashCommands(root),
     ttlMs: COMMANDS_TTL_MS,
@@ -59,7 +59,7 @@ const { useStore: useSlashCommandStore, prune: pruneSlashCommands } =
 
 /** Drop one workspace root's cached catalog when its workspace is removed;
  * the per-root cache would otherwise accumulate every root ever opened. */
-export { useSlashCommandStore, pruneSlashCommands };
+export { useSlashCommandStore, pruneSlashCommands, invalidateSlashCommandCatalog };
 
 /** Max rows the picker renders — caps DOM work regardless of match count. */
 export const SLASH_MENU_LIMIT = 50;

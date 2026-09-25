@@ -41,10 +41,14 @@ impl Engine for OpenCodeEngine {
     }
 
     fn supported_permissions(&self) -> &'static [&'static str] {
-        // serve has no mid-turn approval channel we honor (permission.asked
-        // auto-allows once, matching the old headless run's net behavior);
-        // "plan" selects the read-only plan agent in the prompt body.
-        &["auto", "plan"]
+        // serve has no mid-turn approval UI we show (permission.asked is
+        // auto-answered): "auto"/"plan" reply "once" per ask; "bypass"
+        // replies "always" so matching asks stop round-tripping for the
+        // rest of the session — the serve-world equivalent of `run --auto`
+        // (approve everything not explicitly denied; config denies never
+        // reach us either way). "plan" selects the read-only plan agent in
+        // the prompt body.
+        &["auto", "plan", "bypass"]
     }
 
 }

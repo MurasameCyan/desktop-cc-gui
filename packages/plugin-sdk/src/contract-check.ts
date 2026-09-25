@@ -24,6 +24,8 @@ import type {
   PermissionRequestedEvent,
   PluginAssets,
   PluginContext,
+  PluginConversationProps,
+  PluginAgentCatalogEntry,
   PluginManifest,
   PluginTier,
   PromptContribution,
@@ -140,6 +142,9 @@ export type _InternalMessageCaptureKeys = Assert<
 export type _DocumentStorageRemoveParams = Assert<
   Mutual<Params<DocumentStorage["remove"]>, Params<Pub.DocumentStorage["remove"]>>
 >;
+export type _ConversationProps = Assert<Mutual<PluginConversationProps, Pub.PluginConversationProps>>;
+export type _AgentCatalogEntry = Assert<Mutual<PluginAgentCatalogEntry, Pub.PluginAgentCatalogEntry>>;
+export type _AgentShape = Assert<Mutual<PluginContext["agent"], Pub.PluginContext["agent"]>>;
 
 // --- PluginContext：顶层与各能力组 key 完全对齐 ------------------------------
 
@@ -158,6 +163,7 @@ export type _HooksKeys = Assert<KeyParity<PluginContext["hooks"], Pub.PluginCont
 export type _WorkspaceKeys = Assert<KeyParity<PluginContext["workspace"], Pub.PluginContext["workspace"]>>;
 export type _AssetsKeys = Assert<KeyParity<PluginContext["assets"], Pub.PluginContext["assets"]>>;
 export type _ShellKeys = Assert<KeyParity<PluginContext["shell"], Pub.PluginContext["shell"]>>;
+export type _AgentKeys = Assert<KeyParity<PluginContext["agent"], Pub.PluginContext["agent"]>>;
 export type _DocumentStorageKeys = Assert<
   KeyParity<PluginContext["documentStorage"], Pub.PluginContext["documentStorage"]>
 >;

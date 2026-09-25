@@ -1,15 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import BookOpen from "lucide-react/dist/esm/icons/book-open";
 import Check from "lucide-react/dist/esm/icons/check";
 import { Button } from "@/components/base/buttons/button";
-import {
-  SettingsCard,
-  SettingsRow,
-  SettingsSectionLabel,
-} from "@/components/application/settings/settings-rows";
-import { getAppVersion, openExternal } from "@/lib/platform";
-import { useUpdateStore } from "@/features/update/store";
+import { SettingsSectionLabel } from "@/components/application/settings/settings-rows";
+import { openExternal } from "@/lib/platform";
 import { GITHUB_REPO_URL } from "@/version/changelog";
 import wxqImage from "@/assets/images/wxq.png";
 import douyinImage from "@/assets/images/douyin.png";
@@ -106,73 +101,12 @@ function DouyinChip() {
   );
 }
 
-/** About page: app identity + version, community QR, and social links. */
+/** About page: community QR and social links. */
 export function AboutSection() {
-  const { t, i18n } = useTranslation();
-  const [version, setVersion] = useState<string | null>(null);
-  const updateStage = useUpdateStore((s) => s.stage);
-  const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
-  const updateError = useUpdateStore((s) => s.error);
-  const latestVersion = useUpdateStore((s) => s.latestVersion);
-  const latestPubDate = useUpdateStore((s) => s.latestPubDate);
-
-  useEffect(() => {
-    let cancelled = false;
-    getAppVersion()
-      .then((v) => {
-        if (!cancelled && v) setVersion(v);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  let updateDescription: string | undefined;
-  if (updateStage === "checking") {
-    updateDescription = t("settings.updateChecking");
-  } else if (updateStage === "latest") {
-    const parsed = latestPubDate ? new Date(latestPubDate) : null;
-    const date =
-      parsed && !Number.isNaN(parsed.getTime())
-        ? parsed.toLocaleDateString(i18n.language)
-        : null;
-    updateDescription = !latestVersion
-      ? t("settings.updateLatest")
-      : date
-        ? t("settings.updateLatestDetail", { version: latestVersion, date })
-        : t("settings.updateLatestDetailNoDate", { version: latestVersion });
-  } else if (updateStage === "error") {
-    updateDescription = t("settings.updateError", { message: updateError });
-  }
+  const { t } = useTranslation();
 
   return (
     <div className="flex w-full flex-col gap-6">
-      {/* App identity + version */}
-      <div className="flex w-full flex-col gap-2">
-        <SettingsSectionLabel>{t("settings.about")}</SettingsSectionLabel>
-        <SettingsCard>
-          <SettingsRow label="CC GUI" description={t("settings.aboutDesc")}>
-            <span className="text-body-regular text-text-secondary">
-              {version ? `v${version}` : "…"}
-            </span>
-          </SettingsRow>
-          <SettingsRow
-            label={t("settings.checkUpdates")}
-            description={updateDescription}
-          >
-            <Button
-              size="small"
-              variant="secondary"
-              disabled={updateStage === "checking"}
-              onClick={() => void checkForUpdates({ interactive: true })}
-            >
-              {t("settings.checkUpdates")}
-            </Button>
-          </SettingsRow>
-        </SettingsCard>
-      </div>
-
       {/* Official community group */}
       <div className="flex w-full flex-col gap-2">
         <SettingsSectionLabel>{t("settings.community")}</SettingsSectionLabel>

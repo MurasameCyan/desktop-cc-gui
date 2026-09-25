@@ -15,6 +15,8 @@ import mistralIcon from "@/assets/model-icons/mistral.svg";
 import cohereIcon from "@/assets/model-icons/cohere.svg";
 import perplexityIcon from "@/assets/model-icons/perplexity.svg";
 
+import { HERMES_ICON_PATHS } from "./hermes-glyph";
+
 /**
  * Per-CLI brand marks for the engine picker (ported from the previous
  * desktop-cc-gui demo's EngineIcon). Image marks (claude / dsh) are
@@ -48,7 +50,8 @@ export type EngineIconId =
   | "agy"
   | "opencode"
   | "qoder"
-  | "qoder-cn";
+  | "qoder-cn"
+  | "hermes";
 
 interface EngineIconProps {
   engine: string;
@@ -187,6 +190,7 @@ const MONOCHROME_ICONS: Partial<Record<EngineIconId, readonly string[]>> = {
   kimi: KIMI_ICON_PATHS,
   pi: PI_ICON_PATHS,
   opencode: [OPENCODE_ICON_PATH],
+  hermes: HERMES_ICON_PATHS,
 };
 
 export function EngineIcon({ engine, size = 14, className, style }: EngineIconProps) {

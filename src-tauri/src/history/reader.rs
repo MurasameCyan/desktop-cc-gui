@@ -315,18 +315,49 @@ static PARSED_CACHE_BYTES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(
 const PARSED_CACHE_CAPACITY: usize = 32;
 const PARSED_CACHE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
-/// Rough in-memory footprint of one parsed session (text + image payloads).
-fn parsed_footprint(parsed: &ParsedSession) -> usize {
-    parsed
-        .messages
+/// Rough in-memory footprint of one parsed session. Text and images used to
+/// be the whole story, but tool-result-heavy sessions keep most of their
+/// bytes in retained payloads: an hourly task's omp transcript measured
+/// 28MB of `result.details` against 18MB of chat text, so a text-only sum
+/// lets the 128MB budget admit multiples of itself.
+fn value_footprint(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(s) => s.len(),
+        serde_json::Value::Array(items) => {
+            items.iter().map(value_footprint).sum::<usize>() + items.len() * 32
+        }
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| k.len() + value_footprint(v) + 32)
+            .sum::<usize>(),
+        _ => 8,
+    }
+}
+
+fn todo_footprint(todos: &crate::engine::TodosPayload) -> usize {
+    todos
+        .items
         .iter()
-        .map(|m| {
-            m.text.len()
-                + m.images.iter().map(|i| i.len()).sum::<usize>()
-                + m.ts.as_deref().map(str::len).unwrap_or(0)
-                + 128
-        })
+        .map(|i| i.content.len() + i.status.len() + i.id.as_deref().map(str::len).unwrap_or(0) + 32)
         .sum()
+}
+
+fn message_footprint(m: &Message) -> usize {
+    m.text.len()
+        + m.images.iter().map(|i| i.len()).sum::<usize>()
+        + m.ts.as_deref().map(str::len).unwrap_or(0)
+        + m.path.as_deref().map(str::len).unwrap_or(0)
+        + m.model.as_deref().map(str::len).unwrap_or(0)
+        + m.effort.as_deref().map(str::len).unwrap_or(0)
+        + m.args.as_ref().map(value_footprint).unwrap_or(0)
+        + m.result.as_ref().map(value_footprint).unwrap_or(0)
+        + m.usage.as_ref().map(value_footprint).unwrap_or(0)
+        + m.todos.as_ref().map(todo_footprint).unwrap_or(0)
+        + 128
+}
+
+fn parsed_footprint(parsed: &ParsedSession) -> usize {
+    parsed.messages.iter().map(message_footprint).sum()
 }
 
 fn cached_session(
@@ -354,7 +385,10 @@ fn cached_session(
     let fold = subagent_fold(&parsed.messages);
     // The fold's cloned delegation rows count toward the budget too.
     let footprint = parsed_footprint(&parsed)
-        + fold.iter().map(|(_, row)| row.text.len() + 128).sum::<usize>();
+        + fold
+            .iter()
+            .map(|(_, row)| message_footprint(row))
+            .sum::<usize>();
     let cached = Arc::new(CachedSession { parsed, fold });
     let mut cache = PARSED_CACHE.lock().map_err(|e| e.to_string())?;
     let mut bytes = PARSED_CACHE_BYTES.lock().map_err(|e| e.to_string())?;
@@ -410,7 +444,10 @@ fn subagent_fold(messages: &[Message]) -> SubagentFold {
 /// truncation is pinned against.
 #[cfg(test)]
 fn subagent_history(messages: &[Message]) -> Vec<Message> {
-    subagent_fold(messages).into_iter().map(|(_, row)| row).collect()
+    subagent_fold(messages)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect()
 }
 
 /// Cut a full-session fold at `start`, byte-identical to folding
@@ -444,11 +481,19 @@ fn subagent_history_until(messages: &[Message], fold: &SubagentFold, start: usiz
 }
 
 fn is_subagent_history_tool(message: &Message) -> bool {
-    if message.args.as_ref().is_some_and(|args| args.get("tasks").is_some() || args.get("ids").is_some()) {
+    if message.todos.is_some() {
+        return true;
+    }
+    if message.args.as_ref().is_some_and(|args| {
+        args.get("tasks").is_some()
+            || args.get("ids").is_some()
+            || args.get("todos").is_some()
+            || args.get("op").is_some()
+    }) {
         return true;
     }
     if message.result.as_ref().and_then(|result| result.get("details")).is_some_and(|details| {
-        ["jobs", "peers", "progress"].iter().any(|key| details.get(key).is_some())
+        ["jobs", "peers", "progress", "phases"].iter().any(|key| details.get(key).is_some())
             || details.get("op").and_then(serde_json::Value::as_str) == Some("jobs")
     }) {
         return true;
@@ -456,18 +501,26 @@ fn is_subagent_history_tool(message: &Message) -> bool {
     let head = message.text.split('·').next().unwrap_or_default().trim().to_ascii_lowercase();
     let first = head.split(|c: char| c.is_whitespace() || c == '/' || c == '\\').next().unwrap_or_default().replace('-', "_");
     matches!(first.as_str(), "task" | "agent" | "spawn" | "spawn_agent" | "spawn_subagent"
-        | "workflow" | "run_workflow" | "pipeline" | "dispatch" | "dispatch_agent" | "delegate")
-        || ["spawn agent", "agent swarm", "agent_swarm", "workflow", "subagent"].iter().any(|name| head.contains(name))
+        | "workflow" | "run_workflow" | "pipeline" | "dispatch" | "dispatch_agent" | "delegate" | "todo")
+        || ["spawn agent", "agent swarm", "agent_swarm", "workflow", "subagent", "todo"].iter().any(|name| head.contains(name))
 }
 
 fn subagent_history_row(message: &Message, delegation: bool) -> Message {
     Message {
         seq: message.seq,
         role: message.role.clone(),
-        text: if delegation { message.text.clone() } else { String::new() },
+        text: if delegation {
+            message.text.clone()
+        } else {
+            String::new()
+        },
         ts: None,
         path: None,
-        args: if delegation { message.args.clone() } else { None },
+        args: if delegation {
+            message.args.clone()
+        } else {
+            None
+        },
         // Status snapshots and result presence matter; the full output still
         // lives in the paginated timeline and need not cross IPC twice.
         result: if delegation {
@@ -476,7 +529,7 @@ fn subagent_history_row(message: &Message, delegation: bool) -> Message {
                 None => serde_json::Value::Bool(true),
             })
         } else { None },
-        todos: None,
+        todos: if delegation { message.todos.clone() } else { None },
         usage: None,
         model: None,
         effort: None,
@@ -581,8 +634,7 @@ pub async fn load_session_page(
 /// 发行版内任意 .jsonl 文件。
 fn is_plausible_remote_session_path(engine: &str, path: &str) -> bool {
     // dsh 转录本是 zstd 压缩的 session*.jsonl.zstd;其余引擎均为 .jsonl。
-    let suffix_ok =
-        path.ends_with(".jsonl") || (engine == "dsh" && path.ends_with(".jsonl.zstd"));
+    let suffix_ok = path.ends_with(".jsonl") || (engine == "dsh" && path.ends_with(".jsonl.zstd"));
     if !suffix_ok || !path.starts_with('/') {
         return false;
     }
@@ -623,8 +675,9 @@ pub async fn load_remote_session_page(
     if !is_plausible_remote_session_path(&engine, &remote_path) {
         return Err(format!("远程会话路径不合法: {remote_path}"));
     }
-    let transport = crate::engine::wsl_transport::transport_for_workspace(&state.db, &workspace_path)
-        .ok_or_else(|| format!("工作区 {workspace_path} 未登记远程传输"))?;
+    let transport =
+        crate::engine::wsl_transport::transport_for_workspace(&state.db, &workspace_path)
+            .ok_or_else(|| format!("工作区 {workspace_path} 未登记远程传输"))?;
     // 先远端 stat 卡住字节上限再 base64,超限/不可读直接非零退出,
     // 避免超大转录本经 1.33× 膨胀后全量进内存。
     let quoted = crate::engine::wsl_transport::sh_quote(&remote_path);
@@ -641,10 +694,14 @@ pub async fn load_remote_session_page(
 
     let dir = crate::paths::app_home().join("remote-sessions");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建缓存目录失败: {e}"))?;
-    let digest = sha2::Sha256::digest(format!("{workspace_path}|{engine}|{session_id}|{remote_path}"));
+    let digest = sha2::Sha256::digest(format!(
+        "{workspace_path}|{engine}|{session_id}|{remote_path}"
+    ));
     let name: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
     let cache_path = dir.join(format!("{name}.jsonl"));
-    let stale = std::fs::read(&cache_path).map(|old| old != bytes).unwrap_or(true);
+    let stale = std::fs::read(&cache_path)
+        .map(|old| old != bytes)
+        .unwrap_or(true);
     if stale {
         let tmp = dir.join(format!("{name}.jsonl.tmp"));
         std::fs::write(&tmp, &bytes).map_err(|e| format!("写缓存失败: {e}"))?;
@@ -681,7 +738,7 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(format!("remove {}: {e}", path.display())),
             }
-        },
+        }
         // opencode: the db row points at `storage/session/<project>/<id>.json`;
         // the transcript also lives in `storage/message/<id>/` and one
         // `storage/part/<msg>/` dir per message — all under the same storage root.
@@ -699,7 +756,11 @@ fn delete_session_disk(engine: &str, path: &Path) -> Result<(), String> {
 /// legacy/provider home),stale/损坏的 db 行也无法把 remove_dir_all
 /// 指向任意目录树。
 fn delete_dir_session_disk(engine: &str, path: &Path) -> Result<(), String> {
-    delete_dir_session_disk_anchored(engine, path, &super::discovery::dir_session_anchor_roots(engine))
+    delete_dir_session_disk_anchored(
+        engine,
+        path,
+        &super::discovery::dir_session_anchor_roots(engine),
+    )
 }
 
 /// 根列表可注入:单测不依赖 HOME/DSH_HOME 等进程级环境变量。
@@ -1107,6 +1168,13 @@ pub struct Workspace {
     pub sort_order: Option<i64>,
     /// Sidebar group (工作区分组) this workspace belongs to; None = ungrouped.
     pub group_id: Option<String>,
+    /// "worktree" = git worktree child hanging under its parent workspace
+    /// row in the sidebar; None = ordinary workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Parent workspace id; only set when kind="worktree".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     /// Opaque metadata written via host-capability callers (plugin
     /// `workspaces.add`); absent for ordinary directories. The backend never
     /// interprets it — consumers (spawn transport, plugin panels) own the shape.
@@ -1118,10 +1186,10 @@ pub struct Workspace {
 pub fn list_workspaces(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Workspace>, String> {
     query_rows(
         &state,
-        "SELECT id, path, name, last_opened_at, sort_order, group_id, meta FROM workspaces
+        "SELECT id, path, name, last_opened_at, sort_order, group_id, kind, parent_id, meta FROM workspaces
          ORDER BY sort_order IS NULL, sort_order, COALESCE(last_opened_at, 0) DESC",
         |r| {
-            let meta_json: Option<String> = r.get(6)?;
+            let meta_json: Option<String> = r.get(8)?;
             Ok(Workspace {
                 id: r.get(0)?,
                 path: r.get(1)?,
@@ -1129,6 +1197,8 @@ pub fn list_workspaces(state: tauri::State<'_, crate::AppState>) -> Result<Vec<W
                 last_opened_at: r.get(3)?,
                 sort_order: r.get(4)?,
                 group_id: r.get(5)?,
+                kind: r.get(6)?,
+                parent_id: r.get(7)?,
                 meta: meta_json.and_then(|s| serde_json::from_str(&s).ok()),
             })
         },
@@ -1140,6 +1210,8 @@ pub fn add_workspace(
     state: tauri::State<'_, crate::AppState>,
     path: String,
     meta: Option<serde_json::Value>,
+    kind: Option<String>,
+    parent_id: Option<String>,
 ) -> Result<Workspace, String> {
     // `wsl` meta steers engine traffic over ssh to a plugin-named host (出站
     // + 远程执行导向) — it must come through plugin_caps::plugin_add_workspace
@@ -1153,7 +1225,36 @@ pub fn add_workspace(
             );
         }
     }
-    add_workspace_inner(&state, &path, meta)
+    // kind/parent_id shape checks: "worktree" requires an existing parent
+    // row; an ordinary workspace must not carry a parent.
+    match kind.as_deref() {
+        None => {
+            if parent_id.is_some() {
+                return Err("parent_id requires kind=\"worktree\"".to_string());
+            }
+        }
+        Some("worktree") => {
+            let pid = parent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "kind=\"worktree\" requires parent_id".to_string())?;
+            let exists = {
+                let conn = state.db.0.lock();
+                conn.query_row(
+                    "SELECT 1 FROM workspaces WHERE id=?1",
+                    rusqlite::params![pid],
+                    |_| Ok(()),
+                )
+                .is_ok()
+            };
+            if !exists {
+                return Err(format!("unknown parent workspace: {pid}"));
+            }
+        }
+        Some(other) => return Err(format!("unknown workspace kind: {other}")),
+    }
+    add_workspace_inner(&state, &path, meta, kind, parent_id)
 }
 
 /// Shared body of `add_workspace` / `plugin_caps::plugin_add_workspace`:
@@ -1162,6 +1263,8 @@ pub(crate) fn add_workspace_inner(
     state: &crate::AppState,
     path: &str,
     meta: Option<serde_json::Value>,
+    kind: Option<String>,
+    parent_id: Option<String>,
 ) -> Result<Workspace, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1200,10 +1303,13 @@ pub(crate) fn add_workspace_inner(
     {
         let conn = state.db.0.lock();
         conn.execute(
-            "INSERT INTO workspaces(id, path, name, last_opened_at, meta) VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO workspaces(id, path, name, last_opened_at, kind, parent_id, meta)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(path) DO UPDATE SET last_opened_at=excluded.last_opened_at,
+                kind=COALESCE(excluded.kind, workspaces.kind),
+                parent_id=COALESCE(excluded.parent_id, workspaces.parent_id),
                 meta=COALESCE(excluded.meta, workspaces.meta)",
-            rusqlite::params![id, trimmed, name, now, meta_json],
+            rusqlite::params![id, trimmed, name, now, kind, parent_id, meta_json],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1215,6 +1321,8 @@ pub(crate) fn add_workspace_inner(
         last_opened_at: Some(now),
         sort_order: None,
         group_id: None,
+        kind,
+        parent_id,
         meta,
     })
 }
@@ -1717,7 +1825,10 @@ mod tests {
         assert_eq!(visible_session_count(&db), 1);
         archive_session_in(&db, &session).unwrap();
         assert_eq!(visible_session_count(&db), 0);
-        assert_eq!(list_archived_sessions_from(&db).unwrap()[0].session_id, "archived-1");
+        assert_eq!(
+            list_archived_sessions_from(&db).unwrap()[0].session_id,
+            "archived-1"
+        );
 
         // A scanner update never touches the independent archive marker.
         db.0.lock().execute(
@@ -1739,9 +1850,8 @@ mod tests {
         session.engine = "dsh".into();
         session.file_path.clear();
         session.remote = Some(true);
-        session.remote_path = Some(
-            "/home/dev/.dsh/sessions/-ws-demo/archived-1/session.jsonl.zstd".into(),
-        );
+        session.remote_path =
+            Some("/home/dev/.dsh/sessions/-ws-demo/archived-1/session.jsonl.zstd".into());
 
         archive_session_in(&db, &session).unwrap();
         let archived = list_archived_sessions_from(&db).unwrap();
@@ -1765,15 +1875,27 @@ mod tests {
             "/home/dev/.omp/agent/sessions/s-1.jsonl"
         ));
         // 形状不符:相对路径、非 jsonl、`..` 段、目录形态不匹配
-        assert!(!is_plausible_remote_session_path("claude", "home/dev/x.jsonl"));
-        assert!(!is_plausible_remote_session_path("claude", "/home/dev/.claude/projects/p/s.txt"));
+        assert!(!is_plausible_remote_session_path(
+            "claude",
+            "home/dev/x.jsonl"
+        ));
+        assert!(!is_plausible_remote_session_path(
+            "claude",
+            "/home/dev/.claude/projects/p/s.txt"
+        ));
         assert!(!is_plausible_remote_session_path(
             "claude",
             "/home/dev/.claude/projects/../settings.jsonl"
         ));
         // 任意 .jsonl(不在会话目录形态下)一律拒绝 —— 防借 IPC 读发行版文件
-        assert!(!is_plausible_remote_session_path("claude", "/etc/cron.d/job.jsonl"));
-        assert!(!is_plausible_remote_session_path("codex", "/home/dev/.claude/projects/p/s.jsonl"));
+        assert!(!is_plausible_remote_session_path(
+            "claude",
+            "/etc/cron.d/job.jsonl"
+        ));
+        assert!(!is_plausible_remote_session_path(
+            "codex",
+            "/home/dev/.claude/projects/p/s.jsonl"
+        ));
     }
 
     #[test]
@@ -1803,7 +1925,15 @@ mod tests {
         for i in 0..120 {
             lines.push(json!({"type":"message","message":{"role":"assistant","content":format!("later {i}")}}));
         }
-        std::fs::write(&path, lines.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
         {
             let db = crate::db::Db::open_at(&db_path).unwrap();
             db.0.lock().execute(
@@ -1815,15 +1945,24 @@ mod tests {
         let db = crate::db::Db::open_at(&db_path).unwrap();
         let page = load_session_page_blocking(&db, "omp", "saved", Some(100), None).unwrap();
         assert_eq!(page.messages.len(), 100);
-        assert!(page.messages.iter().all(|message| message.text.starts_with("later")));
+        assert!(page
+            .messages
+            .iter()
+            .all(|message| message.text.starts_with("later")));
         let wire = serde_json::to_value(&page).unwrap();
-        let history = wire["subagentHistory"].as_array().expect("session history is independent of pagination");
+        let history = wire["subagentHistory"]
+            .as_array()
+            .expect("session history is independent of pagination");
         let task = history.iter().find(|row| row["text"] == "task").unwrap();
         assert_eq!(task["args"]["tasks"][0]["name"], "SavedReviewer");
         assert_eq!(task["args"]["tasks"][0]["task"], brief);
         let roster = history.iter().find(|row| row["text"] == "hub").unwrap();
-        assert_eq!(roster["result"]["details"]["jobs"][0]["status"], "completed");
-        let older = load_session_page_blocking(&db, "omp", "saved", Some(100), page.next_before).unwrap();
+        assert_eq!(
+            roster["result"]["details"]["jobs"][0]["status"],
+            "completed"
+        );
+        let older =
+            load_session_page_blocking(&db, "omp", "saved", Some(100), page.next_before).unwrap();
         assert!(older.messages.iter().any(|row| row.text == "task"));
     }
 
@@ -1859,20 +1998,21 @@ mod tests {
     #[test]
     fn truncated_fold_matches_a_fresh_prefix_fold() {
         let messages = vec![
-            plain(0, "user"),       // closed by the delegation at 1
-            delegation(1),          // emits user 0 + itself
-            plain(2, "assistant"),  // turn boundary
-            plain(3, "user"),       // replaced by user 4: absent from the full fold
-            plain(4, "user"),       // closed by the delegation at 5
+            plain(0, "user"),      // closed by the delegation at 1
+            delegation(1),         // emits user 0 + itself
+            plain(2, "assistant"), // turn boundary
+            plain(3, "user"),      // replaced by user 4: absent from the full fold
+            plain(4, "user"),      // closed by the delegation at 5
             delegation(5),
-            plain(6, "user"),       // spent past the cut by the boundary at 7
-            plain(7, "thinking"),   // turn boundary, emits user 6
-            plain(8, "user"),       // trailing unclosed user
-            plain(9, "assistant"),  // no boundary: follows a boundary, not a delegation
+            plain(6, "user"),      // spent past the cut by the boundary at 7
+            plain(7, "thinking"),  // turn boundary, emits user 6
+            plain(8, "user"),      // trailing unclosed user
+            plain(9, "assistant"), // no boundary: follows a boundary, not a delegation
         ];
         let fold = subagent_fold(&messages);
         for start in 0..=messages.len() {
-            let cut = serde_json::to_value(subagent_history_until(&messages, &fold, start)).unwrap();
+            let cut =
+                serde_json::to_value(subagent_history_until(&messages, &fold, start)).unwrap();
             let fresh = serde_json::to_value(subagent_history(&messages[..start])).unwrap();
             assert_eq!(cut, fresh, "start={start}");
         }
@@ -2148,5 +2288,51 @@ mod tests {
             "dsh",
             "/home/dev/notes/session.jsonl.zstd"
         ));
+    }
+    /// Tool-result-heavy sessions are the steady state (an hourly task's omp
+    /// transcript measured 28MB of `result.details` against 18MB of chat
+    /// text): the cache budget must see those payloads, or the 128MB cap
+    /// admits multiples of itself. Regression: `parsed_footprint` only
+    /// summed text + images + ts, so args AND result are each sized here.
+    #[test]
+    fn parsed_footprint_counts_retained_tool_payloads() {
+        let big_args = "A".repeat(20_000);
+        let big_result = "R".repeat(20_000);
+        let row = |args: Option<serde_json::Value>, result: Option<serde_json::Value>| Message {
+            seq: 1,
+            role: "tool".into(),
+            text: "ok".into(),
+            ts: None,
+            path: None,
+            args,
+            result,
+            todos: None,
+            usage: Some(json!({ "input_tokens": 10 })),
+            model: None,
+            effort: None,
+            duration_ms: None,
+            images: Vec::new(),
+        };
+        let full = ParsedSession {
+            messages: vec![row(
+                Some(json!({ "command": big_args })),
+                Some(json!({ "details": { "log": big_result } })),
+            )],
+        };
+        // 40k of args+result dwarfs the 2-char text; a threshold above either
+        // payload alone fails if args OR result accounting is dropped.
+        assert!(
+            parsed_footprint(&full) >= 38_000,
+            "args and result payloads must both count toward the cache budget",
+        );
+        // The same row shape without the payloads is orders of magnitude
+        // smaller: the footprint tracks retained bytes, not the row count.
+        let bare = ParsedSession {
+            messages: vec![row(None, None)],
+        };
+        assert!(
+            parsed_footprint(&full) > parsed_footprint(&bare) + 39_000,
+            "the payloads, not the row, drive the footprint",
+        );
     }
 }

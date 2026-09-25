@@ -6,13 +6,19 @@ import { cx } from "@/utils/cx";
  * node 4081:13943 and "Settings/General" node 4079:13037).
  *
  * Every settings group is the same recipe:
- *   card   bg background/secondary, radius/2xl (16px), pl 12 — the left
- *          padding lives on the card so each row's bottom border stops
- *          12px short of the left edge, exactly like Figma.
+ *   card   bg background/primary (white) + 1px separator border,
+ *          radius/2xl (16px), pl 12 — the left padding lives on the card so
+ *          each row's bottom border stops 12px short of the left edge,
+ *          exactly like Figma. The white fill + hairline outline matches the
+ *          Codex reference (cards read as outlined panels on the page, not
+ *          grey blocks).
  *   row    py 10 pr 10, min-height 52, 1px border/button/default under
  *          every row except the last, label left / control right.
- *   label  Body 1/Regular text/primary, optional Body 2/Regular
- *          text/secondary description underneath.
+ *   label  Body 1/Medium text/primary above a card (14px, near-black, like
+ *          the reference); row labels Body 1/Regular text/primary with an
+ *          optional Body 2/Regular text/secondary description underneath.
+ *          Card body copy keeps Body 2 (13px) — only the section label and
+ *          the card chrome follow the reference.
  */
 
 type IconComponent = ComponentType<{
@@ -25,7 +31,7 @@ export function SettingsCard({ className, children }: { className?: string; chil
   return (
     <div
       className={cx(
-        "flex w-full flex-col rounded-2xl bg-background-secondary-default pl-3",
+        "flex w-full flex-col rounded-2xl border border-separator-border bg-background-primary-default pl-3",
         className,
       )}
     >
@@ -34,10 +40,12 @@ export function SettingsCard({ className, children }: { className?: string; chil
   );
 }
 
-/** Muted 13px section heading above a card ("Pull Requests", "Notifications"). */
+/** 14px near-black section heading above a card ("Pull Requests",
+ *  "Notifications") — the reference's label hierarchy: cards and rows carry
+ *  the dark text, section headings around them do not shrink to mute grey. */
 export function SettingsSectionLabel({ className, children }: { className?: string; children: ReactNode }) {
   return (
-    <p className={cx("w-full px-3 text-body-2-medium text-text-secondary", className)}>{children}</p>
+    <p className={cx("w-full px-3 text-body-medium text-text-primary", className)}>{children}</p>
   );
 }
 

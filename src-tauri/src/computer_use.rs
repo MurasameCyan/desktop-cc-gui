@@ -128,47 +128,6 @@ pub fn computer_use_open_permission_settings(kind: String) -> Result<(), String>
     }
 }
 
-// ==================== Drag-to-authorize source ====================
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DragSourceInfo {
-    /// What the user drops into a System Settings permission list: the .app
-    /// bundle in production, the executable itself in dev builds (TCC
-    /// authorizes either).
-    pub path: String,
-    /// Drag preview image.
-    pub icon: String,
-}
-
-fn app_bundle() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
-        .find(|p| p.extension().is_some_and(|e| e == "app"))
-        .map(|p| p.to_path_buf())
-}
-
-#[tauri::command]
-pub fn computer_use_drag_source() -> Result<DragSourceInfo, String> {
-    let path = app_bundle()
-        .or_else(|| std::env::current_exe().ok())
-        .ok_or_else(|| "cannot resolve the app path for dragging".to_string())?;
-    let icns = path.join("Contents/Resources/icon.icns");
-    let dev_icon = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons/icon.png");
-    let icon = if icns.exists() {
-        icns
-    } else if dev_icon.exists() {
-        dev_icon
-    } else {
-        // A bundle path still drags with its own Finder icon as preview.
-        path.clone()
-    };
-    Ok(DragSourceInfo {
-        path: path.to_string_lossy().into_owned(),
-        icon: icon.to_string_lossy().into_owned(),
-    })
-}
-
 // ==================== Esc-to-stop ====================
 
 static ESC_ARMED: AtomicBool = AtomicBool::new(false);
@@ -283,8 +242,8 @@ pub fn inject_workspace_mcp(workspace: &Path) -> Result<Option<McpRestore>, Stri
     let mut doc: serde_json::Value = if created_file {
         serde_json::json!({ "$schema": MCP_SCHEMA_URL, "mcpServers": {} })
     } else {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?
     };
     {
@@ -316,8 +275,7 @@ pub fn inject_workspace_mcp(workspace: &Path) -> Result<Option<McpRestore>, Stri
     }
     if created_file {
         let parent = path.parent().unwrap();
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let tmp = path.with_extension("json.ccgui-tmp");
     let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
@@ -481,7 +439,11 @@ pub(crate) fn frame_to_logical(
 ) -> (i32, i32) {
     let phys_x = x * display.width as f64 / frame_w.max(1) as f64;
     let phys_y = y * display.height as f64 / frame_h.max(1) as f64;
-    let scale = if display.scale > 0.0 { display.scale } else { 1.0 };
+    let scale = if display.scale > 0.0 {
+        display.scale
+    } else {
+        1.0
+    };
     (
         display.x + (phys_x / scale).round() as i32,
         display.y + (phys_y / scale).round() as i32,
@@ -536,7 +498,11 @@ fn control_client() -> Option<(reqwest::blocking::Client, String, String)> {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
     let base = std::env::var("CCGUI_CU_CONTROL").ok()?;
     let token = std::env::var("CCGUI_CU_TOKEN").ok()?;
-    Some((CLIENT.get_or_init(reqwest::blocking::Client::new).clone(), base, token))
+    Some((
+        CLIENT.get_or_init(reqwest::blocking::Client::new).clone(),
+        base,
+        token,
+    ))
 }
 
 /// Tell the main app's overlay where the next action lands. Fire-and-forget:
@@ -685,7 +651,9 @@ fn action_type(text: &str) -> Result<String, String> {
         }
     }
     if text.chars().count() > MAX_TYPE_CHARS {
-        return Err(format!("text too long (max {MAX_TYPE_CHARS} chars); split it into multiple type calls"));
+        return Err(format!(
+            "text too long (max {MAX_TYPE_CHARS} chars); split it into multiple type calls"
+        ));
     }
     new_enigo()?
         .text(text)
@@ -762,8 +730,8 @@ pub(crate) fn parse_key_chord(chord: &str) -> Result<(Vec<Key>, Key), String> {
             }
         }
     }
-    let key = named_key(&last.to_ascii_lowercase())
-        .ok_or_else(|| format!("unknown key '{last}'"))?;
+    let key =
+        named_key(&last.to_ascii_lowercase()).ok_or_else(|| format!("unknown key '{last}'"))?;
     Ok((modifiers, key))
 }
 
@@ -970,7 +938,10 @@ pub mod mcp {
 
     /// Run one batch step; reuses the single-action implementations so
     /// validation and error text stay identical.
-    pub(crate) fn run_sequence_step(action: &SequenceAction, display_id: Option<u32>) -> Result<String, String> {
+    pub(crate) fn run_sequence_step(
+        action: &SequenceAction,
+        display_id: Option<u32>,
+    ) -> Result<String, String> {
         match action {
             SequenceAction::LeftClick { x, y } => {
                 action_click(Button::Left, "Left", Some(*x), Some(*y), 1, display_id)
@@ -1006,7 +977,9 @@ pub mod mcp {
 
     #[tool_router]
     impl ComputerUseServer {
-        #[tool(description = "Capture a screenshot of a display. Returns a JPEG image; every coordinate used by the other tools is in this image's pixels.")]
+        #[tool(
+            description = "Capture a screenshot of a display. Returns a JPEG image; every coordinate used by the other tools is in this image's pixels."
+        )]
         fn screenshot(
             &self,
             Parameters(params): Parameters<ScreenshotParams>,
@@ -1031,7 +1004,8 @@ pub mod mcp {
         fn list_displays(&self) -> Result<CallToolResult, McpError> {
             let monitors = Monitor::all().map_err(|e| tool_error(format!("list monitors: {e}")))?;
             let infos: Vec<DisplayInfo> = monitors.iter().map(display_info_of).collect();
-            let text = serde_json::to_string_pretty(&infos).map_err(|e| tool_error(e.to_string()))?;
+            let text =
+                serde_json::to_string_pretty(&infos).map_err(|e| tool_error(e.to_string()))?;
             Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
         }
 
@@ -1040,12 +1014,13 @@ pub mod mcp {
             &self,
             Parameters(params): Parameters<PointParams>,
         ) -> Result<CallToolResult, McpError> {
-            let message =
-                action_move(params.x, params.y, params.display_id).map_err(tool_error)?;
+            let message = action_move(params.x, params.y, params.display_id).map_err(tool_error)?;
             Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
         }
 
-        #[tool(description = "Left-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted.")]
+        #[tool(
+            description = "Left-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted."
+        )]
         fn left_click(
             &self,
             Parameters(params): Parameters<OptionalPointParams>,
@@ -1062,7 +1037,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Right-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted.")]
+        #[tool(
+            description = "Right-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted."
+        )]
         fn right_click(
             &self,
             Parameters(params): Parameters<OptionalPointParams>,
@@ -1079,7 +1056,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Middle-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted.")]
+        #[tool(
+            description = "Middle-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted."
+        )]
         fn middle_click(
             &self,
             Parameters(params): Parameters<OptionalPointParams>,
@@ -1096,7 +1075,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Double-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted.")]
+        #[tool(
+            description = "Double-click at a point (screenshot pixels), or at the current cursor position when x/y are omitted."
+        )]
         fn double_click(
             &self,
             Parameters(params): Parameters<OptionalPointParams>,
@@ -1113,7 +1094,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Drag with the left button from one point to another (screenshot pixels).")]
+        #[tool(
+            description = "Drag with the left button from one point to another (screenshot pixels)."
+        )]
         fn drag(
             &self,
             Parameters(params): Parameters<DragParams>,
@@ -1129,7 +1112,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Scroll the mouse wheel, optionally hovering a point first (screenshot pixels). Positive delta_y scrolls content down.")]
+        #[tool(
+            description = "Scroll the mouse wheel, optionally hovering a point first (screenshot pixels). Positive delta_y scrolls content down."
+        )]
         fn scroll(
             &self,
             Parameters(params): Parameters<ScrollParams>,
@@ -1145,7 +1130,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Type text at the current keyboard focus. Unicode (e.g. Chinese) is supported; this does not click anything first.")]
+        #[tool(
+            description = "Type text at the current keyboard focus. Unicode (e.g. Chinese) is supported; this does not click anything first."
+        )]
         fn type_text(
             &self,
             Parameters(params): Parameters<TypeParams>,
@@ -1154,7 +1141,9 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Press a key or key chord: \"enter\", \"tab\", \"esc\", \"backspace\", \"delete\", arrows, \"f1\"-\"f12\", or combos like \"cmd+c\", \"ctrl+shift+t\", \"alt+tab\".")]
+        #[tool(
+            description = "Press a key or key chord: \"enter\", \"tab\", \"esc\", \"backspace\", \"delete\", arrows, \"f1\"-\"f12\", or combos like \"cmd+c\", \"ctrl+shift+t\", \"alt+tab\"."
+        )]
         fn press_key(
             &self,
             Parameters(params): Parameters<KeyParams>,
@@ -1163,14 +1152,18 @@ pub mod mcp {
             action_result(message, params.display_id)
         }
 
-        #[tool(description = "Read the frontmost app's accessibility tree (macOS only): a fast text snapshot of its controls — role, label, position, supported actions — with refs for press_element/set_element_value. MUCH cheaper and faster than a screenshot; try this FIRST for app interactions, and fall back to screenshot when the tree does not cover the target (canvas, custom-drawn UI).")]
+        #[tool(
+            description = "Read the frontmost app's accessibility tree (macOS only): a fast text snapshot of its controls — role, label, position, supported actions — with refs for press_element/set_element_value. MUCH cheaper and faster than a screenshot; try this FIRST for app interactions, and fall back to screenshot when the tree does not cover the target (canvas, custom-drawn UI)."
+        )]
         fn get_app_state(&self) -> Result<CallToolResult, McpError> {
             require_accessibility().map_err(tool_error)?;
             let text = crate::computer_use_ax::app_state().map_err(tool_error)?;
             Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
         }
 
-        #[tool(description = "Press (click) an accessibility element by ref from get_app_state. Precise and does not depend on pixel coordinates.")]
+        #[tool(
+            description = "Press (click) an accessibility element by ref from get_app_state. Precise and does not depend on pixel coordinates."
+        )]
         fn press_element(
             &self,
             Parameters(params): Parameters<ElementRefParams>,
@@ -1181,22 +1174,23 @@ pub mod mcp {
             action_result(message, None)
         }
 
-        #[tool(description = "Set the value of a text-field element by ref from get_app_state. Writes the value directly — no focusing click, no typing; better than left_click + type_text whenever the field has a ref.")]
+        #[tool(
+            description = "Set the value of a text-field element by ref from get_app_state. Writes the value directly — no focusing click, no typing; better than left_click + type_text whenever the field has a ref."
+        )]
         fn set_element_value(
             &self,
             Parameters(params): Parameters<SetValueParams>,
         ) -> Result<CallToolResult, McpError> {
             require_accessibility().map_err(tool_error)?;
-            let message = crate::computer_use_ax::set_value(
-                &params.state,
-                params.ref_id,
-                &params.value,
-            )
-            .map_err(tool_error)?;
+            let message =
+                crate::computer_use_ax::set_value(&params.state, params.ref_id, &params.value)
+                    .map_err(tool_error)?;
             action_result(message, None)
         }
 
-        #[tool(description = "Wait for the UI to settle (e.g. after opening an app), then take a fresh screenshot.")]
+        #[tool(
+            description = "Wait for the UI to settle (e.g. after opening an app), then take a fresh screenshot."
+        )]
         fn wait(
             &self,
             Parameters(params): Parameters<WaitParams>,
@@ -1205,7 +1199,9 @@ pub mod mcp {
             std::thread::sleep(Duration::from_millis(ms));
             action_result(format!("Waited {ms} ms."), None)
         }
-        #[tool(description = "Execute a batch of actions in one call (clicks, typing, keys, scrolls, drags, waits). Much faster than one tool call per action: the model plans several steps from a single screenshot, and only the final screenshot comes back. Stops at the first failing step.")]
+        #[tool(
+            description = "Execute a batch of actions in one call (clicks, typing, keys, scrolls, drags, waits). Much faster than one tool call per action: the model plans several steps from a single screenshot, and only the final screenshot comes back. Stops at the first failing step."
+        )]
         fn sequence(
             &self,
             Parameters(params): Parameters<SequenceParams>,
@@ -1215,7 +1211,9 @@ pub mod mcp {
                 return Err(tool_error("actions must not be empty".into()));
             }
             if params.actions.len() > 32 {
-                return Err(tool_error("too many actions (max 32); split the batch".into()));
+                return Err(tool_error(
+                    "too many actions (max 32); split the batch".into(),
+                ));
             }
             let mut done = Vec::new();
             for (index, action) in params.actions.iter().enumerate() {
@@ -1266,7 +1264,11 @@ pub mod mcp {
                  previous step's visual result — stop the batch there and look at the returned \
                  screenshot first. \
                  If a tool reports a missing OS permission, stop and tell the user to grant it \
-                 in CC GUI → Settings → Computer Use."
+                 in CC GUI → Settings → Computer Use. \
+                 A visible pointer follows every action target on screen: it is drawn by CC GUI \
+                 itself, is always on while these tools run, and cannot be hidden or disabled \
+                 through the tool surface. Do not call attention to it or treat it as page content; \
+                 never try to click it, move it away, or work around it."
                     .into(),
             );
             info
@@ -1453,8 +1455,7 @@ mod tests {
         steer_home("win");
         let ws = temp_workspace("win");
         std::fs::create_dir_all(ws.join(".omp")).unwrap();
-        let original =
-            r#"{"mcpServers":{"ccgui-computer":{"type":"stdio","command":"mine"}}}"#;
+        let original = r#"{"mcpServers":{"ccgui-computer":{"type":"stdio","command":"mine"}}}"#;
         std::fs::write(ws.join(".omp").join("mcp.json"), original).unwrap();
         assert!(inject_workspace_mcp(&ws).unwrap().is_none());
         assert_eq!(

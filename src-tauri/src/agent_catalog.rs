@@ -490,10 +490,7 @@ pub(crate) async fn set_built_in_agent_division_enabled(
             .iter()
             .any(|division| division.id == division_id)
         {
-            return Err(format!(
-                "unknown built-in agent division `{}`",
-                division_id
-            ));
+            return Err(format!("unknown built-in agent division `{}`", division_id));
         }
         let division_agent_ids: HashSet<&str> = catalog
             .agents
@@ -572,10 +569,8 @@ mod tests {
     impl ScratchHome {
         fn new(name: &str) -> Self {
             let guard = crate::paths::HOME_ENV_LOCK.lock();
-            let dir = std::env::temp_dir().join(format!(
-                "ccgui-agent-catalog-{name}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("ccgui-agent-catalog-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             let previous = std::env::var_os("HOME");
@@ -740,7 +735,11 @@ mod tests {
         assert_eq!(view.provider.license, "MIT");
         assert_eq!(view.divisions.len(), 17);
         assert_eq!(view.agents.len(), 248);
-        let enabled_view = view.agents.iter().find(|a| a.id == agent.id).expect("agent view");
+        let enabled_view = view
+            .agents
+            .iter()
+            .find(|a| a.id == agent.id)
+            .expect("agent view");
         assert!(enabled_view.enabled);
         assert_eq!(enabled_view.name, agent.name.zh_cn);
         let division = view
@@ -749,7 +748,17 @@ mod tests {
             .find(|d| d.id == agent.division_id)
             .expect("division view");
         assert_eq!(division.enabled_count, 1);
-        assert_eq!(division.label, catalog.manifest.divisions.iter().find(|d| d.id == agent.division_id).expect("division").label.zh_cn);
+        assert_eq!(
+            division.label,
+            catalog
+                .manifest
+                .divisions
+                .iter()
+                .find(|d| d.id == agent.division_id)
+                .expect("division")
+                .label
+                .zh_cn
+        );
     }
 
     #[test]
@@ -763,7 +772,10 @@ mod tests {
             .map(|agent| agent.id.as_str())
             .collect();
         let division_size = division_agent_ids.len();
-        assert!(division_size > 1, "fixture division should hold several agents");
+        assert!(
+            division_size > 1,
+            "fixture division should hold several agents"
+        );
 
         // Enabling a division enables exactly its agents; disabling one agent
         // inside it leaves the rest; disabling the division clears them all

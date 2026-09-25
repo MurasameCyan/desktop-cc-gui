@@ -265,6 +265,10 @@ input[type="search"]::-webkit-search-cancel-button {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-status-streaming) 18%, transparent);
   animation: sidebar-thread-status-heartbeat 0.92s ease-in-out infinite;
 }
+
+.sidebar-thread-status-retrying {
+  animation: none;
+}
 .sidebar-thread-status-unseen {
   background: var(--color-status-unseen);
 }
@@ -325,6 +329,17 @@ input[type="search"]::-webkit-search-cancel-button {
   -webkit-background-clip: text;
   animation: ai-chat-text-shimmer 2.6s linear infinite;
   will-change: background-position;
+}
+
+/* Provider backoff keeps the status visible without competing with the
+ * sidebar's scroll; the indicator remains on its deterministic first frame. */
+.bui-agent-thinking-static .bui-agent-thinking-star {
+  animation: none;
+  transform: none;
+  opacity: 0.7;
+}
+.bui-agent-thinking-static .bui-agent-thinking-comet {
+  animation: none;
 }
 
 /* Star sparkle: scale + fade in, settle, and vanish; per-star duration and

@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import { useBrowserStore } from "@/features/browser/store";
+import { useGitStore } from "@/features/git/store";
+import { useMissionStore } from "@/features/mission/store";
+import { usePluginHubStore } from "@/features/plugins/hub/store";
+import { usePluginTabsStore } from "@/features/plugins/runtime/center-tabs";
+import { useReleaseNotesTabStore } from "@/features/update/notes-tab";
 import {
   ipc,
   type DirEntry,
@@ -12,6 +17,7 @@ import { writeStored } from "@/lib/storage";
 import { installFilesBridge, readRemoteAware } from "./remote-files";
 
 export const FILES_ROOT_KEY = "ccgui-next.filesRoot";
+let treeGeneration = 0;
 
 /** Join a directory path and a child name. Backend paths are POSIX-style on
  * macOS/Linux; Rust's fs APIs also accept "/" separators on Windows. */
@@ -79,14 +85,11 @@ interface FilesStore {
   toggleDir: (path: string) => Promise<void>;
   /** Re-fetch a directory only if it has been loaded before. */
   invalidateDir: (path: string) => Promise<void>;
-  /** Refresh compact Git status for the directories of one loaded level. */
-  loadRepositories: (dirPath: string, entries: DirEntry[]) => Promise<void>;
   /** Re-fetch every loaded/expanded directory (titlebar refresh button). */
   refreshTree: () => Promise<void>;
   /** True while refreshTree is in flight. */
   refreshing: boolean;
-  /** Refresh per-file git colors for the files of one loaded level. */
-  loadFileColors: (dirPath: string, entries: DirEntry[]) => Promise<void>;
+  loadGitStatus: (levels: Record<string, DirEntry[]>) => Promise<void>;
   selectPath: (path: string | null, isDir?: boolean) => void;
   /** Open a file as a center tab (or focus its existing tab). */
   openFile: (path: string) => Promise<void>;
@@ -116,6 +119,19 @@ interface FilesStore {
   closeSearch: () => void;
 }
 
+/** 文件抢到中心前，非文件面（差异/浏览器/插件页/插件中心/任务工作台/版本
+ *  更新说明）让位。页签条的选择器（use-chat-tabs）会完整清场，但文件树、
+ *  搜索和插件桥直接调 openFile 时同样得切过去——否则编辑器页签亮了，画面还
+ *  停在上一个面。 */
+function dismissNonFileSurfaces() {
+  useGitStore.getState().closeDiff();
+  useBrowserStore.getState().deactivate();
+  usePluginTabsStore.getState().deactivate();
+  usePluginHubStore.getState().deactivate();
+  useMissionStore.getState().deactivate();
+  useReleaseNotesTabStore.getState().deactivate();
+}
+
 export const useFilesStore = create<FilesStore>((set, get) => ({
   root: localStorage.getItem(FILES_ROOT_KEY) ?? "",
   children: {},
@@ -137,6 +153,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   setRoot: (path) => {
     const root = path.trim();
     if (root === get().root) return;
+    treeGeneration += 1;
     if (root) {
       writeStored(FILES_ROOT_KEY, root);
     } else {
@@ -146,6 +163,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     // paths and stay editable regardless of which tree is shown.
     set({
       root,
+      refreshing: false,
       children: {},
       loadingDirs: {},
       dirErrors: {},
@@ -164,9 +182,11 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   ensureDir: async (path) => {
     const s = get();
     if (s.children[path] || s.loadingDirs[path]) return;
+    const generation = treeGeneration;
     set((s) => ({ loadingDirs: { ...s.loadingDirs, [path]: true } }));
     try {
       const entries = await ipc.listDir(path);
+      if (generation !== treeGeneration) return;
       set((s) => {
         const loadingDirs = { ...s.loadingDirs };
         const dirErrors = { ...s.dirErrors };
@@ -178,9 +198,9 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
           dirErrors,
         };
       });
-      void get().loadRepositories(path, entries);
-      void get().loadFileColors(path, entries);
+      await get().loadGitStatus({ [path]: entries });
     } catch (e) {
+      if (generation !== treeGeneration) return;
       set((s) => {
         const loadingDirs = { ...s.loadingDirs };
         delete loadingDirs[path];
@@ -192,38 +212,30 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     }
   },
 
-  loadRepositories: async (dirPath, entries) => {
-    // dirPath itself may be the workspace root repository (the 截图 case:
-    // `open-reverselab main M1 ?12` on the tree's top row), so query it
-    // alongside its child directories.
-    const paths = [dirPath];
-    for (const entry of entries) {
-      if (entry.isDir) paths.push(joinPath(dirPath, entry.name));
-    }
+  loadGitStatus: async (levels) => {
+    const generation = treeGeneration;
+    const requests = Object.entries(levels).map(([path, entries]) => ({
+      path,
+      files: entries.filter((entry) => !entry.name.startsWith(".")).map((entry) => entry.name),
+      directories: entries.filter((entry) => entry.isDir).map((entry) => entry.name),
+    }));
+    if (requests.length === 0) return;
     try {
-      const summaries = await ipc.gitRepositorySummaries(paths);
-      // Non-repos are dropped: a stale entry must not survive a refresh.
-      const fresh: Record<string, RepositorySummary> = {};
-      for (const summary of summaries) fresh[summary.path] = summary;
-      set((s) => ({ repositories: { ...s.repositories, ...fresh } }));
+      const result = await ipc.gitTreeStatus(requests);
+      if (generation !== treeGeneration) return;
+      set((state) => {
+        const repositories = { ...state.repositories };
+        const fileColors = { ...state.fileColors };
+        for (const request of requests) {
+          delete repositories[request.path];
+          for (const name of request.directories) delete repositories[joinPath(request.path, name)];
+          fileColors[request.path] = result.fileColors[request.path] ?? {};
+        }
+        for (const summary of result.repositories) repositories[summary.path] = summary;
+        return { repositories, fileColors };
+      });
     } catch {
-      // File browsing stays usable when the batch status call fails.
-    }
-  },
-
-  loadFileColors: async (dirPath, entries) => {
-    // Ask about files AND folders: the backend aggregates directory colors
-    // from everything beneath them, so parents light up without expanding.
-    const files: string[] = [];
-    for (const entry of entries) {
-      if (!entry.name.startsWith(".")) files.push(entry.name);
-    }
-    if (files.length === 0) return;
-    try {
-      const colors = await ipc.gitFileColors(dirPath, files);
-      set((s) => ({ fileColors: { ...s.fileColors, [dirPath]: colors } }));
-    } catch {
-      // Colors are cosmetic; keep the tree usable when the walk fails.
+      return;
     }
   },
 
@@ -241,11 +253,12 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
 
   invalidateDir: async (path) => {
     if (!get().children[path]) return;
+    const generation = treeGeneration;
     try {
       const entries = await ipc.listDir(path);
+      if (generation !== treeGeneration) return;
       set((s) => ({ children: { ...s.children, [path]: entries } }));
-      void get().loadRepositories(path, entries);
-      void get().loadFileColors(path, entries);
+      await get().loadGitStatus({ [path]: entries });
     } catch {
       // Keep stale listing on refresh failure; the user can retry by toggling.
     }
@@ -253,27 +266,38 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   refreshTree: async () => {
     const s = get();
     if (!s.root || s.refreshing) return;
+    const generation = treeGeneration;
     set({ refreshing: true });
     try {
-      const dirs = new Set([...Object.keys(s.children), ...Object.keys(s.expanded)]);
+      const dirs = new Set([s.root, ...Object.keys(s.children), ...Object.keys(s.expanded)]);
+      const levels: Record<string, DirEntry[]> = {};
       await Promise.all(
-        [...dirs].map((dir) =>
-          get().children[dir] ? get().invalidateDir(dir) : get().ensureDir(dir),
-        ),
+        [...dirs].map(async (dir) => {
+          try {
+            const entries = await ipc.listDir(dir);
+            if (generation !== treeGeneration) return;
+            levels[dir] = entries;
+            set((state) => {
+              const dirErrors = { ...state.dirErrors };
+              delete dirErrors[dir];
+              return { children: { ...state.children, [dir]: entries }, dirErrors };
+            });
+          } catch {
+            if (generation !== treeGeneration) return;
+            if (s.children[dir]) levels[dir] = s.children[dir];
+          }
+        }),
       );
-      // Local listDir is near-instant; hold the spinner long enough for the
-      // animation to read as feedback instead of an imperceptible flicker.
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, 500);
-      await promise;
+      if (generation === treeGeneration) await get().loadGitStatus(levels);
     } finally {
-      set({ refreshing: false });
+      if (generation === treeGeneration) set({ refreshing: false });
     }
   },
 
   selectPath: (path, isDir = false) => set({ selectedPath: path, selectedIsDir: isDir }),
 
   openFile: async (path) => {
+    dismissNonFileSurfaces();
     if (get().fileStates[path]) {
       set({ activeFilePath: path, selectedPath: path, selectedIsDir: false });
       return;
@@ -293,9 +317,9 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
 
   activateFile: (path) => {
     if (get().fileStates[path]) set({ activeFilePath: path });
-    // A file taking the center dismisses any browser tab in view (mutual
-    // exclusion enforced here so file-tree opens cover it too).
-    useBrowserStore.getState().deactivate();
+    // A file taking the center dismisses every other surface in view
+    // (mutual exclusion enforced here so file-tree opens cover it too).
+    dismissNonFileSurfaces();
   },
 
   clearActiveFile: () => set({ activeFilePath: null }),

@@ -15,18 +15,21 @@ vi.mock("@/lib/transport", () => ({ isWeb: false }));
 vi.mock("@/lib/platform", () => ({ getAppVersion: async () => "1.0.5" }));
 
 // vi.mock calls above are hoisted, so this static import sees the mocks.
+import { useReleaseNotesTabStore } from "./notes-tab";
 import { useUpdateStore } from "./store";
 
 function reset() {
   useUpdateStore.setState({
     stage: "idle",
     version: undefined,
+    notesRelease: undefined,
     latestVersion: undefined,
     latestPubDate: undefined,
     error: undefined,
     downloadedBytes: 0,
     totalBytes: undefined,
   });
+  useReleaseNotesTabStore.setState({ open: false, active: false, unreadVersion: undefined });
   invokeMock.mockReset();
   checkMock.mockReset();
 }
@@ -98,5 +101,66 @@ describe("checkForUpdates no-update feedback", () => {
     expect(state.latestVersion).toBe("1.0.5");
     expect(state.latestPubDate).toBe("2026-09-17T00:00:00Z");
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("release-notes tab", () => {
+  beforeEach(reset);
+
+  it("opens the tab and keeps the manifest notes when an update is found", async () => {
+    checkMock.mockResolvedValue({
+      version: "1.0.9",
+      date: "2026-10-01T00:00:00Z",
+      body: "## Fixes\n- crash on quit",
+      close: vi.fn(),
+    });
+
+    // 后台自动检查（非 interactive）同样要把说明开成页签。
+    await useUpdateStore.getState().checkForUpdates();
+
+    expect(useReleaseNotesTabStore.getState()).toMatchObject({ open: true, active: true });
+    expect(useUpdateStore.getState().notesRelease).toEqual({
+      version: "1.0.9",
+      date: "2026-10-01T00:00:00Z",
+      body: "## Fixes\n- crash on quit",
+    });
+  });
+
+  it("keeps the notes snapshot after the user defers the update", async () => {
+    checkMock.mockResolvedValue({ version: "1.0.9", body: "notes", close: vi.fn() });
+    await useUpdateStore.getState().checkForUpdates();
+
+    useUpdateStore.getState().dismiss();
+
+    // 「稍后」只收起待更新状态与浮层；已打开的说明页签还能继续读。
+    expect(useUpdateStore.getState().stage).toBe("idle");
+    expect(useUpdateStore.getState().version).toBeUndefined();
+    expect(useUpdateStore.getState().notesRelease).toEqual({ version: "1.0.9", date: undefined, body: "notes" });
+  });
+
+  it("a discovered update leaves no unread marker (the toast already asks for action)", async () => {
+    checkMock.mockResolvedValue({ version: "1.0.9", body: "notes", close: vi.fn() });
+
+    await useUpdateStore.getState().checkForUpdates();
+
+    expect(useReleaseNotesTabStore.getState().unreadVersion).toBeUndefined();
+  });
+
+  it("closing the tab clears the upgrade announcement's unread marker", () => {
+    useReleaseNotesTabStore.getState().announceNewVersion("1.0.9");
+    expect(useReleaseNotesTabStore.getState()).toMatchObject({
+      open: true,
+      active: true,
+      unreadVersion: "1.0.9",
+    });
+
+    useReleaseNotesTabStore.getState().close();
+
+    // 关掉页签 = 看过了：页签圆点与页头「新版本」一起消失。
+    expect(useReleaseNotesTabStore.getState()).toMatchObject({
+      open: false,
+      active: false,
+      unreadVersion: undefined,
+    });
   });
 });

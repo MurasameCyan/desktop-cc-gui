@@ -26,10 +26,10 @@ use parking_lot::Mutex;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
+use tauri::Manager;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use tauri::Manager;
 
 /// Pause before redialing after a dropped socket: long enough for the Worker
 /// to finish recycling the old connection, short enough that a phone reload
@@ -660,7 +660,9 @@ async fn cf_subdomain(
     account_id: &str,
 ) -> Result<String, String> {
     let response = client
-        .get(format!("{API_BASE}/accounts/{account_id}/workers/subdomain"))
+        .get(format!(
+            "{API_BASE}/accounts/{account_id}/workers/subdomain"
+        ))
         .bearer_auth(token)
         .send()
         .await
@@ -1112,8 +1114,8 @@ fn spawn_http(
             return;
         }
         let url = format!("http://127.0.0.1:{port}{}", pending.path);
-        let method = reqwest::Method::from_bytes(pending.method.as_bytes())
-            .unwrap_or(reqwest::Method::GET);
+        let method =
+            reqwest::Method::from_bytes(pending.method.as_bytes()).unwrap_or(reqwest::Method::GET);
         let mut request = client.request(method, &url).header(VIA_HEADER, "relay");
         for (name, value) in &pending.headers {
             if HOP_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
@@ -1147,9 +1149,16 @@ fn spawn_http(
                 headers.insert(name, value.to_string());
             }
         }
-        if send(&out, &ClientFrame::Head { id, status, headers })
-            .await
-            .is_err()
+        if send(
+            &out,
+            &ClientFrame::Head {
+                id,
+                status,
+                headers,
+            },
+        )
+        .await
+        .is_err()
         {
             return;
         }
@@ -1371,7 +1380,11 @@ mod tests {
         let pack = deploy_pack(key);
         assert_eq!(&pack[0..4], b"PK\x03\x04", "local file header");
         let eocd = pack.len() - 22;
-        assert_eq!(&pack[eocd..eocd + 4], b"PK\x05\x06", "end of central directory");
+        assert_eq!(
+            &pack[eocd..eocd + 4],
+            b"PK\x05\x06",
+            "end of central directory"
+        );
         assert_eq!(
             u16::from_le_bytes([pack[eocd + 10], pack[eocd + 11]]),
             3,
@@ -1439,7 +1452,11 @@ mod tests {
         .await;
 
         assert!(outcome.is_none(), "only stop ends the loop");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2, "the failed dial was retried");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "the failed dial was retried"
+        );
         assert_eq!(
             failures.lock().len(),
             2,
@@ -1489,10 +1506,16 @@ mod tests {
     #[test]
     fn autostart_follows_the_remembered_switch() {
         let mut settings = crate::settings::AppSettings::default();
-        assert!(autostart_target(&settings).is_none(), "off until switched on");
+        assert!(
+            autostart_target(&settings).is_none(),
+            "off until switched on"
+        );
         settings.web_relay_url = Some("https://relay.example".into());
         settings.web_relay_key = Some("KEY".into());
-        assert!(autostart_target(&settings).is_none(), "an address is not a switch");
+        assert!(
+            autostart_target(&settings).is_none(),
+            "an address is not a switch"
+        );
         settings.web_relay_on = Some(true);
         assert_eq!(
             autostart_target(&settings),
@@ -1501,7 +1524,6 @@ mod tests {
         settings.web_relay_on = Some(false);
         assert!(autostart_target(&settings).is_none(), "off stays off");
     }
-
 
     #[test]
     fn stop_persistence_failure_preserves_the_running_relay() {
@@ -1533,7 +1555,10 @@ mod tests {
         )
         .unwrap();
         assert!(slot.is_none(), "a committed stop removes the relay");
-        assert!(*stop_rx.borrow(), "a committed warning still stops the agent");
+        assert!(
+            *stop_rx.borrow(),
+            "a committed warning still stops the agent"
+        );
     }
 
     /// A dial that never answers must not park the agent task: the deadline
@@ -1563,7 +1588,11 @@ mod tests {
         .await;
 
         assert!(outcome.is_none(), "only stop ends the loop");
-        assert_eq!(dialed.load(Ordering::SeqCst), 2, "the timed-out dial was retried");
+        assert_eq!(
+            dialed.load(Ordering::SeqCst),
+            2,
+            "the timed-out dial was retried"
+        );
         assert!(
             failures.lock()[0].contains("超时"),
             "the hang is reported as a timeout"
@@ -1806,8 +1835,14 @@ mod tests {
         let text_payload = br#"{"type":"hello"}"#.to_vec();
         // Deliberately not UTF-8: a binary frame decoded as text would corrupt.
         let binary_payload = vec![0xff, 0x00, 0x01];
-        live.frames.send((text_payload.clone(), true)).await.unwrap();
-        live.frames.send((binary_payload.clone(), false)).await.unwrap();
+        live.frames
+            .send((text_payload.clone(), true))
+            .await
+            .unwrap();
+        live.frames
+            .send((binary_payload.clone(), false))
+            .await
+            .unwrap();
 
         let mut got = Vec::new();
         while got.len() < 2 {

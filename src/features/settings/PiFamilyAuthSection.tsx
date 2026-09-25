@@ -26,6 +26,7 @@ import {
   ipc,
   type PiFamilyAuthListResult,
   type PiFamilyAuthProviderSnapshot,
+  type PiFamilyCustomProviderSummary,
   type PiFamilyModelsConfigReadResult,
 } from "@/lib/ipc";
 import {
@@ -36,19 +37,17 @@ import {
 } from "./piFamilyAuthCatalog";
 import { PiFamilyApiKeySection } from "./PiFamilyApiKeySection";
 import { PiFamilyCustomSection } from "./PiFamilyCustomSection";
+import { extractProviderBlock, removeProviderBlock, replaceProviderBlock } from "./piFamilyModelsBlocks";
 import { launchPiFamilyLogin } from "./piFamilyLogin";
 import { PiFamilyOauthSection } from "./PiFamilyOauthSection";
 import { notifyCliConfigChanged } from "./providers";
 
-export function PiFamilyAuthSection({
-  engine,
-  openCustomEditorSignal,
-}: {
-  engine: "pi" | "omp";
-  /** Bump to open the 自定义供应商 editor from the 官方配置 row's 编辑
-   *  entry (pi/omp official files are never cc-gui-managed, so no gate). */
-  openCustomEditorSignal?: number;
-}) {
+/** All credential-store / custom-provider state and handlers. Kept JSX-free so
+ *  the component below only composes the three groups and their dialogs. */
+function usePiFamilyAuthState(
+  engine: "pi" | "omp",
+  openCustomEditorSignal?: number,
+) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<PiFamilyAuthListResult | null>(null);
@@ -68,6 +67,12 @@ export function PiFamilyAuthSection({
   const [modelsDraft, setModelsDraft] = useState("");
   const [modelsSaving, setModelsSaving] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  const [customQuery, setCustomQuery] = useState("");
+  const [customEditingId, setCustomEditingId] = useState<string | null>(null);
+  const [customDraft, setCustomDraft] = useState("");
+  const [customSaving, setCustomSaving] = useState(false);
+  const [customError, setCustomError] = useState<string | null>(null);
+  const [customDeleteTarget, setCustomDeleteTarget] = useState<PiFamilyCustomProviderSummary | null>(null);
 
   const oauthProviders = PI_FAMILY_OAUTH_PROVIDERS[engine];
   const storePath = snapshot?.store.path ?? "";
@@ -125,6 +130,18 @@ export function PiFamilyAuthSection({
       );
     });
   }, [query, showAll, byId]);
+
+  const visibleCustomProviders = useMemo(() => {
+    const normalized = customQuery.trim().toLowerCase();
+    const providers = modelsConfig?.providers ?? [];
+    if (!normalized) {
+      return providers;
+    }
+    return providers.filter((provider) =>
+      [provider.id, provider.name ?? "", provider.baseUrl ?? "", provider.api ?? ""]
+        .some((value) => value.toLowerCase().includes(normalized)),
+    );
+  }, [customQuery, modelsConfig]);
 
   const closeEditor = useCallback(() => {
     setEditingId(null);
@@ -188,6 +205,23 @@ export function PiFamilyAuthSection({
     }
   }, [engine, deleteTarget, refresh]);
 
+  const closeCustomProviderEditor = useCallback(() => {
+    setCustomEditingId(null);
+    setCustomDraft("");
+    setCustomError(null);
+  }, []);
+
+  const showModelsEditor = useCallback(
+    (error: string | null = null) => {
+      closeCustomProviderEditor();
+      const existing = modelsConfig?.text ?? "";
+      setModelsDraft(existing.trim() ? existing : (modelsConfig?.template ?? ""));
+      setModelsError(error);
+      setModelsEditorOpen(true);
+    },
+    [closeCustomProviderEditor, modelsConfig],
+  );
+
   const openModelsEditor = useCallback(() => {
     if (modelsEditorOpen) {
       setModelsEditorOpen(false);
@@ -195,12 +229,89 @@ export function PiFamilyAuthSection({
       setModelsError(null);
       return;
     }
-    // Missing/empty file → pre-fill the default example (written only on save).
-    const existing = modelsConfig?.text ?? "";
-    setModelsDraft(existing.trim() ? existing : (modelsConfig?.template ?? ""));
-    setModelsError(null);
-    setModelsEditorOpen(true);
-  }, [modelsEditorOpen, modelsConfig]);
+    showModelsEditor();
+  }, [modelsEditorOpen, showModelsEditor]);
+
+  const openCustomProviderEditor = useCallback(
+    (id: string) => {
+      if (customEditingId === id) {
+        closeCustomProviderEditor();
+        return;
+      }
+      const format = modelsConfig?.file.format ?? "yaml";
+      const block = extractProviderBlock(modelsConfig?.text ?? "", format, id);
+      if (!block) {
+        showModelsEditor(t("settings.piAuthCustomEditNotFound", { id }));
+        return;
+      }
+      setModelsEditorOpen(false);
+      setModelsDraft("");
+      setModelsError(null);
+      setCustomEditingId(id);
+      setCustomDraft(block.text);
+      setCustomError(null);
+    },
+    [closeCustomProviderEditor, customEditingId, modelsConfig, showModelsEditor, t],
+  );
+
+  const handleCustomProviderSave = useCallback(async () => {
+    if (!customEditingId || !modelsConfig?.text) {
+      return;
+    }
+    setCustomSaving(true);
+    setCustomError(null);
+    try {
+      const format = modelsConfig.file.format;
+      const block = extractProviderBlock(modelsConfig.text, format, customEditingId);
+      if (!block) {
+        setCustomError(t("settings.piAuthCustomEditNotFound", { id: customEditingId }));
+        return;
+      }
+      const nextText = replaceProviderBlock(modelsConfig.text, block, customDraft);
+      if (!extractProviderBlock(nextText, format, customEditingId)) {
+        setCustomError(t("settings.piAuthCustomEditProviderMissing", { id: customEditingId }));
+        return;
+      }
+      await ipc.piFamilyModelsConfigWrite(engine, nextText);
+      notifyCliConfigChanged();
+      closeCustomProviderEditor();
+      await refresh();
+    } catch (error) {
+      setCustomError(String(error));
+    } finally {
+      setCustomSaving(false);
+    }
+  }, [closeCustomProviderEditor, customDraft, customEditingId, engine, modelsConfig, refresh, t]);
+
+  const handleCustomProviderDelete = useCallback(async () => {
+    const target = customDeleteTarget;
+    if (!target || !modelsConfig?.text) {
+      return;
+    }
+    setCustomSaving(true);
+    setCustomError(null);
+    try {
+      const format = modelsConfig.file.format;
+      const block = extractProviderBlock(modelsConfig.text, format, target.id);
+      if (!block) {
+        setCustomError(t("settings.piAuthCustomEditNotFound", { id: target.id }));
+        return;
+      }
+      const nextText = removeProviderBlock(modelsConfig.text, block, format);
+      await ipc.piFamilyModelsConfigWrite(engine, nextText);
+      notifyCliConfigChanged();
+      setCustomDeleteTarget(null);
+      if (customEditingId === target.id) {
+        closeCustomProviderEditor();
+      }
+      await refresh();
+    } catch (error) {
+      setCustomDeleteTarget(null);
+      setCustomError(String(error));
+    } finally {
+      setCustomSaving(false);
+    }
+  }, [closeCustomProviderEditor, customDeleteTarget, customEditingId, engine, modelsConfig, refresh, t]);
 
   // The 官方配置 row's 编辑 entry bumps this signal to open the models
   // editor. Adjusting state during render (React's recommended pattern,
@@ -248,6 +359,120 @@ export function PiFamilyAuthSection({
     [engine, navigate, t],
   );
 
+  const toggleShowAll = useCallback(() => setShowAll((value) => !value), []);
+  const toggleDraftVisible = useCallback(() => setDraftVisible((visible) => !visible), []);
+
+  return {
+    notice,
+    oauthProviders,
+    oauthActive,
+    handleLaunchLogin,
+    loadError,
+    storePath,
+    query,
+    setQuery,
+    showAll,
+    toggleShowAll,
+    visibleProviders,
+    byId,
+    editingId,
+    openEditor,
+    deleteTarget,
+    setDeleteTarget,
+    handleDelete,
+    draftKey,
+    setDraftKey,
+    draftVisible,
+    toggleDraftVisible,
+    saving,
+    actionError,
+    handleSave,
+    closeEditor,
+    modelsConfig,
+    modelsEditorOpen,
+    modelsDraft,
+    setModelsDraft,
+    modelsSaving,
+    modelsError,
+    openModelsEditor,
+    handleModelsSave,
+    customQuery,
+    setCustomQuery,
+    visibleCustomProviders,
+    customEditingId,
+    customDraft,
+    setCustomDraft,
+    customSaving,
+    customError,
+    openCustomProviderEditor,
+    handleCustomProviderSave,
+    closeCustomProviderEditor,
+    customDeleteTarget,
+    setCustomDeleteTarget,
+    handleCustomProviderDelete,
+  };
+}
+
+export function PiFamilyAuthSection({
+  engine,
+  openCustomEditorSignal,
+}: {
+  engine: "pi" | "omp";
+  /** Bump to open the 自定义供应商 editor from the 官方配置 row's 编辑
+   *  entry (pi/omp official files are never cc-gui-managed, so no gate). */
+  openCustomEditorSignal?: number;
+}) {
+  const { t } = useTranslation();
+  const {
+    notice,
+    oauthProviders,
+    oauthActive,
+    handleLaunchLogin,
+    loadError,
+    storePath,
+    query,
+    setQuery,
+    showAll,
+    toggleShowAll,
+    visibleProviders,
+    byId,
+    editingId,
+    openEditor,
+    deleteTarget,
+    setDeleteTarget,
+    handleDelete,
+    draftKey,
+    setDraftKey,
+    draftVisible,
+    toggleDraftVisible,
+    saving,
+    actionError,
+    handleSave,
+    closeEditor,
+    modelsConfig,
+    modelsEditorOpen,
+    modelsDraft,
+    setModelsDraft,
+    modelsSaving,
+    modelsError,
+    openModelsEditor,
+    handleModelsSave,
+    customQuery,
+    setCustomQuery,
+    visibleCustomProviders,
+    customEditingId,
+    customDraft,
+    setCustomDraft,
+    customSaving,
+    customError,
+    openCustomProviderEditor,
+    handleCustomProviderSave,
+    closeCustomProviderEditor,
+    customDeleteTarget,
+    setCustomDeleteTarget,
+    handleCustomProviderDelete,
+  } = usePiFamilyAuthState(engine, openCustomEditorSignal);
+
   return (
     <div className="flex w-full flex-col gap-6" data-testid="pi-family-auth-section">
       {notice && (
@@ -271,7 +496,7 @@ export function PiFamilyAuthSection({
         query={query}
         onQueryChange={setQuery}
         showAll={showAll}
-        onToggleShowAll={() => setShowAll((value) => !value)}
+        onToggleShowAll={toggleShowAll}
         totalCount={PI_FAMILY_APIKEY_PROVIDERS.length}
         providers={visibleProviders}
         byId={byId}
@@ -281,7 +506,7 @@ export function PiFamilyAuthSection({
         draftKey={draftKey}
         onDraftKeyChange={setDraftKey}
         draftVisible={draftVisible}
-        onToggleDraftVisible={() => setDraftVisible((visible) => !visible)}
+        onToggleDraftVisible={toggleDraftVisible}
         saving={saving}
         actionError={actionError}
         onSave={(provider) => void handleSave(provider)}
@@ -298,6 +523,18 @@ export function PiFamilyAuthSection({
         onToggleEditor={openModelsEditor}
         onDraftChange={setModelsDraft}
         onSave={() => void handleModelsSave()}
+        query={customQuery}
+        onQueryChange={setCustomQuery}
+        providers={visibleCustomProviders}
+        editingProviderId={customEditingId}
+        providerDraft={customDraft}
+        providerSaving={customSaving}
+        providerError={customError}
+        onOpenProviderEditor={openCustomProviderEditor}
+        onProviderDraftChange={setCustomDraft}
+        onProviderSave={() => void handleCustomProviderSave()}
+        onCloseProviderEditor={closeCustomProviderEditor}
+        onDeleteProvider={setCustomDeleteTarget}
       />
 
       {deleteTarget && (
@@ -306,6 +543,16 @@ export function PiFamilyAuthSection({
           message={t("settings.piAuthDeleteConfirm", { name: deleteTarget.name })}
           onConfirm={() => void handleDelete()}
           onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+      {customDeleteTarget && (
+        <ConfirmDialog
+          danger
+          message={t("settings.piAuthCustomDeleteConfirm", {
+            name: customDeleteTarget.name ?? customDeleteTarget.id,
+          })}
+          onConfirm={() => void handleCustomProviderDelete()}
+          onCancel={() => setCustomDeleteTarget(null)}
         />
       )}
     </div>

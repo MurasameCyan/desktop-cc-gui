@@ -4,7 +4,13 @@ import Check from "lucide-react/dist/esm/icons/check";
 import X from "lucide-react/dist/esm/icons/x";
 import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw";
 import type { Message } from "@/lib/ipc";
+import { isWeb } from "@/lib/platform";
 import { sessionKey, useChatStore } from "../store";
+
+const ACTION_BUTTON =
+  "inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-caption-1-medium transition-colors";
+
+type GrantState = NonNullable<Message["grant"]>;
 
 /**
  * Permission-denial card: the CLI (headless) refused a tool call on an
@@ -39,9 +45,6 @@ export function GrantCard({ message }: { message: Message }) {
     if (key) void respondToGrant(key, message.seq, accept);
   };
 
-  const btn =
-    "inline-flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-caption-1-medium transition-colors";
-
   return (
     <div className="flex max-w-[85%] flex-col gap-2 rounded-xl border border-border-secondary bg-background-secondary-default px-3.5 py-2.5 text-left">
       <div className="flex items-center gap-1.5 text-caption-1-medium text-text-primary">
@@ -58,73 +61,126 @@ export function GrantCard({ message }: { message: Message }) {
           {path}
         </div>
       )}
-      {grant.status === "pending" &&
-        (path ? (
-          <>
-            {grant.dir && (
-              <div className="text-caption-1-regular text-text-tertiary">
-                {t("chat.grantScopeNote", { dir: grant.dir })}
-              </div>
-            )}
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => answer(true)}
-                className={`${btn} bg-button-primary text-text-white`}
-              >
-                <Check className="size-3.5" aria-hidden />
-                {t("chat.grantAllow")}
-              </button>
-              <button
-                type="button"
-                onClick={() => answer(false)}
-                className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
-              >
-                <X className="size-3.5" aria-hidden />
-                {t("chat.grantDecline")}
-              </button>
-            </div>
-          </>
-        ) : (
-          // No path was recoverable (e.g. a denied shell command): a
-          // directory grant cannot apply. Explain instead of rendering a
-          // dead disabled button; dismissing settles the card as declined.
-          <>
-            <div className="text-caption-1-regular text-text-tertiary">
-              {t("chat.grantUnavailable")}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => answer(false)}
-                className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
-              >
-                {t("chat.grantDismiss")}
-              </button>
-            </div>
-          </>
-        ))}
+      {grant.status === "pending" && (
+        <PendingGrant grant={grant} path={path} onAnswer={answer} />
+      )}
       {grant.status === "granted" && (
-        <div className="flex flex-wrap items-center gap-2 text-caption-1-regular text-text-secondary">
-          <span className="break-all">
-            {t("chat.grantGranted", { dir: grant.dir ?? path })}
-          </span>
-          <button
-            type="button"
-            disabled={streaming}
-            onClick={() => key && void resendLastUser(key)}
-            className={`${btn} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover disabled:cursor-not-allowed disabled:opacity-50`}
-          >
-            <RotateCcw className="size-3.5" aria-hidden />
-            {t("chat.grantResend")}
-          </button>
-        </div>
+        <GrantedGrant
+          grant={grant}
+          path={path}
+          streaming={streaming}
+          onResend={() => key && void resendLastUser(key)}
+        />
       )}
       {grant.status === "declined" && (
         <div className="text-caption-1-regular text-text-tertiary">
           {t("chat.grantDeclined")}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Pending card body: scope note + allow/decline pair, or the explanatory
+ *  fallback when no path could be recovered. */
+function PendingGrant({
+  grant,
+  path,
+  onAnswer,
+}: {
+  grant: GrantState;
+  path: string;
+  onAnswer: (accept: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  if (!path) {
+    // No path was recoverable (e.g. a denied shell command): a directory
+    // grant cannot apply. Explain instead of rendering a dead disabled
+    // button; dismissing settles the card as declined.
+    return (
+      <>
+        <div className="text-caption-1-regular text-text-tertiary">
+          {t("chat.grantUnavailable")}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onAnswer(false)}
+            className={`${ACTION_BUTTON} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
+          >
+            {t("chat.grantDismiss")}
+          </button>
+        </div>
+      </>
+    );
+  }
+  return (
+    <>
+      {grant.dir && !isWeb && (
+        <div className="text-caption-1-regular text-text-tertiary">
+          {t("chat.grantScopeNote", { dir: grant.dir })}
+        </div>
+      )}
+      {isWeb && (
+        // The web bridge deliberately has no grant_root route (see
+        // web/dispatch.rs): remote clients must not widen the filesystem
+        // boundary, so explain instead of offering a button that can only
+        // fail.
+        <div className="text-caption-1-regular text-text-tertiary">
+          {t("chat.grantWebUnavailable")}
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        {!isWeb && (
+          <button
+            type="button"
+            onClick={() => onAnswer(true)}
+            className={`${ACTION_BUTTON} bg-button-primary text-text-white`}
+          >
+            <Check className="size-3.5" aria-hidden />
+            {t("chat.grantAllow")}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onAnswer(false)}
+          className={`${ACTION_BUTTON} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover`}
+        >
+          <X className="size-3.5" aria-hidden />
+          {t("chat.grantDecline")}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** Granted card body: confirmation text + resend-last-message action. */
+function GrantedGrant({
+  grant,
+  path,
+  streaming,
+  onResend,
+}: {
+  grant: GrantState;
+  path: string;
+  streaming: boolean;
+  onResend: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-caption-1-regular text-text-secondary">
+      <span className="break-all">
+        {t("chat.grantGranted", { dir: grant.dir ?? path })}
+      </span>
+      <button
+        type="button"
+        disabled={streaming}
+        onClick={onResend}
+        className={`${ACTION_BUTTON} bg-background-tertiary-default text-text-secondary hover:bg-background-tertiary-hover disabled:cursor-not-allowed disabled:opacity-50`}
+      >
+        <RotateCcw className="size-3.5" aria-hidden />
+        {t("chat.grantResend")}
+      </button>
     </div>
   );
 }

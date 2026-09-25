@@ -20,6 +20,9 @@ const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffec
  *   idle      label text/secondary, icon foreground/icon/secondary,
  *             background/primary/hover on hover (both styles)
  *   icon      optional 16px leading glyph
+ *   icon-only label omitted (`children` undefined): just the glyph, labelled
+ *             by `title` — used by plugin panel tabs, where the strip is too
+ *             tight for plugin-supplied labels
  *
  * `PillTabList` owns the animated selection background so it can slide
  * between pills with a subtle spring-like settle. `PillTab` remains a plain
@@ -159,6 +162,7 @@ export function PillTab({
   icon: Icon,
   isSelected,
   onSelect,
+  title,
   children,
   className,
 }: {
@@ -166,13 +170,19 @@ export function PillTab({
   icon?: IconComponent;
   isSelected: boolean;
   onSelect: () => void;
-  children: ReactNode;
+  /** Accessible name + hover hint for the icon-only form (`aria-label` +
+   *  `title`); omitted when the label is visible. */
+  title?: string;
+  /** Visible label; omit for an icon-only pill. */
+  children?: ReactNode;
   className?: string;
 }) {
   return (
     <button
       type="button"
       aria-pressed={isSelected}
+      aria-label={title}
+      title={title}
       data-pill-selected={isSelected ? "" : undefined}
       data-pill-variant={variant}
       onClick={onSelect}
@@ -203,14 +213,16 @@ export function PillTab({
           aria-hidden
         />
       )}
-      <span
-        className={cx(
-          "relative z-10 text-body-2-medium whitespace-nowrap",
-          isSelected ? styles.selectedLabel[variant] : "text-text-secondary",
-        )}
-      >
-        {children}
-      </span>
+      {children != null && (
+        <span
+          className={cx(
+            "relative z-10 text-body-2-medium whitespace-nowrap",
+            isSelected ? styles.selectedLabel[variant] : "text-text-secondary",
+          )}
+        >
+          {children}
+        </span>
+      )}
     </button>
   );
 }

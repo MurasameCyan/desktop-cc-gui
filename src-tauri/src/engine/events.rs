@@ -35,6 +35,11 @@ pub enum EngineEvent {
     SessionId(String),
     /// Token usage snapshot from the engine.
     Usage(Value),
+    /// Throughput accounting marker (never streamed to the UI): a model
+    /// response's stream opened (`active: true`) or closed (`active: false`).
+    /// `reader.rs` folds the spans into the next usage report's `genMs` wire
+    /// field, which plugins use to compute generation speed.
+    Generation { active: bool },
     /// Engine-reported error.
     Error(String),
     /// Non-terminal engine notice (e.g. an upstream 429 the CLI is
@@ -104,6 +109,15 @@ pub enum EngineEvent {
     Model(String),
     /// Reasoning effort level requested at launch, then the level the engine actually reported.
     Effort(String),
+    /// MCP servers the CLI reported as loaded for this session (claude
+    /// `system/init`): `(name, status)` pairs plus the session's tool names
+    /// (used to attribute `mcp__<server>__<tool>` tools back to their server).
+    /// Consumed by the MCP settings page's runtime section; not streamed to
+    /// the chat UI.
+    McpServers {
+        servers: Vec<(String, Option<String>)>,
+        tools: Vec<String>,
+    },
 }
 /// One todo entry carried to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +126,25 @@ pub struct TodoItem {
     pub id: Option<String>,
     pub content: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl TodoItem {
+    pub fn new(content: impl Into<String>, status: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            content: content.into(),
+            status: status.into(),
+            phase: None,
+            reason: None,
+            detail: None,
+        }
+    }
 }
 /// `replace: true` is a full snapshot of the todo list; `false` is a patch
 /// the frontend applies by matching on `content`.
@@ -146,7 +179,8 @@ pub(crate) fn parse_tool_args_value(value: &Value) -> Option<Value> {
                 return None;
             }
             match serde_json::from_str::<Value>(trimmed) {
-                Ok(parsed) => parse_tool_args_value(&parsed).or_else(|| Some(Value::String(trimmed.to_string()))),
+                Ok(parsed) => parse_tool_args_value(&parsed)
+                    .or_else(|| Some(Value::String(trimmed.to_string()))),
                 Err(_) => Some(Value::String(trimmed.to_string())),
             }
         }
@@ -230,6 +264,10 @@ pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
         .and_then(Value::as_array)?;
     let mut items = Vec::new();
     for phase in phases {
+        let phase_name = phase
+            .get("name")
+            .or_else(|| phase.get("phase"))
+            .and_then(Value::as_str);
         let Some(tasks) = phase.get("tasks").and_then(Value::as_array) else {
             continue;
         };
@@ -243,10 +281,16 @@ pub(crate) fn parse_todo_result(result: &Value) -> Option<TodosPayload> {
                 continue;
             };
             let status = todo_status(task.get("status").and_then(Value::as_str));
+            let phase = phase_name.or_else(|| task.get("phase").and_then(Value::as_str)).map(str::to_string);
+            let reason = task.get("blocker").or_else(|| task.get("reason")).and_then(Value::as_str).map(str::to_string);
+            let detail = task.get("detail").or_else(|| task.get("description")).and_then(Value::as_str).map(str::to_string);
             items.push(TodoItem {
                 id: None,
                 content: content.to_string(),
                 status: status.to_string(),
+                phase,
+                reason,
+                detail,
             });
         }
     }
@@ -323,11 +367,7 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
         return None;
     }
 
-    let pending_item = |content: &str| TodoItem {
-        id: None,
-        content: content.to_string(),
-        status: "pending".to_string(),
-    };
+    let pending_item = |content: &str| TodoItem::new(content, "pending");
     // `list` phases, each with an `items` string array, flattened.
     let phase_items = |args: &Value| -> Vec<TodoItem> {
         args.get("list")
@@ -335,10 +375,27 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
             .map(|phases| {
                 phases
                     .iter()
-                    .filter_map(|phase| phase.get("items").and_then(Value::as_array))
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(pending_item)
+                    .flat_map(|phase| {
+                        let phase_name = phase
+                            .get("phase")
+                            .or_else(|| phase.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        phase
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(move |content| TodoItem {
+                                id: None,
+                                content: content.to_string(),
+                                status: "pending".to_string(),
+                                phase: phase_name.clone(),
+                                reason: None,
+                                detail: None,
+                            })
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -362,6 +419,9 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
                     id,
                     content: content.to_string(),
                     status: status.to_string(),
+                    phase: entry.get("phase").and_then(Value::as_str).map(str::to_string),
+                    reason: entry.get("reason").or_else(|| entry.get("blocker")).and_then(Value::as_str).map(str::to_string),
+                    detail: entry.get("detail").or_else(|| entry.get("description")).and_then(Value::as_str).map(str::to_string),
                 })
             })
             .collect();
@@ -380,11 +440,15 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
     {
         if args.get("taskId").is_none() && args.get("op").is_none() {
             let status = todo_status(args.get("status").and_then(Value::as_str));
+            let detail = args.get("description").or_else(|| args.get("detail")).and_then(Value::as_str).map(str::to_string);
             return Some(TodosPayload {
                 items: vec![TodoItem {
                     id: None,
                     content: subject.to_string(),
                     status: status.to_string(),
+                    phase: None,
+                    reason: None,
+                    detail,
                 }],
                 replace: false,
             });
@@ -392,27 +456,33 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
     }
 
     // TaskUpdate tool call support: MUST have `taskId`
-    if let Some(task_id) = args
-        .get("taskId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let content = args
-            .get("subject")
+    if args.get("op").is_none() {
+        if let Some(task_id) = args
+            .get("taskId")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("");
-        let status = todo_status(args.get("status").and_then(Value::as_str));
-        return Some(TodosPayload {
-            items: vec![TodoItem {
-                id: Some(task_id.to_string()),
-                content: content.to_string(),
-                status: status.to_string(),
-            }],
-            replace: false,
-        });
+        {
+            let content = args
+                .get("subject")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("");
+            let status = todo_status(args.get("status").and_then(Value::as_str));
+            let detail = args.get("description").or_else(|| args.get("detail")).and_then(Value::as_str).map(str::to_string);
+            return Some(TodosPayload {
+                items: vec![TodoItem {
+                    id: Some(task_id.to_string()),
+                    content: content.to_string(),
+                    status: status.to_string(),
+                    phase: None,
+                    reason: None,
+                    detail,
+                }],
+                replace: false,
+            });
+        }
     }
 
     let op = args.get("op").and_then(Value::as_str)?;
@@ -423,7 +493,11 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
         }),
         "append" => {
             let items = match args.get("items").and_then(Value::as_array) {
-                Some(items) => items.iter().filter_map(Value::as_str).map(pending_item).collect(),
+                Some(items) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(pending_item)
+                    .collect(),
                 None => phase_items(args),
             };
             Some(TodosPayload {
@@ -447,11 +521,17 @@ pub(crate) fn parse_todo_args(args: &Value) -> Option<TodosPayload> {
                 "unblock" => "pending",
                 _ => "dropped",
             };
+            let phase = args.get("phase").and_then(Value::as_str).map(str::to_string);
+            let reason = args.get("reason").or_else(|| args.get("blocker")).and_then(Value::as_str).map(str::to_string);
+            let detail = args.get("detail").or_else(|| args.get("i")).and_then(Value::as_str).map(str::to_string);
             Some(TodosPayload {
                 items: vec![TodoItem {
                     id: None,
                     content: task.to_string(),
                     status: status.to_string(),
+                    phase,
+                    reason,
+                    detail,
                 }],
                 replace: false,
             })

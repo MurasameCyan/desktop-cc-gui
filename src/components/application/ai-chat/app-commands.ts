@@ -12,34 +12,89 @@ import { useSlashCommandStore } from "./slash-commands";
  * defined that command for the CLI, and the CLI expands it — the app
  * shortcut is only the fallback when no such command exists.
  */
-export type AppCommand = "new" | "compact";
+export type AppCommand = "new" | "compact" | "mcp" | "cua";
 
 /** Bare input → catalog key. `/clear` is an alias of `/new`: in-place
  *  clearing is a TUI feature no headless/protocol launch honors, and a new
- *  session is the same net effect. */
+ *  session is the same net effect. `/mcp` opens the app's MCP panel instead
+ *  of being sent — the CLIs only run their own `/mcp` in interactive TUI
+ *  mode, which is exactly what this launch path bypasses.
+ *
+ *  `/ccgui-cua <task>` is the one app command that takes an argument (see
+ *  ARG_COMMANDS): the line after the name is the task, and the app mounts
+ *  its computer-use driver on that single send. */
 const APP_COMMAND_NAMES: Record<string, AppCommand> = {
   "/new": "new",
   "/clear": "new",
   "/compact": "compact",
+  "/mcp": "mcp",
+  "/ccgui-cua": "cua",
 };
+
+/** Commands whose trailing text is a task argument rather than part of the
+ *  command name. Every other app command matches the whole input —
+ *  `/compact 聚焦改动` is the CLI's own command with an argument and must
+ *  keep travelling to the engine verbatim. */
+const ARG_COMMANDS: ReadonlySet<AppCommand> = new Set<AppCommand>(["cua"]);
+
+/** One parsed app command: the command plus its task text (`""` for the
+ *  argument-less forms). */
+export interface AppCommandInput {
+  command: AppCommand;
+  arg: string;
+}
+
+/** Whether a user-defined catalog command of this name shadows the app
+ *  command: the user defined it for the CLI, and the CLI expands it. Shared
+ *  by whole-input matching and the argument form so both honor the same
+ *  precedence. */
+function shadowedByCatalog(
+  name: string,
+  workspacePath: string | null,
+): boolean {
+  if (!workspacePath) return false;
+  const entries = useSlashCommandStore.getState().byRoot[workspacePath]?.entries;
+  return Boolean(
+    entries?.some(
+      (entry) =>
+        entry.kind === "command" &&
+        entry.name.toLowerCase() === name.toLowerCase(),
+    ),
+  );
+}
 
 export function matchAppCommand(
   value: string,
   workspacePath: string | null,
 ): AppCommand | null {
-  const command = APP_COMMAND_NAMES[value.trim()];
-  if (!command || !workspacePath) return command ?? null;
-  const pickerName = value.trim().slice(1);
-  const entries = useSlashCommandStore.getState().byRoot[workspacePath]?.entries;
-  if (
-    entries?.some(
-      (entry) =>
-        entry.kind === "command" && entry.name.toLowerCase() === pickerName,
-    )
-  ) {
-    return null;
-  }
+  const name = value.trim();
+  const command = APP_COMMAND_NAMES[name];
+  if (!command) return null;
+  if (shadowedByCatalog(name.slice(1), workspacePath)) return null;
   return command;
+}
+
+/** Parse one composer submission into an app command. Whole-input matching
+ *  covers the argument-less commands; an ARG_COMMANDS entry additionally
+ *  accepts trailing text as its task (`/ccgui-cua 打开计算器`). Returns null
+ *  when the input is no app command — it then travels to the engine as
+ *  typed. */
+export function parseAppCommand(
+  value: string,
+  workspacePath: string | null,
+): AppCommandInput | null {
+  const exact = matchAppCommand(value, workspacePath);
+  if (exact) return { command: exact, arg: "" };
+  const trimmed = value.trim();
+  const space = trimmed.search(/\s/);
+  if (space < 0) return null;
+  const head = trimmed.slice(0, space);
+  const command = APP_COMMAND_NAMES[head];
+  if (!command || !ARG_COMMANDS.has(command)) return null;
+  if (shadowedByCatalog(head.slice(1), workspacePath)) return null;
+  const arg = trimmed.slice(space).trim();
+  if (!arg) return null;
+  return { command, arg };
 }
 
 /** The `/` picker's built-in group: one row per app-level command. Rows are
@@ -64,6 +119,19 @@ export function appCommandEntries(): SlashCommandEntry[] {
       source: "app",
       kind: "app",
     },
+    {
+      name: "mcp",
+      description: i18n.t("chat.slashAppMcp"),
+      source: "app",
+      kind: "app",
+    },
+    // 电脑操控入口：暂时隐藏（输入框仍可手动输入 /ccgui-cua），恢复时取消注释。
+    // {
+    //   name: "ccgui-cua",
+    //   description: i18n.t("chat.slashAppCua"),
+    //   source: "app",
+    //   kind: "app",
+    // },
   ];
 }
 

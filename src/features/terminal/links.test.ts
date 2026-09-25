@@ -1,5 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { ILink, Terminal } from "@xterm/xterm";
+
+const originalPlatform = window.navigator.platform;
+afterAll(() => {
+  Object.defineProperty(window.navigator, "platform", {
+    value: originalPlatform,
+    configurable: true,
+  });
+});
+
+function setPlatform(platform: string) {
+  Object.defineProperty(window.navigator, "platform", {
+    value: platform,
+    configurable: true,
+  });
+}
 
 const mocks = vi.hoisted(() => ({
   // dir path → entry names; the existence probe lists the candidate's parent.
@@ -37,8 +52,9 @@ function getLinks(
   term: Terminal,
   y: number,
   cwd: string,
+  onActivate: (path: string) => void = () => {},
 ): Promise<ILink[] | undefined> {
-  const provider = createPathLinkProvider({ term, cwd, onActivate: () => {} });
+  const provider = createPathLinkProvider({ term, cwd, onActivate });
   const { promise, resolve } = Promise.withResolvers<ILink[] | undefined>();
   provider.provideLinks(y, resolve);
   return promise;
@@ -109,5 +125,31 @@ describe("terminal path link provider", () => {
     const links = await getLinks(term, 1, CWD);
     expect(links?.[0].text).toBe("/usr/local/bin/node");
     expect(mocks.listDir.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("reveals only with the platform modifier: ⌥ on mac, Ctrl elsewhere", async () => {
+    mocks.dirs.set("/users/x/desktop", ["artifact.dmg"]);
+    const term = fakeTerm(["built /Users/x/Desktop/artifact.dmg now"], [false], 80);
+    const onActivate = vi.fn();
+    const links = await getLinks(term, 1, CWD, onActivate);
+    const link = links?.[0];
+    if (!link) throw new Error("expected a link");
+    const click = (modifiers: { altKey?: boolean; ctrlKey?: boolean }) =>
+      link.activate(modifiers as MouseEvent, link.text);
+
+    setPlatform("MacIntel");
+    click({});
+    click({ ctrlKey: true });
+    expect(onActivate).not.toHaveBeenCalled();
+    click({ altKey: true });
+    expect(onActivate).toHaveBeenCalledExactlyOnceWith("/Users/x/Desktop/artifact.dmg");
+
+    onActivate.mockClear();
+    setPlatform("Win32");
+    click({});
+    click({ altKey: true });
+    expect(onActivate).not.toHaveBeenCalled();
+    click({ ctrlKey: true });
+    expect(onActivate).toHaveBeenCalledExactlyOnceWith("/Users/x/Desktop/artifact.dmg");
   });
 });

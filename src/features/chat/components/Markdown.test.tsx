@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Markdown from "./Markdown";
 import { markdownRegistry } from "@ccgui/plugin-sdk";
 import type { Disposer } from "@ccgui/plugin-sdk";
@@ -35,6 +35,24 @@ async function renderMarkdown(text: string) {
 }
 
 describe("Markdown markdownRegistry merge (plan §4.2 #5)", () => {
+  it("publishes parsed live text and preserves the full body when settling", async () => {
+    vi.useFakeTimers();
+    try {
+      const text = "稳定文字 🙂 **bold** 与 `code`";
+      await act(async () => root.render(<Markdown text={text} workspacePath="/ws" streaming />));
+      await act(async () => vi.advanceTimersByTime(300));
+      expect(container.textContent).toBe("稳定文字 🙂 bold 与 code");
+      await act(async () => root.render(<Markdown text={`${text} 下一批 🙂`} workspacePath="/ws" streaming />));
+      expect(container.textContent).toContain("稳定文字 🙂 bold 与 code");
+      await act(async () => vi.advanceTimersByTime(300));
+      expect(container.textContent).toBe("稳定文字 🙂 bold 与 code 下一批 🙂");
+      await act(async () => root.render(<Markdown text={`${text} finished`} workspacePath="/ws" />));
+      expect(container.textContent).toBe("稳定文字 🙂 bold 与 code finished");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders host defaults with no registrations (gfm + CodeBlock card)", async () => {
     await renderMarkdown(`~~gone~~\n\n${FENCE}`);
     // remark-gfm still active: strikethrough is a <del>.

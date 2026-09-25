@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { IDisposable, Terminal } from "@xterm/xterm";
 import { useTranslation } from "react-i18next";
+import { isMacPlatform } from "@/features/shortcuts/shortcuts";
 import { ipc } from "@/lib/ipc";
 import { loadXterm, type XtermModules } from "./xterm-loader";
 import { TERMINAL_FONT_FAMILY, terminalTheme } from "./appearance";
@@ -69,6 +70,11 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
         theme: terminalTheme(),
         // Option-as-meta so word jumps (⌥←/⌥→) reach readline on macOS.
         macOptionIsMeta: true,
+        // Option+click is the reveal gesture on macOS (links.ts); xterm's
+        // default alt-click-moves-cursor would fire for the same click and
+        // move the shell cursor to the clicked cell. Keep the feature where
+        // it cannot collide (Windows/Linux reveal with Ctrl+click).
+        altClickMovesCursor: !isMacPlatform(),
       });
       termRef = term;
       liveTermRef.current = term;
@@ -113,7 +119,8 @@ export const TerminalView = memo(function TerminalView({ id, cwd }: { id: string
       safeFit();
       void openSession();
 
-      // Absolute paths in output become click-to-reveal links (see links.ts).
+      // Absolute paths in output become modifier-click-to-reveal links
+      // (see links.ts).
       linkDisposable = term.registerLinkProvider(
         createPathLinkProvider({
           term,

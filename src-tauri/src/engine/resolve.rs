@@ -14,9 +14,12 @@
 //!   before PATHEXT and cannot run batch files, so `Command::new("claude")`
 //!   or a path to the shim fails with os error 193. We prefer the `.cmd`
 //!   variant and wrap batch files in `cmd /c` (`.ps1` in `powershell -File`).
-//! - macOS has neither problem (the shim is a real shebang script, and
-//!   `adopt_login_shell_path` fixes PATH), so the Unix side stays a thin
-//!   pass-through.
+//! - macOS shims are real shebang scripts (`#!/usr/bin/env node`).
+//!   `adopt_login_shell_path` usually fixes the process PATH, but discovery
+//!   can still succeed via well-known dirs when adopt fails/times out. Any
+//!   spawn of a shebang shim must therefore inject [`cli_search_path`] into
+//!   the child env — otherwise `/usr/bin/env` cannot see `node` even though
+//!   `find_cli_binary("npx")` returned an absolute path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
@@ -28,6 +31,9 @@ use tokio::process::Command;
 /// (30s TTL) keeps repeated detection rounds from re-probing. Worst-case
 /// staleness after a fresh CLI install is one TTL.
 const RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(30);
+const NPM_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const NPM_REAP_TIMEOUT: Duration = Duration::from_millis(250);
+const NPM_PREFIX_MAX_BYTES: u64 = 16 * 1024;
 
 static EXTRA_SEARCH_PATHS_CACHE: StdMutex<Option<(Vec<PathBuf>, Instant)>> = StdMutex::new(None);
 
@@ -79,15 +85,17 @@ fn resolve_npm_global_bin_dir_from_prefix(prefix: &str) -> Option<PathBuf> {
     }
 }
 
-/// std-Command flavour of the batch wrapper, for the blocking npm probe.
-fn build_std_command_for_binary(bin: &Path) -> std::process::Command {
-    #[cfg(windows)]
-    if let Some((program, leading)) = windows_wrapper(&bin.to_string_lossy()) {
-        let mut command = std::process::Command::new(program);
-        command.args(leading);
-        return command;
+fn reap_npm_probe(child: &mut tokio::process::Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return false,
+        }
     }
-    std::process::Command::new(bin)
 }
 
 fn discover_npm_global_bin_dir(seed_paths: &[PathBuf]) -> Option<PathBuf> {
@@ -96,24 +104,91 @@ fn discover_npm_global_bin_dir(seed_paths: &[PathBuf]) -> Option<PathBuf> {
     let npm_bin = which::which_in("npm", Some(&joined_paths), &cwd)
         .ok()
         .or_else(|| which::which("npm").ok())?;
+    let npm_bin = strip_verbatim(upgrade_executable_variant(npm_bin));
 
-    let mut command = build_std_command_for_binary(&npm_bin);
+    let mut command = command_for_binary(&npm_bin.to_string_lossy());
     command.env("PATH", &joined_paths);
     command.args(["config", "get", "prefix"]);
-    command.stdout(std::process::Stdio::piped());
+    command.stdin(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    super::hide_console(&mut command);
 
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let output_path =
+        std::env::temp_dir().join(format!("ccgui-npm-{}.stdout", uuid::Uuid::new_v4()));
+    let mut output_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .ok()?;
+    let result = (|| {
+        use std::io::{Read, Seek, SeekFrom};
+
+        command.stdout(output_file.try_clone().ok()?);
+        let deadline = Instant::now() + NPM_PROBE_TIMEOUT;
+        let mut child = {
+            let runtime = tauri::async_runtime::handle();
+            let _entered = runtime.inner().enter();
+            command.spawn().ok()?
+        };
+        let pid = child.id()?;
+        #[cfg(windows)]
+        let tree_guard = super::job::assign_kill_on_close(&child);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None)
+                    if Instant::now() < deadline
+                        && output_file
+                            .metadata()
+                            .map(|metadata| metadata.len() <= NPM_PREFIX_MAX_BYTES)
+                            .unwrap_or(false) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => break None,
+            }
+        };
+        #[cfg(unix)]
+        super::kill_process_group(pid);
+        #[cfg(windows)]
+        {
+            if status.is_none() && tree_guard.is_none() {
+                super::kill_process_group(pid);
+            }
+            drop(tree_guard);
+        }
+        if status.is_none() {
+            let _ = child.start_kill();
+            if !reap_npm_probe(&mut child, NPM_REAP_TIMEOUT) {
+                eprintln!("[engine] npm probe reap deadline exceeded; cleanup is incomplete");
+            }
+            return None;
+        }
+        if !status?.success() {
+            return None;
+        }
+        output_file.seek(SeekFrom::Start(0)).ok()?;
+        let mut stdout = Vec::new();
+        (&mut output_file)
+            .take(NPM_PREFIX_MAX_BYTES + 1)
+            .read_to_end(&mut stdout)
+            .ok()?;
+        if stdout.len() as u64 > NPM_PREFIX_MAX_BYTES {
+            return None;
+        }
+        resolve_npm_global_bin_dir_from_prefix(&String::from_utf8_lossy(&stdout))
+    })();
+    drop(command);
+    drop(output_file);
+    if let Err(error) = std::fs::remove_file(output_path) {
+        eprintln!("[engine] npm probe output cleanup failed: {error}");
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    resolve_npm_global_bin_dir_from_prefix(stdout.as_ref())
+    result
 }
 
 // ── extra search paths ──────────────────────────────────────────────────────
@@ -149,8 +224,8 @@ fn build_windows_extra_search_paths(
         // Legacy codemoss builds bundled the Claude Agent SDK under the app
         // home; users whose only claude is that copy have nothing on PATH.
         // Scan for the arch-specific package dir instead of hardcoding x64.
-        let codemoss_sdk_root = user_profile
-            .join(".codemoss\\dependencies\\claude-sdk\\node_modules\\@anthropic-ai");
+        let codemoss_sdk_root =
+            user_profile.join(".codemoss\\dependencies\\claude-sdk\\node_modules\\@anthropic-ai");
         if let Ok(entries) = std::fs::read_dir(&codemoss_sdk_root) {
             for entry in entries.flatten() {
                 let candidate = entry.path();
@@ -453,6 +528,30 @@ fn build_search_paths(custom_bin: Option<&str>) -> std::ffi::OsString {
     std::env::join_paths(all_paths).unwrap_or_default()
 }
 
+/// PATH for child processes that may run shebang shims (`#!/usr/bin/env …`).
+/// Same dirs [`find_cli_binary`] searches: process PATH + well-known install
+/// locations. Plugin exec must set this on the child — resolving an absolute
+/// shim path is not enough for `/usr/bin/env` to find the interpreter.
+pub(crate) fn cli_search_path() -> std::ffi::OsString {
+    build_search_paths(None)
+}
+/// [`cli_search_path`] merged after a caller-supplied PATH: caller entries
+/// keep priority (its intent wins on conflicts), the CLI search dirs are
+/// appended so shebang shims still find their interpreter. Order-preserving,
+/// deduped.
+pub(crate) fn merge_cli_search_path(base: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+    let mut all_paths: Vec<PathBuf> = Vec::new();
+    if let Some(base) = base {
+        for p in std::env::split_paths(base) {
+            push_unique_path(&mut all_paths, p);
+        }
+    }
+    for p in std::env::split_paths(&cli_search_path()) {
+        push_unique_path(&mut all_paths, p);
+    }
+    std::env::join_paths(&all_paths).unwrap_or_default()
+}
+
 // ── shim upgrade + batch wrapper ────────────────────────────────────────────
 
 /// Prefer an executable variant (`.cmd`/`.exe`/…) over a same-named
@@ -557,7 +656,9 @@ pub(crate) fn find_cli_binary(name: &str, custom_bin: Option<&str>) -> Option<Pa
     if let Some(bin) = custom_bin.filter(|v| !v.trim().is_empty()) {
         let bin_path = Path::new(bin.trim());
         if bin_path.exists() {
-            return Some(strip_verbatim(upgrade_executable_variant(bin_path.to_path_buf())));
+            return Some(strip_verbatim(upgrade_executable_variant(
+                bin_path.to_path_buf(),
+            )));
         }
     }
 
@@ -598,8 +699,7 @@ pub(crate) fn resolve_launchable_cli_binary(name_or_path: &str) -> String {
             .to_string_lossy()
             .into_owned();
     }
-    let looks_like_path =
-        path.is_absolute() || trimmed.contains('/') || trimmed.contains('\\');
+    let looks_like_path = path.is_absolute() || trimmed.contains('/') || trimmed.contains('\\');
     if looks_like_path {
         return trimmed.to_string();
     }
@@ -611,6 +711,270 @@ pub(crate) fn resolve_launchable_cli_binary(name_or_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_npm(script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("ccgui npm probe {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("npm");
+        std::fs::write(&binary, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_probe_times_out_and_reaps_child() {
+        let root = fake_npm(
+            "echo $$ > \"$0.pid\"; /bin/sleep 4 & echo $! > \"$0.child\"; wait; printf /late",
+        );
+        let started = Instant::now();
+        let result = discover_npm_global_bin_dir(&[root.clone(), PathBuf::from("/bin")]);
+        let elapsed = started.elapsed();
+        let pid: i32 = std::fs::read_to_string(root.join("npm.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let descendant: u32 = std::fs::read_to_string(root.join("npm.child"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let wait_error = std::io::Error::last_os_error().raw_os_error();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            result.is_none(),
+            "timed-out npm must not supply a prefix: {result:?}"
+        );
+        assert!(elapsed < Duration::from_secs(3), "probe took {elapsed:?}");
+        assert_eq!(waited, -1);
+        assert_eq!(wait_error, Some(libc::ECHILD));
+        let mut system = sysinfo::System::new();
+        let descendant = sysinfo::Pid::from_u32(descendant);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[descendant]), true);
+        assert!(
+            system.process(descendant).map_or(true, |process| {
+                process.status() == sysinfo::ProcessStatus::Zombie
+            }),
+            "timed-out npm left a running descendant"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_probe_does_not_wait_for_descendant_stdout() {
+        let root = fake_npm("/bin/sleep 4 &\nprintf '/prefix with spaces\\n'");
+        let started = Instant::now();
+        let result = discover_npm_global_bin_dir(&[root.clone(), PathBuf::from("/bin")]);
+        let elapsed = started.elapsed();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result, Some(PathBuf::from("/prefix with spaces/bin")));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "stdout outlived npm: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_probe_rejects_failed_command() {
+        let root = fake_npm("printf /invalid; exit 1");
+        let result = discover_npm_global_bin_dir(&[root.clone(), PathBuf::from("/bin")]);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_search_path_covers_well_known_unix_bins() {
+        let path = cli_search_path();
+        let joined = path.to_string_lossy();
+        assert!(
+            joined.contains("/usr/local/bin")
+                || joined.contains("/opt/homebrew/bin")
+                || joined.contains(".local/bin"),
+            "cli_search_path missing well-known dirs: {joined}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_cli_search_path_keeps_caller_dirs_first_and_dedupes() {
+        let merged = merge_cli_search_path(Some(std::ffi::OsStr::new(
+            "/opt/plugin/bin:/opt/plugin/bin",
+        )));
+        let dirs: Vec<PathBuf> = std::env::split_paths(&merged).collect();
+        assert_eq!(
+            dirs.first(),
+            Some(&PathBuf::from("/opt/plugin/bin")),
+            "caller PATH must keep priority: {dirs:?}"
+        );
+        assert_eq!(
+            dirs.iter().filter(|d| d.as_path() == Path::new("/opt/plugin/bin")).count(),
+            1,
+            "caller dir must be deduped: {dirs:?}"
+        );
+        // The CLI search dirs still follow, so shebang shims find node.
+        let joined = merged.to_string_lossy();
+        assert!(
+            joined.contains("/usr/local/bin")
+                || joined.contains("/opt/homebrew/bin")
+                || joined.contains(".local/bin"),
+            "merge dropped well-known dirs: {joined}"
+        );
+    }
+
+    /// Regression: absolute shebang shim + launchd-like PATH → `env: node: No
+    /// such file`. Injecting the search PATH (as plugin_exec does) fixes it.
+    #[cfg(unix)]
+    #[test]
+    fn cli_search_path_lets_env_shebang_find_interpreter() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!("ccgui-shebang-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let node = root.join("node");
+        std::fs::write(&node, "#!/bin/sh\nprintf ok\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shim = root.join("tool");
+        std::fs::write(&shim, "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let bare = Command::new(&shim)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("spawn bare");
+        assert!(
+            !bare.status.success(),
+            "launchd-like PATH must fail shebang; stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&bare.stdout),
+            String::from_utf8_lossy(&bare.stderr)
+        );
+
+        let mut dirs = vec![root.clone()];
+        for part in std::env::split_paths(&cli_search_path()) {
+            push_unique_path(&mut dirs, part);
+        }
+        let enriched = std::env::join_paths(&dirs).unwrap();
+        let fixed = Command::new(&shim)
+            .env("PATH", &enriched)
+            .output()
+            .expect("spawn enriched");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            fixed.status.success(),
+            "enriched PATH should run shebang; stderr={}",
+            String::from_utf8_lossy(&fixed.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&fixed.stdout), "ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_probe_stops_unlimited_output_before_timeout() {
+        let root = fake_npm("while :; do printf '%1024s' x; done");
+        let started = Instant::now();
+        let result = discover_npm_global_bin_dir(&[root.clone(), PathBuf::from("/bin")]);
+        let elapsed = started.elapsed();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(result.is_none());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "output budget took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_probe_reap_is_bounded_for_running_child() {
+        let mut child = {
+            let runtime = tauri::async_runtime::handle();
+            let _entered = runtime.inner().enter();
+            Command::new("/bin/sleep")
+                .arg("4")
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        };
+        let started = Instant::now();
+        let reaped = reap_npm_probe(&mut child, Duration::from_millis(20));
+        let elapsed = started.elapsed();
+        child.start_kill().unwrap();
+        assert!(reap_npm_probe(&mut child, NPM_REAP_TIMEOUT));
+        assert!(!reaped);
+        assert!(elapsed < Duration::from_secs(1), "reap took {elapsed:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn npm_probe_windows_cmd_supports_spaces_and_timeout() {
+        let root = std::env::temp_dir().join(format!("ccgui npm probe {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("npm.cmd");
+        let mut paths = vec![root.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::fs::write(&binary, "@echo off\r\necho C:\\prefix with spaces\r\n").unwrap();
+        let prefix = discover_npm_global_bin_dir(&paths);
+        std::fs::write(
+            &binary,
+            "@echo off\r\nping -n 8 127.0.0.1 > nul\r\necho C:\\late\r\n",
+        )
+        .unwrap();
+        let started = Instant::now();
+        let timeout = discover_npm_global_bin_dir(&paths);
+        let elapsed = started.elapsed();
+        std::fs::write(
+            &binary,
+            "@echo off\r\n:output\r\necho repeated-prefix-output\r\ngoto output\r\n",
+        )
+        .unwrap();
+        let output_started = Instant::now();
+        let oversized = discover_npm_global_bin_dir(&paths);
+        let output_elapsed = output_started.elapsed();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(prefix, Some(PathBuf::from(r"C:\prefix with spaces")));
+        assert!(timeout.is_none());
+        assert!(elapsed < Duration::from_secs(6), "probe took {elapsed:?}");
+        assert!(oversized.is_none());
+        assert!(
+            output_elapsed < NPM_PROBE_TIMEOUT,
+            "output budget took {output_elapsed:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn npm_probe_windows_sweeps_descendant_after_parent_exit() {
+        let root = std::env::temp_dir().join(format!("ccgui npm orphan {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("child.cmd"),
+            "@echo off\r\nping -n 5 127.0.0.1 > nul\r\necho leaked > \"%~dp0leaked\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("npm.cmd"),
+            "@echo off\r\nstart \"\" /b cmd /d /c call \"%~dp0child.cmd\"\r\nping -n 2 127.0.0.1 > nul\r\necho C:\\prefix\r\n",
+        )
+        .unwrap();
+        let mut paths = vec![root.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let prefix = discover_npm_global_bin_dir(&paths);
+        std::thread::sleep(Duration::from_secs(5));
+        let leaked = root.join("leaked").exists();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(prefix, Some(PathBuf::from(r"C:\prefix")));
+        assert!(!leaked, "descendant survived the npm wrapper");
+    }
 
     #[test]
     fn npm_prefix_resolution_uses_bin_on_unix() {
@@ -631,15 +995,17 @@ mod tests {
 
     #[test]
     fn prefer_windows_executable_variant_prefers_cmd_over_posix_shim() {
-        let root =
-            std::env::temp_dir().join(format!("ccgui-posix-shim-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ccgui-posix-shim-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let posix_shim = root.join("dsh");
         let cmd_path = root.join("dsh.cmd");
         std::fs::write(&posix_shim, "#!/bin/sh\n").expect("write shim");
         std::fs::write(&cmd_path, "@echo off\n").expect("write cmd");
 
-        assert_eq!(prefer_windows_executable_variant(posix_shim.clone()), cmd_path);
+        assert_eq!(
+            prefer_windows_executable_variant(posix_shim.clone()),
+            cmd_path
+        );
         // Already-executable variants and missing dirs pass through.
         assert_eq!(
             prefer_windows_executable_variant(cmd_path.clone()),
@@ -665,7 +1031,13 @@ mod tests {
         assert_eq!(program, "powershell");
         assert_eq!(
             leading,
-            vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\npm\claude.ps1"]
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                r"C:\npm\claude.ps1"
+            ]
         );
 
         assert!(windows_wrapper(r"C:\npm\claude.exe").is_none());

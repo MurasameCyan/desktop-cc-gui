@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@/lib/ipc";
-import { deriveAgentTaskSteps, subagentRefsFromArgs } from "./agent-task-steps";
+import { deriveAgentTaskSteps, deriveTodoList, subagentRefsFromArgs } from "./agent-task-steps";
 
 function tool(seq: number, text: string, args?: unknown, result?: unknown): Message {
   return { seq, role: "tool", text, ts: null, args, result } as Message;
@@ -303,5 +303,25 @@ describe("subagent counting", () => {
     expect(steps.map(({ label, subagentType }) => ({ label, subagentType }))).toEqual([
       { label: "StrayWorker", subagentType: undefined },
     ]);
+  });
+
+  it("folds authoritative todo snapshot from message.result details.phases", () => {
+    const messages: Message[] = [
+      tool(1, "todo", { op: "init" }, undefined),
+      tool(2, "todo", { op: "done", phase: "verify" }, {
+        details: {
+          phases: [
+            {
+              name: "impl",
+              tasks: [
+                { content: "实现功能", status: "completed" },
+              ],
+            },
+          ],
+        },
+      }),
+    ];
+    const items = deriveTodoList(messages);
+    expect(items).toEqual([{ content: "实现功能", status: "complete", phase: "impl", reason: undefined, detail: undefined }]);
   });
 });

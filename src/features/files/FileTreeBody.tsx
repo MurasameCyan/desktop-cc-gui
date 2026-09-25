@@ -81,6 +81,7 @@ export function FileTreeBody({ virtualizer, visible, onContextMenu }: FileTreeBo
             <TreeRow
               node={node}
               selected={selectedPath === node.path}
+              isRoot={node.path === root}
               onToggleDir={toggleDir}
               onOpenFile={openFile}
               onSelectDir={selectPath}

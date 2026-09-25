@@ -66,7 +66,12 @@ pub(super) fn apply_channel(
     } else {
         command.env_remove("KIMI_MODEL_BASE_URL");
     }
-    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         command.env("KIMI_MODEL_THINKING_EFFORT", effort);
     }
     Ok(())
@@ -83,7 +88,9 @@ fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<Bui
     cmd.arg("--output-format");
     cmd.arg("stream-json");
     if KimiEngine.resolve_permission(req.permission.as_deref()) == "plan" {
-        return Err("Kimi plan mode requires the local ACP transport; prompt mode cannot enforce it".into());
+        return Err(
+            "Kimi plan mode requires the local ACP transport; prompt mode cannot enforce it".into(),
+        );
     }
     if native_model {
         if let Some(model) = req.model.as_deref() {
@@ -98,7 +105,12 @@ fn build_command(req: &SendRequest, bin: &str, native_model: bool) -> Result<Bui
     let prompt_text = images::kimi_prompt_with_images(&req.prompt, &req.images, &req.workspace);
     cmd.arg("--prompt");
     cmd.arg(safe_prompt_arg(&prompt_text));
-    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         cmd.env("KIMI_MODEL_THINKING_EFFORT", effort);
     }
     Ok(BuiltCommand {
@@ -230,6 +242,7 @@ mod channel_tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            allowed_tools: None,
         };
         let built = KimiEngine.host_command(&req, "kimi").unwrap();
         let args: Vec<_> = built.command.as_std().get_args().collect();
@@ -252,6 +265,7 @@ mod channel_tests {
             additional_dirs: vec![],
             provider_id: Some("plugin_model-switcher_probe".into()),
             computer_use: None,
+            allowed_tools: None,
         };
         let mut env = HashMap::from([
             ("KIMI_BASE_URL".into(), "https://selected.invalid/v1".into()),
@@ -271,7 +285,9 @@ mod channel_tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--session", "existing-session"]));
-        assert!(!args.iter().any(|s| matches!(s.as_str(), "--plan" | "--yolo" | "--auto")));
+        assert!(!args
+            .iter()
+            .any(|s| matches!(s.as_str(), "--plan" | "--yolo" | "--auto")));
         let injected: HashMap<_, _> = built
             .command
             .as_std()

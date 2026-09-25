@@ -20,6 +20,9 @@
 契约收敛（本兼容线）：
 
 - `contract-check.ts` 补齐 `ExternalSessionRow` 的双向可赋值断言（此前该公共镜像类型缺守卫）；`PluginAssets` / `AssetDirectoryGrant` / `PermissionRequestedEvent` / `NormalizedRuntimeEvent` 的双向断言与 `PluginContext` 各能力组（含 `assets`、`shell`、`documentStorage`）的 key 对齐均已覆盖。
+- 2026-09-25 同步上游 `main`：保留 `ui:conversation-mode`、`ctx.agent.catalog`、agent 请求标识/只读参数与 `genMs` 事件字段，宿主和插件握手仍使用 `0.3.12`；下方 `0.3.14` / `0.3.15` 记录其上游来源版本，不表示本兼容线升级版本号。
+- 合并生命周期边界：会话模式禁止关闭时，不派发 `sessionClosed` 或清除提示贡献；历史解析缓存同时按内部帧签名失效并保留上游内存预算。
+- IPC 防护兼容只读但可配置的 Tauri 属性；首次未就绪时允许后续安装，成功后不重复包装，并保留单次同步授权和嵌套插件隔离。
 
 ## 0.4.2 — 2026-09-17
 
@@ -62,6 +65,30 @@
 - `plugin_exec_spawn` 桥命令成功时 resolve 为 void（Rust 返回 ()），文档同步更正。
 - 新增 `src/contract-check.ts`：类型层面把守 plugin.d.ts 与 src/* 的双向漂移
   （纯数据类型双向可赋值；PluginContext 各能力组 key 完全对齐）。
+
+## 0.3.15 — 2026-09-23
+- **payload 增强**：引擎事件 wire payload 新增 `genMs`（宿主实测生成窗口毫秒数）——只出现在 `usage` / `done` 事件上，计量该报告对应的模型
+  真实生成时间：从响应流打开（引擎 message_start，或首个文本/思考 delta）
+  到流关闭，工具执行、用户等待与轮间隔全部排除。插件用它算 tok/s
+  （output token ÷ 生成窗口）即得不含工具等待的生成速度；字段缺失时
+  回退旧的相邻报告 `ts` 间隔。首个消费者：token-meter 插件。
+
+## 0.3.14 — 2026-09-23
+- `ui:conversation-mode` / `ctx.ui.registerConversationMode({ key?, label, component })`
+  注册当前会话内的替代界面。`PluginConversationProps` 提供稳定的 `conversationId`、
+  `workspacePath`、`language` 与 `onExit`；普通会话发送中或队列非空时不可进入。
+- `PluginConversationProps.setExitBlocked?(blocked)` 供插件在 layout effect 中报告
+  忙碌/恢复状态；锁定时宿主禁用退出按钮且拒绝 `onExit()`。锁按会话挂载隔离，
+  切换会话后旧回调不能退出新界面；空闲状态下仍可从崩溃边界返回普通对话。
+- `ctx.agent.catalog(workspacePath)`（`agent` 权限）只返回引擎可用性、只读能力、
+  渠道与模型的 ID/显示名，不返回配置、认证或环境变量。模型探测不可用时为 `[]`，
+  引擎与配置读取失败仍会 reject。禁用的引擎不出现在列表中。
+- `ctx.agent.start` 新增可选 `readOnly`；只读能力以 native 实现为准，目前仅 Pi
+  支持隔离只读调用；Codex 不宣称支持。未提供时保留既有行为。
+- `start({ requestId? })` 接受 32 位十六进制请求标识，native 生成
+  `pa-{pluginId}-{requestId}`；插件可在启动前持久化预期 run id 来恢复早到事件。
+  `interrupt(runId): Promise<boolean>` 保留 native 返回值：`true` 为已路由中断
+  （仍需等待终态事件），`false` 为没有匹配的活动 run。
 ## 0.3.13 — 2026-09-21
 - **新增能力 `agent`**：`ctx.agent.start/interrupt` 让插件经宿主引擎管线
   运行 agent 轮次——与聊天发送共用 spawn/reader/registry（渠道注入、进程

@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import Globe from "lucide-react/dist/esm/icons/globe";
+import LayoutGrid from "lucide-react/dist/esm/icons/layout-grid";
 import MessageSquarePlus from "lucide-react/dist/esm/icons/message-square-plus";
 import PanelLeft from "lucide-react/dist/esm/icons/panel-left";
-import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import ScanSearch from "lucide-react/dist/esm/icons/scan-search";
 import Settings from "lucide-react/dist/esm/icons/settings";
 import Workflow from "lucide-react/dist/esm/icons/workflow";
@@ -70,7 +70,7 @@ function NavItem({
  *  InfoTip: outside press, Escape, scroll, or a second click closes it). The
  *  button stays enabled so the tip stays reachable; `aria-disabled` carries
  *  the unavailable state. */
-function DisabledNavItem({
+export function DisabledNavItem({
   icon: Icon,
   label,
   tip,
@@ -190,32 +190,35 @@ export function SidebarBrandRow({ onOpenSearch }: { onOpenSearch?: () => void })
   );
 }
 
-/** Primary actions: 新建会话/浏览器 (会话搜索在顶栏图标 + ⌘L 弹窗),
+/** Primary actions: 新建会话/插件/浏览器/任务工作台 (会话搜索在顶栏图标 + ⌘L 弹窗),
  *  其后是插件注册的导航项（SDK 0.3.12 ui:sidebar-entry）。 */
 export function SidebarPrimaryNav({
   onNewSession,
   onNewBrowser,
+  onOpenPlugins,
+  onOpenMission,
 }: {
   onNewSession?: () => void;
   onNewBrowser?: () => void;
+  onOpenPlugins?: () => void;
+  onOpenMission?: () => void;
 }) {
   const { t } = useTranslation();
   const pluginEntries = [...useRegistry(sidebarNavRegistry)].sort(compareByOrder);
   return (
     <nav className="flex w-full shrink-0 flex-col gap-1">
       <NavItem icon={MessageSquarePlus} label={t("chat.newSession")} onClick={onNewSession} />
+      <NavItem icon={LayoutGrid} label={t("plugins.hub.title")} onClick={onOpenPlugins} />
       {onNewBrowser && (
         <NavItem icon={Globe} label={t("chat.newBrowser")} onClick={onNewBrowser} />
       )}
-      <DisabledNavItem
-        icon={Workflow}
-        label={t("chat.automation")}
-        tip={t("chat.automationComingSoon")}
-      />
+      {onOpenMission && (
+        <NavItem icon={Workflow} label={t("mission.title")} onClick={onOpenMission} />
+      )}
       {pluginEntries.map((entry) => (
         <NavItem
           key={entry.id}
-          icon={(entry.icon ?? Puzzle) as IconComponent}
+          icon={(entry.icon ?? LayoutGrid) as IconComponent}
           label={entry.label()}
           onClick={entry.onOpen}
         />
@@ -263,6 +266,8 @@ export function SidebarContextMenus({
   onCloseBlankMenu,
   onWorkspaceAlias,
   onSetWorkspaceArchived,
+  onNewWorktree,
+  onDeleteWorktree,
   onCreateGroup,
   onThreadAction,
   onCopyThreadId,
@@ -275,6 +280,10 @@ export function SidebarContextMenus({
   onCloseBlankMenu: () => void;
   onWorkspaceAlias?: (id: string) => void;
   onSetWorkspaceArchived?: (id: string, archived: boolean) => void;
+  /** 工作区菜单「新建 Worktree…」：目标行是普通工作区或 worktree 子行均可。 */
+  onNewWorktree?: (workspaceId: string) => void;
+  /** worktree 子行菜单「删除 Worktree…」。 */
+  onDeleteWorktree?: (workspaceId: string) => void;
   onCreateGroup?: () => void;
   onThreadAction?: (id: string, action: ThreadAction) => void;
   onCopyThreadId?: (id: string) => void;
@@ -287,6 +296,8 @@ export function SidebarContextMenus({
           onClose={onCloseWorkspaceMenu}
           onSetAlias={onWorkspaceAlias}
           onSetArchived={onSetWorkspaceArchived}
+          onNewWorktree={onNewWorktree}
+          onDeleteWorktree={onDeleteWorktree}
         />
       )}
       {blankMenu && onCreateGroup && (

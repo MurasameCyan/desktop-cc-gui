@@ -51,14 +51,19 @@ describe("SlashCommandMenu", () => {
     // Built-in app rows lead, then commands (backend catalog order), then
     // skills; each row ends with its kind badge.
     const rows = optionTexts(node);
-    expect(rows).toHaveLength(6);
+    // 电脑操控（/ccgui-cua）入口暂时隐藏：原先 8 行、/commit 在 rows[5]、
+    // skill 在 rows[7]；恢复时把行数与下标改回去并取消下方注释。
+    expect(rows).toHaveLength(7);
     expect(rows[0]).toContain("/new");
     expect(rows[0]).toContain("chat.slashKindApp");
     expect(rows[1]).toContain("/clear");
-    expect(rows[3]).toContain("/commit");
-    expect(rows[3]).toContain("chat.slashKindCommand");
-    expect(rows[5]).toContain("/code-review");
-    expect(rows[5]).toContain("chat.slashKindSkill");
+    expect(rows[3]).toContain("/mcp");
+    // expect(rows[4]).toContain("/ccgui-cua");
+    // expect(rows[4]).toContain("chat.slashKindApp");
+    expect(rows[4]).toContain("/commit");
+    expect(rows[4]).toContain("chat.slashKindCommand");
+    expect(rows[6]).toContain("/code-review");
+    expect(rows[6]).toContain("chat.slashKindSkill");
   });
 
   it("a catalog command named like an app command shadows the app row", async () => {
@@ -77,9 +82,9 @@ describe("SlashCommandMenu", () => {
       ),
     );
     const rows = optionTexts(node);
-    // /clear and /compact remain in the app group; the user's /new renders
-    // as a command row instead.
-    expect(rows.filter((text) => text?.includes("chat.slashKindApp"))).toHaveLength(2);
+    // /clear, /compact, /mcp remain in the app group（/ccgui-cua 入口暂时
+    // 隐藏，恢复时改回 4 行）；the user's /new renders as a command row instead.
+    expect(rows.filter((text) => text?.includes("chat.slashKindApp"))).toHaveLength(3);
     expect(rows.filter((text) => text?.includes("/new"))).toHaveLength(1);
     expect(rows.find((text) => text?.includes("/new"))).toContain("chat.slashKindCommand");
   });
@@ -100,9 +105,10 @@ describe("SlashCommandMenu", () => {
       ),
     );
     // The ref is re-registered as activeIndex changes; read it fresh per
-    // keypress (a cached handle closes over a stale `active`). Rows: three
-    // app entries, then commands, then the skill — five downs reach it.
-    for (let i = 0; i < 5; i++) {
+    // keypress (a cached handle closes over a stale `active`). Rows: four
+    // app entries, then commands, then the skill — six downs reach it.
+    // （/ccgui-cua 入口暂时隐藏，恢复时改回五个 app 行、七次 ArrowDown）
+    for (let i = 0; i < 6; i++) {
       act(() => {
         expect(menuRef.current!.handleKey("ArrowDown")).toBe(true);
       });

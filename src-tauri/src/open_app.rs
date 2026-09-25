@@ -269,7 +269,9 @@ pub(crate) async fn open_custom_program(
     {
         // `open <path>` launches a .app bundle; for a bare binary it opens the
         // containing folder, so bare binaries go through spawn directly.
-        let is_bundle = expanded.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
+        let is_bundle = expanded
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
         if is_bundle {
             let status = tokio::process::Command::new("open")
                 .arg(&expanded)

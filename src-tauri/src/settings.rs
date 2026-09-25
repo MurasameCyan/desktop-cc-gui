@@ -127,6 +127,10 @@ pub struct AppSettings {
     /// until the user folds it (设置 → 通用 → 行为 → 思考过程).
     #[serde(default)]
     pub thinking_auto_collapse: Option<bool>,
+    /// Beta entry points (设置 → 其他 → 内测功能): feature id -> enabled.
+    /// Empty/missing = the entry stays hidden; every id is off by default.
+    #[serde(default)]
+    pub beta_features: HashMap<String, bool>,
     /// Terminal shell override; None/empty = auto-detect from $SHELL/COMSPEC.
     /// Validated with the same spawn-target rules as bin overrides.
     #[serde(default)]
@@ -147,11 +151,30 @@ pub struct AppSettings {
     /// Proxy URL (http/https/socks5); None/empty = unset.
     #[serde(default)]
     pub system_proxy_url: Option<String>,
+    /// Whether the always-on-top desktop pet is visible at startup.
+    #[serde(default)]
+    pub pet_enabled: bool,
+    /// Selected pet package id.
+    #[serde(default = "default_pet_id")]
+    pub pet_id: String,
+    /// Display scale of the pet overlay; changed by right-clicking the pet.
+    #[serde(default = "default_pet_scale")]
+    pub pet_scale: f64,
+    /// Last screen position of the pet overlay, in logical desktop pixels.
+    #[serde(default)]
+    pub pet_position: Option<PetPosition>,
     /// Per-engine binary overrides. flatten keeps the legacy flat shape
     /// (`"claudeBin": …`) the frontend depends on; keys stay camelCase and
     /// unknown extra fields round-trip untouched.
     #[serde(flatten)]
     pub bin_overrides: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetPosition {
+    pub x: f64,
+    pub y: f64,
 }
 
 fn default_theme() -> String {
@@ -209,6 +232,46 @@ fn default_language() -> String {
     "zh".to_string()
 }
 
+fn default_pet_id() -> String {
+    String::new()
+}
+
+fn default_pet_scale() -> f64 {
+    1.0
+}
+
+/// Migrate settings written by the earlier built-in-pet implementation.
+/// Only packages under the user pet directory are valid now; a stale bundled
+/// id must not make startup create a transparent overlay that can never load.
+fn normalize_pet_settings(settings: &mut AppSettings) {
+    if !settings.pet_scale.is_finite() {
+        settings.pet_scale = default_pet_scale();
+    } else {
+        settings.pet_scale = settings.pet_scale.clamp(0.5, 1.5);
+    }
+    let id = settings.pet_id.trim().to_string();
+    if id.is_empty() {
+        settings.pet_id.clear();
+        settings.pet_enabled = false;
+        return;
+    }
+    // Validate the id with the same rule the pet loader enforces: a raw
+    // is_dir check would follow ".." segments in hand-edited settings and
+    // leave pet_enabled=true behind a window that can never load a package.
+    if !crate::pets::valid_id(&id) {
+        settings.pet_id.clear();
+        settings.pet_enabled = false;
+        return;
+    }
+    let imported = crate::paths::app_home().join("pets").join(&id);
+    if !imported.is_dir() {
+        settings.pet_id.clear();
+        settings.pet_enabled = false;
+    } else {
+        settings.pet_id = id;
+    }
+}
+
 /// Random 8-character pairing key: no vowels and no look-alikes, so it can
 /// be read out loud and typed on a phone without ambiguity.
 pub fn generate_pair_key() -> String {
@@ -225,7 +288,8 @@ impl Default for AppSettings {
         let mut default_efforts = HashMap::new();
         // 为所有引擎设置默认推理强度为 "medium"
         for engine in &[
-            "claude", "pi", "omp", "agy", "codex", "grok", "opencode", "kimi", "dsh", "qoder", "qoder-cn",
+            "claude", "pi", "omp", "agy", "codex", "grok", "opencode", "kimi", "dsh", "qoder",
+            "qoder-cn",
         ] {
             default_efforts.insert(engine.to_string(), "medium".to_string());
         }
@@ -265,12 +329,17 @@ impl Default for AppSettings {
             decrease_ui_scale_shortcut: default_decrease_ui_scale_shortcut(),
             reset_ui_scale_shortcut: default_reset_ui_scale_shortcut(),
             thinking_auto_collapse: None,
+            beta_features: HashMap::new(),
             terminal_shell_path: None,
             dsh_host: None,
             dsh_port: None,
             dsh_auto_start: None,
             system_proxy_enabled: false,
             system_proxy_url: None,
+            pet_enabled: false,
+            pet_id: default_pet_id(),
+            pet_scale: default_pet_scale(),
+            pet_position: None,
             bin_overrides: HashMap::new(),
         }
     }
@@ -393,7 +462,10 @@ pub fn read_settings() -> Result<AppSettings, String> {
     if content.trim().is_empty() {
         return Ok(AppSettings::default());
     }
-    serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))
+    let mut settings: AppSettings =
+        serde_json::from_str(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    normalize_pet_settings(&mut settings);
+    Ok(settings)
 }
 
 /// Write-then-rename so a crash mid-write never leaves a truncated file that
@@ -655,6 +727,7 @@ fn persist_settings_to(
     settings: &mut AppSettings,
     path: &std::path::Path,
 ) -> Result<Option<String>, String> {
+    normalize_pet_settings(settings);
     if settings
         .omp_openai_service_tier
         .as_deref()
@@ -1047,7 +1120,9 @@ mod tests {
         );
         let mac: AppSettings = serde_json::from_str(r#"{"titlebar":"mac"}"#).unwrap();
         assert_eq!(mac.titlebar, "mac");
-        assert!(serde_json::to_string(&mac).unwrap().contains("\"titlebar\":\"mac\""));
+        assert!(serde_json::to_string(&mac)
+            .unwrap()
+            .contains("\"titlebar\":\"mac\""));
     }
 
     #[test]
@@ -1095,7 +1170,10 @@ mod tests {
         } else {
             "/opt/ccgui-codex-home-probe"
         };
-        assert_eq!(validate_home_override(ok).unwrap(), std::path::PathBuf::from(ok));
+        assert_eq!(
+            validate_home_override(ok).unwrap(),
+            std::path::PathBuf::from(ok)
+        );
         assert!(validate_home_override("/tmp/codex-home").is_err());
         assert!(validate_home_override("relative/codex").is_err());
     }
@@ -1135,10 +1213,7 @@ mod tests {
     }
 }
 #[tauri::command]
-pub fn set_window_theme(
-    app: tauri::AppHandle,
-    dark: bool,
-) -> Result<(), String> {
+pub fn set_window_theme(app: tauri::AppHandle, dark: bool) -> Result<(), String> {
     // Only Windows consumes these; reference unconditionally so macOS/Linux
     // builds don't warn.
     let _ = (&app, dark);
@@ -1146,11 +1221,7 @@ pub fn set_window_theme(
     {
         use tauri::{Manager, Theme};
         if let Some(window) = app.get_webview_window("main") {
-            let _ = window.set_theme(Some(if dark {
-                Theme::Dark
-            } else {
-                Theme::Light
-            }));
+            let _ = window.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
         }
     }
     Ok(())
