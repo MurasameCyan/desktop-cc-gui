@@ -86,11 +86,11 @@ const knownRunIds = new Set<string>();
 const KNOWN_RUN_ID_LIMIT = 512;
 /** Events that outran an ambiguous set of same-engine pending sends. The
  * SendResult later identifies the owner and replays that run in order. */
-const bufferedEarlyEvents = new Map<string, EngineEventPayload[]>();
+const bufferedEarlyEvents = new Map<string, ChatEngineEvent[]>();
 const BUFFERED_EARLY_RUN_LIMIT = 64;
 const BUFFERED_EARLY_EVENT_LIMIT = 256;
 
-function bufferEarlyEvent(event: EngineEventPayload): void {
+function bufferEarlyEvent(event: ChatEngineEvent): void {
   const buffered = bufferedEarlyEvents.get(event.runId) ?? [];
   if (buffered.length < BUFFERED_EARLY_EVENT_LIMIT) buffered.push(event);
   bufferedEarlyEvents.delete(event.runId);
@@ -207,7 +207,7 @@ export function bindRunLifecycle(
  * pre-registered for the same engine (and, when both sides know a native
  * session, the same session); ambiguous or absent candidates stay unbound and
  * are rekeyed by the store when the send resolves. */
-function bindUnboundRun(event: EngineEventPayload): boolean {
+function bindUnboundRun(event: ChatEngineEvent): boolean {
   if (runLifecycles.has(event.runId) || knownRunIds.has(event.runId)) return false;
   let match: string | undefined;
   for (const [placeholder, lifecycle] of pendingRuns) {
@@ -430,10 +430,19 @@ export function flushInternalFrameDelta(runId: string): string {
   return processCaptureBuffer(runId, true);
 }
 
-function dispatchNormalized(event: EngineEventPayload, terminal?: EngineTerminalFact): void {
+function dispatchNormalized(event: ChatEngineEvent, terminal?: EngineTerminalFact): void {
+  // Plan-review kinds ride the same run envelope but have no runtime-event
+  // projection; skip them so the transport normalizer only sees kinds from
+  // its own union (normalizeEngineEvent returns null for them anyway).
+  if (
+    event.kind === "plan_draft" ||
+    event.kind === "plan_review" ||
+    event.kind === "plan_review_settled"
+  )
+    return;
   const lifecycle = runLifecycles.get(event.runId);
   if (!lifecycle) return;
-  const normalized = normalizeEngineEvent(event, {
+  const normalized = normalizeEngineEvent(event as EngineEventPayload, {
     turnId: lifecycle.turnId,
     workspaceId: lifecycle.workspace.id,
     workspacePath: lifecycle.workspace.path,
