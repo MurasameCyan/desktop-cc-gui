@@ -1314,6 +1314,7 @@ mod terminal_event_tests {
             args: None,
             result: None,
             patch: false,
+            tool_call_id: None,
         };
 
         // Explicit window: a mid-response tool row (claude streams tool args
