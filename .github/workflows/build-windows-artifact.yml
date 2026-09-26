@@ -1,8 +1,10 @@
 name: Build Windows artifact
 
 on:
-  # A full Windows Tauri build costs 20–40 min of runner time — only run
-  # manually via workflow_dispatch when an artifact is actually needed.
+  push:
+    # A full Windows Tauri build costs 20–40 min of runner time — only run
+    # it for the release line and feature/fix branches, not every WIP push.
+    branches: [v1.0.0, self-build, "feat/**", "fix/**"]
   workflow_dispatch:
 
 jobs:
