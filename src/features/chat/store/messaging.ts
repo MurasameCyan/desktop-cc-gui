@@ -45,6 +45,7 @@ import {
 import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
 import { engineSupportsComputerUse } from "../computer-use";
 import type { SendOptions } from "./types";
+import { patchPlanReview } from "./plan-review";
 import { effectivePermission } from "./permissions";
 import {
   buildAgentBlock,
@@ -110,10 +111,13 @@ export function createMessagingActions(
   ChatStore,
   | "send"
   | "respondToGrant"
+  | "respondToPlanReview"
+  | "resumePlanReview"
   | "respondToQuestion"
   | "resendLastUser"
   | "queueMessage"
   | "removeQueued"
+  | "moveQueued"
   | "clearQueue"
   | "sendQueuedNow"
   | "interrupt"
@@ -611,6 +615,66 @@ export function createMessagingActions(
       }
     },
 
+    respondToPlanReview: async (key, planId, expectedRevision, decision, feedback) => {
+      const row = (get().bySession[key]?.messages ?? []).find(
+        (m) =>
+          m.planReview?.planId === planId &&
+          m.planReview?.revision === expectedRevision,
+      );
+      const record = row?.planReview;
+      // Only an open revision can be decided; anything else (already
+      // submitted, settled, unknown) is a stale click the backend CAS would
+      // reject anyway.
+      if (
+        !record ||
+        (record.status !== "awaiting_review" && record.status !== "deferred")
+      ) {
+        return { kind: "error", error: i18n.t("chat.planReviewNotPending") };
+      }
+      const text = feedback?.trim() || undefined;
+      if (decision === "request_changes" && !text) {
+        return { kind: "error", error: i18n.t("chat.planReviewFeedbackRequired") };
+      }
+      if (decision !== "defer" && !record.complete) {
+        return { kind: "error", error: i18n.t("chat.planReviewIncomplete") };
+      }
+      const revertTo = record.status;
+      patchPlanReview(set, key, planId, expectedRevision, (cur) => ({
+        ...cur,
+        status: "submitting",
+      }));
+      try {
+        const outcome = await ipc.respondPlanReview(
+          planId,
+          expectedRevision,
+          decision,
+          text,
+        );
+        // Applied or conflict, the returned record is the backend's truth:
+        // a conflict replaces the card with the current state instead of
+        // pretending the submit landed.
+        patchPlanReview(set, key, planId, expectedRevision, () => outcome.review);
+        // A landed decision closes a dock the user reopened from the card.
+        if (get().bySession[key]?.planReviewResume === `${planId}:${expectedRevision}`) {
+          patchSession(set, key, { planReviewResume: null });
+        }
+        return outcome.outcome === "applied"
+          ? { kind: "applied", record: outcome.review }
+          : { kind: "conflict", record: outcome.review };
+      } catch (error) {
+        // Never fake success: the card returns to its pre-submit status so
+        // the user can retry (or the next settled event resolves it).
+        patchPlanReview(set, key, planId, expectedRevision, (cur) =>
+          cur.status === "submitting" ? { ...cur, status: revertTo } : cur,
+        );
+        return { kind: "error", error: errorText(error) };
+      }
+    },
+
+    resumePlanReview: (key, resume) => {
+      patchSession(set, key, { planReviewResume: resume });
+    },
+
     respondToQuestion: async (key, seq, answers) => {
       const message = get().bySession[key]?.messages.find((m) => m.seq === seq);
       const question = message?.question;
@@ -712,6 +776,35 @@ export function createMessagingActions(
               ...prev,
               queue: prev.queue.filter((item) => item.id !== id),
             },
+          },
+        };
+      });
+    },
+    /** Reorder one queued message a single step. The card paints newest
+     *  first, so "up" walks the row toward the end of the send order (sent
+     *  later) and "down" toward the head (sent sooner); a move past either
+     *  end is a no-op. */
+    moveQueued: (id, direction) => {
+      const { active } = get();
+      if (!active) return;
+      const key = sessionKey(
+        active.engine,
+        active.sessionId,
+        active.workspacePath,
+      );
+      set((s) => {
+        const prev = s.bySession[key];
+        if (!prev) return {};
+        const index = prev.queue.findIndex((item) => item.id === id);
+        if (index < 0) return {};
+        const target = direction === "up" ? index + 1 : index - 1;
+        if (target < 0 || target >= prev.queue.length) return {};
+        const queue = [...prev.queue];
+        [queue[index], queue[target]] = [queue[target], queue[index]];
+        return {
+          bySession: {
+            ...s.bySession,
+            [key]: { ...prev, queue },
           },
         };
       });

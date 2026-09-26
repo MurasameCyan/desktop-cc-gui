@@ -14,6 +14,7 @@ pub mod dsh_host;
 pub mod engine;
 pub mod event_sink;
 pub mod files;
+pub mod fonts;
 pub mod git;
 pub mod git_worktree;
 pub mod history;
@@ -349,6 +350,8 @@ pub fn run() {
             settings::get_app_settings,
             settings::update_app_settings,
             settings::set_window_theme,
+            // uploaded font files (设置 → 外观 字体行)
+            fonts::read_font_file,
             // desktop pet
             pets::pet_list,
             pets::pet_import,
@@ -393,6 +396,8 @@ pub fn run() {
             engine::send_message,
             engine::interrupt_session,
             engine::answer_question,
+            engine::respond_plan_review,
+            engine::list_plan_reviews,
             engine::list_engines,
             engine::models::list_engine_models,
             engine::pi_family_auth::pi_family_auth_list,

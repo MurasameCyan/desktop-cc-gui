@@ -69,6 +69,15 @@ the totals summed. A cache-bearing turn is seeded too, so the summary row must
 read 累计 = 输入 + 输出 (输入 being the whole prompt side: fresh + cache). It
 also replays a live report (`usage://changed`) to show the page growing
 mid-turn. No app, no database, no saved state.
+Open `/tests/browser/plan-review.html` for the plan preview & approval UI:
+timeline cards in every lifecycle state (draft / awaiting / superseded /
+approved / expired) with accessible status text, the approval dock over the
+composer (three actions, exec-permission readout, no approve focus by
+default), and a long Markdown plan (Chinese, emoji, GFM table, code fences,
+超长文) both inline and in the full-preview side panel (Esc/backdrop close
+sends nothing). The store is seeded statically; no model, no backend, no
+saved conversation.
+
 Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles

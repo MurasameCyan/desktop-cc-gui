@@ -8,13 +8,14 @@ import {
 import { MessageQueue } from "@/components/application/ai-chat/message-queue";
 import type { ContextSegment } from "@/components/application/agent-limits/agent-limits-card";
 import type { BranchInfo, Workspace } from "@/lib/ipc";
-import type { ActiveSession, QueuedMessage } from "../store";
+import type { ActiveSession, QueuedMessage, QueueMoveDirection } from "../store";
 import { useChatStore } from "../store";
 import { ImageLightbox } from "@/components/base/image-lightbox";
 import { imageMetaText } from "@/utils/image-meta";
 import type { AttachmentPreview } from "./use-composer-images";
 import { RunStatusStrip } from "./RunStatusStrip";
 import { QuestionDock, usePendingQuestion } from "./QuestionDock";
+import { PlanReviewDock, usePendingPlanReview } from "./PlanReviewDock";
 import { ErrorBanner } from "./ErrorBanner";
 import { sessionKey } from "../store";
 import { ComposerSlotExtras } from "@/features/plugins/boundary/composer-slot-extras";
@@ -312,6 +313,7 @@ export function ConversationFooter({
   workspaces,
   queue,
   onRemoveQueued,
+  onMoveQueued,
   onSendQueuedNow,
   onClearQueued,
   imageError,
@@ -348,6 +350,7 @@ export function ConversationFooter({
   workspaces: Workspace[];
   queue: QueuedMessage[];
   onRemoveQueued: (id: string) => void;
+  onMoveQueued: (id: string, direction: QueueMoveDirection) => void;
   onSendQueuedNow: (id: string) => void;
   onClearQueued?: () => void;
   imageError: string | null;
@@ -388,6 +391,9 @@ export function ConversationFooter({
   // While the CLI waits on an AskUserQuestion the panel takes the composer's
   // place — it covers the input box instead of floating beside it.
   const pendingQuestion = usePendingQuestion();
+  // A plan revision awaiting the user's decision takes the same slot; the
+  // backend serializes native waiting points, so at most one is pending.
+  const pendingPlan = usePendingPlanReview();
 
   // The draft prop is the store's per-session value, so watching it covers
   // every change source at once: typing, submit-clear, and session switches
@@ -418,7 +424,7 @@ export function ConversationFooter({
             </span>
           </div>
         )}
-        <MessageQueue queue={queue} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
+        <MessageQueue queue={queue} onRemove={onRemoveQueued} onMove={onMoveQueued} onSendNow={onSendQueuedNow} onClear={onClearQueued} className="mx-auto w-full max-w-3xl" />
         <ErrorBanner message={imageError} onDismiss={onDismissImageError} />
         <ErrorBanner message={branchError} onDismiss={onDismissBranchError} />
         <AttachmentChips
@@ -428,7 +434,9 @@ export function ConversationFooter({
           onZoomImage={setZoomImage}
         />
         <ActiveRunStatus active={active} />
-        {pendingQuestion ? (
+        {pendingPlan ? (
+          <PlanReviewDock />
+        ) : pendingQuestion ? (
           <QuestionDock />
         ) : (
           <FooterComposer
