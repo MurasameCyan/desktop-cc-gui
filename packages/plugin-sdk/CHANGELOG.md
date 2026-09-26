@@ -2,7 +2,7 @@
 
 ## 0.3.12 — 2026-09-21（共通兼容线：CCB + Live2D 通用能力重新编号）
 
-本条目把两批来源能力收敛为一份自洽的公共契约：CCB 通用层（截至 0.4.2 的会话/回合/切换 hooks、标准化运行时事件、内部提示贡献与 CAS 文档存储）与 Live2D 通用层（0.4.3 的常驻悬浮层、同源资源路由与目录授权）。两批合并后 `context.ts`、`plugin.d.ts`、`contract-check.ts` 三方逐 key 对齐，权限单一事实源 `spec/permissions.json` 覆盖全部新增 id。本兼容线以 `0.3.12` 重新编号发布：它承载的是上面这套 CCB + Live2D 通用能力，而非历史 0.3.x 的最小 API 集——下方 0.4.0–0.4.3 与 0.3.x 条目是来源演进记录，不是本分支的 manifest 版本。CCB 与 Live2D 插件必须与宿主使用同一冻结值 `0.3.12`（manifest 精确 pin，不用 `^`/`>=`）。
+本条目把两批来源能力收敛为一份自洽的公共契约：CCB 通用层（截至 0.4.2 的会话/回合/切换 hooks、标准化运行时事件、内部提示贡献与 CAS 文档存储）与 Live2D 通用层（0.4.3 的常驻悬浮层、同源资源路由与目录授权）。两批合并后 `context.ts`、`plugin.d.ts`、`contract-check.ts` 三方逐 key 对齐，权限单一事实源 `spec/permissions.json` 覆盖全部新增 id。本兼容线以 `0.3.12` 重新编号发布：它承载的是上面这套 CCB + Live2D 通用能力，而非历史 0.3.x 的最小 API 集——下方 0.4.0–0.4.3 与 0.3.x 条目是来源演进记录，不是本分支的 manifest 版本。CCB 与 Live2D 插件以 `sdkVersion: ">=0.3.12"` 声明最低版本，允许更高版本宿主通过握手，不再要求与宿主精确同版。
 
 来自 Live2D 通用层（0.4.3）：
 
@@ -20,9 +20,10 @@
 契约收敛（本兼容线）：
 
 - `contract-check.ts` 补齐 `ExternalSessionRow` 的双向可赋值断言（此前该公共镜像类型缺守卫）；`PluginAssets` / `AssetDirectoryGrant` / `PermissionRequestedEvent` / `NormalizedRuntimeEvent` 的双向断言与 `PluginContext` 各能力组（含 `assets`、`shell`、`documentStorage`）的 key 对齐均已覆盖。
-- 2026-09-25 同步上游 `main`：保留 `ui:conversation-mode`、`ctx.agent.catalog`、agent 请求标识/只读参数与 `genMs` 事件字段，宿主和插件握手仍使用 `0.3.12`；下方 `0.3.14` / `0.3.15` 记录其上游来源版本，不表示本兼容线升级版本号。
+- 2026-09-25 同步上游 `main`：保留 `ui:conversation-mode`、`ctx.agent.catalog`、agent 请求标识/只读参数与 `genMs` 事件字段，宿主 SDK 仍为 `0.3.12`；下方 `0.3.14` / `0.3.15` 记录其上游来源版本，不表示本兼容线升级版本号。
 - 合并生命周期边界：会话模式禁止关闭时，不派发 `sessionClosed` 或清除提示贡献；历史解析缓存同时按内部帧签名失效并保留上游内存预算。
 - IPC 防护兼容只读但可配置的 Tauri 属性；首次未就绪时允许后续安装，成功后不重复包装，并保留单次同步授权和嵌套插件隔离。
+- 2026-09-26 修正兼容声明：CCB 与 Live2D 从精确 pin 改为 `>=0.3.12`，最低版本保护不变；移除宿主测试中强绑精确版本和注释版本戳的断言，保留精确、caret、tilde 与最低版本范围的行为测试。
 
 ## 0.4.2 — 2026-09-17
 

@@ -25,6 +25,7 @@ function setup(messages: Message[] = []) {
     active: null,
     drafts: {},
     archivedSessionKeys: {},
+    createdSessionKeys: {},
     sessionContributions: {},
   }) as unknown as ChatStore);
   const set = vi.fn<EngineEventDeps["set"]>((update) => store.setState(update));
