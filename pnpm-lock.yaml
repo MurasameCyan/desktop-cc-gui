@@ -204,37 +204,6 @@ importers:
         specifier: ^5.6.2
         version: 5.9.3
 
-  plugins/unified-provider:
-    dependencies:
-      '@ccgui/plugin-ui':
-        specifier: workspace:*
-        version: link:../../packages/plugin-ui
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
-      react-dom:
-        specifier: ^18.3.1
-        version: 18.3.1(react@18.3.1)
-    devDependencies:
-      '@ccgui/plugin-sdk':
-        specifier: workspace:*
-        version: link:../../packages/plugin-sdk
-      '@types/react':
-        specifier: ^18.3.12
-        version: 18.3.31
-      '@types/react-dom':
-        specifier: ^18.3.1
-        version: 18.3.7(@types/react@18.3.31)
-      esbuild:
-        specifier: ^0.25.0
-        version: 0.25.12
-      typescript:
-        specifier: ^5.6.2
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.4(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.33.0)(yaml@2.9.1)
-
 packages:
 
   '@alloc/quick-lru@5.3.0':

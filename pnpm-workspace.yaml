@@ -1,6 +1,5 @@
 packages:
   - "packages/*"
-  - "plugins/*"
 
 # Supply-chain hardening (react-doctor/require-pnpm-hardening).
 # Delay installs of package versions published less than 7 days ago so
