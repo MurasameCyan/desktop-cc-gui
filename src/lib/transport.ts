@@ -42,6 +42,10 @@ class WebBridge {
     ) {
       return this.openGate!;
     }
+    // The reconnect timer scheduled in onClose can outlive the page (or a
+    // test's jsdom environment) and fire after globals are gone; with no
+    // location there is no bridge URL to build, so stop instead of throwing.
+    if (typeof location === "undefined") return Promise.resolve();
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(
       `${proto}://${location.host}/ws?token=${encodeURIComponent(webToken ?? "")}`,
