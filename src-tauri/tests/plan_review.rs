@@ -131,6 +131,7 @@ async fn plan_requests_fail_closed_for_unproven_engines() {
             workspace.to_string_lossy().to_string(),
             None,
             "make a plan".to_string(),
+            Vec::new(),
             None,
             None,
             None,
