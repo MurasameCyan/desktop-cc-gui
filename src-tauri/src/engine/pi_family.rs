@@ -1069,6 +1069,7 @@ mod tests {
             session_id: None,
             workspace: std::path::PathBuf::from("/tmp/ccgui-pi-family-test"),
             prompt: "规划一下".to_string(),
+            prompt_contributions: Vec::new(),
             images: Vec::new(),
             model: None,
             effort: None,

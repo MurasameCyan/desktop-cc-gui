@@ -1684,6 +1684,8 @@ pub(crate) async fn run_plan_decision(
         session_id: Some(thread_id.clone()),
         workspace: PathBuf::from(&review.workspace_path),
         prompt: spec.prompt,
+        // 内部校验 spawn:不属于任何插件回合,没有可注入的贡献。
+        prompt_contributions: Vec::new(),
         images: Vec::new(),
         // Settings inherit the thread's reported model/effort instead.
         model: None,
