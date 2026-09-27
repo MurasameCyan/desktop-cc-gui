@@ -1178,6 +1178,7 @@ mod tests {
             registry: Arc::new(ProcessRegistry::default()),
             engine_id: "dsh".to_string(),
             run_id: "test-run".to_string(),
+            db: None,
         };
         let mut state = TurnState::new(None);
         let mut view = TurnView::default();

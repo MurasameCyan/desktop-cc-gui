@@ -1694,6 +1694,7 @@ pub(crate) async fn run_plan_decision(
         provider_id,
         computer_use: None,
         allowed_tools: None,
+        prompt_contributions: Vec::new(),
     };
     let mut built = super::codex::CodexEngine.host_command(&req, &bin)?;
     built.command.current_dir(&req.workspace);

@@ -1078,6 +1078,7 @@ mod tests {
             provider_id: None,
             computer_use: None,
             allowed_tools: None,
+            prompt_contributions: vec![],
         }
     }
 
