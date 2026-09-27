@@ -78,6 +78,11 @@ default), and a long Markdown plan (Chinese, emoji, GFM table, code fences,
 sends nothing). The store is seeded statically; no model, no backend, no
 saved conversation.
 
+Native plan events (`plan_draft`, `plan_review`, `plan_review_settled`) use the
+shared `EngineEventPayload` in `src/lib/events.ts`. Chat handlers, lifecycle
+buffering and plan-review test fixtures must use that same type; widening it
+only in the chat layer leaves the shared dispatch contract incomplete.
+
 Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles

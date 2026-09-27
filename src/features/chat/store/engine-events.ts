@@ -450,17 +450,6 @@ function dispatchNormalized(event: EngineEventPayload, terminal?: EngineTerminal
  * everything the handlers need arrives through EngineEventDeps.
  */
 
-/** Plan-review events ride the same run envelope, but the kind union in
- *  src/lib/events.ts is transport-owned (integration lead edits it), so the
- *  chat side widens the payload type locally. Unknown kinds are ignored. */
-export type ChatEngineEvent = Omit<EngineEventPayload, "kind"> & {
-  kind:
-    | EngineEventPayload["kind"]
-    | "plan_draft"
-    | "plan_review"
-    | "plan_review_settled";
-};
-
 export interface EngineEventDeps {
   set: (fn: (s: ChatStore) => Partial<ChatStore>) => void;
   get: () => ChatStore;
@@ -558,7 +547,7 @@ function stampedEffort(
 }
 
 function onModel(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -594,7 +583,7 @@ function onModel(
 }
 
 function onEffort(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -618,7 +607,7 @@ function onEffort(
 const retryingKeys = new Set<string>();
 
 function onDelta(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -639,7 +628,7 @@ function onDelta(
 }
 
 function onThinking(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -656,7 +645,7 @@ function onThinking(
 }
 
 function onMessage(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -750,7 +739,7 @@ export function rememberProviderForRun(
 }
 
 function onSession(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -987,7 +976,7 @@ export function settleOrphanedRuns(
 }
 
 function onUsage(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1036,7 +1025,7 @@ function usageSnapshot(totals: ParsedUsage): Record<string, number> {
 /** Ledger one engine report (one request) as it arrives. */
 function recordUsageReport(
   deps: EngineEventDeps,
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   parsed: ParsedUsage,
 ) {
@@ -1048,7 +1037,7 @@ function recordUsageReport(
 /** Shared writer: one ledger row for the run's model and session. */
 function writeUsageRow(
   deps: EngineEventDeps,
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   parsed: ParsedUsage,
   reports: number,
@@ -1075,7 +1064,7 @@ function writeUsageRow(
 }
 
 function onError(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1228,7 +1217,7 @@ export function patchQuestionBySeq(
  * final result's permission_denials; one card per denied path. The card is
  * the actionable surface: grant → next launch gets --add-dir. */
 function onPermissionDenied(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1302,7 +1291,7 @@ function sendAskTerminator(loop: AskLoop, key: string, deps: EngineEventDeps) {
 }
 
 function onQuestion(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1416,7 +1405,7 @@ function onQuestion(
 function updatePlanMessages(
   deps: EngineEventDeps,
   key: string,
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   transform: (messages: Message[]) => Message[] | null,
 ) {
   const pending = drainPending(key);
@@ -1447,7 +1436,7 @@ const PLAN_STATUSES: readonly PlanReviewStatus[] = [
   "superseded",
 ];
 
-function onPlanDraft(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onPlanDraft(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   const data = (event.data ?? {}) as {
     planId?: unknown;
     text?: unknown;
@@ -1469,7 +1458,7 @@ function onPlanDraft(event: ChatEngineEvent, key: string, deps: EngineEventDeps)
   );
 }
 
-function onPlanReview(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onPlanReview(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   const record = event.data as PlanReview | null | undefined;
   // Fail closed on a malformed record: a card without identity/revision
   // could never be CAS-arbitrated, so it must not reach the timeline.
@@ -1488,7 +1477,7 @@ function onPlanReview(event: ChatEngineEvent, key: string, deps: EngineEventDeps
 }
 
 function onPlanReviewSettled(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1507,7 +1496,7 @@ function onPlanReviewSettled(
 }
 
 function onQuestionSettled(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1520,7 +1509,7 @@ function onQuestionSettled(
   if (askLoops.get(key)?.requestId === requestId) askLoops.delete(key);
 }
 
-function onWarn(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onWarn(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   // Non-terminal notice (e.g. an upstream 429 the CLI is retrying): show the
   // banner, but the turn is still alive — streaming state, unflushed chunks,
   // and run routing all stay untouched. Cleared by onDone when the turn
@@ -1535,7 +1524,7 @@ function onWarn(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
  * backing off and will re-issue the request, so this is progress. An attempt
  * of 0 (or a retry-end event) clears it; so does the next content event.
  */
-function onRetry(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onRetry(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   const data = (event.data ?? {}) as {
     attempt?: unknown;
     max?: unknown;
@@ -1575,7 +1564,7 @@ function clearRetry(key: string, deps: EngineEventDeps) {
  *  automatic mid-turn summarization, surfaced as the tail indicator's label
  *  swap. `active: false` clears only an automatic flag — a manual compact
  *  turn owns its flag until the turn settles. */
-function onCompaction(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onCompaction(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   const data = (event.data ?? {}) as { active?: unknown };
   if (data.active === true) {
     if (deps.get().bySession[key]?.compaction) return;
@@ -1587,7 +1576,7 @@ function onCompaction(event: ChatEngineEvent, key: string, deps: EngineEventDeps
   }
 }
 
-function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
+function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   clearRetry(key, deps);
   askLoops.delete(key);
   if (deps.get().bySession[key]?.compaction) patchSession(deps.set, key, { compaction: null });
@@ -1708,7 +1697,7 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
  *  reports already have their rows. */
 function recordTurnUsage(
   deps: EngineEventDeps,
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   usage: unknown,
 ) {
@@ -1724,7 +1713,7 @@ function recordTurnUsage(
  *  Routes the run first so Stop and the orphan sweep reach it, then lifts the
  *  two flags the composer / sidebar / tab dots read. */
 function adoptObservedRun(
-  event: ChatEngineEvent,
+  event: EngineEventPayload,
   key: string,
   deps: EngineEventDeps,
 ) {
@@ -1756,10 +1745,10 @@ const MAX_SETTLED_RUNS = 256;
 /** Resolve an event's session key (run routing, then session-id match) and
  * dispatch to the per-kind handler. */
 export function handleEngineEvents(
-  events: ChatEngineEvent[],
+  events: EngineEventPayload[],
   deps: EngineEventDeps,
 ) {
-  let toolBatch: { event: ChatEngineEvent; key: string; tools: ToolMessageInput[] } | undefined;
+  let toolBatch: { event: EngineEventPayload; key: string; tools: ToolMessageInput[] } | undefined;
   const flushTools = () => {
     if (!toolBatch) return;
     const { event, key, tools } = toolBatch;

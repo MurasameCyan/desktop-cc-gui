@@ -9,6 +9,7 @@ import {
   type PlanRespondOutcome,
   type PlanReview,
 } from "@/lib/ipc";
+import type { EngineEventPayload } from "@/lib/events";
 import { PlanReviewCard } from "./components/PlanReviewCard";
 import { PlanReviewDock, usePlanReviewGateActive } from "./components/PlanReviewDock";
 import { ChatConversation } from "./components/ChatConversation";
@@ -17,7 +18,6 @@ import { useChatStore } from "./store";
 import {
   handleEngineEvents,
   settledRuns,
-  type ChatEngineEvent,
   type EngineEventDeps,
 } from "./store/engine-events";
 import { sessionKey } from "./store/persistence";
@@ -121,7 +121,7 @@ function deps(): EngineEventDeps {
   };
 }
 
-function draftEvent(text: string, replace = false, planId = "p-1"): ChatEngineEvent {
+function draftEvent(text: string, replace = false, planId = "p-1"): EngineEventPayload {
   return {
     runId: "run-1",
     sessionId: "s-1",
@@ -132,7 +132,7 @@ function draftEvent(text: string, replace = false, planId = "p-1"): ChatEngineEv
   };
 }
 
-function reviewEvent(over: Partial<PlanReview> = {}): ChatEngineEvent {
+function reviewEvent(over: Partial<PlanReview> = {}): EngineEventPayload {
   return {
     runId: "run-1",
     sessionId: "s-1",
@@ -147,7 +147,7 @@ function settledEvent(
   planId = "p-1",
   revision = 1,
   status = "approved",
-): ChatEngineEvent {
+): EngineEventPayload {
   return {
     runId: "run-1",
     sessionId: "s-1",
@@ -158,7 +158,7 @@ function settledEvent(
   };
 }
 
-function doneEvent(): ChatEngineEvent {
+function doneEvent(): EngineEventPayload {
   return {
     runId: "run-1",
     sessionId: "s-1",

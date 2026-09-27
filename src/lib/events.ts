@@ -20,6 +20,9 @@ export interface EngineEventPayload {
     | "permission_denied"
     | "question"
     | "question_settled"
+    | "plan_draft"
+    | "plan_review"
+    | "plan_review_settled"
     | "done"
     | "model"
     | "effort";
