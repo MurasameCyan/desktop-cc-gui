@@ -448,36 +448,41 @@ export function createSessionActions(
       }
     },
 
-    loadEarlier: async () => {
-      const { active, bySession } = get();
-      if (!active?.sessionId) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
+    loadEarlier: async (key) => {
+      const { active, bySession, openTabs } = get();
+      // 分屏里每格各自向上加载历史：不带 key 时仍按激活会话。
+      const targetKey =
+        key ??
+        (active
+          ? sessionKey(active.engine, active.sessionId, active.workspacePath)
+          : "");
+      if (!targetKey) return;
+      const tab = openTabs.find(
+        (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === targetKey,
       );
-      const state = bySession[key];
+      if (!tab?.sessionId) return;
+      const state = bySession[targetKey];
       if (!state?.nextBefore || state.loading) return;
-      patchSession(set, key, { loading: true });
+      patchSession(set, targetKey, { loading: true });
       try {
         const page = await loadHistoryPage(
-          active.engine,
-          active.sessionId,
-          active.workspacePath,
+          tab.engine,
+          tab.sessionId,
+          tab.workspacePath,
           100,
           state.nextBefore,
         );
-        patchSession(set, key, {
+        patchSession(set, targetKey, {
           messages: [
             ...page.messages,
-            ...(get().bySession[key] ?? EMPTY_SESSION).messages,
+            ...(get().bySession[targetKey] ?? EMPTY_SESSION).messages,
           ],
           nextBefore: page.nextBefore,
           subagentHistory: page.subagentHistory,
           loading: false,
         });
       } catch {
-        patchSession(set, key, { loading: false });
+        patchSession(set, targetKey, { loading: false });
       }
     },
 

@@ -5,7 +5,8 @@ import ClipboardList from "lucide-react/dist/esm/icons/clipboard-list";
 import Copy from "lucide-react/dist/esm/icons/copy";
 import X from "lucide-react/dist/esm/icons/x";
 import type { Message, PlanReview, PlanReviewStatus } from "@/lib/ipc";
-import { sessionKey, useChatStore } from "../store";
+import { useChatStore } from "../store";
+import { useScopedSessionKey } from "../split/session-scope";
 import Markdown from "./Markdown";
 
 /**
@@ -214,12 +215,10 @@ export function PlanReviewCard({
 }) {
   const { t } = useTranslation();
   const record = message.planReview;
-  const active = useChatStore((s) => s.active);
   const resumePlanReview = useChatStore((s) => s.resumePlanReview);
+  // 所属栏位的会话 key（分屏后不能再用全局 active）。
+  const key = useScopedSessionKey() || null;
   if (!record) return null;
-  const key = active
-    ? sessionKey(active.engine, active.sessionId, active.workspacePath)
-    : null;
   return (
     <div className="flex max-w-[85%] flex-col gap-1.5 rounded-xl border border-border-secondary bg-background-secondary-default px-3.5 py-2.5 text-left">
       <PlanCardHeader record={record} />

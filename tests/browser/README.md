@@ -78,6 +78,18 @@ default), and a long Markdown plan (Chinese, emoji, GFM table, code fences,
 sends nothing). The store is seeded statically; no model, no backend, no
 saved conversation.
 
+Open `/tests/browser/split-layout.html` to check the conversation split view
+(Trellis-style tiling) against real layout: the real `SplitLayout`,
+`SplitDragProvider` and `ChatConversation` render one column first; dragging a
+sidebar session onto the right edge must create a second pane at the half-width
+divider (with its header and one divider, layout persisted in localStorage),
+「向下分屏」 must add an empty pane with the drag/new-chat hint, closing it must
+return to two panes, dragging a pane header onto another pane's center must swap
+their sessions, dragging the divider must follow the pointer ratio and clamp at
+the 220px minimum pane, and closing down to one pane must return to the solo
+column and clear the stored layout. The chat store's `focusTab` and the git
+store's IPC actions are stubbed; no app, no backend, no model.
+
 Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
 fade into the bubble fill with a centered chevron, the chevron toggles

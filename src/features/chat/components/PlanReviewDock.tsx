@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Message, PlanReviewDecision } from "@/lib/ipc";
-import { sessionKey, useChatStore } from "../store";
+import { useChatStore } from "../store";
+import { useScopedSession, useScopedSessionKey } from "../split/session-scope";
 import { isPlanActionable } from "../store/plan-review";
 import {
   CopyPlanButton,
@@ -24,10 +25,9 @@ import {
  *  its card (「继续审批」) — defer settles the round, so the dock closing is
  *  the visible effect of the click. Resolved like usePendingQuestion. */
 export function usePendingPlanReview() {
-  const active = useChatStore((s) => s.active);
+  const key = useScopedSessionKey();
   return useChatStore((s) => {
-    if (!active) return null;
-    const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
+    if (!key) return null;
     const session = s.bySession[key];
     const messages = session?.messages ?? [];
     const resume = session?.planReviewResume;
@@ -53,10 +53,9 @@ export function usePendingPlanReview() {
  *  strand the native waiting point, so the picker entry stays disabled. A
  *  settled plan turn (next_turn) does not block the switch. */
 export function usePlanReviewGateActive(): boolean {
-  const active = useChatStore((s) => s.active);
+  const key = useScopedSessionKey();
   return useChatStore((s) => {
-    if (!active) return false;
-    const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
+    if (!key) return false;
     const session = s.bySession[key];
     if (!session?.streaming) return false;
     for (let i = session.messages.length - 1; i >= 0; i--) {
@@ -82,10 +81,9 @@ function PlanReviewDockBody({
   const { t } = useTranslation();
   const record = message.planReview!;
   const respondToPlanReview = useChatStore((s) => s.respondToPlanReview);
-  const active = useChatStore((s) => s.active);
-  const key = active
-    ? sessionKey(active.engine, active.sessionId, active.workspacePath)
-    : "";
+  // 本栏的会话：分屏后非聚焦格子里的审批面板也不能串到全局 active 上。
+  const scopedSession = useScopedSession();
+  const key = useScopedSessionKey();
   const rootRef = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -150,7 +148,7 @@ function PlanReviewDockBody({
       <div className="flex flex-wrap items-center gap-2">
         <PlanViewFullButton
           record={record}
-          workspacePath={record.workspacePath || active?.workspacePath || ""}
+          workspacePath={record.workspacePath || scopedSession?.workspacePath || ""}
         />
         <CopyPlanButton content={record.content} />
         {open && record.execPermission && (
@@ -300,10 +298,10 @@ function PlanReviewHoldPanel({
  *  so the notice is not lost with the pending card. */
 export function PlanReviewDock() {
   const pending = usePendingPlanReview();
-  const active = useChatStore((s) => s.active);
+  const key = useScopedSessionKey();
   const [hold, setHold] = useState<Message | null>(null);
   // The hold belongs to the session that produced it.
-  useEffect(() => setHold(null), [active]);
+  useEffect(() => setHold(null), [key]);
   // A different actionable plan supersedes the held snapshot.
   useEffect(() => {
     if (!pending?.planReview || !hold?.planReview) return;
