@@ -17,6 +17,15 @@ items per page. Previous/next/latest preserve access to every item; append while
 reading an earlier page must not switch it. Arguments and results remain lazy.
 This is a DOM-bound check, not a native CPU benchmark.
 
+Open `/tests/browser/bot-editor.html` for the real 智能体 pane and bot editor
+against in-memory bots: the list shows identity, runtime and skill counts,
+filters and pin toggles work, a row opens the full-bleed editor, the avatar
+studio repaints the generated SVG, and 拼装预览 lists the blocks the model
+would receive (empty ones marked 已省略, later-phase ones marked 阶段 N). The
+`?open=1&tab=能力&preview=1&theme=dark` query opens the editor, a section tab,
+the preview drawer and the dark theme directly. Every `bot_*` invoke is
+answered from the fixtures: no file is written and no model is called.
+
 Open `/tests/browser/performance-diagnostics.html` for the real diagnostic dialog
 with synthetic native data and the real renderer monitor. The selectable JSON
 summary must be bounded to 12,000 UTF-8 bytes; full export keeps all samples in a

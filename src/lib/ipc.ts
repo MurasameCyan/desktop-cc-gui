@@ -603,20 +603,105 @@ export interface SlashCommandEntry {
   source: string;
   kind: SlashEntryKind;
 }
-/** A user-defined agent persona (`agent_list`): picked in the composer `#`
- *  menu, its prompt appended to the outgoing message. Stored in
- *  `~/.ccgui-next/agents.json`. */
-export interface AgentConfig {
-  id: string;
-  name: string;
-  prompt?: string;
-  icon?: string;
-  /** Frontend-only pick origin: built-in catalog picks carry no prompt —
-   *  sendPrompt resolves the current catalog prompt at send time. Absent
-   *  (older persisted selections) means "custom". */
-  source?: "custom" | "builtIn";
-  createdAt?: number;
+/** Avatar of a bot: a generated paper look (shape + color + face), an emoji
+glyph, or an uploaded image file name inside the bot's directory. */
+export interface BotAvatar {
+  type: "generated" | "emoji" | "image";
+  /** emoji glyph (type=emoji) or image file name inside the bot dir. */
+  value?: string;
+  shape?: string;
+  color?: string;
+  face?: string;
 }
+
+/** Per-bot capability switches. `skills: ["*"]` means "every skill". */
+export interface BotCapabilities {
+  skills: string[];
+  tools: string[];
+  mcpServers: string[];
+}
+
+/** Where a bot's work runs. `direct` uses the app's own model config; the
+ *  CLI kinds drive a subprocess and need a `cwd`. */
+export interface BotRuntimeConfig {
+  kind: "direct" | "claude-code" | "codex";
+  model?: string | null;
+  cwd?: string | null;
+  extraArgs: string[];
+  permissionMode: "ask" | "auto-safe" | "full";
+}
+
+/** Memory behaviour of one bot. `memoryCharLimit` bounds the bot's own
+ *  MEMORY; the global USER profile has its own limit. */
+export interface BotMemoryConfig {
+  enabled: boolean;
+  writeApproval: boolean;
+  memoryCharLimit: number;
+  reviewEnabled: boolean;
+  reviewEveryNTurns: number;
+}
+
+/** A bot (`bot_list`): identity + SOUL + AGENTS + capabilities + runtime +
+ *  memory, stored as `~/.ccgui-next/bots/<id>/{bot.json,SOUL.md,AGENTS.md}`.
+ *  v1 agents (name + emoji + prompt) migrate into this shape with the prompt
+ *  as `soul`. */
+export interface BotConfig {
+  id: string;
+  /** `@`-mention handle; unique across bots. */
+  slug: string;
+  name: string;
+  title?: string | null;
+  description?: string | null;
+  avatar: BotAvatar;
+  /** 人格: how it talks (v1's agent prompt lands here). */
+  soul: string;
+  /** 工作规则: what it does and how. */
+  instructions: string;
+  capabilities: BotCapabilities;
+  runtime: BotRuntimeConfig;
+  memory: BotMemoryConfig;
+  source: "custom" | "builtin";
+  builtinId?: string | null;
+  pinned: boolean;
+  hidden: boolean;
+  schemaVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Partial update for `bot_update`: absent fields stay unchanged, `""`
+ *  clears an optional text field. */
+export type BotPatch = Partial<
+  Pick<
+    BotConfig,
+    | "name"
+    | "slug"
+    | "title"
+    | "description"
+    | "avatar"
+    | "soul"
+    | "instructions"
+    | "capabilities"
+    | "runtime"
+    | "memory"
+    | "pinned"
+    | "hidden"
+  >
+>;
+
+/** Payload of `bot_create`. */
+export interface BotCreateInput {
+  name: string;
+  title?: string;
+  description?: string;
+  avatar?: BotAvatar;
+  soul?: string;
+  instructions?: string;
+  slug?: string;
+  source?: "custom" | "builtin";
+  builtinId?: string;
+}
+
 /** Provider block of the built-in agent catalog (`list_built_in_agents`). */
 export interface BuiltInAgentProviderView {
   id: string;
@@ -1316,15 +1401,15 @@ export const ipc = {
    *  distinguished by `entry.kind`. */
   listSlashCommands: (path: string) =>
     withGrantRetry(() => invoke<SlashCommandEntry[]>("list_slash_commands", { path })),
-  // agents — user personas stored in ~/.ccgui-next/agents.json (app home,
-  // so no grant flow); picked via the composer `#` menu, managed in
-  // settings. agent_update takes a partial; absent fields stay unchanged.
-  listAgents: () => invoke<AgentConfig[]>("agent_list"),
-  addAgent: (input: { name: string; prompt?: string; icon?: string }) =>
-    invoke<AgentConfig>("agent_add", input),
-  updateAgent: (id: string, updates: { name?: string; prompt?: string; icon?: string }) =>
-    invoke<boolean>("agent_update", { id, ...updates }),
-  deleteAgent: (id: string) => invoke<boolean>("agent_delete", { id }),
+  // bots — one directory per bot under ~/.ccgui-next/bots (app home, so no
+  // grant flow); picked via the composer `#` menu, managed in settings.
+  // bot_update takes a patch; absent fields stay unchanged.
+  listBots: () => invoke<BotConfig[]>("bot_list"),
+  createBot: (input: BotCreateInput) => invoke<BotConfig>("bot_create", { input }),
+  updateBot: (id: string, patch: BotPatch) =>
+    invoke<BotConfig | null>("bot_update", { id, patch }),
+  deleteBot: (id: string) => invoke<boolean>("bot_delete", { id }),
+  duplicateBot: (id: string) => invoke<BotConfig | null>("bot_duplicate", { id }),
   // built-in agent catalog — bundled read-only personas (resources/
   // agent-catalogs); enabled ids live in app settings. The composer `#`
   // menu merges enabled ones; sendPrompt resolves the current prompt via

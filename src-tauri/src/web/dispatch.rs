@@ -298,18 +298,14 @@ struct IdArgs {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AgentAddArgs {
-    name: String,
-    prompt: Option<String>,
-    icon: Option<String>,
+struct BotCreateArgs {
+    input: crate::bots::BotCreate,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AgentUpdateArgs {
+struct BotUpdateArgs {
     id: String,
-    name: Option<String>,
-    prompt: Option<String>,
-    icon: Option<String>,
+    patch: crate::bots::BotPatch,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -847,19 +843,23 @@ pub(super) async fn dispatch(
             let a: PathArgs = parse_args(&raw)?;
             ser(crate::slash_commands::list_slash_commands(app.state(), a.path).await)
         }
-        // agents & prompts (composer `#`/`!` pickers)
-        "agent_list" => ser(crate::agents::agent_list().await),
-        "agent_add" => {
-            let a: AgentAddArgs = parse_args(&raw)?;
-            ser(crate::agents::agent_add(a.name, a.prompt, a.icon).await)
+        // bots & prompts (composer `#`/`!` pickers)
+        "bot_list" => ser(crate::bots::bot_list().await),
+        "bot_create" => {
+            let a: BotCreateArgs = parse_args(&raw)?;
+            ser(crate::bots::bot_create(a.input).await)
         }
-        "agent_update" => {
-            let a: AgentUpdateArgs = parse_args(&raw)?;
-            ser(crate::agents::agent_update(a.id, a.name, a.prompt, a.icon).await)
+        "bot_update" => {
+            let a: BotUpdateArgs = parse_args(&raw)?;
+            ser(crate::bots::bot_update(a.id, a.patch).await)
         }
-        "agent_delete" => {
+        "bot_delete" => {
             let a: IdArgs = parse_args(&raw)?;
-            ser(crate::agents::agent_delete(a.id).await)
+            ser(crate::bots::bot_delete(a.id).await)
+        }
+        "bot_duplicate" => {
+            let a: IdArgs = parse_args(&raw)?;
+            ser(crate::bots::bot_duplicate(a.id).await)
         }
         // built-in agent catalog (agency-agents pack)
         "list_built_in_agents" => {
