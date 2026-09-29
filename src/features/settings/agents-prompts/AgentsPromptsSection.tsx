@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import Bot from "lucide-react/dist/esm/icons/bot";
 import FileText from "lucide-react/dist/esm/icons/file-text";
 import { PillTab, PillTabList } from "@/components/base/tabs/pill-tab";
-import { AgentsPane } from "./AgentsPane";
+import { BotsPane } from "./BotsPane";
 import { PromptsPane } from "./PromptsPane";
 
 /**
@@ -38,7 +38,7 @@ export function AgentsPromptsSection() {
           {t("settings.agentPromptTabPrompts")}
         </PillTab>
       </PillTabList>
-      {tab === "agents" ? <AgentsPane /> : <PromptsPane />}
+      {tab === "agents" ? <BotsPane /> : <PromptsPane />}
     </div>
   );
 }

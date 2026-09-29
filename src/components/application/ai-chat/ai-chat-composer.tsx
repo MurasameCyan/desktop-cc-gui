@@ -34,7 +34,7 @@ import { ComposerResizeHandle } from "@/components/application/ai-chat/composer-
 import { ComposerEditable } from "@/components/application/ai-chat/composer-editable";
 import { ComposerToolbar } from "@/components/application/ai-chat/composer-toolbar";
 import { ComposerPickerMenus } from "@/components/application/ai-chat/composer-picker-menus";
-import { SelectedAgentChip } from "@/components/application/ai-chat/composer-agent-chip";
+import { SelectedBotChip } from "@/components/application/ai-chat/composer-bot-chip";
 import { useComposerPickers } from "@/components/application/ai-chat/use-composer-pickers";
 import { useComposerInputHandle } from "@/components/application/ai-chat/use-composer-input-handle";
 import { useResizableComposer } from "@/components/application/ai-chat/use-resizable-composer";
@@ -164,7 +164,7 @@ export function Composer({
     if (el && !isComposingRef.current) renderFileTags(el);
   }, []);
 
-  // `@` mention / `/` slash / `#` agent / `!` prompt pickers: trigger
+  // `@` mention / `/` slash / `#` bot / `!` prompt pickers: trigger
   // tracking, priority arbitration, and select actions live in
   // useComposerPickers. The parent owns the wrapper ref (root div + popover
   // anchor).
@@ -181,16 +181,16 @@ export function Composer({
   const {
     mention,
     slash,
-    agent,
+    bot,
     prompt,
     mentionMenuRef,
     slashMenuRef,
-    agentMenuRef,
+    botMenuRef,
     promptMenuRef,
     updateSlashTrigger,
     updateTriggers,
-    selectedAgent,
-    clearSelectedAgent,
+    selectedBot,
+    clearSelectedBot,
   } = pickers;
 
   // Ghost-text completion from prompt history (desktop-cc-gui parity):
@@ -287,10 +287,10 @@ export function Composer({
         pickers={pickers}
       />
 
-      {/* Pinned-agent chip above the input, styled after the attachment
+      {/* Pinned-bot chip above the input, styled after the attachment
           chips (ConversationFooter); × clears the selection. */}
-      {!isCollapsed && selectedAgent && (
-        <SelectedAgentChip agent={selectedAgent} onClear={clearSelectedAgent} />
+      {!isCollapsed && selectedBot && (
+        <SelectedBotChip bot={selectedBot} onClear={clearSelectedBot} />
       )}
 
       {!isCollapsed && (
@@ -299,7 +299,7 @@ export function Composer({
           sendShortcut={sendShortcut}
           mentionOpen={mention != null}
           slashOpen={slash != null}
-          agentOpen={agent != null}
+          botOpen={bot != null}
           promptOpen={prompt != null}
           completionSuffix={completion.suffix}
           acceptCompletion={completion.accept}
@@ -307,7 +307,7 @@ export function Composer({
           handleHistoryKeyDown={handleHistoryKeyDown}
           mentionMenuRef={mentionMenuRef}
           slashMenuRef={slashMenuRef}
-          agentMenuRef={agentMenuRef}
+          botMenuRef={botMenuRef}
           promptMenuRef={promptMenuRef}
           isComposingRef={isComposingRef}
           lastCompositionEndTimeRef={lastCompositionEndTimeRef}

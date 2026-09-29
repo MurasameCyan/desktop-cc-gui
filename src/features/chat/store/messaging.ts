@@ -44,14 +44,18 @@ import type { SendOptions } from "./types";
 import { patchPlanReview } from "./plan-review";
 import { effectivePermission } from "./permissions";
 import {
-  buildAgentBlock,
+  buildBotBlock,
   hasAgentBlock,
 } from "../components/agent-block";
 import {
-  clearSelectedAgent,
-  getSelectedAgent,
-  migrateSelectedAgent,
-} from "@/features/agents/selected-agent";
+  clearSelectedBot,
+  freezeSelectedBotBlock,
+  getSelectedBot,
+  migrateSelectedBot,
+} from "@/features/bots/selected-bot";
+import { buildBotPromptBlock } from "@/features/bots/bot-block";
+import { botById } from "@/features/bots/bot-store";
+import { assembleBotPrompt, builtInBotShell } from "@/features/bots/bot-prompt";
 import { appendCommittedRows } from "./session-utils";
 import type { ChatStore } from "./types";
 import type {
@@ -137,37 +141,53 @@ export function createMessagingActions(
     options?: SendOptions,
   ) {
     if (!prompt.trim() && images.length === 0) return;
-    // A pinned agent's instructions ride along as a tail block the
+    // A pinned bot's assembled prompt rides along as a tail block the
     // transcript keeps (the bubble strips it back out for display). Slash
     // prompts ("/compact") never get it, and a re-sent committed message
     // already carries its block, so re-injecting would duplicate it.
-    const selectedAgent = getSelectedAgent(tab.workspacePath, tab.sessionId);
+    //
+    // The block is frozen on first send: the rest of this session reuses that
+    // exact text, so editing the bot mid-conversation cannot change a prompt
+    // the model has already been primed with (and the prefix cache holds).
+    const selectedBot = getSelectedBot(tab.workspacePath, tab.sessionId);
     // Built-in resolve failures are re-flagged after the optimistic-turn
     // patch below (which resets `error` for the new turn).
     let agentResolveError: string | null = null;
-    if (selectedAgent && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
-      // Built-in picks store no prompt: resolve the current catalog prompt
-      // at send time. A since-disabled catalog entry fails the resolve —
-      // drop the stale pin, surface the session error banner, and still
-      // send the bare text.
-      if (selectedAgent.source === "builtIn") {
+    if (selectedBot && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
+      if (selectedBot.block) {
+        prompt += `\n\n${selectedBot.block}`;
+      } else if (selectedBot.source === "builtIn") {
+        // Built-in picks store no prompt: resolve the current catalog prompt
+        // at send time. A since-disabled catalog entry fails the resolve —
+        // drop the stale pin, surface the session error banner, and still
+        // send the bare text.
         try {
-          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedAgent.id);
-          prompt += buildAgentBlock({
+          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedBot.id);
+          const block = buildBotBlock({
             name: resolved.name,
             icon: resolved.icon ?? undefined,
-            prompt: resolved.prompt,
+            body: assembleBotPrompt({
+              bot: builtInBotShell(resolved.name, resolved.prompt),
+            }).text,
           });
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
         } catch {
-          clearSelectedAgent(tab.workspacePath, tab.sessionId);
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
           agentResolveError = i18n.t("chat.agentUnavailable");
         }
-      } else if (selectedAgent.prompt) {
-        prompt += buildAgentBlock({
-          name: selectedAgent.name,
-          icon: selectedAgent.icon,
-          prompt: selectedAgent.prompt,
-        });
+      } else {
+        const bot = botById(selectedBot.id);
+        if (bot) {
+          const block = await buildBotPromptBlock(bot);
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
+        } else {
+          // The bot was deleted between picking and sending. Say so instead
+          // of silently sending a bare prompt the user did not ask for.
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
+          agentResolveError = i18n.t("chat.botUnavailable");
+        }
       }
     }
     const engine = tab.engine;
@@ -313,7 +333,7 @@ export function createMessagingActions(
       if (result.sessionId && !tab.sessionId
           && (!settled || (knownKey && get().bySession[knownKey]?.interrupted) || stillPending)) {
         // Preassigned native id (grok): adopt immediately.
-        migrateSelectedAgent(tab.workspacePath, result.sessionId);
+        migrateSelectedBot(tab.workspacePath, result.sessionId);
         const newKey = sessionKey(
           engine,
           result.sessionId,
