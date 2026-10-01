@@ -177,6 +177,7 @@ async fn send_codex_and_wait(
         None,
         Some("run-client-probe".into()),
         None,
+        None,
     )
     .await
     .expect("send_message must succeed");
