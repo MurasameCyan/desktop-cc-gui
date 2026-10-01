@@ -20,24 +20,6 @@ pub(super) static SCAN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(()
 /// summaries derived by the older "any JSON-valid frame" guess are stale.
 const TITLE_VERSION: &str = "9";
 
-/// Titles matching these prefixes were derived before envelope stripping
-/// existed; one migration pass re-derives them even when files are unchanged.
-const NOISE_TITLE_WHERE: &str = "title LIKE '<file %' ESCAPE '\\'
-     OR title LIKE '[Image #%' ESCAPE '\\'
-     OR title LIKE '<user\\_info%' ESCAPE '\\'
-     OR title LIKE '<user\\_query%' ESCAPE '\\'
-     OR title LIKE '# AGENTS.md instructions%'
-     OR title LIKE '<environment\\_context%' ESCAPE '\\'
-     OR title LIKE '<agents-instructions%'
-     OR title LIKE '<skill>%'
-     OR title LIKE '<recommended\\_plugins%' ESCAPE '\\'
-     OR title LIKE '<command-message%'
-     OR title LIKE '<command-name%'
-     OR title LIKE '<local-command-stdout>%'
-     OR title LIKE '<local-command-caveat>%'
-     OR title GLOB '/[a-z]*'
-     OR title LIKE '<INSTRUCTIONS>%'";
-
 // ==================== Scan ====================
 
 #[derive(Serialize)]

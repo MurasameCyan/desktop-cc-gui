@@ -16,7 +16,6 @@ vi.mock("@/lib/ipc", () => ({
     listPlanReviews: vi.fn(async () => []),
     rescanSessions: vi.fn(async () => {}),
     usageRecord: vi.fn(async () => {}),
-    listPlanReviews: vi.fn(async () => []),
   },
 }));
 vi.mock("@/lib/events", () => ({

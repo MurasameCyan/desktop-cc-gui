@@ -30,7 +30,6 @@ vi.mock("@/lib/ipc", () => ({
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async () => {}),
     rescanSessions: vi.fn(async () => {}),
-    listPlanReviews: vi.fn(async () => []),
   },
 }));
 vi.mock("@/lib/events", () => ({
