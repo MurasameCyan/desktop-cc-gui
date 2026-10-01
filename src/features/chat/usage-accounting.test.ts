@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { EngineEventPayload } from "@/lib/events";
 import { ipc } from "@/lib/ipc";
 import { useChatStore } from "./store";
-import { handleEngineEvents, type ChatEngineEvent, type EngineEventDeps } from "./store/engine-events";
+import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
 import { sessionKey } from "./store/persistence";
 import { EMPTY_SESSION, runRouting } from "./store/stream";
 import { parseUsage } from "./usage";
@@ -32,7 +33,7 @@ function deps(): EngineEventDeps {
   };
 }
 
-function event(kind: ChatEngineEvent["kind"], seq: number, data: unknown, engine = "codex"): ChatEngineEvent {
+function event(kind: EngineEventPayload["kind"], seq: number, data: unknown, engine = "codex"): EngineEventPayload {
   return { runId, sessionId: "s-1", engine, seq, kind, data };
 }
 
