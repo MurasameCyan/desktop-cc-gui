@@ -58,6 +58,7 @@ import {
 import { normalizeEngineEvent, type EngineTerminalFact } from "../normalized-runtime-events";
 import type { AfterTurnEvent, InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 import { migrateSelectedAgent } from "@/features/agents/selected-agent";
+import { migrateSelectedBot } from "@/features/bots/selected-bot";
 interface RunLifecycle {
   turnId: string;
   engine: string;
@@ -461,6 +462,10 @@ export interface EngineEventDeps {
   upsertSessionMeta: (meta: SessionMeta) => void;
   /** Re-fetch the latest token usage from session history for the given session key. */
   refreshSessionUsage?: (key: string) => Promise<void>;
+  /** After a turn settles: feeds the background memory review's turn counter
+   *  (features/bots/memory-review.ts). Optional so tests can drive the router
+   *  without the memory feature. */
+  turnSettled?: (key: string) => void;
 }
 
 /** Collapse whitespace and cap a prompt for use as a session title. */
@@ -915,7 +920,7 @@ function onSession(
   }
   // The pinned agent followed the draft key; move it onto the native id so
   // the next send in this tab injects it again.
-  migrateSelectedAgent(workspacePath, nativeId);
+  migrateSelectedBot(workspacePath, nativeId);
   // Sidebar row + tab title pick the new session up immediately instead of
   // waiting for the post-turn rescan.
   const firstUser = (deps.get().bySession[newKey]?.messages ?? []).find(
@@ -1674,6 +1679,9 @@ function onDone(event: EngineEventPayload, key: string, deps: EngineEventDeps) {
   // Native file changed; refresh list cache in background.
   void ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
+  // 一轮对话落定（正常完成或被用户中断）时计数；是否到节奏、用哪个 Bot
+  // 复盘由记忆模块判断（features/bots/memory-review.ts）。
+  deps.turnSettled?.(key);
   // An interrupted turn settles here too: keep the queue parked — the user
   // stopped the session, the next message is theirs to send.
   if (!prev.interrupted) {

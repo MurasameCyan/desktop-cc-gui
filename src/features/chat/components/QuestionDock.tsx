@@ -1,5 +1,8 @@
-import { sessionKey, useChatStore } from "../store";
+import { useMemo } from "react";
+import { useChatStore } from "../store";
+import { useScopedSessionKey } from "../split/session-scope";
 import { QuestionCard } from "./QuestionCard";
+import { memoizeMessageHistory } from "./memoize-message-history";
 
 /**
  * The active session's pending AskUserQuestion, or null. The dock takes over
@@ -7,17 +10,15 @@ import { QuestionCard } from "./QuestionCard";
  * composer) and the dock itself resolve it through this hook.
  */
 export function usePendingQuestion() {
-  const active = useChatStore((s) => s.active);
-  return useChatStore((s) => {
-    if (!active) return null;
-    const key = sessionKey(active.engine, active.sessionId, active.workspacePath);
-    const messages = s.bySession[key]?.messages ?? [];
+  const key = useScopedSessionKey();
+  const pendingQuestion = useMemo(() => memoizeMessageHistory((messages) => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m.role === "question" && m.question?.status === "pending") return m;
     }
     return null;
-  });
+  }), []);
+  return useChatStore((s) => key ? pendingQuestion(s.bySession[key]?.messages) : null);
 }
 
 /**

@@ -192,11 +192,13 @@ export interface ChatStore {
   /** Surface a banner on a session without a send (e.g. a refused
    *  computer-use command); the composer keeps the user's draft. */
   setSessionError: (key: string, message: string) => void;
-  loadEarlier: () => Promise<void>;
+  loadEarlier: (key?: string) => Promise<void>;
+  /** 发送。`target` 不传时发给当前激活会话；分屏里每格带上自己的会话。 */
   send: (
     prompt: string,
     images: string[],
     options?: SendOptions,
+    target?: ActiveSession | null,
   ) => Promise<void>;
   /** Answer a permission-denial grant card: persist the directory grant
    * (accept) or mark the card declined. */
@@ -224,19 +226,25 @@ export interface ChatStore {
   /** Re-send the session's last user message (grant card's one-click retry
    * after a directory grant takes effect on the next launch). */
   resendLastUser: (key: string) => Promise<void>;
-  /** Enqueue a message on the active session while a turn streams. */
-  queueMessage: (text: string, images: string[], options?: SendOptions) => void;
-  /** Drop a queued message from the active session. */
-  removeQueued: (id: string) => void;
+  /** Enqueue a message while a turn streams (default: the active session). */
+  queueMessage: (
+    text: string,
+    images: string[],
+    options?: SendOptions,
+    target?: ActiveSession | null,
+  ) => void;
+  /** Drop a queued message (default: the active session). */
+  removeQueued: (id: string, key?: string) => void;
   /** Move a queued message one row up or down in the queue card; directions
    *  are screen-relative, see `QueueMoveDirection`. */
-  moveQueued: (id: string, direction: QueueMoveDirection) => void;
+  moveQueued: (id: string, direction: QueueMoveDirection, key?: string) => void;
   /** Send one queued message now: it takes the head of the queue, and a
    *  running turn is stopped so the send is not left behind it. */
-  sendQueuedNow: (id: string) => Promise<void>;
-  /** Drop every queued message from the active session. */
-  clearQueue: () => void;
-  interrupt: () => Promise<void>;
+  sendQueuedNow: (id: string, key?: string) => Promise<void>;
+  /** Drop every queued message from a session (default: the active one). */
+  clearQueue: (key?: string) => void;
+  /** Stop the running turn (default: the active session). */
+  interrupt: (target?: ActiveSession | null) => Promise<void>;
   archiveSession: (session: SessionMeta) => Promise<void>;
   deleteSession: (engine: string, sessionId: string) => Promise<void>;
   pinSession: (

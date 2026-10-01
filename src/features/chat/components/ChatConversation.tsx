@@ -17,6 +17,7 @@ import {
   sessionKey,
   type ActiveSession,
   type QueuedMessage,
+  type QueueMoveDirection,
 } from "../store";
 
 import { MessageTimeline } from "./MessageTimeline";
@@ -36,9 +37,9 @@ import { parseUsage } from "../usage";
 import { rememberContextWindow, resolveContextMax } from "../context-window-memory";
 import { useWorkspaceUIHooks, workspaceAllowedEngines } from "../workspace-ui-bridge";
 import { ConversationModePane, ConversationModePicker } from "@/features/plugins/conversation/ConversationModeHost";
+import { SessionScope } from "../split/session-scope";
 import { usePlanReviewGateActive } from "./PlanReviewDock";
 import { useConversationMode } from "@/features/plugins/conversation/use-conversation-mode";
-import { McpCommandPanel } from "@/features/mcp/McpCommandPanel";
 
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -417,8 +418,26 @@ export const ChatConversation = memo(function ChatConversation({
   const supportsImages = engineInfo?.supportsImages ?? false;
 
   const handleLoadEarlier = useCallback(
-    () => void loadEarlier(),
-    [loadEarlier],
+    () => void loadEarlier(key),
+    [loadEarlier, key],
+  );
+
+  // 队列操作都按本栏的会话 key 发出：分屏后每格管自己的队列。
+  const handleRemoveQueued = useCallback(
+    (id: string) => removeQueued(id, key),
+    [removeQueued, key],
+  );
+  const handleMoveQueued = useCallback(
+    (id: string, direction: QueueMoveDirection) => moveQueued(id, direction, key),
+    [moveQueued, key],
+  );
+  const handleSendQueuedNow = useCallback(
+    (id: string) => void sendQueuedNow(id, key),
+    [sendQueuedNow, key],
+  );
+  const handleClearQueue = useCallback(
+    () => clearQueue(key),
+    [clearQueue, key],
   );
 
   const {
@@ -488,7 +507,7 @@ export const ChatConversation = memo(function ChatConversation({
   }
 
   return (
-    <>
+    <SessionScope session={active}>
       <ConversationBody
         active={active}
         hasSession={hasSession}
@@ -502,10 +521,10 @@ export const ChatConversation = memo(function ChatConversation({
         active={active}
         workspaces={workspaces}
         queue={queue}
-        onRemoveQueued={removeQueued}
-        onMoveQueued={moveQueued}
-        onSendQueuedNow={sendQueuedNow}
-        onClearQueued={clearQueue}
+        onRemoveQueued={handleRemoveQueued}
+        onMoveQueued={handleMoveQueued}
+        onSendQueuedNow={handleSendQueuedNow}
+        onClearQueued={handleClearQueue}
         imageError={imageError}
         branchError={branchError}
         onDismissImageError={dismissImageError}
@@ -537,8 +556,6 @@ export const ChatConversation = memo(function ChatConversation({
         startNewChat={startNewChat}
       />
 
-      {/* `/mcp`：当前会话引擎的 MCP 清单（与设置页共享同一份数据）。 */}
-      <McpCommandPanel />
-    </>
+    </SessionScope>
   );
 });

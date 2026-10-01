@@ -1,5 +1,17 @@
 # Chat streaming regression
 
+Open `/tests/browser/concurrent-status.html` for concurrent session indicators:
+the real `AiChatSidebar` and `SessionTab` each render 1, 6 (default), or 12
+synthetic sessions. Switch Processing / Retry / Complete, light / dark, and
+Normal / Reduced motion. The fixture selects the shipped reduced-motion CSS
+declaration by changing its media condition, without overriding its animation
+styles. Processing must retain a changing `transform` on all status dots, while
+Retry, Complete and Reduced motion must have no running status animation.
+The JSON readout reports FAIL if an active keyframe includes any property other
+than `transform` or `opacity` (including `boxShadow`, `filter` or
+`backgroundPosition`). This checks animation contracts and visible states,
+not native CPU/GPU usage; no model, real IPC or saved conversation is used.
+
 Open `/tests/browser/relay-plugin.html` for the installable Relay plugin's actual
 React UI with a fake Agent transport. The plugin source is a sibling checkout at
 `../ccgui-plugin/ccgui-plugin-plan-execute-relay` (dev server allows sibling
@@ -16,6 +28,23 @@ The production disclosure renders 120 or 500 synthetic tools with at most 40
 items per page. Previous/next/latest preserve access to every item; append while
 reading an earlier page must not switch it. Arguments and results remain lazy.
 This is a DOM-bound check, not a native CPU benchmark.
+
+Open `/tests/browser/bot-editor.html` for the real 智能体 pane and bot editor
+against in-memory bots: the list shows identity, runtime and skill counts,
+filters and pin toggles work, a row opens the full-bleed editor, the avatar
+studio repaints the generated avatar (canvas, not SVG — the 36px list rows
+paint new frames too, sample one canvas twice to check it is animating, not
+frozen), and 拼装预览 lists the blocks the model
+would receive (empty ones marked 已省略, blocks waiting on a tool this build
+lacks marked 即将支持). The
+`?open=1&tab=能力&preview=1&theme=dark` query opens the editor, a section tab,
+the preview drawer and the dark theme directly. A short window is the check
+for the identity column: it scrolls on its own (the identity card, hints and
+footer keep their own heights instead of being squeezed) while the section
+column scrolls separately, and none of the dialog's own scrollers paints a
+scrollbar (`scrollbar-none`, same as the settings column and the tab strip).
+Every `bot_*` invoke is answered from the fixtures: no file is written and no
+model is called.
 
 Open `/tests/browser/performance-diagnostics.html` for the real diagnostic dialog
 with synthetic native data and the real renderer monitor. The selectable JSON
@@ -82,6 +111,19 @@ Native plan events (`plan_draft`, `plan_review`, `plan_review_settled`) use the
 shared `EngineEventPayload` in `src/lib/events.ts`. Chat handlers, lifecycle
 buffering and plan-review test fixtures must use that same type; widening it
 only in the chat layer leaves the shared dispatch contract incomplete.
+Open `/tests/browser/split-layout.html` to check the conversation split view
+(Trellis-style tiling) against real layout: the real `SplitLayout`,
+`SplitDragProvider` and `ChatConversation` render one column first; dragging a
+sidebar session onto the right edge must create a second pane at the half-width
+divider (with its header and one divider, layout persisted in localStorage),
+「向下分屏」 must add an empty pane with the drag/new-chat hint, closing it must
+return to two panes, dragging a pane header onto another pane's center must swap
+their sessions, dragging a session tab from the real tab strip down into the
+conversation area must split there too (a horizontal drag inside the strip still
+reorders), dragging the divider must follow the pointer ratio and clamp at
+the 220px minimum pane, and closing down to one pane must return to the solo
+column and clear the stored layout. The chat store's `focusTab` and the git
+store's IPC actions are stubbed; no app, no backend, no model.
 
 Open `/tests/browser/collapsible-message.html` to check the long-message
 collapse: a user message taller than 480px clamps to 320px behind a bottom
@@ -148,7 +190,9 @@ Open `/tests/browser/agent-prompt-menus.html` to check the composer's `#`
 agent picker and `!` prompt picker against seeded stores: the agent menu
 groups 我的智能体 then one section per enabled built-in division (flat when
 filtering), and the prompt menu rows carry 工作区/全局 scope badges; both
-end in a fixed "new" row that jumps to Settings. No app, no backend.
+end in a fixed "new" row that jumps to Settings. Generated avatars animate in
+the 16px rows (the popover mounts above the viewport in this fixture, so pin
+it into view before sampling a canvas twice). No app, no backend.
 
 Open `/tests/browser/delete-confirm-popover.html` to check the session-delete
 confirmation: right-clicking the thread row and picking 删除 must open a
@@ -213,6 +257,15 @@ or staging it updates `lastAction` without touching a repository. Write a
 commit draft, switch to Files or collapse the sidebar, then return: the draft
 must survive, hidden rows must be removed, and the list must still scroll to
 the final file. The metrics output reports requests, mounted rows and actions.
+
+Open `/tests/browser/markdown-preview.html` to check the files-feature Markdown
+preview (Streamdown) against a document covering GFM tables, heading levels,
+lists, task list, blockquote, fenced code, KaTeX math and a Mermaid diagram:
+tables render with a bordered wrapper and styled header row, code blocks carry
+language header + copy/download controls with `files.markdown.*` labels, the
+block formula renders via KaTeX, and the Mermaid diagram stays an empty
+container until scrolled into view (IntersectionObserver lazy render), then
+draws the flow SVG. No app, no backend, no saved state.
 
 Open `/tests/browser/plugin-detail-rail.html` to check the plugin detail page
 at a desktop width (1145x731 in the verification run, with the app's 40px tab

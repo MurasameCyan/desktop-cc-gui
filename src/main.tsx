@@ -1,9 +1,17 @@
+// Engine-compat polyfills (Object.hasOwn, Promise.withResolvers, .at,
+// URL.canParse, structuredClone) must be installed before any other module
+// can run; this side-effect import is intentionally first.
+import "./lib/engine-compat";
 import "./index.css";
+import { installCryptoRandomUUIDPolyfill } from "./lib/id";
 import {
   installReactScanHook,
   isReactScanEnabled,
   startReactScanOverlay,
 } from "./lib/react-scan";
+
+// Ensure crypto.randomUUID is available in non-secure HTTP contexts (e.g. LAN web bridge).
+installCryptoRandomUUIDPolyfill();
 
 /**
  * react-scan must instrument React before the first `react` import runs —

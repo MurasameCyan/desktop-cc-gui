@@ -184,6 +184,7 @@ async fn send(
         None,
         Some(run_id.to_string()),
         None,
+        None,
     )
     .await
     .unwrap_or_else(|error| panic!("{engine_id}: send_message failed: {error}"));
@@ -432,6 +433,7 @@ async fn send_with_images(
         None,
         Some(run_id.to_string()),
         None,
+        None,
     )
     .await
     .unwrap_or_else(|error| panic!("{engine_id}: send_message failed: {error}"));
@@ -512,6 +514,7 @@ async fn kimi_explicit_k3_256k_medium_official_channel() {
         Some("auto".into()),
         Some("__local_settings_json__".into()),
         Some("run-kimi-explicit-model".into()),
+        None,
         None,
     )
     .await
@@ -616,6 +619,7 @@ async fn kimi_invalid_model_exposes_the_setup_error() {
         Some("auto".into()),
         Some("__local_settings_json__".into()),
         Some("run-kimi-invalid-model".into()),
+        None,
         None,
     )
     .await

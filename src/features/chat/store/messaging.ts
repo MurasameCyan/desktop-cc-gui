@@ -48,14 +48,19 @@ import type { SendOptions } from "./types";
 import { patchPlanReview } from "./plan-review";
 import { effectivePermission } from "./permissions";
 import {
-  buildAgentBlock,
+  buildBotBlock,
   hasAgentBlock,
 } from "../components/agent-block";
 import {
-  clearSelectedAgent,
-  getSelectedAgent,
-  migrateSelectedAgent,
-} from "@/features/agents/selected-agent";
+  clearSelectedBot,
+  freezeSelectedBotBlock,
+  getSelectedBot,
+  migrateSelectedBot,
+} from "@/features/bots/selected-bot";
+import { buildBotPromptBlock } from "@/features/bots/bot-block";
+import { engineSupportsMemory } from "@/features/bots/memory";
+import { botById } from "@/features/bots/bot-store";
+import { assembleBotPrompt, builtInBotShell } from "@/features/bots/bot-prompt";
 import { appendCommittedRows } from "./session-utils";
 import {
   prepareSessionContributions,
@@ -96,6 +101,23 @@ export interface MessagingDeps {
   get: StoreGet;
   loadHistoryPage: LoadHistoryPage;
   subscribe: StoreSubscribe;
+}
+
+/** 会话 key：调用方给了目标就用它，否则回退到当前激活会话。
+ *  分屏后每个格子都有自己的输入框与队列，不能再无脑用全局 active。 */
+function keyOfTarget(
+  target: ActiveSession | null | undefined,
+  active: ActiveSession | null,
+): string {
+  const session = target ?? active;
+  return session
+    ? sessionKey(session.engine, session.sessionId, session.workspacePath)
+    : "";
+}
+
+/** 已经算好 key 的调用点直接用 key，没给就回退到激活会话。 */
+function resolveKey(key: string | undefined, active: ActiveSession | null): string {
+  return key ?? keyOfTarget(null, active);
 }
 
 /** The one answer value a question card sends. A multi-select pick arrives as
@@ -146,37 +168,60 @@ export function createMessagingActions(
     options?: SendOptions,
   ) {
     if (!prompt.trim() && images.length === 0) return;
-    // A pinned agent's instructions ride along as a tail block the
+    // A pinned bot's assembled prompt rides along as a tail block the
     // transcript keeps (the bubble strips it back out for display). Slash
     // prompts ("/compact") never get it, and a re-sent committed message
     // already carries its block, so re-injecting would duplicate it.
-    const selectedAgent = getSelectedAgent(tab.workspacePath, tab.sessionId);
+    //
+    // The block is frozen on first send: the rest of this session reuses that
+    // exact text, so editing the bot mid-conversation cannot change a prompt
+    // the model has already been primed with (and the prefix cache holds).
+    const selectedBot = getSelectedBot(tab.workspacePath, tab.sessionId);
+    // 记忆工具每次发送都要重新挂载（每次发送都是一个新进程）；冻结的只是
+    // 提示词。能挂的条件：选中了自定义 Bot、它开着记忆、这个引擎支持 MCP。
+    const pinnedBot = selectedBot ? botById(selectedBot.id) : null;
+    const memoryToolAvailable =
+      pinnedBot !== null &&
+      pinnedBot.memory.enabled !== false &&
+      engineSupportsMemory(get().engines, tab.engine);
     // Built-in resolve failures are re-flagged after the optimistic-turn
     // patch below (which resets `error` for the new turn).
     let agentResolveError: string | null = null;
-    if (selectedAgent && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
-      // Built-in picks store no prompt: resolve the current catalog prompt
-      // at send time. A since-disabled catalog entry fails the resolve —
-      // drop the stale pin, surface the session error banner, and still
-      // send the bare text.
-      if (selectedAgent.source === "builtIn") {
+    if (selectedBot && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
+      if (selectedBot.block) {
+        prompt += `\n\n${selectedBot.block}`;
+      } else if (selectedBot.source === "builtIn") {
+        // Built-in picks store no prompt: resolve the current catalog prompt
+        // at send time. A since-disabled catalog entry fails the resolve —
+        // drop the stale pin, surface the session error banner, and still
+        // send the bare text.
         try {
-          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedAgent.id);
-          prompt += buildAgentBlock({
+          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedBot.id);
+          const block = buildBotBlock({
             name: resolved.name,
             icon: resolved.icon ?? undefined,
-            prompt: resolved.prompt,
+            body: assembleBotPrompt({
+              bot: builtInBotShell(resolved.name, resolved.prompt),
+            }).text,
           });
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
         } catch {
-          clearSelectedAgent(tab.workspacePath, tab.sessionId);
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
           agentResolveError = i18n.t("chat.agentUnavailable");
         }
-      } else if (selectedAgent.prompt) {
-        prompt += buildAgentBlock({
-          name: selectedAgent.name,
-          icon: selectedAgent.icon,
-          prompt: selectedAgent.prompt,
-        });
+      } else {
+        const bot = botById(selectedBot.id);
+        if (bot) {
+          const block = await buildBotPromptBlock(bot, { memoryToolAvailable });
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
+        } else {
+          // The bot was deleted between picking and sending. Say so instead
+          // of silently sending a bare prompt the user did not ask for.
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
+          agentResolveError = i18n.t("chat.botUnavailable");
+        }
       }
     }
     const engine = tab.engine;
@@ -374,6 +419,7 @@ export function createMessagingActions(
         ),
         providerId: provider,
         computerUse: options?.computerUse === true,
+        memoryBot: memoryToolAvailable ? pinnedBot.id : null,
       });
       confirmPromptContributions(promptContributions);
       if (switchEvent) {
@@ -407,7 +453,7 @@ export function createMessagingActions(
       if (result.sessionId && !tab.sessionId
           && (!settled || (knownKey && get().bySession[knownKey]?.interrupted) || stillPending)) {
         // Preassigned native id (grok): adopt immediately.
-        migrateSelectedAgent(tab.workspacePath, result.sessionId);
+        migrateSelectedBot(tab.workspacePath, result.sessionId);
         const newKey = sessionKey(
           engine,
           result.sessionId,
@@ -584,13 +630,79 @@ export function createMessagingActions(
     });
   }
 
+  /** 按会话 key 中断：公共 `interrupt(target)` 与队列「立即发送」共用。
+   *  key 而不是会话对象，是因为后台会话的排队项只有 key。 */
+  async function interruptByKey(key: string) {
+    const pendingSend = pendingSends.get(key);
+    if (pendingSend) {
+      pendingSend.cancelled = true;
+      pendingSends.delete(key);
+    }
+    // Settle locally FIRST: the killed run's done event can arrive while
+    // the kill IPCs below are still in flight, and onDone drains the queue
+    // whenever interrupted is still false — that would fire the next
+    // queued message right after the user pressed stop.
+    const pending = drainPending(key);
+    set((s) => {
+      const cur = s.bySession[key] ?? EMPTY_SESSION;
+      const messages = settleLiveRows(
+        pending
+          ? applyStreamParts(cur.messages, pending.parts, pending.model)
+          : cur.messages,
+      );
+      return {
+        bySession: {
+          ...s.bySession,
+          [key]: {
+            ...cur,
+            messages,
+            streaming: false,
+            interrupted: true,
+            turnStartedAt: null,
+            retry: null,
+          },
+        },
+        streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
+        retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
+      };
+    });
+    // Registry is keyed by native session id once known; before that the
+    // run id routes. Try both.
+    const sessionId = key.includes("/") ? key.slice(key.indexOf("/") + 1) : "";
+    if (sessionId && !key.startsWith("new:"))
+      await ipc.interruptSession(sessionId).catch(() => false);
+    const deadRunIds: string[] = [];
+    for (const [runId, routed] of runRouting) {
+      if (routed === key) deadRunIds.push(runId);
+    }
+    // Independent kills, one IPC call per routed run — fired together.
+    await Promise.all(
+      deadRunIds.map((runId) => ipc.interruptSession(runId).catch(() => false)),
+    );
+    // The runs are dead: drop their routing and usage entries so the maps
+    // cannot grow forever. (A late done event would also remove them.)
+    for (const runId of deadRunIds) {
+      finishRunLifecycle(runId, "cancelled");
+      patchSession(set, key, {
+        settledRunIds: rememberSettledRun(get().bySession[key], runId),
+      });
+      runRouting.delete(runId);
+      untrackRun(runId);
+      dropRunUsage(runId);
+    }
+    // Refresh without holding Stop: the read can take three loads with
+    // backoff, and Stop must complete immediately (every other caller
+    // fires and forgets).
+    void get().refreshSessionUsage(key);
+  }
+
   return {
     drainQueue,
     markUnseenIfBackground,
 
-    send: async (prompt, images, options) => {
-      const { active } = get();
-      if (active) await sendPrompt(active, prompt, images, options);
+    send: async (prompt, images, options, target) => {
+      const session = target === undefined ? get().active : target;
+      if (session) await sendPrompt(session, prompt, images, options);
     },
 
     respondToGrant: async (key, seq, accept) => {
@@ -727,13 +839,13 @@ export function createMessagingActions(
         });
     },
 
-    queueMessage: (text, images, options) => {
-      const { active } = get();
-      if (!active || (!text.trim() && images.length === 0)) return;
+    queueMessage: (text, images, options, target) => {
+      const session = target === undefined ? get().active : target;
+      if (!session || (!text.trim() && images.length === 0)) return;
       const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
+        session.engine,
+        session.sessionId,
+        session.workspacePath,
       );
       set((s) => {
         const prev = s.bySession[key] ?? EMPTY_SESSION;
@@ -758,21 +870,16 @@ export function createMessagingActions(
       });
     },
 
-    removeQueued: (id) => {
-      const { active } = get();
-      if (!active) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
-      );
+    removeQueued: (id, key) => {
+      const targetKey = resolveKey(key, get().active);
+      if (!targetKey) return;
       set((s) => {
-        const prev = s.bySession[key];
+        const prev = s.bySession[targetKey];
         if (!prev) return {};
         return {
           bySession: {
             ...s.bySession,
-            [key]: {
+            [targetKey]: {
               ...prev,
               queue: prev.queue.filter((item) => item.id !== id),
             },
@@ -784,16 +891,11 @@ export function createMessagingActions(
      *  first, so "up" walks the row toward the end of the send order (sent
      *  later) and "down" toward the head (sent sooner); a move past either
      *  end is a no-op. */
-    moveQueued: (id, direction) => {
-      const { active } = get();
-      if (!active) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
-      );
+    moveQueued: (id, direction, key) => {
+      const targetKey = resolveKey(key, get().active);
+      if (!targetKey) return;
       set((s) => {
-        const prev = s.bySession[key];
+        const prev = s.bySession[targetKey];
         if (!prev) return {};
         const index = prev.queue.findIndex((item) => item.id === id);
         if (index < 0) return {};
@@ -804,26 +906,21 @@ export function createMessagingActions(
         return {
           bySession: {
             ...s.bySession,
-            [key]: { ...prev, queue },
+            [targetKey]: { ...prev, queue },
           },
         };
       });
     },
-    clearQueue: () => {
-      const { active } = get();
-      if (!active) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
-      );
+    clearQueue: (key) => {
+      const targetKey = resolveKey(key, get().active);
+      if (!targetKey) return;
       set((s) => {
-        const prev = s.bySession[key];
+        const prev = s.bySession[targetKey];
         if (!prev || prev.queue.length === 0) return {};
         return {
           bySession: {
             ...s.bySession,
-            [key]: { ...prev, queue: [] },
+            [targetKey]: { ...prev, queue: [] },
           },
         };
       });
@@ -834,24 +931,19 @@ export function createMessagingActions(
      *  and the stop's own park is lifted, so the exit drain sends this message
      *  instead of waiting the turn out. The rows behind it follow on the next
      *  settle. */
-    sendQueuedNow: async (id) => {
-      const { active } = get();
-      if (!active) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
-      );
-      const session = get().bySession[key];
+    sendQueuedNow: async (id, key) => {
+      const targetKey = resolveKey(key, get().active);
+      if (!targetKey) return;
+      const session = get().bySession[targetKey];
       const item = session?.queue.find((entry) => entry.id === id);
       if (!item || !session) return;
       const running = session.streaming;
       set((s) => {
-        const prev = s.bySession[key] ?? EMPTY_SESSION;
+        const prev = s.bySession[targetKey] ?? EMPTY_SESSION;
         return {
           bySession: {
             ...s.bySession,
-            [key]: {
+            [targetKey]: {
               ...prev,
               queue: [item, ...prev.queue.filter((entry) => entry.id !== id)],
               interrupted: false,
@@ -859,78 +951,14 @@ export function createMessagingActions(
           },
         };
       });
-      if (running) await get().interrupt();
-      drainQueue(key);
+      if (running) await interruptByKey(targetKey);
+      drainQueue(targetKey);
     },
 
-    interrupt: async () => {
-      const { active } = get();
-      if (!active) return;
-      const key = sessionKey(
-        active.engine,
-        active.sessionId,
-        active.workspacePath,
-      );
-      const pendingSend = pendingSends.get(key);
-      if (pendingSend) {
-        pendingSend.cancelled = true;
-        pendingSends.delete(key);
-      }
-      // Settle locally FIRST: the killed run's done event can arrive while
-      // the kill IPCs below are still in flight, and onDone drains the queue
-      // whenever interrupted is still false — that would fire the next
-      // queued message right after the user pressed stop.
-      const pending = drainPending(key);
-      set((s) => {
-        const cur = s.bySession[key] ?? EMPTY_SESSION;
-        const messages = settleLiveRows(
-          pending
-            ? applyStreamParts(cur.messages, pending.parts, pending.model)
-            : cur.messages,
-        );
-        return {
-          bySession: {
-            ...s.bySession,
-            [key]: {
-              ...cur,
-              messages,
-              streaming: false,
-              interrupted: true,
-              turnStartedAt: null,
-              retry: null,
-            },
-          },
-          streamingByKey: setStreamingFlag(s.streamingByKey, key, false),
-          retryingByKey: setRetryingFlag(s.retryingByKey, key, false),
-        };
-      });
-      // Registry is keyed by native session id once known; before that the
-      // run id routes. Try both.
-      if (active.sessionId)
-        await ipc.interruptSession(active.sessionId).catch(() => false);
-      const deadRunIds: string[] = [];
-      for (const [runId, routed] of runRouting) {
-        if (routed === key) deadRunIds.push(runId);
-      }
-      // Independent kills, one IPC call per routed run — fired together.
-      await Promise.all(
-        deadRunIds.map((runId) =>
-          ipc.interruptSession(runId).catch(() => false),
-        ),
-      );
-      // The runs are dead: drop their routing and usage entries so the maps
-      // cannot grow forever. (A late done event would also remove them.)
-      for (const runId of deadRunIds) {
-        finishRunLifecycle(runId, "cancelled");
-        patchSession(set, key, { settledRunIds: rememberSettledRun(get().bySession[key], runId) });
-        runRouting.delete(runId);
-        untrackRun(runId);
-        dropRunUsage(runId);
-      }
-      // Refresh without holding Stop: the read can take three loads with
-      // backoff, and Stop must complete immediately (every other caller
-      // fires and forgets).
-      void get().refreshSessionUsage(key);
+    interrupt: async (target) => {
+      const key = keyOfTarget(target === undefined ? get().active : target, null);
+      if (!key) return;
+      await interruptByKey(key);
     },
 
     compactContext: async (key?: string) => {

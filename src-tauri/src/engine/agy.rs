@@ -274,6 +274,7 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         }
     }

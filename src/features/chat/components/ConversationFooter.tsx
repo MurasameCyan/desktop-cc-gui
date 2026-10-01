@@ -233,27 +233,32 @@ function FooterStatusBar({
   const [compacting, setCompacting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
+  // 压缩/刷新按本格子的会话 key 发出：分屏时不能再落到全局 active 上。
+  const sessionKeyValue = active
+    ? sessionKey(active.engine, active.sessionId, active.workspacePath)
+    : "";
+
   const handleCompact = useCallback(async () => {
     if (!active || streaming || compacting) return;
     setCompacting(true);
     try {
-      await compactContext();
+      await compactContext(sessionKeyValue);
     } finally {
       setCompacting(false);
     }
-  }, [active, streaming, compacting, compactContext]);
+  }, [active, streaming, compacting, compactContext, sessionKeyValue]);
 
   const handleRefresh = useCallback(async () => {
     if (!active || refreshing) return;
     setRefreshing(true);
     try {
-      await refreshSessionUsage();
+      await refreshSessionUsage(sessionKeyValue);
     } finally {
       // No minimum-visible-busy delay here: the refresh button's feedback
       // finishes the spin lap (and checks) on its own.
       setRefreshing(false);
     }
-  }, [active, refreshing, refreshSessionUsage]);
+  }, [active, refreshing, refreshSessionUsage, sessionKeyValue]);
 
   const visibleWorkspaces = useMemo(
     () => {
