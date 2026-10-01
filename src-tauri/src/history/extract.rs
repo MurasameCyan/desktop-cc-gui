@@ -1947,7 +1947,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let extractor = extractor_for("claude", ImageMode::Collect);
-        collect_session(std::io::Cursor::new(input), &extractor)
+        collect_session(std::io::Cursor::new(input), &extractor, &HashSet::new())
             .messages
             .into_iter()
             .map(|m| m.text)
@@ -1989,6 +1989,7 @@ mod tests {
         walk_lines(
             std::io::Cursor::new(input),
             &extractor_for("claude", ImageMode::SkipDataUrls),
+            &HashSet::new(),
             |row| acc.accept(row),
         );
         assert_eq!(acc.finish().title, "review下本地代码");
