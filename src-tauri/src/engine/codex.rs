@@ -662,6 +662,7 @@ mod tests {
             session_id: None,
             workspace: std::path::PathBuf::from("/tmp"),
             prompt: "hi".into(),
+            native_compact: false,
             images: Vec::new(),
             model: Some("gpt-6-astra".into()),
             effort: None,

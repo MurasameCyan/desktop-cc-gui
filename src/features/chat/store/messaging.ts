@@ -310,6 +310,7 @@ export function createMessagingActions(
         workspacePath: tab.workspacePath,
         sessionId: tab.sessionId,
         prompt,
+        nativeCompact: options?.nativeCompact === true,
         imagePaths: images.length ? images : null,
         model,
         effort,
@@ -888,7 +889,7 @@ export function createMessagingActions(
       });
 
       try {
-        await sendPrompt(targetTab, "/compact", []);
+        await sendPrompt(targetTab, "/compact", [], { nativeCompact: true });
       } catch (error) {
         cleanup?.();
         patchSession(set, targetKey, { compaction: null });

@@ -265,6 +265,7 @@ mod tests {
             session_id: None,
             workspace: PathBuf::from("/tmp/ws"),
             prompt: "hi".to_string(),
+            native_compact: false,
             images: Vec::new(),
             model: None,
             effort: None,

@@ -493,25 +493,35 @@ impl Engine for PiFamilyEngine {
         if rpc_mode {
             // rpc 模式的 prompt 是 stdin 上的 NDJSON 命令(位置参数不派发)。
             // 命令按序执行:get_state 拿 sessionId(json 模式的 session 头帧
-            // 在 rpc 没有等价物)→ 下发任务;omp 额外先协商 v2 分片。早写无
+            // 在 rpc 没有等价物)→下发任务;omp 额外先协商 v2 分片。早写无
             // 害:输入循环在 session 就绪后才启动,管道会缓冲这些行。
-            let mut prompt = serde_json::json!({
-                "id": "ccgui-prompt",
-                "type": "prompt",
-                "message": req.prompt,
-            });
-            if !req.images.is_empty() {
-                let mut payloads = Vec::new();
-                for raw in &req.images {
-                    let (mime, data) = images::load_image(raw, &req.workspace)?;
-                    payloads.push(serde_json::json!({
-                        "type": "image",
-                        "data": data,
-                        "mimeType": mime,
-                    }));
+            let is_omp_compact =
+                self.id == "omp" && req.native_compact && req.images.is_empty();
+            // OMP 将 /compact 作为本地 RPC 命令处理。用普通 prompt 会得到
+            // agentInvoked:false 和 command_output,但不会发 agent_end,宿主因此
+            // 永远等不到回合终态。原生命令的 response 在压缩完成后才返回。
+            let request = if is_omp_compact {
+                serde_json::json!({ "id": "ccgui-compact", "type": "compact" })
+            } else {
+                let mut prompt = serde_json::json!({
+                    "id": "ccgui-prompt",
+                    "type": "prompt",
+                    "message": req.prompt,
+                });
+                if !req.images.is_empty() {
+                    let mut payloads = Vec::new();
+                    for raw in &req.images {
+                        let (mime, data) = images::load_image(raw, &req.workspace)?;
+                        payloads.push(serde_json::json!({
+                            "type": "image",
+                            "data": data,
+                            "mimeType": mime,
+                        }));
+                    }
+                    prompt["images"] = Value::Array(payloads);
                 }
-                prompt["images"] = Value::Array(payloads);
-            }
+                prompt
+            };
             // v2 分片协商是 omp 的 fork 自加;pi 只有 v1(超大帧截断降级,
             // 不影响会话)。json 模式的 session 头帧在 rpc 没有等价物,
             // get_state 响应带回 sessionId。
@@ -528,7 +538,7 @@ impl Engine for PiFamilyEngine {
                 lines.push(serde_json::json!({"id": "ccgui-effort", "type": "set_thinking_level", "level": effort}).to_string());
             }
             lines.push(serde_json::json!({"id": "ccgui-state", "type": "get_state"}).to_string());
-            lines.push(prompt.to_string());
+            lines.push(request.to_string());
             let payload = lines.join("\n");
             // omp 没有 --mcp-config 启动参数(MCP 只从固定文件发现):
             // 注入工作区 .omp/mcp.json,回合结束按引用计数恢复,崩溃残留
@@ -576,12 +586,50 @@ impl Engine for PiFamilyEngine {
         // 判断避免给每一行付出锁的代价。
         if line.contains("\"rpc_chunk\"") {
             if let Some(frame) = self.reassemble_chunk(line) {
-                parse_pi_family_line(&frame, out);
+                parse_pi_family_line_for_engine(self.id, &frame, out);
             }
             return;
         }
-        parse_pi_family_line(line, out);
+        parse_pi_family_line_for_engine(self.id, line, out);
     }
+}
+
+fn parse_pi_family_line_for_engine(id: &str, line: &str, out: &mut Vec<EngineEvent>) {
+    // Avoid a second JSON parse for normal OMP stream frames; only compact
+    // responses need the OMP-specific terminal mapping below.
+    if id == "omp"
+        && line.contains("\"command\"")
+        && line.contains("\"compact\"")
+        && parse_omp_compact_response(line, out)
+    {
+        return;
+    }
+    parse_pi_family_line(line, out);
+}
+
+fn parse_omp_compact_response(line: &str, out: &mut Vec<EngineEvent>) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    if value.get("type").and_then(Value::as_str) != Some("response")
+        || value.get("command").and_then(Value::as_str) != Some("compact")
+    {
+        return false;
+    }
+
+    if value.get("success").and_then(Value::as_bool) == Some(true) {
+        out.push(EngineEvent::Done {
+            session_id: None,
+            usage: None,
+        });
+    } else {
+        let error = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        out.push(EngineEvent::Error(format!("omp 压缩失败:{error}")));
+    }
+    true
 }
 
 impl PiFamilyEngine {
@@ -747,9 +795,9 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             }
         }
         // omp rpc-ui 的命令响应:get_state 带回 sessionId(json 模式的
-        // session 头帧在 rpc 模式没有等价物);prompt 下发失败是致命的,其余
-        // 命令失败仅告警。negotiate_protocol 失败 = 服务端只讲 v1,大帧可能
-        // 截断降级,但会话本身不受影响。
+        // session 头帧在 rpc 模式没有等价物);prompt 下发失败和 OMP compact
+        // 失败是致命的,其余命令失败仅告警。negotiate_protocol 失败 = 服务端
+        // 只讲 v1,大帧可能截断降级,但会话本身不受影响。
         "response" => {
             let command = value.get("command").and_then(Value::as_str).unwrap_or("");
             let success = value
@@ -1087,6 +1135,7 @@ mod tests {
             session_id: None,
             workspace: std::path::PathBuf::from("/tmp/ccgui-pi-family-test"),
             prompt: "规划一下".to_string(),
+            native_compact: false,
             images: Vec::new(),
             model: None,
             effort: None,
@@ -1106,6 +1155,41 @@ mod tests {
             .as_std()
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
+    #[test]
+    fn omp_native_compact_uses_the_rpc_command_and_nothing_else_does() {
+        // ccgui 的内置 /compact：OMP 改走原生 compact 命令。
+        let mut req = plan_req(None);
+        req.prompt = "/compact".to_string();
+        req.native_compact = true;
+        assert_eq!(rpc_command_types(&omp(), &req), vec!["compact"]);
+        // pi 没有这条命令，保持普通 prompt。
+        assert_eq!(rpc_command_types(&pi(), &req), vec!["prompt"]);
+
+        // 用户自定义的同名目录命令由 CLI 自己展开：文本一样，但没有标记，
+        // 绝不能被改写成压缩命令（否则该命令永远执行不到）。
+        req.native_compact = false;
+        assert_eq!(rpc_command_types(&omp(), &req), vec!["prompt"]);
+
+        // 带参数的 /compact 聚焦改动 同样是 CLI 的命令，不是宿主按钮。
+        req.prompt = "/compact 聚焦改动".to_string();
+        assert_eq!(rpc_command_types(&omp(), &req), vec!["prompt"]);
+    }
+
+    /// stdin 上除协商/状态等固定前缀外，本次下发的命令类型。
+    fn rpc_command_types(engine: &PiFamilyEngine, req: &SendRequest) -> Vec<String> {
+        let built = engine.build_command(req, "fake-cli").unwrap();
+        built
+            .stdin_payload
+            .as_deref()
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                let kind = value["type"].as_str().unwrap().to_string();
+                matches!(kind.as_str(), "prompt" | "compact").then_some(kind)
+            })
             .collect()
     }
 
@@ -1329,9 +1413,9 @@ mod tests {
     }
 
     #[test]
-    fn rpc_prompt_failure_is_terminal_and_other_commands_warn() {
+    fn rpc_prompt_and_compact_results_set_terminal_state() {
         let mut out = Vec::new();
-        parse_pi_family_line(
+        omp().parse_line(
             &serde_json::json!({
                 "id": "ccgui-prompt", "type": "response", "command": "prompt",
                 "success": false, "error": "rate limited",
@@ -1341,11 +1425,47 @@ mod tests {
         );
         assert!(matches!(&out[..], [EngineEvent::Error(_)]), "got {out:?}");
 
+        let compact_success = serde_json::json!({
+            "id": "ccgui-compact", "type": "response", "command": "compact",
+            "success": true, "data": { "tokensBefore": 100, "tokensAfter": 20 },
+        })
+        .to_string();
         let mut out = Vec::new();
-        parse_pi_family_line(
+        omp().parse_line(&compact_success, &mut out);
+        assert!(
+            matches!(
+                &out[..],
+                [EngineEvent::Done {
+                    session_id: None,
+                    usage: None
+                }]
+            ),
+            "got {out:?}"
+        );
+
+        let mut out = Vec::new();
+        omp().parse_line(
             &serde_json::json!({
-                "id": "x", "type": "response", "command": "compact",
+                "id": "ccgui-compact", "type": "response", "command": "compact",
                 "success": false, "error": "busy",
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(matches!(&out[..], [EngineEvent::Error(_)]), "got {out:?}");
+
+        // The shared Pi-family parser must not make Pi treat an OMP-only
+        // response as a terminal event.
+        let mut out = Vec::new();
+        pi().parse_line(&compact_success, &mut out);
+        assert!(out.is_empty(), "got {out:?}");
+
+        // Unrelated command failures remain non-terminal warnings.
+        let mut out = Vec::new();
+        omp().parse_line(
+            &serde_json::json!({
+                "id": "x", "type": "response", "command": "set_thinking_level",
+                "success": false, "error": "unsupported",
             })
             .to_string(),
             &mut out,
@@ -1354,7 +1474,7 @@ mod tests {
 
         // negotiate_protocol 失败 = v1 降级,不告警不致命。
         let mut out = Vec::new();
-        parse_pi_family_line(
+        omp().parse_line(
             &serde_json::json!({
                 "id": "ccgui-negotiate", "type": "response", "command": "negotiate_protocol",
                 "success": false, "error": "unsupported",
@@ -1904,6 +2024,7 @@ mod tests {
         let req = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,
@@ -1941,6 +2062,7 @@ mod tests {
         let req = SendRequest {
             session_id: Some("s1".into()),
             prompt: "hi".into(),
+            native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,
@@ -1990,6 +2112,7 @@ mod tests {
         let req = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,
