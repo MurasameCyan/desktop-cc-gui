@@ -360,7 +360,10 @@ it("draft 新对话右键只提供删除,不暴露重命名/复制 ID/插件项"
 
     await rightClick(threadRow("新对话"));
     const menu = openMenu();
+    // 草稿只能删除与分屏打开：重命名/复制 ID/插件项都不适用。
     expect([...menu.querySelectorAll("[role='menuitem']")].map((el) => el.textContent)).toEqual([
+      "chat.splitRight",
+      "chat.splitDown",
       "chat.deleteSession",
     ]);
     await act(async () => menuItem(menu, "chat.deleteSession").click());
@@ -559,6 +562,62 @@ it("WORKTREES 分组折叠走高度动画：内容随收起动画卸载后才离
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("收起的 worktree 子行聚合显示运行中状态点，展开后让位给各线程行", async () => {
+  // 子行折叠时看不到线程行自己的呼吸点，不知道里面有没有会话在跑——
+  // 聚合点把这层信息提到子行上；展开后各线程行已有自己的点，聚合点退出。
+  await act(async () => {
+    root.render(
+      <AiChatSidebar
+        repos={[
+          {
+            id: "a",
+            label: "a",
+            defaultOpen: true,
+            threads: [],
+            worktrees: [
+              {
+                id: "a::wt-run",
+                label: "wt-run",
+                threads: [
+                  { id: "t-run", label: "运行中会话", time: "", streaming: true },
+                  { id: "t-done", label: "已完成会话", time: "" },
+                ],
+                worktree: { branch: "wt-run" },
+              },
+              {
+                id: "a::wt-retry",
+                label: "wt-retry",
+                threads: [
+                  { id: "t-retry", label: "退避会话", time: "", streaming: true, retrying: true },
+                ],
+                worktree: { branch: "wt-retry" },
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+  });
+
+  const runRow = node.querySelector<HTMLElement>('button[aria-label="wt-run"]');
+  const retryRow = node.querySelector<HTMLElement>('button[aria-label="wt-retry"]');
+  if (!runRow || !retryRow) throw new Error("no worktree child rows");
+
+  // Collapsed children carry the aggregate dot; all-retrying degrades to the
+  // static variant, same as a thread row.
+  const runDot = runRow.querySelector(".sidebar-thread-status");
+  expect(runDot?.classList.contains("sidebar-thread-status-processing")).toBe(true);
+  expect(runDot?.classList.contains("sidebar-thread-status-retrying")).toBe(false);
+  const retryDot = retryRow.querySelector(".sidebar-thread-status");
+  expect(retryDot?.classList.contains("sidebar-thread-status-retrying")).toBe(true);
+
+  // Expanding hands the indicator back to the thread rows.
+  await act(async () => runRow.click());
+  expect(runRow.querySelector(".sidebar-thread-status")).toBeNull();
+  const threadDot = threadRow("运行中会话").querySelector(".sidebar-thread-status");
+  expect(threadDot?.classList.contains("sidebar-thread-status-processing")).toBe(true);
 });
 
 /** The innermost disclosure region holding the worktree child rows. */

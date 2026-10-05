@@ -19,6 +19,8 @@ import { ipc } from "@/lib/ipc";
 import { useWorktreeStore } from "@/features/worktree/store";
 import { WorktreeProgressRow } from "@/features/worktree/WorktreeProgressRow";
 import type { AiChatRepo, AiChatThread, ThreadAction } from "@/components/application/ai-chat/sidebar-types";
+import { useDragSource } from "@/features/chat/split/drag";
+import { sessionFromThreadId } from "@/features/chat/split/store";
 import { cx } from "@/utils/cx";
 
 /** Streaming/unseen status dot on a thread row; renders nothing when the
@@ -141,6 +143,14 @@ function ThreadItem({
   /** Right-click anywhere on the row: opens the thread context menu. */
   onContextMenu?: (event: ReactMouseEvent<HTMLElement>, id: string) => void;
 }) {
+  // 拖到中心区 = 分屏（边=切分到那一侧，中心=替换/互换）：会话在按下时才查，
+  // 免得每一行都订阅整个会话列表。
+  const startDrag = useDragSource(
+    useCallback(() => {
+      const session = sessionFromThreadId(id);
+      return session ? { kind: "session" as const, session, label } : null;
+    }, [id, label]),
+  );
   return (
     <div
       onContextMenu={
@@ -157,6 +167,7 @@ function ThreadItem({
         type="button"
         tabIndex={tabIndex}
         aria-current={isSelected ? "page" : undefined}
+        onPointerDown={startDrag}
         onClick={() => id && onSelect?.(id)}
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 text-left"
       >
@@ -407,6 +418,11 @@ function WorktreeChildRow({
   const missing = useWorktreeStore((s) =>
     repo.path ? s.missingPaths[repo.path] === true : false,
   );
+  // 收起时把线程运行状态聚合到本行（展开时各线程行自己带状态点）：任一
+  // 线程流式中即显示呼吸点；全部流式线程都在退避重试时降为静态点，与会
+  // 话行 / 页签同一套 `sidebar-thread-status` 视觉语言。
+  const running = repo.threads.some((th) => th.streaming);
+  const retrying = running && repo.threads.every((th) => !th.streaming || th.retrying);
   return (
     <div
       onContextMenu={onContextMenu}
@@ -431,6 +447,9 @@ function WorktreeChildRow({
           )}
         />
         <GitBranch aria-hidden className="size-3.5 shrink-0 text-foreground-icon-tertiary" />
+        {!expanded && running && (
+          <ThreadStatusDot streaming retrying={retrying} unseen={false} />
+        )}
         <span className="min-w-0 flex-1 truncate text-body-2-medium text-text-secondary">
           {repo.label}
         </span>

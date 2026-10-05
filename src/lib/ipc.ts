@@ -248,7 +248,80 @@ export interface EngineInfo {
   /** 引擎能否兑现逐次调用的工具白名单（任务工作台只读节点）；
    *  不支持的引擎会被工作台阻止运行只读节点。 */
   supportsToolConstraints?: boolean;
+  /** 计划审批能力；旧后端/旧记录缺省视为不可用之外的既有行为。 */
+  plan?: PlanApprovalInfo;
 }
+/** 计划预览与人工审批能力（后端 Engine.plan_approval）：
+ *  typed = 审批主干已接通；legacy = 引擎原生计划入口（不经主干）；
+ *  unavailable = 显式计划请求将被受控拒绝，UI 不得提供可点的计划入口。 */
+export type PlanApprovalInfo =
+  | {
+      kind: "typed";
+      reviewKind: PlanReviewKind;
+      evidence: string;
+      limitations: string;
+    }
+  | { kind: "legacy" }
+  | { kind: "unavailable"; reason: string };
+
+/** 两种原生生命周期：native_request = 原生请求真实暂停等待回答；
+ *  next_turn = 计划轮次结束后客户端仲裁，批准 = 原子创建一次执行 turn。 */
+export type PlanReviewKind = "native_request" | "next_turn";
+
+export type PlanReviewStatus =
+  | "draft"
+  | "awaiting_review"
+  | "submitting"
+  | "approved"
+  | "changes_requested"
+  | "deferred"
+  | "cancelled"
+  | "expired"
+  | "superseded";
+
+export type PlanExecutionStatus =
+  | "not_started"
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+/** 计划审批记录（审批事实源在后端；前端 localStorage 不是权威）。 */
+export interface PlanReview {
+  planId: string;
+  engine: string;
+  sessionId: string;
+  workspacePath: string;
+  runId: string | null;
+  revision: number;
+  title: string;
+  /** 用户看到并复制的最终 Markdown，与原生最终正文逐字一致。 */
+  content: string;
+  contentHash: string;
+  /** false = 草稿/来源不确定：批准按钮必须保持不可用。 */
+  complete: boolean;
+  reviewKind: PlanReviewKind;
+  nativePlanId: string | null;
+  /** 批准将沿用的执行权限快照；批准不得改变它。 */
+  execPermission: string;
+  status: PlanReviewStatus;
+  execution: PlanExecutionStatus;
+  decision?: unknown;
+  decisionIntentAt: number | null;
+  appliedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  supersededBy: number | null;
+}
+
+/** 决策只提交 planId + expectedRevision + decision + 可选反馈；
+ *  原生 RPC 方法、路径与审批 token 永不离开后端。 */
+export type PlanReviewDecision = "approve" | "request_changes" | "defer";
+
+export type PlanRespondOutcome =
+  | { outcome: "applied"; review: PlanReview }
+  | { outcome: "conflict"; review: PlanReview };
 export interface ComputerUsePermissionStatus {
   accessibility: boolean;
   screenRecording: boolean;
@@ -377,6 +450,16 @@ export interface AppSettings {
   codexHome?: string | null;
   /** Max sessions listed per workspace in the sidebar (default 5). */
   sidebarThreadLimit: number;
+  /** UI font: "" = 系统默认 (bundled stack + system fallback), "custom" =
+   *  the uploaded font file in `fontFile`. */
+  fontFamily: string;
+  /** Absolute path of the uploaded UI font file (设置 → 外观). */
+  fontFile: string;
+  /** Code font for chat code blocks and the built-in terminal: "" = 系统默认,
+   *  "custom" = the uploaded code font in `codeFontFile`. */
+  codeFontFamily: string;
+  /** Absolute path of the uploaded code font file. */
+  codeFontFile: string;
   /** Composer send gesture: "enter" (Enter sends) or "cmdEnter" (⌘/Ctrl+Enter sends). */
   composerSendShortcut: string;
   /** Keyboard shortcuts (快捷键), format "cmd+ctrl+alt+shift+key" lowercase;
@@ -1014,6 +1097,9 @@ export const ipc = {
     settingsPromise = null;
   },
   listPets: () => invoke<PetSummary[]>("pet_list"),
+  /** Raw bytes of an uploaded font file, base64-encoded (设置 → 外观): the
+   *  webview cannot read the native dialog's file itself. */
+  readFontFile: (path: string) => invoke<string>("read_font_file", { path }),
   importPet: (path: string) => invoke<PetSummary>("pet_import", { path }),
   removePet: (id: string) => invoke<void>("pet_remove", { id }),
   getPetPackage: (id: string) => invoke<PetPackage>("pet_get_package", { id }),
@@ -1300,6 +1386,23 @@ export const ipc = {
     requestId: string,
     answers: Record<string, string | string[]> | null,
   ) => invoke<void>("answer_question", { sessionId, requestId, answers }),
+  /** 提交计划审批决策（approve / request_changes / defer）。重复提交同一
+   *  revision 返回 conflict 与当前状态，不会重复执行。 */
+  respondPlanReview: (
+    planId: string,
+    expectedRevision: number,
+    decision: PlanReviewDecision,
+    feedback?: string,
+  ) =>
+    invoke<PlanRespondOutcome>("respond_plan_review", {
+      planId,
+      expectedRevision,
+      decision,
+      feedback: feedback ?? null,
+    }),
+  /** 会话的计划审批历史（重启后历史页加载；按 planId/revision 去重）。 */
+  listPlanReviews: (engine: string, sessionId: string) =>
+    invoke<PlanReview[]>("list_plan_reviews", { engine, sessionId }),
   revokeGrantedRoot: (path: string) => invoke<void>("revoke_granted_root", { path }),
   // git
   gitStatus: (path: string) => invoke<GitStatus>("git_status", { path }),
