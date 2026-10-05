@@ -18,6 +18,7 @@ const baseText: AgentLimitsCardProps["text"] = {
   autoCompactThreshold: "自动压缩阈值",
   autoCompactEnable: "开启自动压缩",
   autoCompactDisable: "关闭自动压缩",
+  autoCompactNoSession: "新建或打开一个会话后可设置；阈值按会话保存",
   refreshUsageTooltip: "重新获取当前会话最新上下文占用",
   refreshing: "刷新中…",
 };
@@ -128,6 +129,27 @@ describe("AgentLimitsCard", () => {
       input.blur();
     });
     expect(onThresholdChange).toHaveBeenCalledWith(100);
+  });
+
+  it("keeps the auto-compact controls visible but inert without a session", async () => {
+    await renderCard({
+      autoCompact: {
+        enabled: false,
+        threshold: 80,
+        disabled: true,
+        onEnabledChange: vi.fn(),
+        onThresholdChange: vi.fn(),
+      },
+    });
+
+    const input = container.querySelector<HTMLInputElement>("[data-testid='auto-compact-threshold']");
+    const toggle = container.querySelector<HTMLButtonElement>("[data-testid='auto-compact-toggle']");
+    expect(input).not.toBeNull();
+    expect(toggle).not.toBeNull();
+    expect(input?.disabled).toBe(true);
+    expect(toggle?.disabled).toBe(true);
+    expect(input?.value).toBe("80");
+    expect(toggle?.getAttribute("title")).toContain("新建或打开一个会话");
   });
 
   it("renders a one-million-token window as 1M", async () => {

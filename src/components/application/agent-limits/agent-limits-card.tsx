@@ -108,6 +108,8 @@ export interface AgentLimitsCardProps {
     autoCompactThreshold?: string;
     autoCompactEnable?: string;
     autoCompactDisable?: string;
+    /** Tooltip shown while the controls have no session to bind to. */
+    autoCompactNoSession?: string;
   };
   onCompact?: () => void;
   onRefresh?: () => void;
@@ -117,6 +119,8 @@ export interface AgentLimitsCardProps {
   autoCompact?: {
     enabled: boolean;
     threshold: number;
+    /** No active session: render the controls but keep them inert. */
+    disabled?: boolean;
     onEnabledChange: (enabled: boolean) => void;
     onThresholdChange: (threshold: number) => void;
   };
@@ -374,16 +378,26 @@ function AutoCompactControls({
   const toggleLabel = settings.enabled
     ? text.autoCompactDisable ?? "关闭自动压缩"
     : text.autoCompactEnable ?? "开启自动压缩";
+  // No session to bind to: the controls stay visible (the row keeps its shape
+  // from the first launch) but cannot be edited until a chat exists.
+  const disabled = settings.disabled === true;
+  const hint = disabled ? text.autoCompactNoSession ?? toggleLabel : toggleLabel;
 
   return (
-    <div className="mr-auto flex items-center gap-1.5">
-      <div className="flex h-6 w-11 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5">
+    <div className="mr-auto flex items-center gap-1.5" title={hint}>
+      <div
+        className={cx(
+          "flex h-6 w-11 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5",
+          disabled && "cursor-not-allowed opacity-50",
+        )}
+      >
         <input
           type="number"
           min={1}
           max={100}
           step={1}
           inputMode="numeric"
+          disabled={disabled}
           data-testid="auto-compact-threshold"
           aria-label={text.autoCompactThreshold ?? "自动压缩阈值"}
           value={draft}
@@ -395,19 +409,22 @@ function AutoCompactControls({
               event.currentTarget.blur();
             }
           }}
-          className="min-w-0 flex-1 bg-transparent text-right text-caption-1-medium tabular-nums text-text-secondary outline-none"
+          className="min-w-0 flex-1 bg-transparent text-right text-caption-1-medium tabular-nums text-text-secondary outline-none disabled:cursor-not-allowed"
         />
         <span className="pl-0.5 text-caption-1-medium text-text-tertiary">%</span>
       </div>
       <button
         type="button"
         data-testid="auto-compact-toggle"
+        disabled={disabled}
         aria-label={toggleLabel}
         aria-pressed={settings.enabled}
-        title={toggleLabel}
+        title={hint}
         onClick={() => settings.onEnabledChange(!settings.enabled)}
         className={cx(
-          "flex size-6 cursor-pointer items-center justify-center rounded-md border border-border-button-default outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring",
+          "flex size-6 items-center justify-center rounded-md border border-border-button-default outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring",
+          disabled && "cursor-not-allowed opacity-50",
+          !disabled && "cursor-pointer",
           settings.enabled
             ? "bg-background-tertiary-default text-text-primary"
             : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",

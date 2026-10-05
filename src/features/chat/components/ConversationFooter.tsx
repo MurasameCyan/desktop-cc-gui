@@ -347,13 +347,10 @@ function FooterStatusBar({
         compacting={compacting}
         refreshing={refreshing}
         canCompact={Boolean(active) && !streaming && !compacting}
-        autoCompact={sessionKeyValue ? autoCompact : undefined}
-        onAutoCompactEnabledChange={
-          sessionKeyValue ? (enabled) => setAutoCompactEnabled(sessionKeyValue, enabled) : undefined
-        }
-        onAutoCompactThresholdChange={
-          sessionKeyValue ? (threshold) => setAutoCompactThreshold(sessionKeyValue, threshold) : undefined
-        }
+        autoCompact={autoCompact}
+        autoCompactDisabled={!sessionKeyValue}
+        onAutoCompactEnabledChange={(enabled) => setAutoCompactEnabled(sessionKeyValue, enabled)}
+        onAutoCompactThresholdChange={(threshold) => setAutoCompactThreshold(sessionKeyValue, threshold)}
       />
     </div>
   );

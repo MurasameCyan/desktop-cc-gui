@@ -354,6 +354,7 @@ export const zh = {
     autoCompactThreshold: "自动压缩阈值",
     autoCompactEnable: "开启自动压缩",
     autoCompactDisable: "关闭自动压缩",
+    autoCompactNoSession: "新建或打开一个会话后可设置；阈值按会话保存",
     showMoreSessions: "加载更多",
     showFewerSessions: "收起",
     sessionRunning: "进行中",

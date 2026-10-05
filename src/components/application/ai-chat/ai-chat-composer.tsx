@@ -499,6 +499,7 @@ export function StatusBar({
   refreshing,
   canCompact,
   autoCompact,
+  autoCompactDisabled,
   onAutoCompactEnabledChange,
   onAutoCompactThresholdChange,
 }: {
@@ -518,6 +519,8 @@ export function StatusBar({
   refreshing?: boolean;
   canCompact?: boolean;
   autoCompact?: AutoCompactSettings;
+  /** No active session: keep the controls visible but inert. */
+  autoCompactDisabled?: boolean;
   onAutoCompactEnabledChange?: (enabled: boolean) => void;
   onAutoCompactThresholdChange?: (threshold: number) => void;
 }) {
@@ -554,6 +557,7 @@ export function StatusBar({
       autoCompactThreshold: t("chat.autoCompactThreshold"),
       autoCompactEnable: t("chat.autoCompactEnable"),
       autoCompactDisable: t("chat.autoCompactDisable"),
+      autoCompactNoSession: t("chat.autoCompactNoSession"),
     }),
     [t],
   );
@@ -632,11 +636,12 @@ export function StatusBar({
                 refreshing={refreshing}
                 canCompact={canCompact}
                 autoCompact={
-                  autoCompact && onAutoCompactEnabledChange && onAutoCompactThresholdChange
+                  autoCompact
                     ? {
                         ...autoCompact,
-                        onEnabledChange: onAutoCompactEnabledChange,
-                        onThresholdChange: onAutoCompactThresholdChange,
+                        disabled: autoCompactDisabled === true,
+                        onEnabledChange: onAutoCompactEnabledChange ?? (() => {}),
+                        onThresholdChange: onAutoCompactThresholdChange ?? (() => {}),
                       }
                     : undefined
                 }
