@@ -44,7 +44,7 @@ import {
 } from "./ask-loop";
 import { mergeUsage, parseUsage, reportedContextWindow, type ParsedUsage } from "../usage";
 import { usageTrackingEnabled } from "@/features/settings/usage-tracking";
-import { migrateSelectedAgent } from "@/features/agents/selected-agent";
+import { migrateSelectedBot } from "@/features/bots/selected-bot";
 
 /**
  * Engine-event handling: the main loop resolves each event's session key and
@@ -75,6 +75,10 @@ export interface EngineEventDeps {
   upsertSessionMeta: (meta: SessionMeta) => void;
   /** Re-fetch the latest token usage from session history for the given session key. */
   refreshSessionUsage?: (key: string) => Promise<void>;
+  /** After a turn settles: feeds the background memory review's turn counter
+   *  (features/bots/memory-review.ts). Optional so tests can drive the router
+   *  without the memory feature. */
+  turnSettled?: (key: string) => void;
 }
 
 /** Collapse whitespace and cap a prompt for use as a session title. */
@@ -128,22 +132,21 @@ export function upsertSessionMetaInto(
   });
 }
 
-/** Effective model for event-stamped rows: the session's activeModel wins,
- * followed by the owning tab's per-tab override, then the session's own
- * history, then the engine default — the same resolveSessionModel the send
- * path uses, so a row can never claim a model the turn did not run. */
+/** Rows and the ledger describe this turn, not the next picker selection.
+ * activeModel is seeded on send and updated by engine reports; it may be a
+ * concrete custom model while the tab deliberately keeps a family alias. */
 function stampedModel(
   deps: EngineEventDeps,
   engine: string,
   key: string,
 ): string | null {
   const s = deps.get();
+  const session = s.bySession[key];
+  if (session?.activeModel) return session.activeModel;
   const tab = s.openTabs.find(
     (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
   );
-  return (
-    resolveSessionModel(tab, s.bySession[key], s.models[engine]) || null
-  );
+  return resolveSessionModel(tab, session, s.models[engine]) || null;
 }
 
 /** Effective reasoning effort for event-stamped rows. Native-session state
@@ -476,7 +479,7 @@ function onSession(
   });
   // The pinned agent followed the draft key; move it onto the native id so
   // the next send in this tab injects it again.
-  migrateSelectedAgent(workspacePath, nativeId);
+  migrateSelectedBot(workspacePath, nativeId);
   // Sidebar row + tab title pick the new session up immediately instead of
   // waiting for the post-turn rescan.
   const firstUser = (deps.get().bySession[newKey]?.messages ?? []).find(
@@ -1210,6 +1213,9 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   // Native file changed; refresh list cache in background.
   void ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
+  // 一轮对话落定（正常完成或被用户中断）时计数；是否到节奏、用哪个 Bot
+  // 复盘由记忆模块判断（features/bots/memory-review.ts）。
+  deps.turnSettled?.(key);
   // An interrupted turn settles here too: keep the queue parked — the user
   // stopped the session, the next message is theirs to send.
   if (!prev.interrupted) {
