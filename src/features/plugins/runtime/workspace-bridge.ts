@@ -1,4 +1,4 @@
-import { ipc } from "@/lib/ipc";
+import { ipc, worktreeMetaOf } from "@/lib/ipc";
 import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { useChatStore } from "@/features/chat/store";
 import type { PluginWorkspaceRow } from "@ccgui/plugin-sdk";
@@ -26,15 +26,29 @@ import type { PluginWorkspaceRow } from "@ccgui/plugin-sdk";
  * 解析，不是侧栏结构）。返回的是拷贝，插件改它动不到 store。
  */
 export function listPluginWorkspaces(): PluginWorkspaceRow[] {
-  return useChatStore.getState().workspaces.map((workspace) => ({
-    id: workspace.id,
-    path: workspace.path,
-    name: workspace.name,
-    ...(workspace.kind ? { kind: workspace.kind } : {}),
-    groupId: workspace.groupId,
-    ...(workspace.parentId ? { parentId: workspace.parentId } : {}),
-    lastOpenedAt: workspace.lastOpenedAt,
-  }));
+  return useChatStore.getState().workspaces.map((workspace) => {
+    // worktree 子行另外投影出分支 / 来源 PR（meta.worktree 的公开部分）：插件
+    // 要用它把 PR 绑到本地 worktree（如 git-tasks 的 WORKTREE 列）。其余 meta
+    // （wsl 等宿主/其它插件的私有载荷）仍然不出。
+    const meta = worktreeMetaOf(workspace);
+    return {
+      id: workspace.id,
+      path: workspace.path,
+      name: workspace.name,
+      ...(workspace.kind ? { kind: workspace.kind } : {}),
+      groupId: workspace.groupId,
+      ...(workspace.parentId ? { parentId: workspace.parentId } : {}),
+      lastOpenedAt: workspace.lastOpenedAt,
+      ...(meta
+        ? {
+            worktree: {
+              branch: meta.branch,
+              ...(meta.prNumber != null ? { prNumber: meta.prNumber } : {}),
+            },
+          }
+        : {}),
+    };
+  });
 }
 
 export async function addPluginWorkspace(

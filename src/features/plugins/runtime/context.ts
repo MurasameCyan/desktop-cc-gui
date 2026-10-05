@@ -32,6 +32,8 @@ import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { addPluginWorkspace, listPluginWorkspaces, openPluginSession } from "./workspace-bridge";
+import { createPluginWorktree } from "./worktree-bridge";
+import { interruptPluginChatRun, startPluginChatRun } from "./session-run-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
 import { runAsPlugin } from "./hardening";
@@ -387,6 +389,14 @@ export function createPluginContext(
         return Promise.resolve().then(listPluginWorkspaces);
       },
     },
+    worktrees: {
+      create(def) {
+        requirePermission("host:worktree");
+        // 与 workspaces.add 同理：校验失败走 rejection 而不是同步抛，
+        // 插件可用 .catch 链式处理；创建本身走宿主 store（见 worktree-bridge）。
+        return Promise.resolve().then(() => createPluginWorktree(id, def));
+      },
+    },
     sessions: {
       selectSession(engine, sessionId, workspacePath) {
         requirePermission("host:session");
@@ -414,6 +424,16 @@ export function createPluginContext(
             m.setPluginSessionEffort(engine, sessionId, workspacePath, effort),
           ),
         );
+      },
+      startRun(def) {
+        requirePermission("host:session");
+        // 与 workspaces.add 同理：参数/权限失败走 rejection，便于插件链式处理。
+        // 真实管线在 session-run-bridge（宿主聊天发送路径，会话可见可停）。
+        return Promise.resolve().then(() => startPluginChatRun(id, def));
+      },
+      interruptRun(def) {
+        requirePermission("host:session");
+        return Promise.resolve().then(() => interruptPluginChatRun(id, def));
       },
       registerSource(def) {
         requirePermission("host:session");

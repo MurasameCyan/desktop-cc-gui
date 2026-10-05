@@ -1615,6 +1615,7 @@ mod tests {
         let mut request = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,
@@ -1665,6 +1666,7 @@ mod tests {
         let request = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
             model: None,
