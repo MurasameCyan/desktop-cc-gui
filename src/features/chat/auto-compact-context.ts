@@ -99,6 +99,27 @@ export function setAutoCompactThreshold(sessionKey: string, threshold: unknown):
   updateSettings(sessionKey, { threshold: normalizeAutoCompactThreshold(threshold) });
 }
 
+/** Carry a pending tab's settings onto the native session it just adopted.
+ *  Without this, a threshold set on a brand-new chat is lost the moment the
+ *  first send resolves the session id (the key changes from `new:<engine>:<ws>`
+ *  to `<engine>/<id>`). A native key that already has settings wins — the user
+ *  configured that session explicitly. */
+export function migrateAutoCompactSettings(fromKey: string, toKey: string): void {
+  if (!fromKey || !toKey || fromKey === toKey) return;
+  const current = readStoredSettings();
+  const pending = current[fromKey];
+  if (!pending) return;
+  const next = { ...current, [toKey]: current[toKey] ?? pending };
+  delete next[fromKey];
+  writeStored(AUTO_COMPACT_STORAGE_KEY, JSON.stringify(next));
+  settingsSnapshot = next;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTO_COMPACT_CHANGED_EVENT));
+  } else {
+    for (const listener of listeners) listener();
+  }
+}
+
 export function useAutoCompactSettings(sessionKey: string): AutoCompactSettings {
   const getSnapshot = useCallback(() => getAutoCompactSettings(sessionKey), [sessionKey]);
   return useSyncExternalStore(subscribeAutoCompactSettings, getSnapshot, () => DEFAULT_SETTINGS);
