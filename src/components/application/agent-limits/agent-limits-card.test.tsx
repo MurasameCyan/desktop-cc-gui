@@ -15,6 +15,9 @@ const baseText: AgentLimitsCardProps["text"] = {
   compactContextTooltip: "向会话发送 /compact 以压缩精简历史上下文",
   compacting: "压缩中…",
   refreshUsage: "刷新用量",
+  autoCompactThreshold: "自动压缩阈值",
+  autoCompactEnable: "开启自动压缩",
+  autoCompactDisable: "关闭自动压缩",
   refreshUsageTooltip: "重新获取当前会话最新上下文占用",
   refreshing: "刷新中…",
 };
@@ -73,6 +76,58 @@ describe("AgentLimitsCard", () => {
 
     expect(onCompact).toHaveBeenCalledTimes(1);
     expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a percentage threshold input and an icon-only toggle", async () => {
+    const onEnabledChange = vi.fn();
+    const onThresholdChange = vi.fn();
+
+    await renderCard({
+      autoCompact: {
+        enabled: false,
+        threshold: 80,
+        onEnabledChange,
+        onThresholdChange,
+      },
+    });
+
+    const input = container.querySelector<HTMLInputElement>("[data-testid='auto-compact-threshold']");
+    const toggle = container.querySelector<HTMLButtonElement>("[data-testid='auto-compact-toggle']");
+    expect(input?.value).toBe("80");
+    expect(input?.getAttribute("aria-label")).toBe("自动压缩阈值");
+    expect(container.textContent).toContain("%");
+    expect(toggle?.textContent).toBe("");
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      input!.focus();
+      input!.value = "95";
+      input!.blur();
+      toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onThresholdChange).toHaveBeenCalledWith(95);
+    expect(onEnabledChange).toHaveBeenCalledWith(true);
+  });
+
+  it("clamps threshold values to one through one hundred on blur", async () => {
+    const onThresholdChange = vi.fn();
+    await renderCard({
+      autoCompact: {
+        enabled: true,
+        threshold: 80,
+        onEnabledChange: vi.fn(),
+        onThresholdChange,
+      },
+    });
+
+    const input = container.querySelector<HTMLInputElement>("[data-testid='auto-compact-threshold']")!;
+    await act(async () => {
+      input.focus();
+      input.value = "150";
+      input.blur();
+    });
+    expect(onThresholdChange).toHaveBeenCalledWith(100);
   });
 
   it("renders a one-million-token window as 1M", async () => {

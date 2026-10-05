@@ -240,8 +240,8 @@ export interface ChatStore {
     sessionId: string,
     title: string,
   ) => Promise<void>;
-  /** Send /compact to compress conversation context. */
-  compactContext: (key?: string) => Promise<void>;
+  /** Send /compact to compress conversation context. `automatic` marks threshold-triggered runs. */
+  compactContext: (key?: string, options?: { automatic?: boolean }) => Promise<void>;
   /** Re-fetch the latest token usage from session history for the current session. */
   refreshSessionUsage: (key?: string) => Promise<void>;
 }

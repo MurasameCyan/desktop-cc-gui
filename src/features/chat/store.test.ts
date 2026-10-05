@@ -460,7 +460,8 @@ describe("compactContext and refreshSessionUsage", () => {
       subagentHistory: [],
     });
 
-    const compactPromise = useChatStore.getState().compactContext(key);
+    const compactPromise = useChatStore.getState().compactContext(key, { automatic: true });
+    expect(useChatStore.getState().bySession[key]?.compaction).toMatchObject({ automatic: true });
 
     // Verify /compact message was sent
     expect(ipc.sendMessage).toHaveBeenCalledWith(

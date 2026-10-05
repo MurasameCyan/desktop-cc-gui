@@ -827,7 +827,7 @@ export function createMessagingActions(
       await interruptByKey(key);
     },
 
-    compactContext: async (key?: string) => {
+    compactContext: async (key?: string, options?: { automatic?: boolean }) => {
       const { active, streamingByKey, openTabs } = get();
       const targetKey =
         key ??
@@ -843,10 +843,10 @@ export function createMessagingActions(
         ) ?? active;
       if (!targetTab) return;
 
-      // Manual-compaction flag: the tail status strip swaps to the compacting
-      // label for the whole run. Cleared in the finally below.
+      // The tail status strip swaps its label for the whole run. The metadata
+      // distinguishes threshold-triggered compaction from the manual action.
       patchSession(set, targetKey, {
-        compaction: { automatic: false, startedAt: Date.now() },
+        compaction: { automatic: options?.automatic === true, startedAt: Date.now() },
       });
 
       // Track the compaction turn completion so callers (and UI) can await it.

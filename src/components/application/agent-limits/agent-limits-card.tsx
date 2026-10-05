@@ -1,11 +1,12 @@
 "use client";
 
-import { useMemo, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ArrowRight from "lucide-react/dist/esm/icons/arrow-right";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import Minimize2 from "lucide-react/dist/esm/icons/minimize-2";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
+import Zap from "lucide-react/dist/esm/icons/zap";
 import { Collapsible } from "@/components/application/collapsible/collapsible";
 import {
   ActionFeedbackIcon,
@@ -14,6 +15,7 @@ import {
 } from "@/components/base/action-feedback";
 import { cx } from "@/utils/cx";
 import { formatTokens } from "@/utils/format-tokens";
+import { normalizeAutoCompactThreshold } from "@/features/chat/auto-compact-context";
 
 /** Series colours: explicit `color` (+ optional `activeColor`) wins;
  * otherwise the `chart-n` token palette cycles in an order that keeps
@@ -85,7 +87,6 @@ export interface AgentLimitsCardProps {
   };
   /** Plan name shown after "Plan usage limits ·". */
   plan?: string;
-  /** Where the plan arrow points (omit to hide the arrow). */
   planHref?: string;
   limits?: UsageLimit[];
   /** Start with the context breakdown open. */
@@ -104,12 +105,21 @@ export interface AgentLimitsCardProps {
     refreshUsage?: string;
     refreshUsageTooltip?: string;
     refreshing?: string;
+    autoCompactThreshold?: string;
+    autoCompactEnable?: string;
+    autoCompactDisable?: string;
   };
   onCompact?: () => void;
   onRefresh?: () => void;
   compacting?: boolean;
   refreshing?: boolean;
   canCompact?: boolean;
+  autoCompact?: {
+    enabled: boolean;
+    threshold: number;
+    onEnabledChange: (enabled: boolean) => void;
+    onThresholdChange: (threshold: number) => void;
+  };
   className?: string;
 }
 
@@ -342,7 +352,74 @@ function CardActionButton({
   );
 }
 
-/** Compact / refresh actions; rendered only when at least one handler exists. */
+function AutoCompactControls({
+  settings,
+  text,
+}: {
+  settings: NonNullable<AgentLimitsCardProps["autoCompact"]>;
+  text: AgentLimitsCardProps["text"];
+}) {
+  const [draft, setDraft] = useState(String(settings.threshold));
+
+  useEffect(() => {
+    setDraft(String(settings.threshold));
+  }, [settings.threshold]);
+
+  const commitThreshold = (value = draft) => {
+    const next = normalizeAutoCompactThreshold(value, settings.threshold);
+    setDraft(String(next));
+    settings.onThresholdChange(next);
+  };
+
+  const toggleLabel = settings.enabled
+    ? text.autoCompactDisable ?? "关闭自动压缩"
+    : text.autoCompactEnable ?? "开启自动压缩";
+
+  return (
+    <div className="mr-auto flex items-center gap-1.5">
+      <div className="flex h-6 w-16 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5">
+        <input
+          type="number"
+          min={1}
+          max={100}
+          step={1}
+          inputMode="numeric"
+          data-testid="auto-compact-threshold"
+          aria-label={text.autoCompactThreshold ?? "自动压缩阈值"}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={(event) => commitThreshold(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              commitThreshold(event.currentTarget.value);
+              event.currentTarget.blur();
+            }
+          }}
+          className="min-w-0 flex-1 bg-transparent text-right text-caption-1-medium tabular-nums text-text-secondary outline-none"
+        />
+        <span className="pl-0.5 text-caption-1-medium text-text-tertiary">%</span>
+      </div>
+      <button
+        type="button"
+        data-testid="auto-compact-toggle"
+        aria-label={toggleLabel}
+        aria-pressed={settings.enabled}
+        title={toggleLabel}
+        onClick={() => settings.onEnabledChange(!settings.enabled)}
+        className={cx(
+          "flex size-6 cursor-pointer items-center justify-center rounded-md border border-border-button-default outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring",
+          settings.enabled
+            ? "bg-background-tertiary-default text-text-primary"
+            : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
+        )}
+      >
+        <Zap className="size-3.5" fill={settings.enabled ? "currentColor" : "none"} aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+/** Compact / refresh actions and the per-session auto-compaction controls. */
 function ContextActions({
   text,
   onCompact,
@@ -350,6 +427,7 @@ function ContextActions({
   compacting,
   refreshing,
   canCompact,
+  autoCompact,
 }: {
   text: AgentLimitsCardProps["text"];
   onCompact?: () => void;
@@ -357,40 +435,42 @@ function ContextActions({
   compacting: boolean;
   refreshing: boolean;
   canCompact: boolean;
+  autoCompact?: AgentLimitsCardProps["autoCompact"];
 }) {
-  // Refresh mirrors the git panel's refresh: spin while the usage re-fetch
-  // runs, check when it comes back.
   const refreshFeedback = useRunningFeedback(refreshing);
-  if (!onCompact && !onRefresh) return null;
+  if (!onCompact && !onRefresh && !autoCompact) return null;
   return (
-    <div className="mt-2.5 flex items-center justify-end gap-2 border-t border-border-button-default/40 pt-2.5">
-      {onCompact && (
-        <CardActionButton
-          testId="compact-context-btn"
-          disabled={!canCompact || compacting}
-          busy={compacting}
-          onClick={onCompact}
-          tooltip={text.compactContextTooltip ?? text.compactContext}
-          label={text.compactContext ?? "压缩上下文"}
-          busyLabel={text.compacting ?? "压缩中…"}
-          icon={Minimize2}
-          busyIconClassName="animate-pulse"
-        />
-      )}
+    <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border-button-default/40 pt-2.5">
+      {autoCompact ? <AutoCompactControls settings={autoCompact} text={text} /> : <span />}
+      <div className="flex items-center gap-2">
+        {onCompact && (
+          <CardActionButton
+            testId="compact-context-btn"
+            disabled={!canCompact || compacting}
+            busy={compacting}
+            onClick={onCompact}
+            tooltip={text.compactContextTooltip ?? text.compactContext}
+            label={text.compactContext ?? "压缩上下文"}
+            busyLabel={text.compacting ?? "压缩中…"}
+            icon={Minimize2}
+            busyIconClassName="animate-pulse"
+          />
+        )}
 
-      {onRefresh && (
-        <CardActionButton
-          testId="refresh-usage-btn"
-          disabled={refreshing}
-          busy={refreshing}
-          onClick={onRefresh}
-          tooltip={text.refreshUsageTooltip ?? text.refreshUsage}
-          label={text.refreshUsage ?? "刷新用量"}
-          busyLabel={text.refreshing ?? "刷新中…"}
-          icon={RefreshCw}
-          feedback={refreshFeedback}
-        />
-      )}
+        {onRefresh && (
+          <CardActionButton
+            testId="refresh-usage-btn"
+            disabled={refreshing}
+            busy={refreshing}
+            onClick={onRefresh}
+            tooltip={text.refreshUsageTooltip ?? text.refreshUsage}
+            label={text.refreshUsage ?? "刷新用量"}
+            busyLabel={text.refreshing ?? "刷新中…"}
+            icon={RefreshCw}
+            feedback={refreshFeedback}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -470,6 +550,7 @@ export function AgentLimitsCard({
   compacting = false,
   refreshing = false,
   canCompact = true,
+  autoCompact,
   className,
 }: AgentLimitsCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -554,6 +635,7 @@ export function AgentLimitsCard({
         compacting={compacting}
         refreshing={refreshing}
         canCompact={canCompact}
+        autoCompact={autoCompact}
       />
 
       {/* ------------------------------------------------- plan limits */}

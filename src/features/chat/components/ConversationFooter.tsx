@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Composer,
@@ -22,6 +22,12 @@ import { ComposerSlotExtras } from "@/features/plugins/boundary/composer-slot-ex
 import { COMPOSER_DRAFT_TOPIC, pluginBus } from "@/features/plugins/runtime/events";
 import { USAGE_PART_LABEL_KEYS, usageBreakdown } from "./usage-breakdown";
 import { useComposerFileDrop } from "./use-composer-file-drop";
+import {
+  setAutoCompactEnabled,
+  setAutoCompactThreshold,
+  shouldAutoCompact,
+  useAutoCompactSettings,
+} from "../auto-compact-context";
 
 /** Path → trailing name (folder or file) for status-bar and chip labels.
  *  Both separators: workspace/attachment paths are native — backslashes on
@@ -237,16 +243,63 @@ function FooterStatusBar({
   const sessionKeyValue = active
     ? sessionKey(active.engine, active.sessionId, active.workspacePath)
     : "";
+  const autoCompact = useAutoCompactSettings(sessionKeyValue);
+  const autoCompactLatch = useRef({ sessionKey: "", latched: false });
 
-  const handleCompact = useCallback(async () => {
-    if (!active || streaming || compacting) return;
-    setCompacting(true);
-    try {
-      await compactContext(sessionKeyValue);
-    } finally {
-      setCompacting(false);
+  const compactSession = useCallback(
+    async (automatic: boolean) => {
+      if (!sessionKeyValue || streaming || compacting) return;
+      setCompacting(true);
+      try {
+        await compactContext(sessionKeyValue, { automatic });
+      } finally {
+        setCompacting(false);
+      }
+    },
+    [compactContext, compacting, sessionKeyValue, streaming],
+  );
+
+  const handleCompact = useCallback(() => {
+    if (usage?.pct !== undefined && usage.pct >= autoCompact.threshold) {
+      autoCompactLatch.current = { sessionKey: sessionKeyValue, latched: true };
     }
-  }, [active, streaming, compacting, compactContext, sessionKeyValue]);
+    void compactSession(false).catch(() => {});
+  }, [autoCompact.threshold, compactSession, sessionKeyValue, usage?.pct]);
+
+  useEffect(() => {
+    if (autoCompactLatch.current.sessionKey !== sessionKeyValue) {
+      autoCompactLatch.current = { sessionKey: sessionKeyValue, latched: false };
+    }
+
+    const usagePct = usage?.pct;
+    if (usagePct !== undefined && usagePct < autoCompact.threshold) {
+      autoCompactLatch.current.latched = false;
+    }
+    if (
+      !sessionKeyValue ||
+      !shouldAutoCompact({
+        enabled: autoCompact.enabled,
+        threshold: autoCompact.threshold,
+        usagePct,
+        streaming,
+        compacting,
+        latched: autoCompactLatch.current.latched,
+      })
+    ) {
+      return;
+    }
+
+    autoCompactLatch.current.latched = true;
+    void compactSession(true).catch(() => {});
+  }, [
+    autoCompact.enabled,
+    autoCompact.threshold,
+    compactSession,
+    compacting,
+    sessionKeyValue,
+    streaming,
+    usage?.pct,
+  ]);
 
   const handleRefresh = useCallback(async () => {
     if (!active || refreshing) return;
@@ -294,6 +347,13 @@ function FooterStatusBar({
         compacting={compacting}
         refreshing={refreshing}
         canCompact={Boolean(active) && !streaming && !compacting}
+        autoCompact={sessionKeyValue ? autoCompact : undefined}
+        onAutoCompactEnabledChange={
+          sessionKeyValue ? (enabled) => setAutoCompactEnabled(sessionKeyValue, enabled) : undefined
+        }
+        onAutoCompactThresholdChange={
+          sessionKeyValue ? (threshold) => setAutoCompactThreshold(sessionKeyValue, threshold) : undefined
+        }
       />
     </div>
   );
