@@ -245,6 +245,8 @@ const feedback = useRunningFeedback(store.loading);
 | 报错态「刷新」 | `src/features/files/FileTreeBody.tsx`、`src/features/files/EditorPane.tsx` | **不加反馈** | 纯文本恢复入口，见 §8 |
 | Worktree 状态采集 | `src/components/application/ai-chat/repo-tree.tsx`（`WorktreeGroup`） | **不加反馈** | 展开「WORKTREES」分组时后台刷一次 git status（复用 git store 30s TTL）与 `git_worktree_list`（locked/prunable），没有用户发起的「刷新」按钮；徽标随状态自然更新 |
 | 更换密钥 | `src/features/settings/WebAuthCard.tsx` | **不加反馈** | 语义是"轮换"不是"刷新" |
+| Git 任务管理「刷新」 | `ccgui-plugin/git-tasks/main.js` | `useRunningFeedback` 等价实现（0.6s 转圈 → 900ms 对号，失败复位） | 独立 ESM 插件（`exec:gh` / `exec:git`），不导入宿主 hook；重读当前预设下的议题 / PR 与预设计数。缺省不接入新的宿主依赖 |
+| Git 任务管理「重新读取工作区与仓库」 | 同上 | **不加反馈** | 弹层内的菜单项，点击即关闭入口（同「重新加载」成功后按钮消失一类）；加载态由选择器自身的分组转圈与计数表达。重读 `ctx.workspaces.list` + git remote 解析 + `gh repo list` |
 | 接力引擎列表 | `ccgui-plugin/ccgui-plugin-plan-execute-relay/main.js` | 异步动作期间禁用，失败行内告警 | 独立 ESM 插件的文本动作；不导入宿主私有反馈 hook。刷新仅重读可用引擎、渠道名和模型，不触发模型请求 |
 
 注：Worktree **创建进度行不登记**在本清单——它不是「重新读取」入口，而是一次性任务的状态表达（进行中 → 成功/失败），用 §5 的进度语言（`Loader2` + 阶段文案），不存在「再刷一次」的语义；其失败行的「重试」是重新执行创建动作，同样不是刷新。
@@ -263,6 +265,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.74 | 2026-10-05 | git-tasks 插件的仓库来源改为侧栏工作区（新增 SDK `ctx.workspaces.list()`，0.3.16）：选择器按「我的工作区」分组（工作区名 + 解析出的 owner/repo，副标题弱化），worktree 子行去重、非 github.com 远端计入「已忽略」，完整 GitHub 仓库列表折叠为第二组按需加载；浮层改为跟随锚点重定位、滚动不再关闭（弹层内滚动不重定位）；工具条控件对齐宿主尺度（32px / xs 26px）并补齐 `focus-visible` / `active` / `prefers-reduced-motion` 与图标按钮 `aria-label`；刷新接入 §4.1 转圈→对号；§7 登记两个入口 |
 | v0.73 | 2026-10-05 | 复制到剪贴板支持非安全上下文（局域网 HTTP）降级：提供 copyText 与 polyfill，自动回退到 execCommand，避免 navigator.clipboard 为 undefined 导致应用崩溃；WebAuthCard 补齐 Copy → Check 反馈；§4.2 补充规则 |
 | v0.72 | 2026-10-05 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环；仅凭 100.64.0.0/10 网段命中但未匹配 Tailscale 网卡名时标为 CGNAT）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（留空或 0 为自动分配随机端口，/重置/占用友好提示）与持久化 Token 配置（自填 Token 少于 16 位拒绝保存并提示，可重新生成，运行中修改提示一键重启）；§3 补充规则 |
 | v0.71 | 2026-10-05 | 原生 `title` 全局接管为主题化气泡（`NativeTitleTooltip`）：500ms 延迟、150ms 进入过渡、`z-[130]`，覆盖 body portal 弹层，`aria-description` 兜底读屏；§2.3 补充规则 |

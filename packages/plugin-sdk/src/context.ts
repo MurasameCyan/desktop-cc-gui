@@ -39,6 +39,24 @@ export interface PluginAgentCatalogEntry {
   models: { id: string; label: string }[];
 }
 
+/** 侧栏工作区行（`ctx.workspaces.list()`）。刻意不含 `meta`：那是宿主与
+ *  其它插件写入的私有载荷，读接口只给展示与路径解析需要的字段。 */
+export interface PluginWorkspaceRow {
+  id: string;
+  /** 本机绝对路径（远程/WSL 工作区的路径在本机不存在，但字符串原样可用）。 */
+  path: string;
+  /** 侧栏显示名（目录名或用户重命名后的名字）。 */
+  name: string;
+  /** "worktree" = git worktree 子行；undefined = 普通工作区。 */
+  kind?: "worktree";
+  /** 侧栏分组 id；null = 未分组。 */
+  groupId: string | null;
+  /** 父工作区 id；仅 kind="worktree" 时存在。 */
+  parentId?: string;
+  /** 上次打开时间（Unix 毫秒）；从未打开为 null。 */
+  lastOpenedAt: number | null;
+}
+
 export interface PluginContext {
   pluginId: string;
   version: string;
@@ -198,9 +216,15 @@ export interface PluginContext {
   composer: {
     setDraft(text: string): void;
   };
-  /** 工作区登记（权限 `host:workspace`，0.3.3 起）。把任意路径登记为侧栏
-   *  工作区——不要求本机存在该目录（如经 ssh 管理的远程机/WSL 发行版内
-   *  路径）。`meta` 透传存储在宿主工作区行上，形状由写入方与消费方约定。
+  /** 工作区登记与读取（权限 `host:workspace`，0.3.3 起；
+   *  `list` 0.3.16 起）。把任意路径登记为侧栏工作区——不要求本机存在该
+   *  目录（如经 ssh 管理的远程机/WSL 发行版内路径）。`meta` 透传存储在
+   *  宿主工作区行上，形状由写入方与消费方约定。
+   *
+   *  `list` 返回侧栏当前的工作区行（含 worktree 子行，`kind` 区分）。它是
+   *  **只读快照**：不含 `meta`（远程/其它插件写入的私有载荷）、不含分组
+   *  定义，只给插件做「按本机工作区解析仓库/路径」这类用途。需要跟随宿主
+   *  变更时重新调用，宿主不为插件广播工作区变更事件。
    *
    *  `meta` 携带 `wsl` 键（远程工作区，宿主引擎经 ssh 把会话流量导到
    *  meta.wsl 指定的主机与发行版）需要额外权限 `host:workspace:remote`
@@ -210,6 +234,8 @@ export interface PluginContext {
    *  TOFU 而非严格 pinning。 */
   workspaces: {
     add(path: string, meta?: Record<string, unknown>): Promise<void>;
+    /** 侧栏工作区快照（只读；权限 `host:workspace`，0.3.16 起）。 */
+    list(): Promise<PluginWorkspaceRow[]>;
   };
   /** 会话打开 + 外部会话源(权限 `host:session`;selectSession 0.3.3 起,
    *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话

@@ -109,6 +109,62 @@ describe("createPluginContext", () => {
     return expect(ctx.storage.get("k")).rejects.toThrow(/storage/);
   });
 
+  it("workspaces.list is gated by host:workspace and projects the store rows", async () => {
+    const { useChatStore } = await import("@/features/chat/store");
+    const previous = useChatStore.getState().workspaces;
+    useChatStore.setState({
+      workspaces: [
+        {
+          id: "w1",
+          path: "/Users/me/proj",
+          name: "proj",
+          lastOpenedAt: 17,
+          sortOrder: null,
+          groupId: "g1",
+          meta: { secret: "must-not-leak" },
+        },
+        {
+          id: "w2",
+          path: "/Users/me/proj-worktrees/pr-1",
+          name: "pr-1",
+          lastOpenedAt: null,
+          sortOrder: 2,
+          groupId: null,
+          kind: "worktree",
+          parentId: "w1",
+          meta: { worktree: { branch: "pr-1" } },
+        },
+      ],
+    });
+    try {
+      const backend = fakeStorage();
+      const { ctx } = createPluginContext(manifest(["host:workspace"]), backend, { appVersion: "1" });
+      await expect(ctx.workspaces.list()).resolves.toEqual([
+        { id: "w1", path: "/Users/me/proj", name: "proj", groupId: "g1", lastOpenedAt: 17 },
+        {
+          id: "w2",
+          path: "/Users/me/proj-worktrees/pr-1",
+          name: "pr-1",
+          kind: "worktree",
+          groupId: null,
+          parentId: "w1",
+          lastOpenedAt: null,
+        },
+      ]);
+      // meta 是宿主/其它插件的私有载荷，不进读接口
+      const rows = await ctx.workspaces.list();
+      expect(rows.every((row) => !("meta" in row))).toBe(true);
+    } finally {
+      useChatStore.setState({ workspaces: previous });
+    }
+  });
+
+  it("workspaces.list throws without host:workspace", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["storage"]), backend, { appVersion: "1" });
+    expect(() => ctx.workspaces.list()).toThrow(/host:workspace/);
+  });
+
   it("storage round-trips through the backend in the plugin's namespace", async () => {
     const backend = fakeStorage();
     const { ctx } = createPluginContext(manifest(["storage"]), backend, { appVersion: "1.0.0" });

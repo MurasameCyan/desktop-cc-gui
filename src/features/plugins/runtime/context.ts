@@ -31,7 +31,7 @@ import type {
 import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
-import { addPluginWorkspace, openPluginSession } from "./workspace-bridge";
+import { addPluginWorkspace, listPluginWorkspaces, openPluginSession } from "./workspace-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
 import { runAsPlugin } from "./hardening";
@@ -379,6 +379,12 @@ export function createPluginContext(
         return addPluginWorkspace(id, path, meta, () =>
           requirePermission("host:workspace:remote"),
         );
+      },
+      list() {
+        requirePermission("host:workspace");
+        // 与 sessions.refresh 同理：经 workspace-bridge 拿侧栏同一份 store，
+        // 不在插件侧另开数据源（chat store 依赖链重，也便于单测 mock）。
+        return Promise.resolve().then(listPluginWorkspaces);
       },
     },
     sessions: {

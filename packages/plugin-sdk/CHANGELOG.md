@@ -1,5 +1,12 @@
 # @ccgui/plugin-sdk changelog
 
+## 0.3.16 — 2026-10-05
+- `ctx.workspaces.list()`（沿用 `host:workspace` 权限）返回侧栏工作区快照：
+  `{ id, path, name, kind?, groupId, parentId?, lastOpenedAt }`。给插件做「按本机
+  工作区解析仓库 / 路径」这类只读用途（如 git-tasks 的仓库选择器只列用户
+  自己的工作区，而不是全部 GitHub 仓库）。刻意不含 `meta`（宿主与其它插件
+  写入的私有载荷）与分组定义；是快照而非订阅，需要跟随变更时重新调用。
+
 ## 0.3.15 — 2026-09-23
 - **payload 增强**：引擎事件 wire payload 新增 `genMs`（宿主实测生成窗口毫秒数）——只出现在 `usage` / `done` 事件上，计量该报告对应的模型
   真实生成时间：从响应流打开（引擎 message_start，或首个文本/思考 delta）
