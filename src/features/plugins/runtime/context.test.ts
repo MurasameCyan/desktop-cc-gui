@@ -21,6 +21,15 @@ import type { PluginManifest } from "@ccgui/plugin-sdk";
 // composer.setDraft 的 store 落点由 composer-draft.test.ts 单独覆盖；
 // 这里只验证权限门与委派，不拉入 chat store 依赖链。
 vi.mock("./composer-draft", () => ({ setActiveComposerDraft: vi.fn() }));
+// worktrees.create 的宿主实现（worktree-bridge）依赖 worktree/chat store，
+// 这里同样只验证权限门与委派，桥本身由 worktree-bridge.test.ts 覆盖。
+vi.mock("./worktree-bridge", () => ({ createPluginWorktree: vi.fn(async () => ({ worktreePath: "/x" })) }));
+// sessions.startRun/interruptRun 的宿主实现在 session-run-bridge（依赖聊天管线），
+// 这里只验证权限门与委派。
+vi.mock("./session-run-bridge", () => ({
+  startPluginChatRun: vi.fn(async () => ({ runId: "run-1", sessionId: "sess-1" })),
+  interruptPluginChatRun: vi.fn(async () => undefined),
+}));
 
 function fakeStorage(): PluginContextBackend & { data: Map<string, unknown>; bridgeInvoke: Mock } {
   const data = new Map<string, unknown>();
@@ -149,6 +158,8 @@ describe("createPluginContext", () => {
           groupId: null,
           parentId: "w1",
           lastOpenedAt: null,
+          // meta.worktree 的公开部分（分支/来源 PR）另外投影出来
+          worktree: { branch: "pr-1" },
         },
       ]);
       // meta 是宿主/其它插件的私有载荷，不进读接口
@@ -163,6 +174,56 @@ describe("createPluginContext", () => {
     const backend = fakeStorage();
     const { ctx } = createPluginContext(manifest(["storage"]), backend, { appVersion: "1" });
     expect(() => ctx.workspaces.list()).toThrow(/host:workspace/);
+  });
+
+  it("worktrees.create is gated by host:worktree and delegates with the plugin id", async () => {
+    const bridge = await import("./worktree-bridge");
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:worktree"]), backend, { appVersion: "1" });
+    const def = {
+      repoPath: "/Users/me/proj",
+      parentWorkspaceId: "w1",
+      branch: "pr-9-x",
+      prNumber: 9,
+    };
+    await expect(ctx.worktrees.create(def)).resolves.toEqual({ worktreePath: "/x" });
+    expect(bridge.createPluginWorktree).toHaveBeenCalledWith("test-plugin", def);
+  });
+
+  it("worktrees.create throws without host:worktree", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:workspace"]), backend, { appVersion: "1" });
+    expect(() =>
+      ctx.worktrees.create({ repoPath: "/r", parentWorkspaceId: "w", branch: "b" }),
+    ).toThrow(/host:worktree/);
+  });
+
+  it("sessions.startRun / interruptRun are gated by host:session and delegate", async () => {
+    const bridge = await import("./session-run-bridge");
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:session"]), backend, { appVersion: "1" });
+    const def = { engine: "pi", prompt: "review", workspacePath: "/w" };
+    await expect(ctx.sessions.startRun(def)).resolves.toEqual({ runId: "run-1", sessionId: "sess-1" });
+    expect(bridge.startPluginChatRun).toHaveBeenCalledWith("test-plugin", def);
+    await expect(
+      ctx.sessions.interruptRun({ engine: "pi", workspacePath: "/w", sessionId: "sess-1" }),
+    ).resolves.toBeUndefined();
+    expect(bridge.interruptPluginChatRun).toHaveBeenCalledWith("test-plugin", {
+      engine: "pi",
+      workspacePath: "/w",
+      sessionId: "sess-1",
+    });
+  });
+
+  it("sessions.startRun throws without host:session", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
+    expect(() => ctx.sessions.startRun({ engine: "pi", prompt: "p", workspacePath: "/w" })).toThrow(
+      /host:session/,
+    );
+    expect(() => ctx.sessions.interruptRun({ engine: "pi", workspacePath: "/w" })).toThrow(
+      /host:session/,
+    );
   });
 
   it("storage round-trips through the backend in the plugin's namespace", async () => {

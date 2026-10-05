@@ -328,6 +328,9 @@ export function createMessagingActions(
         runRouting.delete(requestedRunId);
         untrackRun(requestedRunId);
       }
+      // 宿主能力（插件轮次）靠这个钩子在 spawn 成功后拿到轮次身份；
+      // 聊天发送不传，行为不变。
+      options?.onStarted?.({ runId: result.runId, sessionId: result.sessionId ?? null });
       // A whole turn can finish while invoke is still pending. Its session
       // event has then moved the state and done has removed the routing entry.
       const knownKey = runRouting.get(result.runId) ?? Object.keys(get().bySession).find(

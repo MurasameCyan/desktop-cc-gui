@@ -30,6 +30,9 @@ export interface SendOptions {
    *  compact RPC 命令。用户自定义的同名目录命令不带这个标记，仍按普通
    *  提示词发给 CLI。 */
   nativeCompact?: boolean;
+  /** 内部：宿主能力（插件 session-run bridge）用它在 spawn 成功后拿到
+   *  runId / 原生 sessionId，好把轮次回执给发起方。聊天发送不传。 */
+  onStarted?: (info: { runId: string; sessionId: string | null }) => void;
 }
 
 export interface ChatStore {

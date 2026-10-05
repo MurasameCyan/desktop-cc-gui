@@ -7,7 +7,7 @@ import {
   applyPlanSettled,
 } from "./plan-review";
 import { errorText } from "@/lib/errors";
-import { dedupeTabs, persistTabs, sessionKey } from "./persistence";
+import { pendingWorkspaceOfKey, dedupeTabs, persistTabs, sessionKey } from "./persistence";
 import {
   EMPTY_SESSION,
   appendToolMessages,
@@ -361,8 +361,16 @@ function onSession(
   // otherwise fall back to the active tab's workspace.
   const tab =
     owner ?? (pendingCandidates.length === 1 ? pendingCandidates[0] : undefined);
+  // 插件轮次（ctx.sessions.startRun）不占标签页：工作区要从轮次路由键
+  // （`new:<engine>:<workspacePath>`）取。回落成「当前激活工作区」会让新行
+  // 先挂在用户正看着的仓库下（点同步才归位），还可能把前台的待发标签页
+  // 认领成这个会话。
+  const routedWorkspace = tab ? "" : pendingWorkspaceOfKey(event.engine, key);
   const workspacePath =
-    tab?.workspacePath ?? deps.get().active?.workspacePath ?? "";
+    tab?.workspacePath ||
+    routedWorkspace ||
+    deps.get().active?.workspacePath ||
+    "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
   // The event can resolve straight to the native key when it beat the send
   // response (the run had no routing entry yet). The turn rows and streaming
