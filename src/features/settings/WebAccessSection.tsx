@@ -5,6 +5,7 @@ import Copy from "lucide-react/dist/esm/icons/copy";
 import Check from "lucide-react/dist/esm/icons/check";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import { Button } from "@/components/base/buttons/button";
+import { useCopied } from "@/hooks/use-copied";
 import { Input } from "@/components/base/input/input";
 import { Switch } from "@/components/base/switch/switch";
 import { Select, SelectItem } from "@/components/base/select/select";
@@ -46,7 +47,7 @@ export function WebAccessSection() {
   const [info, setInfo] = useState<WebAccessInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopied();
   const [pane, setPane] = useState<"lan" | "wan">("lan");
   const [autoStart, setAutoStart] = useState(() =>
     readStoredBool(WEB_ACCESS_AUTO_START_KEY, false),
@@ -278,11 +279,8 @@ export function WebAccessSection() {
 
   const copyUrl = useCallback(() => {
     if (!displayUrl) return;
-    void navigator.clipboard.writeText(displayUrl).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  }, [displayUrl]);
+    copy(displayUrl);
+  }, [copy, displayUrl]);
 
   const handleIpChange = useCallback((key: unknown) => {
     if (key === null || key === undefined) return;

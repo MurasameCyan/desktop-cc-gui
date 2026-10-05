@@ -193,6 +193,7 @@ const feedback = useRunningFeedback(store.loading);
 - 用 `src/hooks/use-copied.ts` 的 `useCopied(resetMs = COPY_FEEDBACK_MS)`，成功后图标换成 `Check`，**1500ms** 后复位。性能诊断需要显式处理复制失败，使用同一 `COPY_FEEDBACK_MS` 常量，成功反馈与卸载清理语义保持一致。
 - 与刷新反馈的差异：复制没有别的成功信号，所以**可访问名一起改成"已复制"**（`aria-label` / `title`），刷新反馈则不改名。这是刻意的差别，不要强行统一。
 - 复制按钮旁边有明文内容时（如密钥框），保留原布局尺寸与分隔符，只换图标。
+- **非安全环境（局域网 HTTP）安全降级**：通过 `src/lib/clipboard.ts` 的 `copyText()` 或 `useCopied()` 复制，当 `navigator.clipboard` 因非安全上下文（如 `http://<ip>:<port>` 局域网 Web 桥）为 `undefined` 或调用失败时，自动降级到 `document.execCommand('copy')` 并安装全局 polyfill，避免抛出 `TypeError: Cannot read properties of undefined (reading 'writeText')` 导致界面崩溃。
 
 ### 4.3 桌面宠物（pet overlay）
 
@@ -262,6 +263,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.73 | 2026-10-05 | 复制到剪贴板支持非安全上下文（局域网 HTTP）降级：提供 copyText 与 polyfill，自动回退到 execCommand，避免 navigator.clipboard 为 undefined 导致应用崩溃；WebAuthCard 补齐 Copy → Check 反馈；§4.2 补充规则 |
 | v0.72 | 2026-10-05 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环；仅凭 100.64.0.0/10 网段命中但未匹配 Tailscale 网卡名时标为 CGNAT）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（留空或 0 为自动分配随机端口，/重置/占用友好提示）与持久化 Token 配置（自填 Token 少于 16 位拒绝保存并提示，可重新生成，运行中修改提示一键重启）；§3 补充规则 |
 | v0.71 | 2026-10-05 | 原生 `title` 全局接管为主题化气泡（`NativeTitleTooltip`）：500ms 延迟、150ms 进入过渡、`z-[130]`，覆盖 body portal 弹层，`aria-description` 兜底读屏；§2.3 补充规则 |
 | v0.70 | 2026-10-05 | Git 多选提交语义对齐 IntelliJ 直觉并防止静默改动暂存区：勾选的文件按「整个文件」提交——同一文件同时有已暂存与未暂存改动时，提交前自动把工作区剩余改动一并暂存，不再只提交已暂存的那一半；当提交会把「已暂存但未勾选」的文件移出暂存区时，先弹确认框说明数量（改动保留在工作区，不丢失），确认后才执行，取消则完全不触碰暂存区 |
