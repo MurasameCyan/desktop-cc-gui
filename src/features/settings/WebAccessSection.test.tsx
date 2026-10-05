@@ -274,4 +274,60 @@ describe("WebAccessSection", () => {
     expect(container.textContent).toContain("配置已保存，需重启服务以应用新端口或凭证");
     expect(container.textContent).toContain("立即重启服务");
   });
+
+  // React controlled inputs ignore direct value assignment; drive them with
+  // the native setter + input event, and blur via focusout (React's onBlur).
+  function setInputValue(input: HTMLInputElement, value: string) {
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    nativeSetter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("treats port 0 as auto assign, never clamps it to port 1", async () => {
+    await render();
+
+    const portInput = container.querySelector<HTMLInputElement>(
+      `input[aria-label="服务端口"]`,
+    );
+    expect(portInput).toBeTruthy();
+
+    await act(async () => {
+      setInputValue(portInput!, "0");
+    });
+    await act(async () => {
+      portInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ webAccessPort: null }),
+    );
+    expect(updateAppSettings).not.toHaveBeenCalledWith(
+      expect.objectContaining({ webAccessPort: 1 }),
+    );
+    expect(portInput!.value).toBe("");
+  });
+
+  it("rejects a custom token shorter than 16 characters", async () => {
+    await render();
+
+    const tokenInput = container.querySelector<HTMLInputElement>(
+      `input[aria-label="访问凭证 (Token)"]`,
+    );
+    expect(tokenInput).toBeTruthy();
+
+    await act(async () => {
+      setInputValue(tokenInput!, "abc");
+    });
+    await act(async () => {
+      tokenInput!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    expect(updateAppSettings).not.toHaveBeenCalledWith(
+      expect.objectContaining({ webAccessToken: "abc" }),
+    );
+    expect(container.textContent).toContain("访问凭证太短");
+  });
 });

@@ -994,31 +994,8 @@ fn is_benchmark_range(ip: &std::net::Ipv4Addr) -> bool {
 }
 
 #[cfg(unix)]
-fn interface_ips() -> Vec<std::net::Ipv4Addr> {
-    use std::net::Ipv4Addr;
-    unsafe {
-        let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut addrs) != 0 {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        let mut cur = addrs;
-        while !cur.is_null() {
-            let ifa = &*cur;
-            let sa = ifa.ifa_addr;
-            if !sa.is_null() && (*sa).sa_family == libc::AF_INET as libc::sa_family_t {
-                let sin = sa as *const libc::sockaddr_in;
-                out.push(Ipv4Addr::from(u32::from_be((*sin).sin_addr.s_addr)));
-            }
-            cur = ifa.ifa_next;
-        }
-        libc::freeifaddrs(addrs);
-        out
-    }
-}
-
-#[cfg(unix)]
 fn native_interface_ips() -> Vec<(std::net::Ipv4Addr, String)> {
+    use std::net::Ipv4Addr;
     let mut out = Vec::new();
     let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
     unsafe {
@@ -1061,6 +1038,10 @@ fn native_interface_ips() -> Vec<(std::net::Ipv4Addr, String)> {
     let mut size: u32 = 16384;
     let mut buf: Vec<u8> = vec![0u8; size as usize];
 
+    // The buffer can grow between calls; retry with the reported size, and
+    // only parse the buffer once a call actually succeeded — otherwise the
+    // tail of a stale buffer would surface as phantom adapters.
+    let mut succeeded = false;
     for _ in 0..3 {
         let ret = unsafe {
             GetAdaptersAddresses(
@@ -1072,12 +1053,16 @@ fn native_interface_ips() -> Vec<(std::net::Ipv4Addr, String)> {
             )
         };
         if ret == ERROR_SUCCESS.0 {
+            succeeded = true;
             break;
         } else if ret == ERROR_BUFFER_OVERFLOW.0 {
             buf.resize(size as usize, 0);
         } else {
             return out;
         }
+    }
+    if !succeeded {
+        return out;
     }
 
     let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
@@ -1141,7 +1126,9 @@ fn format_ip_label(ip: &std::net::Ipv4Addr, iface: Option<&str>) -> String {
                 return format!("{ip_str} ({name})");
             }
         }
-        return format!("{ip_str} (Tailscale)");
+        // Matched on the 100.64.0.0/10 CGNAT range alone: ISPs also use it
+        // for carrier-grade NAT, so don't claim the adapter is Tailscale.
+        return format!("{ip_str} (CGNAT)");
     }
     if let Some(name) = iface {
         let trimmed = name.trim();
@@ -1395,7 +1382,10 @@ mod tests {
         assert!(!is_tailscale(&normal_ip, None));
 
         assert_eq!(format_ip_label(&loopback_ip, None), "127.0.0.1 (Localhost)");
-        assert_eq!(format_ip_label(&ts_ip, None), "100.101.102.103 (Tailscale)");
+        // CGNAT-only match is labeled CGNAT (could be an ISP range); a
+        // Tailscale-named adapter keeps its real name in the label.
+        assert_eq!(format_ip_label(&ts_ip, None), "100.101.102.103 (CGNAT)");
+        assert_eq!(format_ip_label(&ts_ip, Some("Tailscale")), "100.101.102.103 (Tailscale)");
         assert_eq!(format_ip_label(&normal_ip, Some("Wi-Fi")), "192.168.1.10 (Wi-Fi)");
     }
 

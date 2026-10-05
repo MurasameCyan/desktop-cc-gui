@@ -818,6 +818,7 @@ export const zh = {
     webAccessTokenDesc: "用于网页端连接与鉴权的专属密钥；固定凭证方便书签收藏与桌面快捷访问",
     webAccessRotateToken: "重新生成访问凭证",
     webAccessRotateTokenBtn: "重新生成",
+    webAccessTokenTooShort: "访问凭证太短：自定义 Token 至少 {{min}} 位，否则局域网内易被猜解",
     webAccessRestartNotice: "配置已保存，需重启服务以应用新端口或凭证",
     webAccessRestartBtn: "立即重启服务",
     webAccessUrl: "访问地址",

@@ -851,6 +851,7 @@ export const en: Messages = {
     webAccessTokenDesc: "Exclusive security key for browser connection and authentication; keeps bookmarks valid",
     webAccessRotateToken: "Regenerate access token",
     webAccessRotateTokenBtn: "Regenerate",
+    webAccessTokenTooShort: "Access token too short: custom tokens need at least {{min}} characters, otherwise anyone on the LAN can guess it",
     webAccessRestartNotice: "Settings saved. Restart service to apply new port or token",
     webAccessRestartBtn: "Restart Service",
     webAccessUrl: "Access URL",

@@ -33,6 +33,9 @@ const WAN_RISK_ACK_KEY = "ccgui-next.webWanRiskAccepted";
 /** Compact select trigger (h 32, radius/lg) per settings design conventions. */
 const SELECT_TRIGGER = "h-8 min-w-[200px] w-auto gap-1 rounded-lg px-2 py-1.5";
 
+/** Shortest accepted custom access token — generated tokens are 64 hex chars. */
+const MIN_CUSTOM_TOKEN_LENGTH = 16;
+
 /**
  * Mobile/web access page: starts the LAN bridge (src-tauri/src/web.rs) and
  * shows the token-bearing URL as text + QR. Start/stop are desktop-only —
@@ -56,15 +59,26 @@ export function WebAccessSection() {
     }
   });
 
+  /** The 外网访问 tab stays behind a one-time warning: everything it enables
+   *  hands a remote browser the same reach the user has on this machine. A
+   *  ref, not state: it is only read by the tab's click handler, so a state
+   *  update would redraw the page for nothing — accepting already re-renders
+   *  via setPane/setRiskPrompt. */
   const wanRiskAcceptedRef = useRef<boolean | null>(null);
   useEffect(() => {
+    // Lazy init off the render path (react-doctor: no ref writes in render);
+    // runs before any user interaction can read the click-handler-only value.
     if (wanRiskAcceptedRef.current === null) {
       wanRiskAcceptedRef.current = readStoredBool(WAN_RISK_ACK_KEY, false);
     }
   }, []);
 
+  /** Which tab to reveal once the warning is accepted; null when no ask is
+   *  pending. Kept separate from `pane` so declining leaves 内网访问 showing. */
   const [riskPrompt, setRiskPrompt] = useState<"wan" | null>(null);
 
+  /** Accepting reveals the tab and is remembered, so the warning is a
+   *  first-run gate rather than a toll on every visit. */
   const acceptWanRisk = useCallback(() => {
     wanRiskAcceptedRef.current = true;
     writeStored(WAN_RISK_ACK_KEY, "1");
@@ -128,14 +142,17 @@ export function WebAccessSection() {
         .then((s) => {
           void ipc.updateAppSettings({ ...s, webAccessAutoStart: enabled });
         })
-        .catch(() => {});
+        .catch((e) => setError(String(e)));
     }
   }, []);
 
   const commitPort = useCallback(() => {
     if (isWeb) return;
     const trimmed = portDraft.trim();
-    const nextPort = trimmed ? Math.min(65535, Math.max(1, parseInt(trimmed, 10) || 0)) : null;
+    // Empty or 0 means "auto assign a random port" per the field description —
+    // never clamp 0 up to the privileged port 1.
+    const parsed = parseInt(trimmed, 10);
+    const nextPort = !trimmed || !parsed ? null : Math.min(65535, parsed);
     setConfiguredPort(nextPort);
     setPortDraft(nextPort ? String(nextPort) : "");
     void ipc
@@ -143,7 +160,7 @@ export function WebAccessSection() {
       .then((s) => {
         void ipc.updateAppSettings({ ...s, webAccessPort: nextPort });
       })
-      .catch(() => {});
+      .catch((e) => setError(String(e)));
   }, [portDraft]);
 
   const commitToken = useCallback(() => {
@@ -153,14 +170,20 @@ export function WebAccessSection() {
       setTokenDraft(configuredToken ?? info?.token ?? "");
       return;
     }
+    // A short custom token is guessable by anyone on the LAN; reject instead
+    // of silently persisting a broken lock.
+    if (trimmed.length < MIN_CUSTOM_TOKEN_LENGTH) {
+      setError(t("settings.webAccessTokenTooShort", { min: MIN_CUSTOM_TOKEN_LENGTH }));
+      return;
+    }
     setConfiguredToken(trimmed);
     void ipc
       .getAppSettings()
       .then((s) => {
         void ipc.updateAppSettings({ ...s, webAccessToken: trimmed });
       })
-      .catch(() => {});
-  }, [tokenDraft, configuredToken, info]);
+      .catch((e) => setError(String(e)));
+  }, [tokenDraft, configuredToken, info, t]);
 
   const rotateToken = useCallback(async () => {
     if (isWeb) return;
@@ -278,6 +301,8 @@ export function WebAccessSection() {
             data-setting-anchor={id === "lan" ? "webLanTab" : "webWanTab"}
             aria-pressed={pane === id}
             onClick={() => {
+              // 内网访问 is upstream's LAN behaviour and needs no warning; the
+              // internet tab does, exactly once per machine.
               if (id === "wan" && !wanRiskAcceptedRef.current) {
                 setRiskPrompt("wan");
                 return;
@@ -358,9 +383,12 @@ export function WebAccessSection() {
                       onClick={() => {
                         setPortDraft("");
                         setConfiguredPort(null);
-                        void ipc.getAppSettings().then((s) => {
-                          void ipc.updateAppSettings({ ...s, webAccessPort: null });
-                        });
+                        void ipc
+                          .getAppSettings()
+                          .then((s) => {
+                            void ipc.updateAppSettings({ ...s, webAccessPort: null });
+                          })
+                          .catch((e) => setError(String(e)));
                       }}
                     >
                       {t("settings.webAccessPortReset")}

@@ -75,15 +75,34 @@ function MainApp() {
     const id = setTimeout(() => void useUpdateStore.getState().checkForUpdates(), 3000);
     return () => clearTimeout(id);
   }, []);
-  // LAN web access autostart: starts the LAN bridge on launch when enabled in settings.
+  // LAN web access autostart: starts the LAN bridge on launch when enabled in
+  // settings. The persisted app setting is the source of truth (the backend
+  // setup hook reads the same flag); the localStorage key is only a fallback
+  // cache for when the settings read fails.
   useEffect(() => {
-    if (!isWeb && readStoredBool(WEB_ACCESS_AUTO_START_KEY, false)) {
-      void ipc.webAccessStatus().then((status) => {
-        if (!status) {
-          void ipc.webAccessStart().catch(() => {});
-        }
+    if (isWeb) return;
+    void ipc
+      .getAppSettings()
+      .then((s) => {
+        const enabled =
+          typeof s.webAccessAutoStart === "boolean"
+            ? s.webAccessAutoStart
+            : readStoredBool(WEB_ACCESS_AUTO_START_KEY, false);
+        if (!enabled) return;
+        void ipc.webAccessStatus().then((status) => {
+          if (!status) {
+            void ipc.webAccessStart().catch(() => {});
+          }
+        });
+      })
+      .catch(() => {
+        if (!readStoredBool(WEB_ACCESS_AUTO_START_KEY, false)) return;
+        void ipc.webAccessStatus().then((status) => {
+          if (!status) {
+            void ipc.webAccessStart().catch(() => {});
+          }
+        });
       });
-    }
   }, []);
 
   return (
