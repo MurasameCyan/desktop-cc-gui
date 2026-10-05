@@ -51,6 +51,7 @@
 - 用户可见文案一律从 `src/i18n/zh.ts`、`src/i18n/en.ts` 取，两个语言文件同步新增 key，组件里不写死中文。
 - 图标按钮必须同时有 `aria-label`（可访问名）和 `title`（指针悬停）。可访问名用**动作名**（"刷新"、"重新加载"），不用"点这里"。
 - 需要解释性文案、快捷键或多行说明时才用 `Tooltip`（`src/components/base/tooltip/tooltip.tsx`）：它基于 react-aria，trigger 必须是 react-aria 组件或包在 `Focusable` 里的元素；触屏上不可达，所以**关键信息不能只放在 tooltip 里**。
+- 原生 `title` 提示由 `NativeTitleTooltip`（`src/components/base/tooltip/native-title-tooltip.tsx`，挂在 `App.tsx`）全局接管：它监听 `document.body`（覆盖 portal 到 body 的右键菜单、对话框），把 `title` 文案搬进 `data-native-tooltip` 并置空原属性，改渲染与 `TooltipContent` 同一视觉的气泡（500ms 延迟、150ms 进入过渡、`z-[130]`，高于对话框 z-110 / 右键菜单 z-120），同时把文案复制为 `aria-description` 保住读屏描述。写控件时仍直接写 `title` 即可，不要手动操作 `data-native-tooltip`；Esc / 滚动 / 按下 / 目标卸载都会收起。
 
 ### 2.4 展开 / 收起动效
 
@@ -76,6 +77,7 @@
 - **排队行可上下调序**：排队卡片每行在发送 / 移除之外给「上移 / 下移」箭头（`message-queue.tsx` 的 `onMove` → store 的 `moveQueued(id, "up" | "down")`），仅在队列多于一行时渲染；首尾行各有一个方向禁用（`disabled:cursor-default` + 降透明，不隐藏，控件不换位）。箭头按用户看到的列表方向移动——卡片是「最新在上、队首在下」，所以上移 = 更晚发送、下移 = 更早发送（`moveQueued` 里 `up` 即数组后移一位；越界与未知 id 为 no-op），行首编号随重排实时重算。回归：`message-queue.test.tsx`、`queue-drain.test.ts`。
 - 可交互元素至少实现：默认 / hover / `focus-visible`（`ring-border-focus-ring`）/ active / disabled。按钮类控件的焦点环只走 `focus-visible`（不打扰鼠标用户）；输入类控件可以用 `focus:border-border-focus-ring` 表示聚焦，因为文本输入聚焦本身就是用户意图。三个搜索面板（⌘K 命令 / ⌘L 会话 / ⌘P 文件）的输入框例外：无边框，聚焦只靠光标与键盘高亮行，`.palette-search-field`（`globals.css`）负责压掉平台默认焦点框——Windows WebView2 会在 `outline-none` 之外再画一圈，macOS WKWebView 不画。
 - **渠道选择后保留当前引擎面板**：`engine-model-panel.tsx` 的 `ChannelPicker` 在选项卸载前将焦点交回同一面板的渠道按钮（`preventScroll: true`），桌面浮层与移动端弹窗共用。不能让选项卸载后的焦点恢复落到首个引擎行，触发 `onFocus` 把 Codex 面板切成 Claude Code；正常的引擎行点击、键盘导航与悬停切换保持不变。
+- **用量与消息记录按本轮实际模型归属**：`src/features/chat/store/engine-events.ts` 的 `stampedModel` 优先使用发送时初始化、由引擎上报更新的 `activeModel`；Claude 的 `haiku` / `sonnet` 等选择器别名不能压过已解析的自定义模型名。`sessions.ts` 的会话列表刷新不覆盖运行中已知的模型，标签页选择仍保留供下次发送。用量页按台账记录的模型名聚合，不按当前渠道映射猜测回填旧台账。回归：`usage-accounting.test.ts`、`session-model-memory.test.ts`。
 - disabled 必须改变光标语义（`disabled:cursor-not-allowed` 或 `disabled:cursor-default`）并降低强调（`opacity-50`~`60` 或语义 disabled token），不能只是点不动。
 - **异步动作进行中不可重入**：进行中禁用按钮（或首行拦截 `if (running) return`），避免重复请求。
 - **反馈不改变布局**：图标在默认态与反馈态之间切换时，外层容器尺寸固定（`ActionFeedbackIcon` 用 `iconClassName` 同时约束容器和图标），按钮不能因为换图标而抖动。
@@ -260,7 +262,12 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
-| v0.67 | 2026-09-28 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（自动分配/重置/占用友好提示）与持久化 Token 配置（可重新生成，运行中修改提示一键重启）；§3 补充规则 |
+| v0.72 | 2026-10-05 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（自动分配/重置/占用友好提示）与持久化 Token 配置（可重新生成，运行中修改提示一键重启）；§3 补充规则 |
+| v0.71 | 2026-10-05 | 原生 `title` 全局接管为主题化气泡（`NativeTitleTooltip`）：500ms 延迟、150ms 进入过渡、`z-[130]`，覆盖 body portal 弹层，`aria-description` 兜底读屏；§2.3 补充规则 |
+| v0.70 | 2026-10-05 | Git 多选提交语义对齐 IntelliJ 直觉并防止静默改动暂存区：勾选的文件按「整个文件」提交——同一文件同时有已暂存与未暂存改动时，提交前自动把工作区剩余改动一并暂存，不再只提交已暂存的那一半；当提交会把「已暂存但未勾选」的文件移出暂存区时，先弹确认框说明数量（改动保留在工作区，不丢失），确认后才执行，取消则完全不触碰暂存区 |
+| v0.69 | 2026-10-05 | Git 变更列表对齐 IntelliJ IDEA 状态颜色与文件类型图标：文件名与状态徽标按 Git 状态赋予不同语义颜色（变更/修改 M 为天蓝色 `#0088D2` / `#589DF6`、新增 A 为森林绿 `#208A3C` / `#59A869`、删除 D 为中性灰带删除线 `line-through`、未暂存/未跟踪 ? 为砖红色 `#B00020` / `#E05555`、重命名 R 为青蓝色）；每行文件展示对应的丰富语言/格式图标（涵盖 Java、Kotlin、TypeScript、Python、Rust、Go、C/C++、SQL、Docker 等）；目录节点采用暖黄色文件夹图标并在展开/收起时切换形态 |
+| v0.68 | 2026-10-05 | Git 变更面板（ChangesPanel）新增树状结构与多选提交：页头支持一键在「树状视图」与「列表视图」之间切换（`FolderTree` / `List` 图标按钮，持久化记忆偏好）；树状视图按路径构建目录层级并自动合并单子目录（compact folders），目录节点支持展开/收起、变更计数与整目录暂存/取消暂存/撤销；全部分组（已暂存/未暂存/未跟踪）与每个文件/目录新增 Checkbox 勾选框（支持全选/半选/取消），底栏提交按钮显示「提交 (N 项)」并在提交时自动暂存所选变更，实现即勾即提 |
+| v0.67 | 2026-10-01 | 用量与消息标记优先采用本轮实际模型，修复 Claude 自定义模型被统计成 haiku 等别名；会话刷新保留运行中模型，选择器与下次发送规则不变；§3 补充模型归属规则 |
 | v0.66 | 2026-09-30 | 智能体记忆补齐两个开关：「写入需要审批」把模型 / 复盘写入转成待审批队列（面板逐条或全部批准 / 驳回，replace/remove 展示前后对比，批准时才过容量闸，暂存后原文已变则拒绝执行；面板手动写入不审批）；「会话结束后台复盘」每 N 轮 + 离开会话触发，用该引擎的 API 渠道跑一次整理（无渠道 / 官方登录 / 忙碌明确跳过并就地说明），结果逐条走同一套写入闸；§3 更新记忆规则 |
 | v0.65 | 2026-09-30 | 智能体「记忆」上线：设置 → 智能体 → 记忆页签从概念图换成真面板（MEMORY / USER 两个账本、用量条、手动增删改、导出 / 清空），写入与容量规则后端单点（安全扫描 + 超限拒绝不截断），`memory` MCP 工具按引擎挂载（Claude Code / Codex / omp），USER/MEMORY 注入下次会话、引擎不支持时不写「记忆使用说明」；审批与后台复盘仍标「即将支持」；§3 补两条规则 |
 | v0.64 | 2026-09-30 | 多会话运行状态点改为静态阴影 + 缩放/透明度呼吸，保留 0.92s 节奏与重试/减少动态效果的静态反馈；增加真实侧栏与页签的并发动画回归 |
