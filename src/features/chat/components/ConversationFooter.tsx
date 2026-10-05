@@ -247,11 +247,11 @@ function FooterStatusBar({
   const autoCompactLatch = useRef({ sessionKey: "", latched: false });
 
   const compactSession = useCallback(
-    async (automatic: boolean) => {
+    async (trigger: "manual" | "threshold") => {
       if (!sessionKeyValue || streaming || compacting) return;
       setCompacting(true);
       try {
-        await compactContext(sessionKeyValue, { automatic });
+        await compactContext(sessionKeyValue, { trigger });
       } finally {
         setCompacting(false);
       }
@@ -263,7 +263,7 @@ function FooterStatusBar({
     if (usage?.pct !== undefined && usage.pct >= autoCompact.threshold) {
       autoCompactLatch.current = { sessionKey: sessionKeyValue, latched: true };
     }
-    void compactSession(false).catch(() => {});
+    void compactSession("manual").catch(() => {});
   }, [autoCompact.threshold, compactSession, sessionKeyValue, usage?.pct]);
 
   useEffect(() => {
@@ -290,7 +290,7 @@ function FooterStatusBar({
     }
 
     autoCompactLatch.current.latched = true;
-    void compactSession(true).catch(() => {});
+    void compactSession("threshold").catch(() => {});
   }, [
     autoCompact.enabled,
     autoCompact.threshold,
