@@ -142,6 +142,9 @@ struct SendMessageArgs {
     workspace_path: String,
     session_id: Option<String>,
     prompt: String,
+    /// ccgui 内置 `/compact`：OMP 走原生 compact RPC 命令。默认值让旧客户端保持可用。
+    #[serde(default)]
+    native_compact: Option<bool>,
     image_paths: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
@@ -631,6 +634,7 @@ pub(super) async fn dispatch(
                 a.workspace_path,
                 a.session_id,
                 a.prompt,
+                a.native_compact,
                 a.image_paths,
                 a.model,
                 a.effort,

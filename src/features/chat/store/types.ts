@@ -26,6 +26,10 @@ export interface SendOptions {
    *  server + virtual pointer overlay) for this turn. Engines that cannot
    *  mount it are refused before the send (see computer-use.ts). */
   computerUse?: boolean;
+  /** ccgui 自己拦下的 `/compact`（底部按钮或内置 app 命令）：OMP 改走原生
+   *  compact RPC 命令。用户自定义的同名目录命令不带这个标记，仍按普通
+   *  提示词发给 CLI。 */
+  nativeCompact?: boolean;
 }
 
 export interface ChatStore {
