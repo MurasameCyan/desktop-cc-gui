@@ -334,7 +334,7 @@ export const zh = {
     usageCacheRead: "缓存读取",
     usageCacheWrite: "缓存写入",
     usageTokens: "Token 用量",
-    compactContext: "压缩上下文",
+    compactContext: "压缩",
     compactContextTooltip: "向会话发送 /compact 以压缩精简历史上下文",
     compacting: "压缩中…",
     compactingContext: "正在压缩上下文…",
@@ -348,7 +348,7 @@ export const zh = {
     slashAppCua: "电脑操控：让 Agent 看屏幕并操作本机应用（/ccgui-cua <任务>）",
     cuaUnsupportedEngine:
       "当前引擎不支持电脑操控（它接收不到驱动）。请切换到支持该能力的引擎，或在「设置 → 电脑操控」查看各引擎支持情况。",
-    refreshUsage: "刷新用量",
+    refreshUsage: "刷新",
     refreshUsageTooltip: "重新获取当前会话最新上下文占用",
     refreshing: "刷新中…",
     autoCompactThreshold: "自动压缩阈值",

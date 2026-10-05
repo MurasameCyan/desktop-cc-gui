@@ -349,7 +349,7 @@ export const en: Messages = {
     usageCacheRead: "Cache read",
     usageCacheWrite: "Cache write",
     usageTokens: "Tokens",
-    compactContext: "Compact context",
+    compactContext: "Compact",
     compactContextTooltip: "Send /compact to compress conversation context",
     compacting: "Compacting…",
     compactingContext: "Compacting context…",
@@ -364,7 +364,7 @@ export const en: Messages = {
       "Computer use: let the agent see the screen and drive apps (/ccgui-cua <task>)",
     cuaUnsupportedEngine:
       "This engine cannot do computer use (it cannot mount the driver). Switch to an engine that supports it, or see Settings → Computer use for per-engine support.",
-    refreshUsage: "Refresh usage",
+    refreshUsage: "Refresh",
     refreshUsageTooltip: "Re-fetch latest context usage for current session",
     autoCompactThreshold: "Auto-compact threshold",
     autoCompactEnable: "Enable auto-compact",

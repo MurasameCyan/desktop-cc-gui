@@ -377,7 +377,7 @@ function AutoCompactControls({
 
   return (
     <div className="mr-auto flex items-center gap-1.5">
-      <div className="flex h-6 w-16 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5">
+      <div className="flex h-6 w-11 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5">
         <input
           type="number"
           min={1}
@@ -450,7 +450,7 @@ function ContextActions({
             busy={compacting}
             onClick={onCompact}
             tooltip={text.compactContextTooltip ?? text.compactContext}
-            label={text.compactContext ?? "压缩上下文"}
+            label={text.compactContext ?? "压缩"}
             busyLabel={text.compacting ?? "压缩中…"}
             icon={Minimize2}
             busyIconClassName="animate-pulse"
@@ -464,7 +464,7 @@ function ContextActions({
             busy={refreshing}
             onClick={onRefresh}
             tooltip={text.refreshUsageTooltip ?? text.refreshUsage}
-            label={text.refreshUsage ?? "刷新用量"}
+            label={text.refreshUsage ?? "刷新"}
             busyLabel={text.refreshing ?? "刷新中…"}
             icon={RefreshCw}
             feedback={refreshFeedback}

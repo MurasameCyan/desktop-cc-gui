@@ -11,10 +11,10 @@ const baseText: AgentLimitsCardProps["text"] = {
   freeSpace: "空闲",
   planUsageLimits: "套餐用量上限",
   managePlan: "管理套餐",
-  compactContext: "压缩上下文",
+  compactContext: "压缩",
   compactContextTooltip: "向会话发送 /compact 以压缩精简历史上下文",
   compacting: "压缩中…",
-  refreshUsage: "刷新用量",
+  refreshUsage: "刷新",
   autoCompactThreshold: "自动压缩阈值",
   autoCompactEnable: "开启自动压缩",
   autoCompactDisable: "关闭自动压缩",
@@ -66,8 +66,8 @@ describe("AgentLimitsCard", () => {
 
     expect(compactBtn).not.toBeNull();
     expect(refreshBtn).not.toBeNull();
-    expect(compactBtn?.textContent).toContain("压缩上下文");
-    expect(refreshBtn?.textContent).toContain("刷新用量");
+    expect(compactBtn?.textContent).toContain("压缩");
+    expect(refreshBtn?.textContent).toContain("刷新");
 
     await act(async () => {
       compactBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
