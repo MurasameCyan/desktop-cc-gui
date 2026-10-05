@@ -51,6 +51,7 @@
 - 用户可见文案一律从 `src/i18n/zh.ts`、`src/i18n/en.ts` 取，两个语言文件同步新增 key，组件里不写死中文。
 - 图标按钮必须同时有 `aria-label`（可访问名）和 `title`（指针悬停）。可访问名用**动作名**（"刷新"、"重新加载"），不用"点这里"。
 - 需要解释性文案、快捷键或多行说明时才用 `Tooltip`（`src/components/base/tooltip/tooltip.tsx`）：它基于 react-aria，trigger 必须是 react-aria 组件或包在 `Focusable` 里的元素；触屏上不可达，所以**关键信息不能只放在 tooltip 里**。
+- 原生 `title` 提示由 `NativeTitleTooltip`（`src/components/base/tooltip/native-title-tooltip.tsx`，挂在 `App.tsx`）全局接管：它监听 `document.body`（覆盖 portal 到 body 的右键菜单、对话框），把 `title` 文案搬进 `data-native-tooltip` 并置空原属性，改渲染与 `TooltipContent` 同一视觉的气泡（500ms 延迟、150ms 进入过渡、`z-[130]`，高于对话框 z-110 / 右键菜单 z-120），同时把文案复制为 `aria-description` 保住读屏描述。写控件时仍直接写 `title` 即可，不要手动操作 `data-native-tooltip`；Esc / 滚动 / 按下 / 目标卸载都会收起。
 
 ### 2.4 展开 / 收起动效
 
@@ -259,6 +260,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.71 | 2026-10-05 | 原生 `title` 全局接管为主题化气泡（`NativeTitleTooltip`）：500ms 延迟、150ms 进入过渡、`z-[130]`，覆盖 body portal 弹层，`aria-description` 兜底读屏；§2.3 补充规则 |
 | v0.70 | 2026-10-05 | Git 多选提交语义对齐 IntelliJ 直觉并防止静默改动暂存区：勾选的文件按「整个文件」提交——同一文件同时有已暂存与未暂存改动时，提交前自动把工作区剩余改动一并暂存，不再只提交已暂存的那一半；当提交会把「已暂存但未勾选」的文件移出暂存区时，先弹确认框说明数量（改动保留在工作区，不丢失），确认后才执行，取消则完全不触碰暂存区 |
 | v0.69 | 2026-10-05 | Git 变更列表对齐 IntelliJ IDEA 状态颜色与文件类型图标：文件名与状态徽标按 Git 状态赋予不同语义颜色（变更/修改 M 为天蓝色 `#0088D2` / `#589DF6`、新增 A 为森林绿 `#208A3C` / `#59A869`、删除 D 为中性灰带删除线 `line-through`、未暂存/未跟踪 ? 为砖红色 `#B00020` / `#E05555`、重命名 R 为青蓝色）；每行文件展示对应的丰富语言/格式图标（涵盖 Java、Kotlin、TypeScript、Python、Rust、Go、C/C++、SQL、Docker 等）；目录节点采用暖黄色文件夹图标并在展开/收起时切换形态 |
 | v0.68 | 2026-10-05 | Git 变更面板（ChangesPanel）新增树状结构与多选提交：页头支持一键在「树状视图」与「列表视图」之间切换（`FolderTree` / `List` 图标按钮，持久化记忆偏好）；树状视图按路径构建目录层级并自动合并单子目录（compact folders），目录节点支持展开/收起、变更计数与整目录暂存/取消暂存/撤销；全部分组（已暂存/未暂存/未跟踪）与每个文件/目录新增 Checkbox 勾选框（支持全选/半选/取消），底栏提交按钮显示「提交 (N 项)」并在提交时自动暂存所选变更，实现即勾即提 |
