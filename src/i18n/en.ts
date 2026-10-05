@@ -1493,6 +1493,13 @@ export const en: Messages = {
         other: "Other",
       },
       sectionInstalled: "Installed",
+      installedFilter: {
+        label: "Filter installed plugins",
+        all: "All",
+        recent: "Recently installed",
+        marketplace: "From marketplace",
+        local: "Installed locally",
+      },
       refresh: "Refresh marketplace index",
       installLocal: "Install from directory",
       create: "Create plugin",

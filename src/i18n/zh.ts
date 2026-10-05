@@ -1438,6 +1438,13 @@ export const zh = {
         other: "其他",
       },
       sectionInstalled: "已安装",
+      installedFilter: {
+        label: "筛选已安装插件",
+        all: "全部",
+        recent: "最近安装",
+        marketplace: "市场安装",
+        local: "本地安装",
+      },
       refresh: "刷新市场索引",
       installLocal: "从本地目录安装",
       create: "创建插件",

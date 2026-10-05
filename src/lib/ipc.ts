@@ -1146,6 +1146,8 @@ export interface PluginInfo {
   quarantined: boolean;
   lastError: string | null;
   permissions: string[];
+  /** Unix 秒（backend `plugins.json` 的 `now_secs`），不是毫秒；重装 / 更新
+   *  保留首次安装时间。 */
   installedAt: number;
   minAppVersion: string | null;
   /** Artwork declared by the installed manifest: `https://` URLs render

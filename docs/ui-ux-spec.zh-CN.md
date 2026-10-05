@@ -85,6 +85,7 @@
 - **同一状态只表达一次**：列表行里「已安装 / 可更新」只给一个信号——市场表的右侧按钮就是该行的状态（`安装` → `更新至 vX` → `已安装`），行内不再重复挂徽标；安装中按钮原地换成进度（`plugins.installingPct`）且保持占位不變（`PluginMarketRow.tsx`）。
 - **表格化列表**：插件市场用语义 `<table>` + `table-fixed`，列头是唯一的字段说明（名称 / 开发者 / 安装量 / 版本 / 操作）；整列无数据时整列不渲染（`PluginMarketView` 的 `showDownloads`），不用一列「—」占位。开发者列的头像是该账号的真实 GitHub 头像（`githubAvatarUrl`），加载中或取不到时回落到同一配色的首字母瓷砖，不出现破图。
 - **官方身份用紫色品牌徽标，工具栏下拉同时承担人群范围**：市场表开发者列在 `githubLoginFor` 解析出的账号等于官方账号时（`isOfficialPlugin`，账号 `zhukunpenglinyutong`，author 或 repo owner，大小写不敏感），整格只渲染紫色「CCGUI官方插件」徽标（`status-purple-background` / `status-purple-text`；紫色专属官方，不与中性类型徽标、lime「已安装」混用）——官方插件的账号是隐含信息，不再重复头像与（被截断的）用户名；详情页右栏 `AuthorChip` 同一条判定，徽标整块是按钮（`title` 报出目标主页），点击打开该官方账号主页，第三方插件才展示可点的头像+名称。工具栏下拉（`sortLabel`）语义混合：`综合排序` / `下载量` 显示全部、只是排序不同；`CCGUI官方插件` / `社区插件` 只保留该类并按下载量排序（`sortPlugins` 内 `pluginMatchesAudience`）。空状态的「清除筛选」要把下拉一并复位回 `综合排序`。
+- **「已安装」的筛选按记录字段判定，时间只说安装时间**：页头「已安装」标题右侧的下拉（`installed-filter.ts` 的 `filterInstalledPlugins`）默认「全部」，其余三项是「最近安装」（`installedAt` 落在 3 天窗口内，恰好满 3 天仍算，按安装时间倒序——四项里只有它重排，其余保持后端 id 序）、「市场安装」（记录 `source === "marketplace"`）、「本地安装」（`source === "local"`）。`installedAt` 是 backend 的 Unix 秒（`state.rs` 的 `now_secs`），不是毫秒；重装 / 更新保留首次安装时间（`fs.rs`），所以一次更新不会把旧插件顶进「最近安装」，时间戳为 0 的记录不算。搜索框与下拉同时生效，筛到空且确有筛选条件时给「清除筛选」，把两者一起复位。回归：`installed-filter.test.ts`、`PluginHub.test.tsx`。
 - **开发者只在能落到真实账号时可点**：插件详情页右栏的「开发者」用 `githubLoginFor({ author, repo })` 判定身份——索引 `author` 是 GitHub 账号（或回落到 repo owner）时，整块头像+名称是可点按钮，点击走 `openExternal` 打开 `https://github.com/<login>`，并把目标主页写进 `title`；官方徽标同理指向 `OFFICIAL_PLUGIN_LOGIN`；解析不出账号时保持纯文本，不猜主页地址（`PluginDetailPage.tsx` 的 `AuthorChip`）。
 - **带背景的块在 flex 列里必须自适应宽度**：右信息栏 `RailRow` 是 `flex flex-col`，默认 `align-items: stretch` 会把任何块拉伸到整栏宽——带背景的徽标不加 `w-fit` 就变成整行色块。所以 `OFFICIAL_BADGE` 带 `w-fit`，可点的头像+名称块用 `flex w-fit max-w-full`。长文本靠内层 `truncate` 收窄，不靠父级的拉伸。
 - **时间只说数据源里有的**：插件详情页右栏的「最近更新时间」只取索引 `plugins/<id>.json` 的 `updatedAt`（上游 Release 发布时间，`indexUpdatedAt` 解析后按当前语言格式化）；条目没有该字段就不渲染这一行，不用本机安装时间顶替，也不用「—」占位。
@@ -265,6 +266,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.75 | 2026-10-05 | 插件中心「已安装」页头新增来源筛选下拉（全部 / 最近安装（3 天内，按安装时间倒序）/ 市场安装 / 本地安装），按安装记录的 `source` 与 Unix 秒 `installedAt` 判定，重装 / 更新不刷新首次安装时间；筛到空可一键清除筛选；§3 补充规则 |
 | v0.74 | 2026-10-05 | git-tasks 插件的仓库来源改为侧栏工作区（新增 SDK `ctx.workspaces.list()`，0.3.16）：选择器按「我的工作区」分组（工作区名 + 解析出的 owner/repo，副标题弱化），worktree 子行去重、非 github.com 远端计入「已忽略」，完整 GitHub 仓库列表折叠为第二组按需加载；浮层改为跟随锚点重定位、滚动不再关闭（弹层内滚动不重定位）；工具条控件对齐宿主尺度（32px / xs 26px）并补齐 `focus-visible` / `active` / `prefers-reduced-motion` 与图标按钮 `aria-label`；刷新接入 §4.1 转圈→对号；§7 登记两个入口 |
 | v0.73 | 2026-10-05 | 复制到剪贴板支持非安全上下文（局域网 HTTP）降级：提供 copyText 与 polyfill，自动回退到 execCommand，避免 navigator.clipboard 为 undefined 导致应用崩溃；WebAuthCard 补齐 Copy → Check 反馈；§4.2 补充规则 |
 | v0.72 | 2026-10-05 | 内网访问支持自启开关、IP/网卡下拉切换与固定端口/Token表单：启动后根据可用 IP 列表（Windows 通过 `GetAdaptersAddresses` 枚举虚拟隧道与物理网卡，优先置顶 Tailscale CGNAT IP 与虚拟网卡，兼顾局域网与本地回环；仅凭 100.64.0.0/10 网段命中但未匹配 Tailscale 网卡名时标为 CGNAT）下拉选择，自动联动变更访问地址、复制内容与二维码；增加「随应用自动开启」滑动开关；增加固定端口设置（留空或 0 为自动分配随机端口，/重置/占用友好提示）与持久化 Token 配置（自填 Token 少于 16 位拒绝保存并提示，可重新生成，运行中修改提示一键重启）；§3 补充规则 |
