@@ -147,9 +147,22 @@ describe("AgentLimitsCard", () => {
     expect(input).not.toBeNull();
     expect(toggle).not.toBeNull();
     expect(input?.disabled).toBe(true);
-    expect(toggle?.disabled).toBe(true);
+    expect(toggle?.getAttribute("aria-disabled")).toBe("true");
     expect(input?.value).toBe("80");
-    expect(toggle?.getAttribute("title")).toContain("新建或打开一个会话");
+    // The hint rides the app tooltip (react-aria), never a native title: inside
+    // the context popover a native title is painted under the overlay layer.
+    expect(toggle?.getAttribute("title")).toBeNull();
+    expect(toggle?.getAttribute("aria-label")).toBe("开启自动压缩");
+
+    // Keyboard focus opens the themed tooltip with the no-session hint.
+    await act(async () => {
+      toggle!.focus();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 50);
+      await promise;
+    });
+    const tip = document.querySelector("[role='tooltip']");
+    expect(tip?.textContent ?? "").toContain("新建或打开一个会话");
   });
 
   it("renders a one-million-token window as 1M", async () => {
@@ -163,11 +176,15 @@ describe("AgentLimitsCard", () => {
 
     await renderCard({ onCompact, canCompact: false });
     let compactBtn = container.querySelector<HTMLButtonElement>("[data-testid='compact-context-btn']");
-    expect(compactBtn?.disabled).toBe(true);
+    expect(compactBtn?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      compactBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onCompact).not.toHaveBeenCalled();
 
     await renderCard({ onCompact, canCompact: true, compacting: true });
     compactBtn = container.querySelector<HTMLButtonElement>("[data-testid='compact-context-btn']");
-    expect(compactBtn?.disabled).toBe(true);
+    expect(compactBtn?.getAttribute("aria-disabled")).toBe("true");
     expect(compactBtn?.textContent).toContain("压缩中…");
   });
 
@@ -176,7 +193,7 @@ describe("AgentLimitsCard", () => {
 
     await renderCard({ onRefresh, refreshing: true });
     const refreshBtn = container.querySelector<HTMLButtonElement>("[data-testid='refresh-usage-btn']");
-    expect(refreshBtn?.disabled).toBe(true);
+    expect(refreshBtn?.getAttribute("aria-disabled")).toBe("true");
     expect(refreshBtn?.textContent).toContain("刷新中…");
     expect(refreshBtn?.querySelector(".animate-refresh-spin")).not.toBeNull();
   });

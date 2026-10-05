@@ -7,7 +7,9 @@ import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
 import Minimize2 from "lucide-react/dist/esm/icons/minimize-2";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw";
 import Zap from "lucide-react/dist/esm/icons/zap";
+import { Button as AriaButton } from "react-aria-components";
 import { Collapsible } from "@/components/application/collapsible/collapsible";
+import { Tooltip, TooltipContent } from "@/components/base/tooltip/tooltip";
 import {
   ActionFeedbackIcon,
   useRunningFeedback,
@@ -324,35 +326,41 @@ function CardActionButton({
   feedback?: ActionFeedback;
 }) {
   return (
-    <button
-      type="button"
-      data-testid={testId}
-      disabled={disabled}
-      onClick={onClick}
-      title={tooltip}
-      className={cx(
-        "inline-flex h-6 items-center gap-1.5 rounded-md border border-border-button-default bg-background-primary-default px-2 text-caption-1-medium transition-colors duration-150",
-        disabled
-          ? "cursor-not-allowed opacity-50 text-text-tertiary"
-          : "cursor-pointer text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary active:bg-background-tertiary-default",
-      )}
-    >
-      {feedback ? (
-        <ActionFeedbackIcon
-          icon={Icon}
-          feedback={feedback}
-          spin
-          iconClassName="size-3"
-          runningClassName="text-blue-500"
-        />
-      ) : (
-        <Icon
-          className={cx("size-3 shrink-0", busy && `${busyIconClassName} text-blue-500`)}
-          aria-hidden
-        />
-      )}
-      <span>{busy ? busyLabel : label}</span>
-    </button>
+    <Tooltip>
+      <AriaButton
+        data-testid={testId}
+        // aria-disabled keeps the button hoverable/focusable so its tooltip
+        // still explains what it does while it is unavailable.
+        aria-disabled={disabled || undefined}
+        onPress={() => {
+          if (disabled) return;
+          onClick();
+        }}
+        className={cx(
+          "inline-flex h-6 items-center gap-1.5 rounded-md border border-border-button-default bg-background-primary-default px-2 text-caption-1-medium transition-colors duration-150",
+          disabled
+            ? "cursor-not-allowed opacity-50 text-text-tertiary"
+            : "cursor-pointer text-text-secondary hover:bg-background-secondary-hover hover:text-text-primary active:bg-background-tertiary-default",
+        )}
+      >
+        {feedback ? (
+          <ActionFeedbackIcon
+            icon={Icon}
+            feedback={feedback}
+            spin
+            iconClassName="size-3"
+            runningClassName="text-blue-500"
+          />
+        ) : (
+          <Icon
+            className={cx("size-3 shrink-0", busy && `${busyIconClassName} text-blue-500`)}
+            aria-hidden
+          />
+        )}
+        <span>{busy ? busyLabel : label}</span>
+      </AriaButton>
+      {tooltip && <TooltipContent>{tooltip}</TooltipContent>}
+    </Tooltip>
   );
 }
 
@@ -384,7 +392,7 @@ function AutoCompactControls({
   const hint = disabled ? text.autoCompactNoSession ?? toggleLabel : toggleLabel;
 
   return (
-    <div className="mr-auto flex items-center gap-1.5" title={hint}>
+    <div className="mr-auto flex items-center gap-1.5">
       <div
         className={cx(
           "flex h-6 w-11 items-center rounded-md border border-border-button-default bg-background-primary-default px-1.5",
@@ -413,25 +421,33 @@ function AutoCompactControls({
         />
         <span className="pl-0.5 text-caption-1-medium text-text-tertiary">%</span>
       </div>
-      <button
-        type="button"
-        data-testid="auto-compact-toggle"
-        disabled={disabled}
-        aria-label={toggleLabel}
-        aria-pressed={settings.enabled}
-        title={hint}
-        onClick={() => settings.onEnabledChange(!settings.enabled)}
-        className={cx(
-          "flex size-6 items-center justify-center rounded-md border border-border-button-default outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring",
-          disabled && "cursor-not-allowed opacity-50",
-          !disabled && "cursor-pointer",
-          settings.enabled
-            ? "bg-background-tertiary-default text-text-primary"
-            : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
-        )}
-      >
-        <Zap className="size-3.5" fill={settings.enabled ? "currentColor" : "none"} aria-hidden />
-      </button>
+      <Tooltip>
+        <AriaButton
+          data-testid="auto-compact-toggle"
+          // aria-disabled, not isDisabled: a natively disabled button receives
+          // neither hover nor focus, so its tooltip could never be read — and
+          // this hint is exactly what explains the inert state. The press is
+          // guarded instead.
+          aria-disabled={disabled || undefined}
+          aria-label={toggleLabel}
+          aria-pressed={settings.enabled}
+          onPress={() => {
+            if (disabled) return;
+            settings.onEnabledChange(!settings.enabled);
+          }}
+          className={cx(
+            "flex size-6 items-center justify-center rounded-md border border-border-button-default outline-none transition-colors focus-visible:ring-2 focus-visible:ring-border-focus-ring",
+            disabled && "cursor-not-allowed opacity-50",
+            !disabled && "cursor-pointer",
+            settings.enabled
+              ? "bg-background-tertiary-default text-text-primary"
+              : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
+          )}
+        >
+          <Zap className="size-3.5" fill={settings.enabled ? "currentColor" : "none"} aria-hidden />
+        </AriaButton>
+        <TooltipContent>{hint}</TooltipContent>
+      </Tooltip>
     </div>
   );
 }
