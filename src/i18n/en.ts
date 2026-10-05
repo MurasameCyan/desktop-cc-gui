@@ -370,6 +370,8 @@ export const en: Messages = {
     autoCompactEnable: "Enable auto-compact",
     autoCompactDisable: "Disable auto-compact",
     autoCompactNoSession: "Open or start a chat to configure; the threshold is saved per session",
+    autoCompactResume:
+      "Auto-compaction finished. Continue the previous task; if nothing remains, just say so briefly.",
     refreshing: "Refreshing…",
     showMoreSessions: "Load more",
     showFewerSessions: "Show fewer",

@@ -131,7 +131,11 @@ export interface AutoCompactDecisionInput {
   usagePct: number | undefined;
   streaming: boolean;
   compacting: boolean;
-  latched: boolean;
+  /** Usage pct of this session's last threshold-triggered attempt; null =
+   *  nothing tried (or re-armed). Only context that grew past that level may
+   *  fire again, so a compaction that failed (or one that left usage above
+   *  the threshold) cannot spin — and does not disarm the session either. */
+  attemptedAtPct: number | null;
 }
 
 export function shouldAutoCompact({
@@ -140,14 +144,68 @@ export function shouldAutoCompact({
   usagePct,
   streaming,
   compacting,
-  latched,
+  attemptedAtPct,
 }: AutoCompactDecisionInput): boolean {
   return Boolean(
     enabled &&
       !streaming &&
       !compacting &&
-      !latched &&
       usagePct !== undefined &&
-      usagePct >= threshold,
+      usagePct >= threshold &&
+      (attemptedAtPct === null || usagePct > attemptedAtPct),
+  );
+}
+
+/** Message slice that can park the session on a user decision. Structural on
+ *  purpose: store messages satisfy it as-is, tests pass the bare fields. */
+export interface ParkedInputMessage {
+  question?: { status?: string } | null;
+  grant?: { status?: string } | null;
+  planReview?: { status?: string } | null;
+}
+
+/** True while the session waits on the user — the footer swaps the composer
+ *  for a dock then, and sending anything would race the dialog the CLI is
+ *  parked on. Answered/decided rows keep their history but stop matching. */
+export function hasPendingUserInput(
+  messages: readonly ParkedInputMessage[],
+): boolean {
+  return messages.some(
+    (message) =>
+      message.question?.status === "pending" ||
+      message.grant?.status === "pending" ||
+      message.planReview?.status === "awaiting_review" ||
+      message.planReview?.status === "submitting",
+  );
+}
+
+export interface AutoCompactResumeInput {
+  trigger: "manual" | "threshold";
+  /** Session error after the attempt. Every send clears it up front, so a
+   *  non-null value means this attempt raised one — omp maps its compact RPC
+   *  failure to 「压缩失败」 — and the task must not resume on top of it. */
+  errorAfter: string | null;
+  interrupted: boolean;
+  streaming: boolean;
+  queued: number;
+  parked: boolean;
+  sessionId: string | null;
+}
+
+/** After a threshold compaction the task picks itself back up — the point of
+ *  auto-compact is not having to type 「继续」 by hand. A manual click stays
+ *  the user's own move, and stop / queued messages / parked dialogs all mean
+ *  someone else owns what happens next. */
+export function shouldResumeAfterAutoCompact(
+  input: AutoCompactResumeInput,
+): boolean {
+  return (
+    input.trigger === "threshold" &&
+    input.sessionId !== null &&
+    input.errorAfter === null &&
+    !input.interrupted &&
+    !input.streaming &&
+    input.queued === 0 &&
+    !input.parked
   );
 }

@@ -23,9 +23,11 @@ import { COMPOSER_DRAFT_TOPIC, pluginBus } from "@/features/plugins/runtime/even
 import { USAGE_PART_LABEL_KEYS, usageBreakdown } from "./usage-breakdown";
 import { useComposerFileDrop } from "./use-composer-file-drop";
 import {
+  hasPendingUserInput,
   setAutoCompactEnabled,
   setAutoCompactThreshold,
   shouldAutoCompact,
+  shouldResumeAfterAutoCompact,
   useAutoCompactSettings,
 } from "../auto-compact-context";
 
@@ -244,7 +246,51 @@ function FooterStatusBar({
     ? sessionKey(active.engine, active.sessionId, active.workspacePath)
     : "";
   const autoCompact = useAutoCompactSettings(sessionKeyValue);
-  const autoCompactLatch = useRef({ sessionKey: "", latched: false });
+  const autoCompactLatch = useRef<{
+    sessionKey: string;
+    attemptedAtPct: number | null;
+  }>({ sessionKey: "", attemptedAtPct: null });
+
+  /** Hand the task back after a threshold compaction: the point of
+   *  auto-compact is not having to type 「继续」 by hand. Manual clicks stay
+   *  the user's own move, and a failed compaction / pressed stop / queued
+   *  message / parked dialog all mean someone else owns what happens next
+   *  (see shouldResumeAfterAutoCompact). */
+  const resumeAfterAutoCompact = useCallback(
+    (key: string) => {
+      const state = useChatStore.getState();
+      const session = state.bySession[key];
+      const tab =
+        state.openTabs.find(
+          (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
+        ) ?? state.active;
+      const shouldResume = shouldResumeAfterAutoCompact({
+        trigger: "threshold",
+        // A send clears the error up front, so anything set here came from
+        // this very compaction attempt.
+        errorAfter: session?.error ?? null,
+        interrupted: session?.interrupted === true,
+        streaming: session?.streaming === true,
+        queued: session?.queue.length ?? 0,
+        parked: hasPendingUserInput(session?.messages ?? []),
+        sessionId: tab?.sessionId ?? null,
+      });
+      if (!shouldResume || !tab) return;
+      void state
+        .send(
+          t("chat.autoCompactResume"),
+          [],
+          {},
+          {
+            engine: tab.engine,
+            sessionId: tab.sessionId,
+            workspacePath: tab.workspacePath,
+          },
+        )
+        .catch(() => {});
+    },
+    [t],
+  );
 
   const compactSession = useCallback(
     async (trigger: "manual" | "threshold") => {
@@ -252,28 +298,35 @@ function FooterStatusBar({
       setCompacting(true);
       try {
         await compactContext(sessionKeyValue, { trigger });
+        if (trigger === "threshold") {
+          resumeAfterAutoCompact(sessionKeyValue);
+        }
       } finally {
         setCompacting(false);
       }
     },
-    [compactContext, compacting, sessionKeyValue, streaming],
+    [compactContext, compacting, resumeAfterAutoCompact, sessionKeyValue, streaming],
   );
 
   const handleCompact = useCallback(() => {
     if (usage?.pct !== undefined && usage.pct >= autoCompact.threshold) {
-      autoCompactLatch.current = { sessionKey: sessionKeyValue, latched: true };
+      autoCompactLatch.current = {
+        sessionKey: sessionKeyValue,
+        attemptedAtPct: usage.pct,
+      };
     }
     void compactSession("manual").catch(() => {});
   }, [autoCompact.threshold, compactSession, sessionKeyValue, usage?.pct]);
 
   useEffect(() => {
     if (autoCompactLatch.current.sessionKey !== sessionKeyValue) {
-      autoCompactLatch.current = { sessionKey: sessionKeyValue, latched: false };
+      autoCompactLatch.current = { sessionKey: sessionKeyValue, attemptedAtPct: null };
     }
 
     const usagePct = usage?.pct;
     if (usagePct !== undefined && usagePct < autoCompact.threshold) {
-      autoCompactLatch.current.latched = false;
+      // Back under the threshold: the next upward crossing is a new event.
+      autoCompactLatch.current.attemptedAtPct = null;
     }
     if (
       !sessionKeyValue ||
@@ -283,13 +336,16 @@ function FooterStatusBar({
         usagePct,
         streaming,
         compacting,
-        latched: autoCompactLatch.current.latched,
+        attemptedAtPct: autoCompactLatch.current.attemptedAtPct,
       })
     ) {
       return;
     }
 
-    autoCompactLatch.current.latched = true;
+    // Arm at the level just tried: a retry needs the context to grow past it,
+    // so a failed compaction (or one that left usage above the threshold)
+    // neither spins nor disarms the session for good.
+    autoCompactLatch.current.attemptedAtPct = usagePct ?? null;
     void compactSession("threshold").catch(() => {});
   }, [
     autoCompact.enabled,
