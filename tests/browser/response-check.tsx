@@ -53,6 +53,14 @@ const SCENARIOS: Record<string, Scenario> = {
     ],
     expected: { verdict: "mismatch", visible: true },
   },
+  downgraded: {
+    label: "档位降级",
+    events: [
+      { kind: "launch", data: { model: "claude-opus-5-5", effort: "xhigh" } },
+      { kind: "served", data: { model: "claude-opus-5-5", effort: "high" } },
+    ],
+    expected: { verdict: "mismatch", visible: true },
+  },
   variant: {
     label: "版本差异",
     events: [
