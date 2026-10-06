@@ -247,8 +247,13 @@ export interface ChatStore {
     sessionId: string,
     title: string,
   ) => Promise<void>;
-  /** Send /compact to compress conversation context. */
-  compactContext: (key?: string) => Promise<void>;
+  /** Send /compact to compress conversation context. `trigger` records who
+   *  asked: the composer action/command ("manual") or the per-session
+   *  auto-compaction threshold ("threshold"). */
+  compactContext: (
+    key?: string,
+    options?: { trigger?: "manual" | "threshold" },
+  ) => Promise<void>;
   /** Re-fetch the latest token usage from session history for the current session. */
   refreshSessionUsage: (key?: string) => Promise<void>;
 }

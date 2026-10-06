@@ -10,6 +10,7 @@ import type { TimelineRow } from "./timeline-rows";
  *  步骤合成一段，命中后由搜索导航展开该行。 */
 export function rowSearchText(row: TimelineRow): string {
   if (row.kind === "msg") return row.message.text;
+  if (row.kind === "curtain") return "";
   return row.items.map((item) => item.text).join("\n");
 }
 

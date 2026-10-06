@@ -460,7 +460,11 @@ describe("compactContext and refreshSessionUsage", () => {
       subagentHistory: [],
     });
 
-    const compactPromise = useChatStore.getState().compactContext(key);
+    const compactPromise = useChatStore.getState().compactContext(key, { trigger: "threshold" });
+    expect(useChatStore.getState().bySession[key]?.compaction).toMatchObject({
+      automatic: false,
+      trigger: "threshold",
+    });
 
     // Verify /compact message was sent
     expect(ipc.sendMessage).toHaveBeenCalledWith(
@@ -483,6 +487,7 @@ describe("compactContext and refreshSessionUsage", () => {
 
     expect(ipc.loadSessionPage).toHaveBeenCalledWith("claude", "sess-compact", 100);
     expect(useChatStore.getState().bySession[key]?.usage).toEqual(newUsage);
+    expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
   });
 });
 

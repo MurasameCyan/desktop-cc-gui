@@ -8,6 +8,7 @@ import {
 } from "./plan-review";
 import { errorText } from "@/lib/errors";
 import { pendingWorkspaceOfKey, dedupeTabs, persistTabs, sessionKey } from "./persistence";
+import { migrateAutoCompactSettings } from "../auto-compact-context";
 import {
   EMPTY_SESSION,
   appendToolMessages,
@@ -488,6 +489,12 @@ function onSession(
   // The pinned agent followed the draft key; move it onto the native id so
   // the next send in this tab injects it again.
   migrateSelectedBot(workspacePath, nativeId);
+  // The auto-compaction threshold/toggle follows the draft too: a value set on
+  // a brand-new chat must survive the adoption of the native session id.
+  migrateAutoCompactSettings(
+    sessionKey(event.engine, null, workspacePath),
+    newKey,
+  );
   // Sidebar row + tab title pick the new session up immediately instead of
   // waiting for the post-turn rescan.
   const firstUser = (deps.get().bySession[newKey]?.messages ?? []).find(

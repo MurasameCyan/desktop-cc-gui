@@ -78,6 +78,9 @@ const TimelineRowView = memo(function TimelineRowView({
       </PluginBoundary>
     );
   }
+  // The compaction command renders in place, not as a bubble: one grey line
+  // that stays after the compaction ends.
+  if (row.kind === "curtain") return <CompactionCurtain />;
   // Every process run — thinking, tools, or both — folds into the same
   // collapsed summary line ("思考 N 次 工具调用 M 次 >"); expanding shows
   // the per-step details.
@@ -102,6 +105,21 @@ const TimelineRowView = memo(function TimelineRowView({
     />
   );
 });
+
+/** The one trace host automatic compaction leaves in the transcript: a grey,
+ *  right-aligned line where the /compact bubble used to be. It belongs to the
+ *  row, so it survives the compaction ending; the engine's own mid-turn
+ *  compaction has no row and mounts this component as the tail instead. */
+export function CompactionCurtain() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex justify-end py-2 pr-1" data-testid="compaction-curtain">
+      <span className="text-caption-1-medium text-text-tertiary">
+        {`< ${t("chat.compactingContext")} >`}
+      </span>
+    </div>
+  );
+}
 
 const LazyMarkdown = lazy(() => import("./Markdown"));
 
@@ -538,7 +556,10 @@ export const MessageTimeline = memo(function MessageTimeline({
   // settles: while streaming, mid-turn segments (kimi multi-message replies)
   // are not the final word.
   const turnLive = streaming;
-  const count = rows.length + (streaming ? 1 : 0);
+  // The tail item is the turn-status indicator (or the grey compaction line).
+  // A compaction keeps it mounted even between sends, so the line does not
+  // blink out in the gap between the compact turn and the resume turn.
+  const count = rows.length + (streaming || session.compaction ? 1 : 0);
 
   const virtualizer = useVirtualizer({
     count,
@@ -686,27 +707,34 @@ export const MessageTimeline = memo(function MessageTimeline({
                 className="py-2"
               >
                 {isTail ? (
-                  <AgentThinking
-                    variant="wave"
-                    label={session.compaction ? t("chat.compactingContext") : t("chat.thinking")}
-                    className="py-2"
-                    startedAt={session.turnStartedAt ?? undefined}
-                    durationFormatter={(d) => t("chat.metaDuration", { duration: d })}
-                    model={activeModelFormatted}
-                    effort={activeEffortFormatted}
-                    usage={liveUsage}
-                    retry={
-                      session.retry
-                        ? session.retry.max > 0
-                          ? t("chat.retrying", {
-                              attempt: session.retry.attempt,
-                              max: session.retry.max,
-                            })
-                          : t("chat.retryingNoMax", { attempt: session.retry.attempt })
-                        : null
-                    }
-                    retryDetail={session.retry?.message || null}
-                  />
+                  // A host-sent compaction already shows in place (its /compact
+                  // row became the grey line), so the tail only carries the
+                  // engine's own mid-turn compaction — a flag with no row.
+                  session.compaction?.automatic ? (
+                    <CompactionCurtain />
+                  ) : session.compaction ? null : (
+                    <AgentThinking
+                      variant="wave"
+                      label={t("chat.thinking")}
+                      className="py-2"
+                      startedAt={session.turnStartedAt ?? undefined}
+                      durationFormatter={(d) => t("chat.metaDuration", { duration: d })}
+                      model={activeModelFormatted}
+                      effort={activeEffortFormatted}
+                      usage={liveUsage}
+                      retry={
+                        session.retry
+                          ? session.retry.max > 0
+                            ? t("chat.retrying", {
+                                attempt: session.retry.attempt,
+                                max: session.retry.max,
+                              })
+                            : t("chat.retryingNoMax", { attempt: session.retry.attempt })
+                          : null
+                      }
+                      retryDetail={session.retry?.message || null}
+                    />
+                  )
                 ) : (
                   <TimelineRowView
                     row={rows[item.index]}

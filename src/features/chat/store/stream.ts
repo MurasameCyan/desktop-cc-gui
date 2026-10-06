@@ -52,10 +52,15 @@ export interface SessionState {
    * not a failure: it clears on the next content event or when the turn
    * settles. `null` when nothing is being retried. */
   retry: { attempt: number; max: number; message: string } | null;
-  /** Context compaction in progress: set by the composer compact action
-   *  (manual) or by the engine's compaction events (automatic, omp rpc-ui).
-   *  Cleared when the compact turn settles or the engine reports the end. */
-  compaction: { automatic: boolean; startedAt: number } | null;
+  /** Context compaction in progress. `automatic` means the engine started it
+   *  mid-turn (omp rpc-ui `auto_compaction_*`) and the engine's own events
+   *  clear it; a compaction we send ourselves keeps `automatic: false` and is
+   *  cleared when the compact turn settles. `trigger` records who asked for
+   *  ours: the composer action ("manual") or the per-session usage threshold
+   *  ("threshold"); it only labels the indicator and never gates cleanup. */
+  compaction:
+    | { automatic: boolean; startedAt: number; trigger?: "manual" | "threshold" }
+    | null;
   /** Messages typed while a turn streams; sent FIFO when the turn ends. */
   queue: QueuedMessage[];
   /** Set by interrupt(): the next "done" settles the turn but must not

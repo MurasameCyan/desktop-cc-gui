@@ -132,6 +132,14 @@
 
 - **内网访问自启、访问 IP 切换与端口/Token配置**：设置「远程访问 / 内网访问」（`WebAccessSection.tsx`）提供「随应用自动开启」滑动开关（`Switch`），开启时客户端启动即自动运行内网 Web 服务（后端持久化于 `AppSettings.web_access_auto_start`，前端启动时带兜底探测与自启保障）。运行态下提供「访问 IP / 网卡」下拉框（`Select`），通过平台原生接口（Windows `GetAdaptersAddresses` / Unix `getifaddrs`）动态枚举本机网络接口 IPv4 列表，优先置顶 Tailscale 虚拟网卡与 CGNAT IP（100.64.0.0/10），并列出物理网卡及 Localhost 回环地址；切换 IP 联动实时更新访问地址、复制内容与二维码，并在本地持久化所选偏好（`WEB_ACCESS_SELECTED_IP_KEY`）。支持自定义监听端口（`web_access_port`，留空为自动分配随机端口）与持久化鉴权 Token（`web_access_token`，支持一键「重新生成」）；服务运行中修改配置在卡片内展示重启提示与快捷「立即重启服务」动作，绑定失败时在界面显式展示端口冲突原因。回归：`WebAccessSection.test.tsx`、`web::tests::*`。
 
+### 3.1 自动压缩：阈值控件与幕布行
+
+- **压缩过程在时间线上只有一条灰线（幕布行），不是气泡**：宿主发出的 `/compact` 用户行（手动按钮或跨过阈值的自动压缩，`ConversationFooter.tsx` 的 `compactSession`）原位渲染为一行右对齐的灰色「‹ 正在压缩上下文 ›」（`MessageTimeline.tsx` 的 `CompactionCurtain`；`internal-rows.ts` 的 `isCompactCommandRow` 把该用户行转成 `curtain` 行）。它属于那条消息，压缩结束后继续留在历史里——用户要能回看「这里压缩过」；原先是用户气泡，已按同一提交移除。阈值触发压缩完成后 footer 自动补发的续接提示（`chat.autoCompactResume`）两语都按 `isResumeNudgeRow` 过滤，从不渲染，模型的回复才是可见部分。
+- **宿主压缩原位常驻，引擎回合中压缩挂尾部**：宿主自己发的压缩（`session.compaction.automatic === false`）已经有原位幕布行，时间线尾部不再重复画；引擎回合中自己触发的压缩（`automatic === true`，只有 `compaction` flag、没有消息行）把幕布行挂在时间线尾部（`MessageTimeline.tsx` 的 tail 槽位），flag 被引擎事件清除即卸载。
+- **压缩期间尾部指示器让位，但槽位保留**：`session.compaction` 非空时 tail 槽位不再渲染 `AgentThinking` 波浪行（原位或尾部的幕布已经在表达进行中），`null` 占位而不是把槽位整个拿掉；`count = rows.length + (streaming || session.compaction ? 1 : 0)` 保证压缩轮与续接轮之间的空档幕布不闪断、结束后也不留悬空占位。
+- **阈值控件按会话保存，无会话时可见但不可操作**：阈值数字输入（1–100 整数，`normalizeAutoCompactThreshold` 统一夹取与取整）与闪电开关在状态栏上下文弹层的用量卡底部（`AutoCompactControls`，`agent-limits-card.tsx`），存储键 `ccgui-next.chat.autoCompactBySession`（`auto-compact-context.ts`，默认阈值 `DEFAULT_AUTO_COMPACT_THRESHOLD = 80`），按 `sessionKey` 读写，换会话即换设置、新建待发会话的设置在拿到真实 sessionId 时随会话迁移。没有会话时两个控件保持可见（首启就能看到入口、卡片行高不跳）但禁用：`cursor-not-allowed opacity-50`，输入框走原生 `disabled`；开关**刻意不用原生 `disabled`**——原生禁用收不到 hover/focus，解释禁用原因的 tooltip 就永远读不到，所以用 `aria-disabled` + press 守卫（`agent-limits-card.tsx` 注释），tooltip 文案换成 `chat.autoCompactNoSession`（「新建或打开一个会话后可设置；阈值按会话保存」），可用态才显示「开启 / 关闭自动压缩」。
+- **续接只回到原来那个会话标签页**：自动压缩完成后由 footer 发一次 `chat.autoCompactResume` 把任务接回去，条件收在 `shouldResumeAfterAutoCompact`：必须是阈值触发、同一个会话的标签页仍在 `openTabs` 里、压缩没有报错、用户没有按停止、没有排队消息、会话没有停在问答 / 审批 dock。压缩期间用户关掉了标签页就什么都不做，绝不回落到当前活动会话（`ConversationFooter.tsx` 的 `resumeAfterAutoCompact`，与 `refreshSessionUsage` 的「closed tab 不得回退到 active」是同一条约束）——那条续接指令是一条真实用户消息，落到别的会话会让它真的开始续作。
+
 ## 4. 动作反馈
 
 - **并发会话运行状态点**：侧栏、页签和收起的 worktree 聚合状态复用 `sidebar-thread-status`。运行中保持 0.92s 呼吸节奏，只动画 `transform` / `opacity`，光晕阴影保持静态，避免并发会话逐帧重绘阴影。退避重试与系统减少动态效果下保持静态蓝点，未读完成态保持静态绿点。浏览器回归：`tests/browser/concurrent-status.html`（1 / 6 / 12 会话，侧栏 + 页签，正常 / 重试 / 完成、亮暗主题和减少动态效果）。
@@ -266,6 +274,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.76 | 2026-10-06 | 自动压缩的用户可见契约（§3.1）：宿主 `/compact` 在时间线原位留下常驻幕布行、引擎回合中压缩挂尾部；压缩期间尾部 `AgentThinking` 隐藏但槽位保留；阈值输入与闪电开关按会话保存，无会话时可见但禁用（`aria-disabled` + `chat.autoCompactNoSession` tooltip，不用原生 `disabled`）；续接只发回原会话标签页，压缩期间关掉标签页不续接也不落到活动会话 |
 | v0.75 | 2026-10-05 | 插件中心「已安装」页头新增来源筛选下拉（全部 / 最近安装（3 天内，按安装时间倒序）/ 市场安装 / 本地安装），按安装记录的 `source` 与 Unix 秒 `installedAt` 判定，重装 / 更新不刷新首次安装时间；筛到空可一键清除筛选；§3 补充规则 |
 | v0.74 | 2026-10-05 | git-tasks 插件的仓库来源改为侧栏工作区（新增 SDK `ctx.workspaces.list()`，0.3.16）：选择器按「我的工作区」分组（工作区名 + 解析出的 owner/repo，副标题弱化），worktree 子行去重、非 github.com 远端计入「已忽略」，完整 GitHub 仓库列表折叠为第二组按需加载；浮层改为跟随锚点重定位、滚动不再关闭（弹层内滚动不重定位）；工具条控件对齐宿主尺度（32px / xs 26px）并补齐 `focus-visible` / `active` / `prefers-reduced-motion` 与图标按钮 `aria-label`；刷新接入 §4.1 转圈→对号；§7 登记两个入口 |
 | v0.73 | 2026-10-05 | 复制到剪贴板支持非安全上下文（局域网 HTTP）降级：提供 copyText 与 polyfill，自动回退到 execCommand，避免 navigator.clipboard 为 undefined 导致应用崩溃；WebAuthCard 补齐 Copy → Check 反馈；§4.2 补充规则 |
