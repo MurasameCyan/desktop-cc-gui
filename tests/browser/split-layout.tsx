@@ -20,6 +20,8 @@ import {
   SplitDragProvider,
   useDragSource,
 } from "../../src/features/chat/split/drag";
+import { SessionTabStrip } from "../../src/features/chat/components/SessionTabStrip";
+import type { SessionTabItem } from "../../src/features/chat/components/SessionTab";
 import { SplitLayout } from "../../src/features/chat/split/SplitLayout";
 import { SPLIT_LAYOUT_KEY, useSplitStore } from "../../src/features/chat/split/store";
 import { listPanes } from "../../src/features/chat/split/tree";
@@ -130,11 +132,16 @@ function DragRow({ sessionId, session }: { sessionId: string; session: typeof SE
   );
 }
 
+const TABS: SessionTabItem[] = [
+  { key: "claude/aaa-111", label: "会话 A", streaming: false, session: SESSION_A },
+  { key: "claude/bbb-222", label: "会话 B", streaming: false, session: SESSION_B },
+];
+
 function Harness() {
   const [active] = useState(SESSION_A);
   return (
     <SplitDragProvider>
-      <div style={{ display: "flex", gap: 8, width: 980, height: 560 }}>
+      <div style={{ display: "flex", gap: 8, width: 980, height: 620 }}>
         <div
           style={{ width: 200, display: "flex", flexDirection: "column", gap: 6 }}
           data-fixture-sidebar=""
@@ -142,25 +149,35 @@ function Harness() {
           <DragRow sessionId="aaa-111" session={SESSION_A} />
           <DragRow sessionId="bbb-222" session={SESSION_B} />
         </div>
-        <div
-          data-fixture-center=""
-          style={{
-            position: "relative",
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            border: "1px solid #ddd",
-            borderRadius: 8,
-            background: "#fff",
-          }}
-        >
-          <SplitLayout
-            active={active}
-            engines={[]}
-            workspaces={[] as Workspace[]}
-            startNewChat={() => {}}
+        <div style={{ display: "flex", flex: 1, minWidth: 0, flexDirection: "column" }}>
+          <SessionTabStrip
+            tabs={TABS}
+            activeKey="claude/aaa-111"
+            onSelect={() => {}}
+            onClose={() => {}}
+            closeLabel="关闭"
+            onReorder={() => {}}
           />
+          <div
+            data-fixture-center=""
+            style={{
+              position: "relative",
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              background: "#fff",
+            }}
+          >
+            <SplitLayout
+              active={active}
+              engines={[]}
+              workspaces={[] as Workspace[]}
+              startNewChat={() => {}}
+            />
+          </div>
         </div>
       </div>
     </SplitDragProvider>
@@ -379,6 +396,32 @@ async function main() {
   await sleep(120);
   check(panes().length === 1 && paneIds()[0] === "solo", "closing down to one pane returns to solo");
   check(localStorage.getItem(SPLIT_LAYOUT_KEY) === null, "solo view clears the persisted layout");
+
+  // 8. 从页签条把页签向下拖进对话区 → 同样分屏（横向拖动仍是排序）。
+  // 拖拽处理器挂在页签的 [role="tab"] 内层（外层只有 data-tab-key 供命中判定）。
+  const tabB = document.querySelector<HTMLElement>(
+    '[data-tab-key="claude/bbb-222"] [role="tab"]',
+  );
+  const stripBox = document
+    .querySelector<HTMLElement>("[data-tab-strip]")
+    ?.getBoundingClientRect();
+  if (!tabB || !stripBox) throw new Error("tab strip missing");
+  const tabCenter = centerOf(tabB);
+  pointer(tabB, "pointerdown", tabCenter.x, tabCenter.y);
+  pointer(window, "pointermove", tabCenter.x, stripBox.bottom + 60);
+  await sleep(60);
+  pointer(window, "pointermove", centerBox.right - 20, centerBox.top + centerBox.height / 2);
+  await sleep(60);
+  check(
+    document.querySelector("[data-split-drop-hint]") !== null,
+    "dragging a tab shows the pane drop hint",
+  );
+  pointer(window, "pointerup", centerBox.right - 20, centerBox.top + centerBox.height / 2);
+  await sleep(120);
+  check(
+    JSON.stringify(sessionIds()) === JSON.stringify(["aaa-111", "bbb-222"]),
+    `dragging a tab below the strip splits the conversation area (got ${JSON.stringify(sessionIds())})`,
+  );
 
   const result = document.getElementById("result");
   if (result) {

@@ -25,6 +25,15 @@ export type SplitDragPayload =
   | { kind: "session"; session: ActiveSession; label: string }
   | { kind: "pane"; paneId: string; label: string };
 
+/** 发起拖拽只需要这几个字段：页签条的指针拖拽是原生 PointerEvent，
+ *  行/标题栏给的是 React 合成事件，两者都满足。 */
+export interface SplitDragStartEvent {
+  button: number;
+  clientX: number;
+  clientY: number;
+  pointerType?: string;
+}
+
 export interface SplitDropTarget {
   paneId: string;
   zone: DropZone;
@@ -37,7 +46,7 @@ interface SplitDragContextValue {
   target: SplitDropTarget | null;
   /** 拖动中的载荷（提示层文案、测试断言用），未拖动时为 null。 */
   payload: SplitDragPayload | null;
-  startDrag: (payload: SplitDragPayload, event: ReactPointerEvent) => void;
+  startDrag: (payload: SplitDragPayload, event: SplitDragStartEvent) => void;
   /** 分隔条拖动中：布局过渡要关掉，否则跟手会滞后。 */
   setResizing: (resizing: boolean) => void;
   resizing: boolean;
@@ -115,7 +124,7 @@ export function SplitDragProvider({ children }: { children: ReactNode }) {
     dragging: boolean;
   } | null>(null);
 
-  const startDrag = useCallback((dragPayload: SplitDragPayload, event: ReactPointerEvent) => {
+  const startDrag = useCallback((dragPayload: SplitDragPayload, event: SplitDragStartEvent) => {
     // 只认鼠标/触控板：手指拖拽要留给侧栏滚动，触屏入口走右键菜单。
     if (event.button !== 0 || event.pointerType === "touch") return;
     pendingRef.current = {
