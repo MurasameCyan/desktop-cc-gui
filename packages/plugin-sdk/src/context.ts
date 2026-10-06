@@ -64,6 +64,80 @@ export interface PluginWorkspaceRow {
   worktree?: { branch: string; prNumber?: number };
 }
 
+export interface PluginWindowBounds {
+  /** Physical desktop coordinates; may be negative on left/top monitors. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PluginWindowSnapshot {
+  bounds: PluginWindowBounds;
+  state: "normal" | "minimized" | "maximized" | "fullscreen";
+  scaleFactor: number;
+}
+
+export interface PluginWechatWindow {
+  bounds: PluginWindowBounds;
+  executable: "Weixin.exe" | "WeChat.exe";
+}
+
+export interface PluginEngineInfo {
+  id: string;
+  available: boolean;
+  enabled: boolean;
+  supportsImages: boolean;
+  supportsComputerUse: boolean;
+  supportsEffort: boolean;
+  supportsToolConstraints: boolean;
+  permissions: string[];
+}
+
+export interface PluginEngineModel {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  provider: string;
+  contextWindow?: number | null;
+}
+
+export interface PluginEngineCatalog {
+  models: PluginEngineModel[];
+  authoritative: boolean;
+  remote?: boolean;
+}
+
+export interface PluginEngineCatalogEntry {
+  engine: PluginEngineInfo;
+  catalog: PluginEngineCatalog;
+}
+
+export interface PluginModelCatalogResult {
+  engines: PluginModelCatalogEngine[];
+  errors: PluginModelCatalogError[];
+  refreshedAt: number;
+}
+export interface PluginModelCatalogEngine {
+  engine: PluginEngineInfo;
+  sources: PluginModelSource[];
+}
+export interface PluginModelSource {
+  id: string;
+  name: string;
+  kind: "cli" | "official" | "provider" | "custom" | "configured" | "builtin";
+  authoritative: boolean;
+  remote: boolean;
+  models: PluginEngineModel[];
+  refreshedAt: number;
+  detail?: string;
+}
+export interface PluginModelCatalogError {
+  engine: string;
+  sourceId?: string;
+  message: string;
+}
+
 export interface PluginContext {
   pluginId: string;
   version: string;
@@ -278,6 +352,18 @@ export interface PluginContext {
       /** true = `branch` 是已存在的本地分支（检出而非新建）。 */
       existingBranch?: boolean;
     }): Promise<{ worktreePath: string }>;
+    /** 删除本地 worktree（权限 `host:worktree`，0.3.19 起）：走宿主侧栏
+     *  的删除流程——`git worktree remove`（可选删分支）+ 注销侧栏/终端
+     *  登记。reject 的 message 形如 "<errorKind>: <detail>"（errorKind 与
+     *  创建同一套分类，另有 not_found / remove_failed）。resolve 带非致命
+     *  尾巴：`orphanDirectory`（目录没能删掉）、`branchKeptReason`
+     *  （"checked_out_elsewhere" | "unknown"；null = 分支已删或未要求删）。 */
+    remove(def: {
+      repoPath: string;
+      worktreePath: string;
+      branch?: string | null;
+      deleteBranch?: boolean;
+    }): Promise<{ orphanDirectory: boolean; branchKeptReason: string | null }>;
   };
   /** 会话打开 + 外部会话源(权限 `host:session`;selectSession 0.3.3 起,
    *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话
@@ -331,6 +417,28 @@ export interface PluginContext {
       id: string;
       list: () => Promise<ExternalSessionRow[]>;
     }): Disposer;
+  };
+  /** 主窗口访问（权限 `host:window`，0.3.19 起）。坐标与尺寸均为物理像素；
+   *  setNormalBounds 仅接受普通态窗口，并要求至少 64x64 像素落在当前任一屏幕。
+   *  sampleWechat 在 Windows 按可执行名 Weixin.exe/WeChat.exe 采样；其他平台
+   *  以 Unsupported 拒绝，找不到以 NotFound 拒绝。 */
+  window: {
+    getState(): Promise<PluginWindowSnapshot>;
+    setNormalBounds(bounds: PluginWindowBounds): Promise<PluginWindowSnapshot>;
+    sampleWechat(): Promise<PluginWechatWindow>;
+  };
+  /** 宿主模型目录（权限 `host:models`，0.3.19 起）。结果来自宿主权威
+   *  list_engines/list_engine_models，不包含 API key、token 或完整 provider 配置。
+   *  workspace 可选；远程工作区由拥有 CLI 的远程宿主/WSL 侧探测。 */
+  models: {
+    listEngines(): Promise<PluginEngineInfo[]>;
+    listEngineModels(engine: string, workspace?: string): Promise<PluginEngineCatalog>;
+    /** Aggregated safe catalog. Provider endpoints are contacted only when
+     *  refreshProviders is true (must be tied to an explicit user action). */
+    catalog(options?: {
+      workspace?: string;
+      refreshProviders?: boolean;
+    }): Promise<PluginModelCatalogResult>;
   };
   /** Agent 轮次（权限 `agent`，0.3.13 起）：经宿主引擎管线拉起 agent
    *  进程——渠道注入、进程注册与聊天发送同构。事件走独立的

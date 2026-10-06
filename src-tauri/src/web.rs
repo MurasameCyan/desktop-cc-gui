@@ -941,6 +941,13 @@ fn read_scoped_file(path: &Path) -> Option<(Vec<u8>, &'static str)> {
     if !canon.starts_with(&home) {
         return None;
     }
+    // Portable mode can move the app home away from ~/.ccgui-next, and the
+    // static deny list below (mirroring tauri.conf.json's assetProtocol
+    // scope) only knows that one name — refuse the resolved app_home() too
+    // so plugins.json, provider API keys, and session history never leak.
+    if canon.starts_with(crate::paths::app_home()) {
+        return None;
+    }
     for denied in [".ssh", ".aws", ".gnupg", ".ccgui-next"] {
         if canon.starts_with(home.join(denied)) {
             return None;

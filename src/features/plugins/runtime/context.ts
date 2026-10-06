@@ -24,6 +24,12 @@ import {
 import type {
   Disposer,
   PluginAgentCatalogEntry,
+  PluginEngineCatalog,
+  PluginEngineInfo,
+  PluginModelCatalogResult,
+  PluginWindowBounds,
+  PluginWindowSnapshot,
+  PluginWechatWindow,
   MarkdownRendererDef,
   PluginContext,
   PluginManifest,
@@ -32,7 +38,7 @@ import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { addPluginWorkspace, listPluginWorkspaces, openPluginSession } from "./workspace-bridge";
-import { createPluginWorktree } from "./worktree-bridge";
+import { createPluginWorktree, removePluginWorktree } from "./worktree-bridge";
 import { interruptPluginChatRun, startPluginChatRun } from "./session-run-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
@@ -51,6 +57,15 @@ export interface PluginStorageBackend {
  *  loader's IPC-backed implementation). */
 export interface PluginContextBackend extends PluginStorageBackend {
   agentCatalog?(workspacePath: string): Promise<PluginAgentCatalogEntry[]>;
+  windowGetState?(id: string): Promise<PluginWindowSnapshot>;
+  windowSetNormalBounds?(id: string, bounds: PluginWindowBounds): Promise<PluginWindowSnapshot>;
+  windowSampleWechat?(id: string): Promise<PluginWechatWindow>;
+  modelListEngines?(id: string): Promise<PluginEngineInfo[]>;
+  modelListEngineModels?(id: string, engine: string, workspace?: string): Promise<PluginEngineCatalog>;
+  modelCatalog?(
+    id: string,
+    options?: { workspace?: string; refreshProviders?: boolean },
+  ): Promise<PluginModelCatalogResult>;
   bridgeInvoke(command: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -122,10 +137,11 @@ function tokenBlock(selector: string, tokens: Record<string, string> | undefined
 export function createPluginContext(
   manifest: PluginManifest,
   backend: PluginContextBackend,
-  hostInfo: { appVersion: string },
+  hostInfo: { appVersion: string; isWeb?: boolean },
 ): PluginHandle {
   const disposers: Disposer[] = [];
   const id = manifest.id;
+  const hostIsWeb = hostInfo.isWeb ?? isWeb;
 
   /** Missing-permission failures throw: a plugin probing beyond its manifest
    *  is a bug the developer should see, not a silent no-op. Unknown
@@ -396,6 +412,12 @@ export function createPluginContext(
         // 插件可用 .catch 链式处理；创建本身走宿主 store（见 worktree-bridge）。
         return Promise.resolve().then(() => createPluginWorktree(id, def));
       },
+      remove(def) {
+        requirePermission("host:worktree");
+        // 删除同样走宿主既有的 side-bar 流程：注销登记、清终端会话、
+        // 处理目录残留与分支保留原因。
+        return Promise.resolve().then(() => removePluginWorktree(id, def));
+      },
     },
     sessions: {
       selectSession(engine, sessionId, workspacePath) {
@@ -451,6 +473,88 @@ export function createPluginContext(
         return track(
           registerSessionSource(id, def.id, () => runAsPlugin(def.list)),
         );
+      },
+    },
+    window: {
+      async getState() {
+        requirePermission("host:window");
+        if (hostIsWeb) {
+          throw new Error("Unsupported: main-window access is unavailable on remote web hosts");
+        }
+        if (!backend.windowGetState) {
+          throw new Error("Unsupported: main-window access is unavailable on this host");
+        }
+        return backend.windowGetState(id);
+      },
+      async setNormalBounds(bounds) {
+        requirePermission("host:window");
+        if (
+          !Number.isInteger(bounds?.x) ||
+          !Number.isInteger(bounds?.y) ||
+          !Number.isInteger(bounds?.width) ||
+          !Number.isInteger(bounds?.height) ||
+          bounds.width < 640 ||
+          bounds.height < 480 ||
+          bounds.width > 32768 ||
+          bounds.height > 32768
+        ) {
+          throw new Error("Invalid window bounds: integer x/y and size 640x480..32768x32768 required");
+        }
+        if (hostIsWeb) {
+          throw new Error("Unsupported: main-window access is unavailable on remote web hosts");
+        }
+        if (!backend.windowSetNormalBounds) {
+          throw new Error("Unsupported: main-window access is unavailable on this host");
+        }
+        return backend.windowSetNormalBounds(id, bounds);
+      },
+      async sampleWechat() {
+        requirePermission("host:window");
+        if (hostIsWeb) {
+          throw new Error("Unsupported: WeChat window sampling is unavailable on remote web hosts");
+        }
+        if (!backend.windowSampleWechat) {
+          throw new Error("Unsupported: WeChat window sampling is unavailable on this host");
+        }
+        return backend.windowSampleWechat(id);
+      },
+    },
+    models: {
+      async listEngines() {
+        requirePermission("host:models");
+        if (!backend.modelListEngines) {
+          throw new Error("Plugin model catalog is unavailable on this host");
+        }
+        return backend.modelListEngines(id);
+      },
+      async listEngineModels(engine, workspace) {
+        requirePermission("host:models");
+        if (typeof engine !== "string" || !engine.trim()) {
+          throw new Error("engine must be a non-empty string");
+        }
+        if (!backend.modelListEngineModels) {
+          throw new Error("Plugin model catalog is unavailable on this host");
+        }
+        return backend.modelListEngineModels(id, engine, workspace);
+      },
+      async catalog(options) {
+        requirePermission("host:models");
+        if (options !== undefined && (typeof options !== "object" || options === null || Array.isArray(options))) {
+          throw new Error("options must be an object");
+        }
+        if (options?.workspace !== undefined && typeof options.workspace !== "string") {
+          throw new Error("workspace must be a string");
+        }
+        if (
+          options?.refreshProviders !== undefined &&
+          typeof options.refreshProviders !== "boolean"
+        ) {
+          throw new Error("refreshProviders must be a boolean");
+        }
+        if (!backend.modelCatalog) {
+          throw new Error("Plugin model catalog is unavailable on this host");
+        }
+        return backend.modelCatalog(id, options);
       },
     },
     agent: {
@@ -535,7 +639,7 @@ export function createPluginContext(
     host: {
       appVersion: hostInfo.appVersion,
       sdkVersion: SDK_VERSION,
-      isWeb,
+      isWeb: hostIsWeb,
       get locale() {
         return i18n.language;
       },

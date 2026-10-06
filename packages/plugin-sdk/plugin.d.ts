@@ -6,7 +6,7 @@
  * 插件仓用法（包未发布 npm 前的过渡方案）：复制本文件为插件仓的
  * `src/ccgui-plugin.d.ts`，首行版本戳必须与所用宿主 SDK 一致。
  *
- * @ccgui/plugin-sdk v0.3.18
+ * @ccgui/plugin-sdk v0.3.19
  */
 
 /** 宿主实现的 SDK 契约版本。 */
@@ -55,6 +55,72 @@ export interface PluginWorkspaceRow {
   /** worktree 子行的只读投影(0.3.17 起):分支名与来源 PR 编号。kind 为
    *  "worktree" 时存在;meta 里的其它私有载荷(如 wsl)仍然不出。 */
   worktree?: { branch: string; prNumber?: number };
+}
+
+export interface PluginWindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export interface PluginWindowSnapshot {
+  bounds: PluginWindowBounds;
+  state: "normal" | "minimized" | "maximized" | "fullscreen";
+  scaleFactor: number;
+}
+export interface PluginWechatWindow {
+  bounds: PluginWindowBounds;
+  executable: "Weixin.exe" | "WeChat.exe";
+}
+export interface PluginEngineInfo {
+  id: string;
+  available: boolean;
+  enabled: boolean;
+  supportsImages: boolean;
+  supportsComputerUse: boolean;
+  supportsEffort: boolean;
+  supportsToolConstraints: boolean;
+  permissions: string[];
+}
+export interface PluginEngineModel {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  provider: string;
+  contextWindow?: number | null;
+}
+export interface PluginEngineCatalog {
+  models: PluginEngineModel[];
+  authoritative: boolean;
+  remote?: boolean;
+}
+export interface PluginEngineCatalogEntry {
+  engine: PluginEngineInfo;
+  catalog: PluginEngineCatalog;
+}
+export interface PluginModelCatalogResult {
+  engines: PluginModelCatalogEngine[];
+  errors: PluginModelCatalogError[];
+  refreshedAt: number;
+}
+export interface PluginModelCatalogEngine {
+  engine: PluginEngineInfo;
+  sources: PluginModelSource[];
+}
+export interface PluginModelSource {
+  id: string;
+  name: string;
+  kind: "cli" | "official" | "provider" | "custom" | "configured" | "builtin";
+  authoritative: boolean;
+  remote: boolean;
+  models: PluginEngineModel[];
+  refreshedAt: number;
+  detail?: string;
+}
+export interface PluginModelCatalogError {
+  engine: string;
+  sourceId?: string;
+  message: string;
 }
 
 /** 信任层级（ADR-1）：declarative = 零 JS 声明式。 */
@@ -406,6 +472,26 @@ export interface PluginContext {
       id: string;
       list: () => Promise<ExternalSessionRow[]>;
     }): Disposer;
+  };
+  /** 主窗口访问（权限 host:window，SDK 0.3.19；宿主 ≥ 1.0.10）。物理像素坐标；
+   *  设置 bounds 只允许普通态且必须保留在连接的屏幕内。微信采样在 Windows
+   *  按 Weixin.exe/WeChat.exe 进程名识别，其他平台返回 Unsupported。 */
+  window: {
+    getState(): Promise<PluginWindowSnapshot>;
+    setNormalBounds(bounds: PluginWindowBounds): Promise<PluginWindowSnapshot>;
+    sampleWechat(): Promise<PluginWechatWindow>;
+  };
+  /** 权威宿主模型目录（权限 host:models，SDK 0.3.19；宿主 ≥ 1.0.10）。
+   *  返回 engine/model 的公开字段与 authoritative/remote 标志，不返回密钥、
+   *  token 或完整 provider 配置。 */
+  models: {
+    listEngines(): Promise<PluginEngineInfo[]>;
+    listEngineModels(engine: string, workspace?: string): Promise<PluginEngineCatalog>;
+    /** 仅 refreshProviders=true 才联网；调用方必须绑定显式用户动作。 */
+    catalog(options?: {
+      workspace?: string;
+      refreshProviders?: boolean;
+    }): Promise<PluginModelCatalogResult>;
   };
   /** Agent 轮次（权限 `agent`，0.3.13 起）：经宿主引擎管线拉起 agent
    *  进程——渠道注入、进程注册与聊天发送同构。事件经 `agent://<pluginId>`
