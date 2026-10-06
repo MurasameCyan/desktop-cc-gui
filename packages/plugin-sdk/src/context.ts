@@ -278,6 +278,18 @@ export interface PluginContext {
       /** true = `branch` 是已存在的本地分支（检出而非新建）。 */
       existingBranch?: boolean;
     }): Promise<{ worktreePath: string }>;
+    /** 删除本地 worktree（权限 `host:worktree`，0.3.19 起）：走宿主侧栏
+     *  的删除流程——`git worktree remove`（可选删分支）+ 注销侧栏/终端
+     *  登记。reject 的 message 形如 "<errorKind>: <detail>"（errorKind 与
+     *  创建同一套分类，另有 not_found / remove_failed）。resolve 带非致命
+     *  尾巴：`orphanDirectory`（目录没能删掉）、`branchKeptReason`
+     *  （"checked_out_elsewhere" | "unknown"；null = 分支已删或未要求删）。 */
+    remove(def: {
+      repoPath: string;
+      worktreePath: string;
+      branch?: string | null;
+      deleteBranch?: boolean;
+    }): Promise<{ orphanDirectory: boolean; branchKeptReason: string | null }>;
   };
   /** 会话打开 + 外部会话源(权限 `host:session`;selectSession 0.3.3 起,
    *  registerSource 0.3.4 起)。registerSource:登记异步会话源,宿主在会话

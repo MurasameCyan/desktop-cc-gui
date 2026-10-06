@@ -1,7 +1,7 @@
 <!-- 由 src/features/plugins/skill/creator-skill-docs.ts 从源码生成，请勿手改。 -->
 <!-- 重新生成：pnpm plugin-skill:docs（测试 creator-skill-docs.test.ts 会断言本文件与源码一致）。 -->
 
-# CC GUI 插件 SDK 参考（SDK 0.3.18）
+# CC GUI 插件 SDK 参考（SDK 0.3.19）
 
 本文件由脚本从 `packages/plugin-sdk`（公共契约）与宿主运行时（权限门禁）派生，属于 `ccgui-plugin-creator` skill。
 字段、方法、权限以本文件为准：**文中没有的 API 一律视为不存在**，不要凭记忆猜测方法名或权限名。
@@ -73,6 +73,7 @@ export default function activate(ctx: PluginContext): void | (() => void) {
 | `ctx.workspaces.add` | `host:workspace`（`host:workspace:remote` 按需） | — |
 | `ctx.workspaces.list` | `host:workspace` | 侧栏工作区快照（只读；权限 `host:workspace`，0.3.16 起）。 worktree 子行额外带 `worktree: { branch, prNumber? }` 只读投影 （0.3.17 起），用来把 PR 绑到本地 worktree；字段定义见 `PluginWorkspaceRow`，`meta` 本体仍不输出。 |
 | `ctx.worktrees.create` | `host:worktree` | — |
+| `ctx.worktrees.remove` | `host:worktree` | 删除本地 worktree（权限 `host:worktree`，0.3.19 起）：走宿主侧栏 的删除流程——`git worktree remove`（可选删分支）+ 注销侧栏/终端 登记。reject 的 message 形如 "<errorKind>: <detail>"（errorKind 与 创建同一套分类，另有 not_found / remove_failed）。resolve 带非致命 尾巴：`orphanDirectory`（目录没能删掉）、`branchKeptReason` （"checked_out_elsewhere" \| "unknown"；null = 分支已删或未要求删）。 |
 | `ctx.sessions.selectSession` | `host:session` | — |
 | `ctx.sessions.refresh` | `host:session` | 请求宿主立即刷新会话目录（侧栏/标签页），0.3.7 起。 插件绕过宿主直写会话数据（如 sqlite custom_title、转录 title 行）后 调用——否则变更要等用户手动同步或下次常规刷新才可见。 |
 | `ctx.sessions.setEffort` | `host:session` | 修改已有会话的 effort 档位，0.3.10 起。直写宿主会话状态并持久化 （等价于用户在会话内切换档位，refreshSessions 不会回滚）。未知会话 或空 effort 以 rejection 失败——不会创建幽灵会话条目。 |
@@ -201,6 +202,8 @@ Worktree 创建（权限 `host:worktree`，0.3.17 起）：经宿主「新建 Wo
 worktrees: {
   /** 权限：host:worktree */
   create(def: { repoPath: string; parentWorkspaceId: string; branch: string; baseRef?: string | null; prNumber?: number | null; prTitle?: string | null; prUrl?: string | null; existingBranch?: boolean }): Promise<{ worktreePath: string }>;
+  /** 权限：host:worktree */
+  remove(def: { repoPath: string; worktreePath: string; branch?: string | null; deleteBranch?: boolean }): Promise<{ orphanDirectory: boolean; branchKeptReason: string | null }>;
 }
 ```
 
@@ -298,7 +301,7 @@ ctx.react: typeof React; // Shared host React instance: external bundles can't r
 | `host:session` | `ctx.sessions.selectSession`、`ctx.sessions.refresh`、`ctx.sessions.setEffort`、`ctx.sessions.startRun`、`ctx.sessions.interruptRun`、`ctx.sessions.registerSource` |
 | `host:workspace` | `ctx.workspaces.add`、`ctx.workspaces.list` |
 | `host:workspace:remote` | `ctx.workspaces.add` |
-| `host:worktree` | `ctx.worktrees.create` |
+| `host:worktree` | `ctx.worktrees.create`、`ctx.worktrees.remove` |
 
 ### network: / exec: 授权形状
 

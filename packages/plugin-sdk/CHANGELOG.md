@@ -1,5 +1,15 @@
 # @ccgui/plugin-sdk changelog
 
+## 0.3.19 — 2026-10-06
+- **新增 `ctx.worktrees.remove({ repoPath, worktreePath, branch?, deleteBranch? })`**
+  （权限 `host:worktree`）：走宿主侧栏「删除 Worktree」同一条流程——`git
+  worktree remove`（可选删本地分支）+ 终端会话清理 + 侧栏登记注销；目录已
+  成孤儿（git 里没登记）时宿主会自行删目录并 prune。resolve
+  `{ orphanDirectory, branchKeptReason }`（分支被别处检出等原因保留时为
+  `"checked_out_elsewhere" | "unknown"`），失败以 `"<errorKind>: <detail>"`
+  reject（`invalid_args` / `remove_failed`）。宿主侧带 `silent` 语义：插件
+  调用不会同时弹宿主的错误横幅。
+
 ## 0.3.18 — 2026-10-06
 - **新增 `ctx.sessions.startRun(def)` / `ctx.sessions.interruptRun(def)`**（权限
   `host:session`）：把一个 AI 轮次跑成**宿主聊天会话**——会话立即进侧栏

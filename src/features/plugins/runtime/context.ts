@@ -32,7 +32,7 @@ import { assertPluginEmitTopic, pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
 import { dismissCenterSurfaces } from "@/features/chat/center-surfaces";
 import { addPluginWorkspace, listPluginWorkspaces, openPluginSession } from "./workspace-bridge";
-import { createPluginWorktree } from "./worktree-bridge";
+import { createPluginWorktree, removePluginWorktree } from "./worktree-bridge";
 import { interruptPluginChatRun, startPluginChatRun } from "./session-run-bridge";
 import { registerSessionSource } from "./session-source";
 import { usePluginTabsStore } from "./center-tabs";
@@ -395,6 +395,12 @@ export function createPluginContext(
         // 与 workspaces.add 同理：校验失败走 rejection 而不是同步抛，
         // 插件可用 .catch 链式处理；创建本身走宿主 store（见 worktree-bridge）。
         return Promise.resolve().then(() => createPluginWorktree(id, def));
+      },
+      remove(def) {
+        requirePermission("host:worktree");
+        // 删除同样走宿主既有的 side-bar 流程：注销登记、清终端会话、
+        // 处理目录残留与分支保留原因。
+        return Promise.resolve().then(() => removePluginWorktree(id, def));
       },
     },
     sessions: {
