@@ -258,6 +258,66 @@ describe("user bubble copy affordance", () => {
   });
 });
 
+describe("settled response check record", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(async () => {
+    await i18n.changeLanguage("zh");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  function settledMessage(): Message {
+    return {
+      seq: 2,
+      role: "assistant",
+      text: "ok",
+      ts: null,
+      model: "gpt-6-astra",
+      effort: "max",
+      responseCheck: {
+        requested: { model: "gpt-6-astra", effort: "max" },
+        served: { model: "gpt-5.6-luna", effort: "low" },
+      },
+    };
+  }
+
+  it("keeps the check available after the turn ends", async () => {
+    await act(async () => {
+      root.render(
+        <MessageRow message={settledMessage()} workspacePath="/ws" turnFinal />,
+      );
+    });
+    const badge = container.querySelector<HTMLButtonElement>(
+      'button[aria-label^="响应校验"]',
+    );
+    expect(badge).not.toBeNull();
+    expect(badge!.getAttribute("aria-label")).toBe("响应校验：与响应不一致");
+    // Hover-revealed together with the rest of the meta row.
+    expect(container.textContent).toContain("模型 gpt-6-astra");
+  });
+
+  it("shows no badge for a message with no recorded check", async () => {
+    await act(async () => {
+      root.render(
+        <MessageRow
+          message={{ seq: 2, role: "assistant", text: "ok", ts: null, model: "gpt-6-astra" }}
+          workspacePath="/ws"
+          turnFinal
+        />,
+      );
+    });
+    expect(container.querySelector('button[aria-label^="响应校验"]')).toBeNull();
+  });
+});
+
 describe("user bubble agent badge", () => {
   let container: HTMLDivElement;
   let root: Root;

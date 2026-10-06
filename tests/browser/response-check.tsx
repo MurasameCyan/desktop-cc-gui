@@ -4,6 +4,7 @@ import "../../src/index.css";
 import i18n from "@/lib/i18n";
 import { AgentThinking } from "@/components/application/agent-thinking/agent-thinking";
 import { ResponseCheckBadge } from "@/features/chat/components/response-check-badge";
+import { MessageRow } from "@/features/chat/components/MessageTimeline";
 import { checkResponseSelection } from "@/features/chat/response-check";
 import { useChatStore } from "@/features/chat/store";
 import { handleEngineEvents, type EngineEventDeps } from "@/features/chat/store/engine-events";
@@ -32,7 +33,7 @@ const deps: EngineEventDeps = {
 
 type Scenario = {
   label: string;
-  events: ({ kind: "launch" | "served" } & Record<string, unknown>)[];
+  events: ({ kind: "launch" | "served" | "done" } & Record<string, unknown>)[];
   expected: { verdict: string; visible: boolean };
 };
 
@@ -74,13 +75,33 @@ const SCENARIOS: Record<string, Scenario> = {
     events: [{ kind: "launch", data: { model: "claude-opus-5-5", effort: "xhigh" } }],
     expected: { verdict: "unknown", visible: false },
   },
+  settled: {
+    label: "已结算",
+    events: [
+      { kind: "launch", data: { model: "gpt-6-astra", effort: "max" } },
+      { kind: "served", data: { model: "gpt-5.6-luna", effort: "low" } },
+      { kind: "done", data: {} },
+    ],
+    expected: { verdict: "mismatch", visible: true },
+  },
 };
 
 function applyScenario(name: string) {
   runRouting.clear();
   const runId = `response-check-fixture-run-${++runCounter}`;
   useChatStore.setState({
-    bySession: { [KEY]: { ...EMPTY_SESSION, streaming: true, turnStartedAt: Date.now() - 7000 } },
+    bySession: {
+      [KEY]: {
+        ...EMPTY_SESSION,
+        streaming: true,
+        turnStartedAt: Date.now() - 7000,
+        // One assistant row for the settle path to stamp the check onto.
+        messages: [
+          { seq: 1, role: "user", text: "读一下 package.json", ts: null },
+          { seq: 2, role: "assistant", text: "ok", ts: null, live: true },
+        ],
+      },
+    },
     streamingByKey: {},
   });
   const scenario = SCENARIOS[name];
@@ -90,7 +111,7 @@ function applyScenario(name: string) {
       sessionId: SID,
       engine: "omp",
       seq: index + 1,
-      kind: event.kind,
+      kind: event.kind as "launch" | "served" | "done",
       data: event.data,
     })),
     deps,
@@ -129,6 +150,10 @@ function Harness() {
     ? i18n.t("chat.metaEffort", { effort: session.activeEffort })
     : null;
 
+  const settled = [...(session?.messages ?? [])]
+    .reverse()
+    .find((message) => message.role === "assistant");
+
   return (
     <div className="min-h-screen bg-background-primary-default p-6 text-text-primary">
       <div className="flex flex-wrap gap-2">
@@ -161,6 +186,15 @@ function Harness() {
           metaExtra={<ResponseCheckBadge check={session?.responseCheck} />}
         />
       </div>
+      {/* Settled row: the recorded check must survive the turn's end. */}
+      <div data-testid="settled-row" className="mt-8">
+        {settled ? (
+          <MessageRow message={settled} workspacePath="/ws" turnFinal />
+        ) : null}
+      </div>
+      <pre data-testid="settled-check" className="mt-2 text-caption-1-regular">
+        {JSON.stringify(settled?.responseCheck ?? null)}
+      </pre>
       <pre data-testid="result" className="mt-6 text-caption-1-regular">
         {result}
       </pre>

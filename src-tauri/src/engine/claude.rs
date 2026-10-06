@@ -317,8 +317,12 @@ impl Engine for ClaudeEngine {
                     .map(str::to_string);
                 let reported_effort = value
                     .get("message")
-                    .and_then(|m| m.get("thinking_effort"))
+                    .and_then(|m| m.get("thinking_effort").or_else(|| m.get("effort")))
                     .or_else(|| value.get("thinking_effort"))
+                    // The CLI records the level per assistant entry as a
+                    // top-level `effort` (the same field its transcript
+                    // carries) — the level actually in force for the message.
+                    .or_else(|| value.get("effort"))
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -948,6 +952,32 @@ mod tests {
         );
         assert!(
             !out.iter().any(|e| matches!(e, EngineEvent::Served { .. })),
+            "got {out:?}"
+        );
+
+        // The level actually in force rides the assistant entry as a
+        // top-level `effort` (what the CLI's own transcript records), so the
+        // response check can compare it against the launch request.
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({
+                "type": "assistant",
+                "session_id": "s-1",
+                "effort": "max",
+                "message": { "model": "claude-opus-4" }
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|e| matches!(e, EngineEvent::Effort(level) if level == "max")),
+            "got {out:?}"
+        );
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                EngineEvent::Served { model: Some(_), effort: Some(effort) } if effort == "max"
+            )),
             "got {out:?}"
         );
     }

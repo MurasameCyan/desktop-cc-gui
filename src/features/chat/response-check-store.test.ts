@@ -31,7 +31,7 @@ function deps(): EngineEventDeps {
 }
 
 function ev(
-  kind: "launch" | "served" | "model" | "effort",
+  kind: "launch" | "served" | "model" | "effort" | "done",
   seq: number,
   data: unknown,
 ) {
@@ -122,6 +122,32 @@ describe("the response check's engine wiring", () => {
     expect(session().responseCheck).toEqual({
       requested: { model: null, effort: null },
       served: { model: "claude-opus-5-5", effort: null },
+    });
+  });
+
+  it("a settled turn keeps the check on its last assistant message", () => {
+    useChatStore.setState({
+      bySession: {
+        [KEY]: {
+          ...EMPTY_SESSION,
+          streaming: true,
+          turnStartedAt: Date.now() - 5000,
+          messages: [
+            { seq: 1, role: "user", text: "go", ts: null },
+            { seq: 2, role: "assistant", text: "ok", ts: null, live: true },
+          ],
+        },
+      },
+    });
+    handleEngineEvents([ev("launch", 1, { model: "gpt-6-astra", effort: "max" })], deps());
+    handleEngineEvents([ev("served", 2, { model: "gpt-5.6-luna", effort: "low" })], deps());
+    handleEngineEvents([ev("done", 3, {})], deps());
+
+    const assistant = session().messages.filter((m) => m.role === "assistant");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].responseCheck).toEqual({
+      requested: { model: "gpt-6-astra", effort: "max" },
+      served: { model: "gpt-5.6-luna", effort: "low" },
     });
   });
 });

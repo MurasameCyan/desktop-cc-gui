@@ -184,10 +184,17 @@ function MessageMeta({ message }: { message: Message }) {
     modelFormatted,
     effortText,
   ].filter((p): p is string => Boolean(p));
-  if (parts.length === 0) return null;
+  const check = message.responseCheck ?? null;
+  if (parts.length === 0 && !check) return null;
   return (
     <span className="text-caption-1-regular tabular-nums text-text-tertiary opacity-0 transition-opacity duration-150 group-hover:opacity-100">
       {parts.join(" · ")}
+      {/* Recorded at settle: the response check outlives the tail indicator. */}
+      {check && (
+        <span className="ml-1.5 inline-flex items-center align-middle">
+          <ResponseCheckBadge check={check} />
+        </span>
+      )}
     </span>
   );
 }

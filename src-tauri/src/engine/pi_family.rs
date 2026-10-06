@@ -757,6 +757,14 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
                 let trimmed = level.trim();
                 if !trimmed.is_empty() {
                     out.push(EngineEvent::Effort(trimmed.to_string()));
+                    // The session's effective level is the runtime's own
+                    // account of the level in force — auto-thinking can move
+                    // it away from the request, which is exactly what the
+                    // response check should surface.
+                    out.push(EngineEvent::Served {
+                        model: None,
+                        effort: Some(trimmed.to_string()),
+                    });
                 }
             }
         }
@@ -2128,6 +2136,12 @@ mod tests {
         assert!(out
             .iter()
             .any(|e| matches!(e, EngineEvent::Effort(l) if l == "high")));
+        // The effective level is also evidence for the response check:
+        // auto-thinking can move it away from the request.
+        assert!(out.iter().any(|e| matches!(
+            e,
+            EngineEvent::Served { model: None, effort: Some(l) } if l == "high"
+        )));
     }
 
     #[test]

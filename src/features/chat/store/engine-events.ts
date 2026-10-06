@@ -1252,6 +1252,9 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
     const model = stampedModel(deps, event.engine, key);
     const effort = stampedEffort(deps, event.engine, key);
     // Stamp usage, durationMs, effort, and model onto the turn's last assistant message.
+    // The response check rides along so the settled row keeps the record
+    // after the tail indicator (and its badge) unmounts.
+    const settledCheck = cur.responseCheck ?? null;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant") {
         messages = [
@@ -1262,6 +1265,7 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
             ...(durationMs != null ? { durationMs } : {}),
             ...(effort ? { effort } : {}),
             ...(model ? { model } : {}),
+            ...(settledCheck ? { responseCheck: settledCheck } : {}),
           },
           ...messages.slice(i + 1),
         ];
