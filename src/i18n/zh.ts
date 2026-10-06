@@ -1511,6 +1511,8 @@ export const zh = {
         hostWorkspace: "读取当前工作区",
         hostWorkspaceRemote: "访问远程工作区",
         hostWorktree: "创建本地 Worktree",
+        hostWindow: "读取和定位主窗口，并采样微信窗口范围",
+        hostModels: "读取宿主引擎与模型目录（显式刷新渠道模型时会联网）",
         networkNone: "无网络访问",
         uiSettingsSection: "添加设置页",
         uiAddMenu: "添加「+」菜单项",
