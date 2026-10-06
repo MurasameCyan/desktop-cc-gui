@@ -123,7 +123,7 @@ const CLI_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// The CLI's config root: $CLAUDE_CONFIG_DIR when set, else ~/.claude.
-fn claude_config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir);
@@ -171,7 +171,7 @@ impl CliModelConfig {
 }
 
 fn read_cli_config() -> CliModelConfig {
-    read_cli_config_from(&claude_config_dir())
+    read_cli_config_from(&config_dir())
 }
 
 /// The model id a picker selector actually runs, for launch: a family alias

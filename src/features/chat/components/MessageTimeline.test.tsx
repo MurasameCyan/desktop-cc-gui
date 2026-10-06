@@ -316,6 +316,48 @@ describe("settled response check record", () => {
     });
     expect(container.querySelector('button[aria-label^="响应校验"]')).toBeNull();
   });
+
+  it("keeps the footer on the reply when a card is the newest row", async () => {
+    // A denied tool leaves a grant card after the reply; the card renders its
+    // own chrome and must not steal the footer slot from the assistant row.
+    const messages: Message[] = [
+      { seq: 1, role: "user", text: "go", ts: null },
+      {
+        seq: 2,
+        role: "assistant",
+        text: "ok",
+        ts: null,
+        model: "gpt-6-astra",
+        responseCheck: {
+          requested: { model: "gpt-6-astra", effort: "max" },
+          served: { model: "gpt-6-astra", effort: "max" },
+        },
+      },
+      {
+        seq: 3,
+        role: "grant",
+        text: "",
+        ts: null,
+        path: "S:\\ws\\package.json",
+        grant: { status: "pending", dir: "S:\\ws" },
+      },
+    ];
+    await act(async () => {
+      root.render(
+        <MessageTimeline
+          session={{ ...EMPTY_SESSION, messages }}
+          streaming={false}
+          onLoadEarlier={() => {}}
+          workspacePath="/ws"
+        />,
+      );
+    });
+    const badge = container.querySelector<HTMLButtonElement>(
+      'button[aria-label^="响应校验"]',
+    );
+    expect(badge).not.toBeNull();
+    expect(badge!.getAttribute("aria-label")).toBe("响应校验：与响应一致");
+  });
 });
 
 describe("user bubble agent badge", () => {
