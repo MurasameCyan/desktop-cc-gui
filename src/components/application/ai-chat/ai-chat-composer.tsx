@@ -50,6 +50,7 @@ import { ipc } from "@/lib/ipc";
 import { listenSettingsChanged } from "@/lib/events";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { ASSUMED_CONTEXT_WINDOW } from "@/features/chat/usage";
+import type { AutoCompactSettings } from "@/features/chat/auto-compact-context";
 import {
   usePromptCompletion,
   usePromptHistoryNav,
@@ -497,30 +498,31 @@ export function StatusBar({
   compacting,
   refreshing,
   canCompact,
+  autoCompact,
+  autoCompactDisabled,
+  onAutoCompactEnabledChange,
+  onAutoCompactThresholdChange,
 }: {
   branch?: string;
-  /** Local and remote-tracking branches for the switcher; empty until the
-   *  first load. */
   branches?: BranchMenuItem[];
-  /** Repository display name when the chip tracks a nested repo (file-tree
-   *  selection inside a subfolder repository); prefixes the branch label. */
   branchRepoName?: string;
-  /** Present → the branch label becomes a switcher dropdown. */
   onBranchSelect?: (name: string) => void;
-  /** Workspace folder display names. */
   folders?: string[];
   selectedFolder?: string;
   onFolderSelect?: (name: string) => void;
   usagePct?: number;
-  /** Context window size in tokens for the breakdown card. */
   contextMax?: number;
-  /** Token buckets for the breakdown card; empty until usage is reported. */
   contextSegments?: ContextSegment[];
   onCompactContext?: () => void;
   onRefreshUsage?: () => void;
   compacting?: boolean;
   refreshing?: boolean;
   canCompact?: boolean;
+  autoCompact?: AutoCompactSettings;
+  /** No active session: keep the controls visible but inert. */
+  autoCompactDisabled?: boolean;
+  onAutoCompactEnabledChange?: (enabled: boolean) => void;
+  onAutoCompactThresholdChange?: (threshold: number) => void;
 }) {
   const { t } = useTranslation();
   // `isNonModal` popovers don't dismiss on outside press (react-aria couples
@@ -552,6 +554,10 @@ export function StatusBar({
       refreshUsage: t("chat.refreshUsage"),
       refreshUsageTooltip: t("chat.refreshUsageTooltip"),
       refreshing: t("chat.refreshing"),
+      autoCompactThreshold: t("chat.autoCompactThreshold"),
+      autoCompactEnable: t("chat.autoCompactEnable"),
+      autoCompactDisable: t("chat.autoCompactDisable"),
+      autoCompactNoSession: t("chat.autoCompactNoSession"),
     }),
     [t],
   );
@@ -629,6 +635,16 @@ export function StatusBar({
                 compacting={compacting}
                 refreshing={refreshing}
                 canCompact={canCompact}
+                autoCompact={
+                  autoCompact
+                    ? {
+                        ...autoCompact,
+                        disabled: autoCompactDisabled === true,
+                        onEnabledChange: onAutoCompactEnabledChange ?? (() => {}),
+                        onThresholdChange: onAutoCompactThresholdChange ?? (() => {}),
+                      }
+                    : undefined
+                }
               />
             </AriaDialog>
           </AriaPopover>

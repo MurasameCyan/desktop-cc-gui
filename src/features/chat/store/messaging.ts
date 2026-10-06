@@ -833,7 +833,7 @@ export function createMessagingActions(
       await interruptByKey(key);
     },
 
-    compactContext: async (key?: string) => {
+    compactContext: async (key?: string, options?: { trigger?: "manual" | "threshold" }) => {
       const { active, streamingByKey, openTabs } = get();
       const targetKey =
         key ??
@@ -849,10 +849,17 @@ export function createMessagingActions(
         ) ?? active;
       if (!targetTab) return;
 
-      // Manual-compaction flag: the tail status strip swaps to the compacting
-      // label for the whole run. Cleared in the finally below.
+      // The tail status strip swaps its label for the whole run. `automatic`
+      // stays false: this is a /compact turn we own, so the settle path below
+      // (and the done/end handlers) clear it. The engine's own mid-turn
+      // compaction events are the only producer of automatic: true, and they
+      // must not take ownership of this flag. `trigger` records who asked.
       patchSession(set, targetKey, {
-        compaction: { automatic: false, startedAt: Date.now() },
+        compaction: {
+          automatic: false,
+          startedAt: Date.now(),
+          trigger: options?.trigger ?? "manual",
+        },
       });
 
       // Track the compaction turn completion so callers (and UI) can await it.
