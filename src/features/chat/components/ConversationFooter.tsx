@@ -260,10 +260,11 @@ function FooterStatusBar({
     (key: string) => {
       const state = useChatStore.getState();
       const session = state.bySession[key];
-      const tab =
-        state.openTabs.find(
-          (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
-        ) ?? state.active;
+      // No active fallback: a closed tab means there is nothing to resume
+      // into, and the fallback would send the nudge to a different session.
+      const tab = state.openTabs.find(
+        (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
+      );
       const shouldResume = shouldResumeAfterAutoCompact({
         trigger: "threshold",
         // A send clears the error up front, so anything set here came from
