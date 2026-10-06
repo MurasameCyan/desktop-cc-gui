@@ -58,6 +58,16 @@ describe("ResponseCheckBadge", () => {
     expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：与响应一致");
   });
 
+  it("keeps a green check when the model matches but effort is unreported", () => {
+    render({
+      requested: { model: "claude-opus-4-5", effort: "max" },
+      served: { model: "claude-opus-4-5", effort: null },
+    });
+    const button = trigger()!;
+    expect(button.getAttribute("aria-label")).toBe("响应校验：与响应一致");
+    expect(button.className).toContain("text-foreground-icon-quaternary");
+  });
+
   it("flags a served response that differs from the request", () => {
     render({
       requested: { model: "gpt-6-astra", effort: "max" },
