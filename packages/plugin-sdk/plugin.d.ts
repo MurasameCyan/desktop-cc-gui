@@ -742,7 +742,10 @@ export interface PluginContext {
       /** 本轮渠道 id(catalog 的 providers[].id)。 */
       providerId?: string | null;
     }): Promise<{ runId: string; sessionId: string | null }>;
-    /** 停止 startRun 起的轮次(等价于聊天里的停止按钮)。 */
+    /** 停止 startRun 起的轮次(等价于聊天里的停止按钮)。只允许停止本插件
+     *  startRun 起的、仍在运行的轮次：没有匹配的在跑轮次会以 rejection 失败，
+     *  不会误停用户或其他插件的会话；`sessionId: null` 匹配本插件在该引擎+工作
+     *  区里的任意在跑轮次（原生 id 可能在 startRun 返回后才 announce）。 */
     interruptRun(def: {
       engine: string;
       workspacePath: string;

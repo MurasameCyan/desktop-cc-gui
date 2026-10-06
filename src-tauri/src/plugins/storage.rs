@@ -215,6 +215,38 @@ fn is_existing_base_writable(base: &Path) -> bool {
     }
 }
 
+/// Canonicalize a selection that may not exist yet by resolving its deepest
+/// existing ancestor and re-appending the missing components, so a not-yet-
+/// created path cannot dodge `denied_grant_root` through a symlinked parent.
+fn canonicalize_missing_tail(path: &Path) -> Result<PathBuf, String> {
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cursor = path;
+    loop {
+        match fs::symlink_metadata(cursor) {
+            Ok(_) => {
+                let mut resolved = dunce::canonicalize(cursor)
+                    .map_err(|e| format!("canonicalize {}: {e}", cursor.display()))?;
+                for name in missing.iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(parent) = cursor.parent() else {
+                    return Ok(path.to_path_buf());
+                };
+                if let Some(name) = cursor.file_name() {
+                    missing.push(name);
+                }
+                cursor = parent;
+            }
+            Err(error) => {
+                return Err(format!("stat {}: {error}", cursor.display()));
+            }
+        }
+    }
+}
+
 fn probe_writable(base: &Path) -> Result<(), String> {
     if base.exists() && !base.is_dir() {
         return Err(format!("{}: not a directory", base.display()));
@@ -266,6 +298,19 @@ fn select_location_at_with_writer(
     let _state_guard = super::state::lock_state(state_path)?;
     authorize(state_path, id)?;
     let new_base = resolve_selection_base(roots, &selection)?;
+    // The picker is the consent surface, but the IPC boundary is the real
+    // edge: a plugin submitting a path directly must not point its storage
+    // base at the credential dirs, $HOME or the filesystem root. Same deny
+    // baseline as the asset directory grant (assets.rs::denied_grant_root),
+    // checked before any probe write.
+    if matches!(selection.kind, StorageLocationKind::Custom)
+        && super::assets::denied_grant_root(&canonicalize_missing_tail(&new_base)?)
+    {
+        return Err(format!(
+            "refusing a sensitive storage location: {}",
+            new_base.display()
+        ));
+    }
     probe_writable(&new_base)?;
 
     let mut state = super::state::read_state(state_path)?;
@@ -1065,6 +1110,47 @@ mod tests {
         state.plugins.get_mut(id).unwrap().permissions.clear();
         crate::plugins::state::write_state(&state_path, &state).unwrap();
         assert!(authorize(&state_path, id).unwrap_err().contains("plugin.storage"));
+    }
+
+    #[test]
+    fn custom_locations_under_a_denied_root_are_refused() {
+        // $HOME is process-global and other tests steer it behind this lock;
+        // hold it so the deny check sees the real (restored) home.
+        let _home_lock = crate::paths::HOME_ENV_LOCK.lock();
+        let scratch = Scratch::new();
+        let state_path = scratch.path("plugins.json");
+        let id = "vendor.plugin";
+        enabled_state(&state_path, id);
+        let roots = roots(&scratch);
+        let Some(home) = dirs::home_dir() else { return };
+        // The deny check runs before probe_writable, so $HOME is refused
+        // without writing a probe file into it.
+        let error = select_location_at(
+            &state_path,
+            &roots,
+            id,
+            StorageLocationSelection {
+                kind: StorageLocationKind::Custom,
+                path: Some(home.to_string_lossy().into()),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("sensitive storage location"), "unexpected error: {error}");
+        // A missing tail under a denied root is refused through its existing
+        // prefix and is never created.
+        let nested = home.join(".ssh").join("nested-not-there");
+        let error = select_location_at(
+            &state_path,
+            &roots,
+            id,
+            StorageLocationSelection {
+                kind: StorageLocationKind::Custom,
+                path: Some(nested.to_string_lossy().into()),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("sensitive storage location"), "unexpected error: {error}");
+        assert!(!nested.exists());
     }
 
     #[test]

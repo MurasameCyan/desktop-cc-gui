@@ -140,13 +140,17 @@ fn check_absolute_path(path: &Path) -> Result<(), String> {
 /// $HOME itself, and the filesystem root. Compared in both directions —
 /// granting an ancestor of a denied dir exposes it just as surely as
 /// granting the denied dir itself.
-fn denied_grant_root(canonical: &Path) -> bool {
+pub(super) fn denied_grant_root(canonical: &Path) -> bool {
     if canonical.parent().is_none() {
         return true;
     }
     let Some(home) = dirs::home_dir() else {
         return false;
     };
+    // Resolve the home the same way as the candidate: a symlinked $HOME would
+    // otherwise make both the equality check and the credential-dir prefixes
+    // miss against an already-canonical path.
+    let home = dunce::canonicalize(&home).unwrap_or(home);
     if canonical == home {
         return true;
     }

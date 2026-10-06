@@ -303,7 +303,7 @@ SDK 0.4.2 起，`RuntimeSwitchEvent` 包含必填 `switchId`，同一次启动�
 
 `ctx.ui.registerSessionMenuItem`（权限 `ui:session-menu`，0.3.5 起）向侧栏会话右键菜单追加行；`run` 接收打开菜单的目标会话 `{ engine, sessionId }`，`label` 是随语言切换重新求值的函数。它与工作区菜单是独立的扩展点。`ctx.ui.openSettings(key?)`（复用权限 `ui:settings-section`，0.3.6 起）跳转到本插件设置页；`key` 对应 `registerSettingsSection` 的子 key，省略时打开主 section。SDK 0.4.1 同时保留这两项能力和工作区菜单。
 
-`ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器，插件不能提交任意绝对根路径。
+`ctx.documentStorage` 是 `ctx.storage` KV 之外的受控 UTF-8 文档存储：根目录固定隔离在 `<所选位置>/plugin-data/<plugin-id>/`，路径必须相对且不能逃逸；`writeTextAtomic(path, content, expectedVersion)` 使用不透明版本做 CAS，`expectedVersion: null` 表示要求文件尚不存在。`selectLocation('custom')` 由宿主打开目录选择器；SDK 不接受插件提供的路径，IPC 边界另对敏感根做纵深防护（`$HOME` 本身、文件系统根、`.ssh`/`.aws`/`.gnupg`/`.ccgui-next` 及其祖先一律拒绝）。该黑名单不是与选择器结果的加密绑定：绕过 SDK 直接调用 IPC 提交路径属审核违规，宿主不承诺拦截任意非黑名单目录。
 
 路径使用 `/` 分隔；检查原始输入中的空段、`.`、`..`，不接受 `a/./b`、`a//b` 或末尾 `/` 的别名写法。`list()` 的空前缀仍表示列出根目录。
 
@@ -345,7 +345,7 @@ interface PluginAssets {
 - `bundleUrl`：权限 `assets:bundle`，路径相对于已安装插件目录；包内 JS/wasm 可作为资源读取，不允许从远程或目录授权来源执行脚本。
 - `documentUrl`：权限 `plugin.storage`，始终解析到本插件当前选择的 documentStorage 根。写入仍走原有 CAS 文档接口。
 - `remoteUrl`：只接受无用户名/密码的 HTTP(S) URL；复用精确 `network:<host>[:port或范围]` 授权，子域不会自动获得权限。远程重定向的每个目标也必须已授权。没有运行时动态域名授权。
-- `grantDirectory` / `listDirectories` / `revokeDirectory` / `directoryUrl`：权限 `assets:directory`；选择器只能由明确用户操作触发，不能在插件激活期弹出。取消选择会 reject。每插件最多 16 个目录，重复选同一规范目录复用 grant；授权不会放开宿主的通用文件访问。路径用 `/` 分隔且相对于授权根，不能带绝对路径、`.` 或 `..` 段。
+- `grantDirectory` / `listDirectories` / `revokeDirectory` / `directoryUrl`：权限 `assets:directory`；选择器只能由明确用户操作触发，不能在插件激活期弹出。取消选择会 reject。每插件最多 16 个目录，重复选同一规范目录复用 grant；授权不会放开宿主的通用文件访问。路径用 `/` 分隔且相对于授权根，不能带绝对路径、`.` 或 `..` 段。IPC 边界复核与 documentStorage 同一份敏感目录黑名单（资产协议 deny 基线）；同上是纵深防护而非选择器结果的加密绑定，绕过 SDK 直接提交路径属审核违规。
 - `ctx.shell.revealPath(path)`：只在文件管理器中定位真实存在的本插件 documentStorage 路径或已授权目录内路径；分别要求 `plugin.storage` / `assets:directory`。不提供任意文件打开、进程启动或目录外探测能力。
 
 返回的 URL 可用于 `fetch`、图片、音频及描述文件的相对依赖加载；资源内容按字节传递，不经文本或 base64 转换。桌面使用 `pluginasset` 协议，Web 使用带鉴权路径前缀的宿主路由，因此相对资源请求仍携带凭据；这些 URL 是临时能力地址，不应记录到日志或分享给外部站点。

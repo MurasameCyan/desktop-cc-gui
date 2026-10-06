@@ -417,20 +417,7 @@ impl Db {
         session_id: &str,
     ) -> Result<(HashSet<String>, String), String> {
         let conn = self.0.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT frame_hash FROM accepted_internal_frames WHERE engine=?1 AND session_id=?2 ORDER BY frame_hash",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![engine, session_id], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
-        let mut hashes = HashSet::new();
-        for row in rows {
-            hashes.insert(row.map_err(|error| error.to_string())?);
-        }
-        let signature = accepted_frame_set_signature(&hashes);
-        Ok((hashes, signature))
+        accepted_internal_frames_from(&conn, engine, session_id)
     }
 
     /// Every recorded identity, grouped `engine -> session -> set`, plus a
@@ -509,6 +496,32 @@ pub struct AcceptedFrameSet {
 
 /// Recorded frame identities grouped by engine, then native session id.
 pub type AcceptedFrameIndex = HashMap<String, HashMap<String, AcceptedFrameSet>>;
+
+/// Identity set plus its signature, readable through a caller-owned connection.
+/// The indexer re-checks the signature under its write lock (same connection),
+/// so a frame recorded while a file was being parsed cannot be published.
+pub(crate) fn accepted_internal_frames_from(
+    conn: &rusqlite::Connection,
+    engine: &str,
+    session_id: &str,
+) -> Result<(HashSet<String>, String), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT frame_hash FROM accepted_internal_frames WHERE engine=?1 AND session_id=?2 ORDER BY frame_hash",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![engine, session_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let mut hashes = HashSet::new();
+    for row in rows {
+        hashes.insert(row.map_err(|error| error.to_string())?);
+    }
+    let signature = accepted_frame_set_signature(&hashes);
+    Ok((hashes, signature))
+}
 
 /// Identity of one session's accepted-frame set: two sets with the same
 /// members produce the same signature regardless of insertion order.

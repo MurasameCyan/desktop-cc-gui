@@ -25,6 +25,7 @@
 - 合并生命周期边界：会话模式禁止关闭时，不派发 `sessionClosed` 或清除提示贡献；历史解析缓存同时按内部帧签名失效并保留上游内存预算。
 - IPC 防护兼容只读但可配置的 Tauri 属性；首次未就绪时允许后续安装，成功后不重复包装，并保留单次同步授权和嵌套插件隔离。
 - 2026-09-26 修正兼容声明：CCB 与 Live2D 从精确 pin 改为最低版本范围，最低版本保护不变；移除宿主测试中强绑精确版本和注释版本戳的断言，保留精确、caret、tilde 与最低版本范围的行为测试。
+- 审查轮收紧：`ctx.sessions.interruptRun` 只停止本插件 `startRun` 起的在跑轮次（无匹配以 rejection 失败，不会误停用户或其他插件的会话）；`ctx.documentStorage.selectLocation('custom')` 与 `ctx.assets.grantDirectory` 在 IPC 边界拒绝敏感根（`$HOME` 本身、文件系统根、`.ssh`/`.aws`/`.gnupg`/`.ccgui-next` 及其祖先）。黑名单是与资产协议 deny 基线对齐的纵深防护，不是选择器同意与提交路径的加密绑定。
 
 ## 0.3.19 — 2026-10-06
 - 新增权限 `host:window` 与 `ctx.window`：读取主窗口物理像素 bounds/state/DPI、
