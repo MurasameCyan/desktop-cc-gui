@@ -288,6 +288,8 @@ export function createMessagingActions(
         activeComputerUse: options?.computerUse === true,
         // The tail indicator counts this reply, not the one before it.
         turnUsage: null,
+        // The check belongs to this run: the launch event reopens it.
+        responseCheck: null,
       },
     );
     // Refresh independently: a slow history read must not delay sending or Stop.

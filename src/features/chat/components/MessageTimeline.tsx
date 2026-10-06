@@ -23,6 +23,7 @@ import { buildRows, collectToolKeys, rowKey, type TimelineRow } from "./timeline
 import { formatDuration } from "./format-duration";
 import { modelDisplayName } from "@/features/settings/usage-model";
 import { ProcessDisclosure, type ProcessSearchTarget } from "./ProcessDisclosure";
+import { ResponseCheckBadge } from "./response-check-badge";
 import { CollapsibleMessage } from "./CollapsibleMessage";
 import { useScrollFollow, useTailPin } from "./use-scroll-follow";
 import { ScrollControl } from "./ScrollControl";
@@ -695,6 +696,7 @@ export const MessageTimeline = memo(function MessageTimeline({
                     model={activeModelFormatted}
                     effort={activeEffortFormatted}
                     usage={liveUsage}
+                    metaExtra={<ResponseCheckBadge check={session.responseCheck} />}
                     retry={
                       session.retry
                         ? session.retry.max > 0

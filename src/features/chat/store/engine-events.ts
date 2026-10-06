@@ -163,13 +163,12 @@ function stampedEffort(
   return resolveSessionEffort(tab, s.bySession[key], s.efforts[engine]) || null;
 }
 
-function onModel(
-  event: ChatEngineEvent,
+/** Apply an engine-reported model to the display (activeModel + live row). */
+function applyModelDisplay(
+  reported: string,
   key: string,
   deps: EngineEventDeps,
 ) {
-  const reported = typeof event.data === "string" ? event.data.trim() : "";
-  if (!reported) return;
   // The engine reports the bare model name; our own record spells it
   // "provider/model" (see ipc.rememberSessionModel). Same model, more
   // context — keep the qualified one instead of dropping the provider.
@@ -199,13 +198,12 @@ function onModel(
   });
 }
 
-function onEffort(
-  event: ChatEngineEvent,
+/** Apply an engine-reported effort to the display. */
+function applyEffortDisplay(
+  reported: string,
   key: string,
   deps: EngineEventDeps,
 ) {
-  const reported = typeof event.data === "string" ? event.data.trim() : "";
-  if (!reported) return;
   deps.set((s) => {
     const cur = s.bySession[key];
     if (!cur || cur.activeEffort === reported) return {};
@@ -213,6 +211,84 @@ function onEffort(
       bySession: {
         ...s.bySession,
         [key]: { ...cur, activeEffort: reported },
+      },
+    };
+  });
+}
+
+/** `{model?, effort?}` payload of a launch/served selection event. */
+function selectionFields(event: ChatEngineEvent): {
+  model: string | null;
+  effort: string | null;
+} {
+  const data = (event.data ?? {}) as { model?: unknown; effort?: unknown };
+  const model =
+    typeof data.model === "string" && data.model.trim() ? data.model.trim() : null;
+  const effort =
+    typeof data.effort === "string" && data.effort.trim()
+      ? data.effort.trim()
+      : null;
+  return { model, effort };
+}
+
+/** The run's launch selection: seed the display exactly as the old
+ *  model/effort echo did, and open a fresh request side for the check. */
+function onLaunch(
+  event: ChatEngineEvent,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  const { model, effort } = selectionFields(event);
+  if (!model && !effort) return;
+  if (model) applyModelDisplay(model, key, deps);
+  if (effort) applyEffortDisplay(effort, key, deps);
+  deps.set((s) => {
+    const cur = s.bySession[key];
+    if (!cur) return {};
+    return {
+      bySession: {
+        ...s.bySession,
+        [key]: {
+          ...cur,
+          responseCheck: {
+            requested: { model, effort },
+            served: { model: null, effort: null },
+          },
+        },
+      },
+    };
+  });
+}
+
+/** What the response reported as served: evidence for the check only — the
+ *  tail's model/effort display keeps coming from the model/effort reports. */
+function onServed(
+  event: ChatEngineEvent,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  const { model, effort } = selectionFields(event);
+  if (!model && !effort) return;
+  deps.set((s) => {
+    const cur = s.bySession[key];
+    if (!cur) return {};
+    const prev = cur.responseCheck ?? {
+      requested: { model: null, effort: null },
+      served: { model: null, effort: null },
+    };
+    return {
+      bySession: {
+        ...s.bySession,
+        [key]: {
+          ...cur,
+          responseCheck: {
+            requested: prev.requested,
+            served: {
+              model: model ?? prev.served.model,
+              effort: effort ?? prev.served.effort,
+            },
+          },
+        },
       },
     };
   });
@@ -1455,11 +1531,21 @@ export function handleEngineEvents(
       case "done":
         onDone(event, key, deps);
         break;
-      case "model":
-        onModel(event, key, deps);
+      case "model": {
+        const reported = typeof event.data === "string" ? event.data.trim() : "";
+        if (reported) applyModelDisplay(reported, key, deps);
         break;
-      case "effort":
-        onEffort(event, key, deps);
+      }
+      case "effort": {
+        const reported = typeof event.data === "string" ? event.data.trim() : "";
+        if (reported) applyEffortDisplay(reported, key, deps);
+        break;
+      }
+      case "launch":
+        onLaunch(event, key, deps);
+        break;
+      case "served":
+        onServed(event, key, deps);
         break;
     }
   }

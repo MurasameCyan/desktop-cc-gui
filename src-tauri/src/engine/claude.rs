@@ -307,25 +307,38 @@ impl Engine for ClaudeEngine {
             "assistant" => {
                 // Full message snapshot; used as session-id and actual model source.
                 push_session_id(&value, "session_id", out);
-                if let Some(model) = value
+                let reported_model = value
                     .get("message")
                     .and_then(|m| m.get("model"))
                     .or_else(|| value.get("model"))
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                {
-                    out.push(EngineEvent::Model(model.to_string()));
-                }
-                if let Some(effort) = value
+                    .map(str::to_string);
+                let reported_effort = value
                     .get("message")
                     .and_then(|m| m.get("thinking_effort"))
                     .or_else(|| value.get("thinking_effort"))
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                {
-                    out.push(EngineEvent::Effort(effort.to_string()));
+                    .map(str::to_string);
+                if let Some(model) = reported_model.clone() {
+                    out.push(EngineEvent::Model(model));
+                }
+                if let Some(effort) = reported_effort.clone() {
+                    out.push(EngineEvent::Effort(effort));
+                }
+                // The response's own account of what ran. `<synthetic>` marks
+                // messages the CLI fabricated locally (errors, interrupts):
+                // that is not a served model and must not read as one.
+                let served_model = reported_model
+                    .filter(|model| !model.starts_with('<'));
+                if served_model.is_some() || reported_effort.is_some() {
+                    out.push(EngineEvent::Served {
+                        model: served_model,
+                        effort: reported_effort,
+                    });
                 }
             }
             "user" => {
@@ -899,6 +912,44 @@ mod tests {
         assert!(!out
             .iter()
             .any(|event| matches!(event, EngineEvent::McpServers { .. })));
+    }
+
+    #[test]
+    fn assistant_snapshot_reports_the_served_selection() {
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({
+                "type": "assistant",
+                "session_id": "s-1",
+                "message": { "model": "claude-opus-4", "thinking_effort": "high" }
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                EngineEvent::Served { model: Some(model), effort: Some(effort) }
+                    if model == "claude-opus-4" && effort == "high"
+            )),
+            "got {out:?}"
+        );
+
+        // `<synthetic>` marks a message the CLI fabricated locally (an error
+        // or an interrupt): not a served model, so no evidence is emitted.
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({
+                "type": "assistant",
+                "message": { "model": "<synthetic>" }
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            !out.iter().any(|e| matches!(e, EngineEvent::Served { .. })),
+            "got {out:?}"
+        );
     }
 
     #[test]

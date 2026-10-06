@@ -127,6 +127,27 @@ pub enum EngineEvent {
     Model(String),
     /// Reasoning effort level requested at launch, then the level the engine actually reported.
     Effort(String),
+    /// The selection this run was launched with — the model/effort this
+    /// client asked the CLI to use, after channel remap. Dispatched at most
+    /// once per run, before any output, so the response check has an
+    /// unambiguous request side: a `model`/`effort` report is never mistaken
+    /// for it, and vice versa. Absent sides stay `None` rather than echoing
+    /// a default the CLI picked on its own.
+    Launch {
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    /// What the response itself reported as running: the model named by the
+    /// upstream message (claude's `assistant.message.model`), the serving
+    /// model the runtime recovered from the response (pi's `upstreamModel`,
+    /// a codex `model/rerouted` target), or an effort level echoed by the
+    /// stream. Evidence only — emitted when the stream carries it, and never
+    /// synthesized from the launch request, so an unreported side stays
+    /// unknown instead of reading as a match.
+    Served {
+        model: Option<String>,
+        effort: Option<String>,
+    },
     /// MCP servers the CLI reported as loaded for this session (claude
     /// `system/init`): `(name, status)` pairs plus the session's tool names
     /// (used to attribute `mcp__<server>__<tool>` tools back to their server).
