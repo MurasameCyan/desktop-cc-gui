@@ -219,59 +219,6 @@ pub fn claude_encode_project_path(path: &str) -> String {
         .collect()
 }
 
-/// The reasoning level the Claude CLI recorded for its newest assistant entry.
-///
-/// Claude Code's stream-json never names a level: `system/init` reports only
-/// `per_turn_effort_active`, and neither the `assistant` nor the `result`
-/// event carries an effort (verified against the CLI's own output). The
-/// transcript writes a top-level `effort` per assistant entry — the only
-/// record of the level actually applied — so the response check reads it back
-/// when a turn settles. Bounded tail read: transcripts grow to megabytes.
-pub fn claude_latest_effort(workspace: &str, session_id: &str) -> Option<String> {
-    claude_latest_effort_in(
-        &crate::engine::models::claude_config_dir(),
-        workspace,
-        session_id,
-    )
-}
-
-fn claude_latest_effort_in(root: &Path, workspace: &str, session_id: &str) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    /// Enough for the newest assistant entry of any realistic message.
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let path = root
-        .join("projects")
-        .join(claude_encode_project_path(workspace))
-        .join(format!("{session_id}.jsonl"));
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail).ok()?;
-    // A nonzero start can land mid-line: that partial first line is not JSON.
-    if start > 0 {
-        if let Some(newline) = tail.find('\n') {
-            tail.drain(..=newline);
-        }
-    }
-    tail.lines().rev().find_map(|line| {
-        let value: Value = serde_json::from_str(line).ok()?;
-        if value.get("type").and_then(Value::as_str) != Some("assistant") {
-            return None;
-        }
-        let message = value.get("message");
-        value
-            .get("effort")
-            .or_else(|| message.and_then(|m| m.get("effort")))
-            .or_else(|| message.and_then(|m| m.get("thinking_effort")))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|effort| !effort.is_empty())
-            .map(str::to_string)
-    })
-}
-
 /// Extract display text from a message `content` value that may be a string
 /// or an array of typed parts.
 pub fn content_text(value: Option<&Value>) -> String {
@@ -532,68 +479,6 @@ fn strip_title_noise(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Scratch root under the system temp dir; the test removes it.
-    fn effort_scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ccgui-{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn claude_latest_effort_reads_the_newest_assistant_entry() {
-        let root = effort_scratch("claude-effort");
-        let workspace = "S:\\AIWorker\\demo";
-        let dir = root
-            .join("projects")
-            .join(claude_encode_project_path(workspace));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("s-1.jsonl"),
-            concat!(
-                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
-                "{\"type\":\"assistant\",\"effort\":\"high\",\"message\":{\"role\":\"assistant\"}}\n",
-                "{\"type\":\"assistant\",\"effort\":\"max\",\"message\":{\"role\":\"assistant\"}}\n"
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            claude_latest_effort_in(&root, workspace, "s-1").as_deref(),
-            Some("max")
-        );
-        assert_eq!(claude_latest_effort_in(&root, workspace, "missing"), None);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn claude_latest_effort_reads_past_a_partial_first_line() {
-        let root = effort_scratch("claude-effort-tail");
-        let workspace = "/tmp/ws";
-        let dir = root
-            .join("projects")
-            .join(claude_encode_project_path(workspace));
-        std::fs::create_dir_all(&dir).unwrap();
-        let padding = format!(
-            "{}\n",
-            serde_json::json!({ "type": "user", "padding": "x".repeat(300 * 1024) })
-        );
-        std::fs::write(
-            dir.join("s-2.jsonl"),
-            format!(
-                "{}\n{padding}{}\n",
-                serde_json::json!({ "type": "assistant", "effort": "low" }),
-                serde_json::json!({ "type": "assistant", "effort": "xhigh" }),
-            ),
-        )
-        .unwrap();
-        // The 256 KiB window starts mid-padding; the newest entry is read
-        // while the stale "low" one sits beyond it.
-        assert_eq!(
-            claude_latest_effort_in(&root, workspace, "s-2").as_deref(),
-            Some("xhigh")
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
     /// Title derivation = strip noise, then truncate (mirrors ScanAcc::accept).
     fn stripped(text: &str) -> String {

@@ -319,9 +319,8 @@ impl Engine for ClaudeEngine {
                     .get("message")
                     .and_then(|m| m.get("thinking_effort").or_else(|| m.get("effort")))
                     .or_else(|| value.get("thinking_effort"))
-                    // The CLI records the level per assistant entry as a
-                    // top-level `effort` (the same field its transcript
-                    // carries) — the level actually in force for the message.
+                    // Only use effort explicitly present in this streamed assistant
+                    // payload. Local transcript metadata is not response evidence.
                     .or_else(|| value.get("effort"))
                     .and_then(Value::as_str)
                     .map(str::trim)
@@ -955,9 +954,8 @@ mod tests {
             "got {out:?}"
         );
 
-        // The level actually in force rides the assistant entry as a
-        // top-level `effort` (what the CLI's own transcript records), so the
-        // response check can compare it against the launch request.
+        // A top-level level is accepted only when the streamed assistant
+        // event explicitly carries it.
         let mut out = Vec::new();
         ClaudeEngine::new().parse_line(
             &serde_json::json!({
@@ -1017,6 +1015,32 @@ mod tests {
         assert!(
             !out.iter().any(|e| matches!(e, EngineEvent::Effort(_))),
             "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_snapshot_without_effort_keeps_it_unreported() {
+        let mut out = Vec::new();
+        ClaudeEngine::new().parse_line(
+            &serde_json::json!({
+                "type": "assistant",
+                "session_id": "s-1",
+                "message": { "model": "claude-opus-4" }
+            })
+            .to_string(),
+            &mut out,
+        );
+        assert!(
+            out.iter().any(|event| matches!(
+                event,
+                EngineEvent::Served { model: Some(model), effort: None }
+                    if model == "claude-opus-4"
+            )),
+            "model remains reported while effort stays unknown: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|event| matches!(event, EngineEvent::Effort(_))),
+            "missing stream effort must not be inferred: {out:?}"
         );
     }
 

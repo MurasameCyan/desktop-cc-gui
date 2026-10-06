@@ -1054,34 +1054,6 @@ pub(crate) async fn run_reader(stdout: ChildStdout, ctx: RunContext) {
             .iter()
             .any(|event| matches!(event, EngineEvent::SessionId(_)));
         for mut event in events {
-            // The Claude CLI names no level anywhere in its stream (init only
-            // reports `per_turn_effort_active`); its transcript does, one
-            // `effort` per assistant entry. Read the newest one back and
-            // report it as served evidence *before* the done event, so the
-            // settled response check keeps the response side.
-            if ctx.core.engine_id == "claude" && matches!(event, EngineEvent::Done { .. }) {
-                let done_session_id = match &event {
-                    EngineEvent::Done { session_id, .. } => session_id.clone(),
-                    _ => None,
-                };
-                if let Some(session_id) =
-                    done_session_id.or_else(|| state.native_session_id.clone())
-                {
-                    if let Some(workspace) = crate::mcp::workspace_for_run(&ctx.core.run_id) {
-                        if let Some(effort) =
-                            crate::history::claude_latest_effort(&workspace, &session_id)
-                        {
-                            ctx.dispatch_event(
-                                &mut state,
-                                EngineEvent::Served {
-                                    model: None,
-                                    effort: Some(effort),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
             // Flush the final rollout records BEFORE done/error. Sending them
             // afterwards made observers adopt the already-finished run again.
             if matches!(event, EngineEvent::Done { .. } | EngineEvent::Error(_))

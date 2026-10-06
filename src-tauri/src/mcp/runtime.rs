@@ -40,12 +40,6 @@ pub(crate) fn register_run(run_id: &str, workspace: &str) {
         .insert(run_id.to_string(), workspace.to_string());
 }
 
-/// The workspace a run was registered with (None for runs never registered,
-/// and for runs already marked ended — `mark_run_ended` drops the mapping).
-pub(crate) fn workspace_for_run(run_id: &str) -> Option<String> {
-    run_workspace().lock().get(run_id).cloned()
-}
-
 /// 记录一次会话的 MCP 快照（claude `system/init`）。
 pub(crate) fn record_from_run(
     run_id: &str,

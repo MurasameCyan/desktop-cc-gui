@@ -54,14 +54,6 @@ pub(crate) fn resolve_claude_launch_model(selector: &str) -> String {
     claude::resolve_launch_model(selector)
 }
 
-/// The Claude CLI's config root ($CLAUDE_CONFIG_DIR, else ~/.claude): the
-/// transcript tree the response check reads the applied effort back from.
-pub(crate) fn claude_config_dir() -> std::path::PathBuf {
-    claude::config_dir()
-}
-
-use serde::Serialize;
-
 /// Catalog probe budget; with extension boot skipped the call lands in ~1s,
 /// this is pure slow-machine headroom.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
