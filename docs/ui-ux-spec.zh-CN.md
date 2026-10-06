@@ -289,6 +289,7 @@ const feedback = useRunningFeedback(store.loading);
 | v0.55 | 2026-09-24 | 设置搜索铺满所有内置设置页：Web 访问（含藏在「公网访问」面板里的四行）、11 个 CLI 引擎页（按各页真实行集生成）、智能体与提示词 / Skills 页签、工作区分组/项目/已授权目录；新增 `activatorAnchor`（命中前先点开页签或折叠卡，已开就不点）与 `labelText`（品牌名不翻译）、可省略的 `sectionKey`，`SettingsSectionLabel` / `PillTab` / CLI `RowShell` 都能当搜索目标；§3 更新规则 |
 | v0.54 | 2026-09-24 | 设置搜索可搜页面内部的行：左导航搜索分两条 lane（「命中行」按页面分组、行内显示「标签 + 所在卡片」，点选/回车打开页面并滚动到该行、1.2s 内侧 focus ring 高亮；「命中页面」仍是页标题子串过滤），行索引为声明式（`settings-search.ts` + 内置页清单 `builtin-search.ts`），通用页全量覆盖；§3 补充规则 |
 | v0.53 | 2026-09-24 | ⌘L 会话搜索面板新增检索统计行：内容 lane 存活时显示「正在检索… / 耗时 {{time}} · 共检索 {{total}} 条消息 / 检索失败」；后端 `search()` 返回 `elapsedUs` + `totalMessages`，耗时只计查询本身（看板计数在计时外）；§3 补充规则 |
+| v0.53 | 2026-09-25 | 新增 MiniMax Code CLI（命令 `mcode`）引擎：聊天引擎下拉与设置 CLI 管理按既有数据驱动形态自动出现，引擎图标采用随 app 分发的蓝色徽章（.icns 转 PNG），模型厂商推断沿用原扁平标志；权限问答走 ACP `session/request_permission` 问题卡（同 grok/kimi 形态）；MCP 页如实标注不支持（不伪造 native 空来源）；渠道/技能同步暂不接入 |
 | v0.52 | 2026-09-24 | 设置「电脑操控」移除拖拽授权引导：删掉“重启生效 / 把图标拖进授权列表”提示与可拖拽 App 图标，macOS 授权只保留「打开系统设置」深链（`computer_use_open_permission_settings`）；同步删除 `computer_use_drag_source` 命令、`tauri-plugin-drag` 依赖与 `drag:default` 权限；§3 更新权限行规则 |
 | v0.51 | 2026-09-24 | AskUserQuestion 多题卡片：单选自动前进、多选逐题确认与单选/多选样式区分 |
 | v0.50 | 2026-09-23 | 桌面宠物（§4.3）：透明置顶宠物窗口的点击穿透/拖动/右键缩放交互、状态气泡动效时长、位置与尺寸记忆、多会话轮播；移除宠物改用 `ConfirmDialog`（danger），后端宠物错误码本地化 |
