@@ -352,7 +352,7 @@ export const en: Messages = {
     compactContext: "Compact",
     compactContextTooltip: "Send /compact to compress conversation context",
     compacting: "Compacting…",
-    compactingContext: "Compacting context…",
+    compactingContext: "Compacting context",
     slashGroupApp: "Built-in",
     slashKindApp: "App",
     removeTag: "Remove {{name}}",

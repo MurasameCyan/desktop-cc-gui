@@ -1,4 +1,5 @@
 import type { Message } from "@/lib/ipc";
+import { isInternalUserRow } from "../internal-rows";
 
 export type ProcessItem = {
   type: "tool" | "thinking";
@@ -94,7 +95,7 @@ export function buildRows(messages: Message[]): TimelineRow[] {
   let i = 0;
   while (i < messages.length) {
     const message = messages[i];
-    if (isPlaceholderMessage(message)) {
+    if (isPlaceholderMessage(message) || isInternalUserRow(message)) {
       i++;
       continue;
     }

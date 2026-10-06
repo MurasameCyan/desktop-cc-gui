@@ -538,7 +538,10 @@ export const MessageTimeline = memo(function MessageTimeline({
   // settles: while streaming, mid-turn segments (kimi multi-message replies)
   // are not the final word.
   const turnLive = streaming;
-  const count = rows.length + (streaming ? 1 : 0);
+  // The tail item is the turn-status indicator (or the grey compaction line).
+  // A compaction keeps it mounted even between sends, so the line does not
+  // blink out in the gap between the compact turn and the resume turn.
+  const count = rows.length + (streaming || session.compaction ? 1 : 0);
 
   const virtualizer = useVirtualizer({
     count,
@@ -686,27 +689,38 @@ export const MessageTimeline = memo(function MessageTimeline({
                 className="py-2"
               >
                 {isTail ? (
-                  <AgentThinking
-                    variant="wave"
-                    label={session.compaction ? t("chat.compactingContext") : t("chat.thinking")}
-                    className="py-2"
-                    startedAt={session.turnStartedAt ?? undefined}
-                    durationFormatter={(d) => t("chat.metaDuration", { duration: d })}
-                    model={activeModelFormatted}
-                    effort={activeEffortFormatted}
-                    usage={liveUsage}
-                    retry={
-                      session.retry
-                        ? session.retry.max > 0
-                          ? t("chat.retrying", {
-                              attempt: session.retry.attempt,
-                              max: session.retry.max,
-                            })
-                          : t("chat.retryingNoMax", { attempt: session.retry.attempt })
-                        : null
-                    }
-                    retryDetail={session.retry?.message || null}
-                  />
+                  session.compaction ? (
+                    // Compaction is plumbing, not conversation: one grey line
+                    // on the right replaces the tail indicator while it runs
+                    // (no "/compact" bubble, no model/usage chrome).
+                    <div className="flex justify-end py-2 pr-1">
+                      <span className="text-caption-1-medium text-text-tertiary">
+                        {`< ${t("chat.compactingContext")} >`}
+                      </span>
+                    </div>
+                  ) : (
+                    <AgentThinking
+                      variant="wave"
+                      label={t("chat.thinking")}
+                      className="py-2"
+                      startedAt={session.turnStartedAt ?? undefined}
+                      durationFormatter={(d) => t("chat.metaDuration", { duration: d })}
+                      model={activeModelFormatted}
+                      effort={activeEffortFormatted}
+                      usage={liveUsage}
+                      retry={
+                        session.retry
+                          ? session.retry.max > 0
+                            ? t("chat.retrying", {
+                                attempt: session.retry.attempt,
+                                max: session.retry.max,
+                              })
+                            : t("chat.retryingNoMax", { attempt: session.retry.attempt })
+                          : null
+                      }
+                      retryDetail={session.retry?.message || null}
+                    />
+                  )
                 ) : (
                   <TimelineRowView
                     row={rows[item.index]}

@@ -337,7 +337,7 @@ export const zh = {
     compactContext: "压缩",
     compactContextTooltip: "向会话发送 /compact 以压缩精简历史上下文",
     compacting: "压缩中…",
-    compactingContext: "正在压缩上下文…",
+    compactingContext: "正在压缩上下文",
     slashGroupApp: "内置",
     slashKindApp: "内置",
     removeTag: "移除 {{name}}",

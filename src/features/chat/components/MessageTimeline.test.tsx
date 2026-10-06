@@ -6,7 +6,7 @@ import { MessageRow, MessageTimeline } from "./MessageTimeline";
 import { buildBotBlock } from "./agent-block";
 import { useBotStore } from "@/features/bots/bot-store";
 import type { BotConfig, Message } from "@/lib/ipc";
-import { EMPTY_SESSION } from "../store/stream";
+import { EMPTY_SESSION, type SessionState } from "../store/stream";
 import i18n from "@/lib/i18n";
 
 const searchHarness = vi.hoisted(() => ({ handlers: new Map<string, () => void>(), scrollToIndex: vi.fn() }));
@@ -369,5 +369,76 @@ describe("user bubble agent badge", () => {
     expect(
       container.querySelector("canvas")?.getAttribute("aria-label"),
     ).toBe(label);
+  });
+});
+
+describe("host compaction rows", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(async () => {
+    await i18n.changeLanguage("zh");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  async function renderCompacting(
+    messages: Message[],
+    compaction: SessionState["compaction"],
+    streaming: boolean,
+  ) {
+    await act(async () => {
+      root.render(
+        <MessageTimeline
+          session={{ ...EMPTY_SESSION, messages, compaction }}
+          streaming={streaming}
+          onLoadEarlier={() => {}}
+          workspacePath="/ws"
+        />,
+      );
+    });
+  }
+
+  const hintText = () => `< ${i18n.t("chat.compactingContext")} >`;
+
+  it("hides the /compact and resume rows, leaving one grey hint line", async () => {
+    const messages: Message[] = [
+      { seq: 1, role: "user", text: "读一下那个文件", ts: null },
+      { seq: 2, role: "user", text: "/compact", ts: null },
+      { seq: 3, role: "user", text: i18n.t("chat.autoCompactResume"), ts: null },
+      { seq: 4, role: "assistant", text: "文件已经读完了。", ts: null },
+    ];
+    await renderCompacting(messages, { automatic: false, startedAt: 1 }, true);
+
+    expect(container.textContent).toContain("读一下那个文件");
+    // The rows stay in the store (compact-turn detection reads them) and are
+    // filtered at render time — including on a history page reloaded from the
+    // engine's transcript, where only the texts identify them.
+    expect(container.textContent).not.toContain("/compact");
+    expect(container.textContent).not.toContain(i18n.t("chat.autoCompactResume"));
+
+    const hint = [...container.querySelectorAll("span")].find(
+      (span) => span.textContent === hintText(),
+    );
+    expect(hint).toBeTruthy();
+    expect(hint!.className).toContain("text-text-tertiary");
+    expect(hint!.parentElement?.className).toContain("justify-end");
+  });
+
+  it("holds the hint through the gap between the compact and resume turns", async () => {
+    const messages: Message[] = [{ seq: 1, role: "user", text: "继续", ts: null }];
+    // Between the two sends nothing streams; the hint must not blink out.
+    await renderCompacting(messages, { automatic: false, startedAt: 1 }, false);
+    expect(container.textContent).toContain(hintText());
+
+    await renderCompacting(messages, null, true);
+    expect(container.textContent).not.toContain(hintText());
+    expect(container.textContent).toContain(i18n.t("chat.thinking"));
   });
 });
