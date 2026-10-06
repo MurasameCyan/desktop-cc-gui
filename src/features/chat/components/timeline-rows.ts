@@ -1,5 +1,5 @@
 import type { Message } from "@/lib/ipc";
-import { isInternalUserRow } from "../internal-rows";
+import { isCompactCommandRow, isResumeNudgeRow } from "../internal-rows";
 
 export type ProcessItem = {
   type: "tool" | "thinking";
@@ -15,7 +15,10 @@ export type ProcessItem = {
 
 export type TimelineRow =
   | { kind: "msg"; message: Message; turnFinal: boolean }
-  | { kind: "process"; items: ProcessItem[]; firstSeq: number };
+  | { kind: "process"; items: ProcessItem[]; firstSeq: number }
+  /** Host-sent compaction (/compact): renders as one grey line in place of the
+   *  bubble and stays there, so the compaction is still traceable later. */
+  | { kind: "curtain"; seq: number };
 
 /** Letters, digits, or emoji make a segment real content. Harnesses emit
  * bare placeholder segments ("·", ".") between tool batches; rendered as a
@@ -33,6 +36,7 @@ function isPlaceholderMessage(message: Message): boolean {
  * WeakMaps keep no message alive beyond the session state that holds it. */
 type MsgRow = Extract<TimelineRow, { kind: "msg" }>;
 const msgRowCache = new WeakMap<Message, { final?: MsgRow; plain?: MsgRow }>();
+const curtainRowCache = new WeakMap<Message, Extract<TimelineRow, { kind: "curtain" }>>();
 const processItemCache = new WeakMap<Message, ProcessItem>();
 const processRowCache = new WeakMap<
   Message,
@@ -50,6 +54,15 @@ function getMsgRow(message: Message, turnFinal: boolean): MsgRow {
   const row: MsgRow = { kind: "msg", message, turnFinal };
   if (turnFinal) slots.final = row;
   else slots.plain = row;
+  return row;
+}
+
+function getCurtainRow(message: Message): Extract<TimelineRow, { kind: "curtain" }> {
+  let row = curtainRowCache.get(message);
+  if (!row) {
+    row = { kind: "curtain", seq: message.seq };
+    curtainRowCache.set(message, row);
+  }
   return row;
 }
 
@@ -95,7 +108,19 @@ export function buildRows(messages: Message[]): TimelineRow[] {
   let i = 0;
   while (i < messages.length) {
     const message = messages[i];
-    if (isPlaceholderMessage(message) || isInternalUserRow(message)) {
+    if (isPlaceholderMessage(message)) {
+      i++;
+      continue;
+    }
+    // The compaction command keeps its place in the transcript, as the grey
+    // line; the resume nudge has no place at all — the reply it triggers is
+    // the visible part.
+    if (isCompactCommandRow(message)) {
+      rows.push(getCurtainRow(message));
+      i++;
+      continue;
+    }
+    if (isResumeNudgeRow(message)) {
       i++;
       continue;
     }
@@ -123,6 +148,12 @@ export function buildRows(messages: Message[]): TimelineRow[] {
   let seenAssistant = false;
   for (let j = rows.length - 1; j >= 0; j--) {
     const row = rows[j];
+    // A curtain row is a turn boundary like the user row it replaces: the
+    // reply before it is final, the one after it starts a fresh turn.
+    if (row.kind === "curtain") {
+      seenAssistant = false;
+      continue;
+    }
     if (row.kind !== "msg") continue;
     if (row.message.role === "user") {
       seenAssistant = false;
@@ -136,7 +167,8 @@ export function buildRows(messages: Message[]): TimelineRow[] {
 }
 
 export function rowKey(row: TimelineRow): string | number {
-  return row.kind === "msg" ? row.message.seq : `process-${row.firstSeq}`;
+  if (row.kind === "msg") return row.message.seq;
+  return row.kind === "curtain" ? `curtain-${row.seq}` : `process-${row.firstSeq}`;
 }
 
 export function toolEntranceKey(processId: number, index: number): string {

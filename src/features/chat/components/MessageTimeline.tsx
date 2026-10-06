@@ -78,6 +78,9 @@ const TimelineRowView = memo(function TimelineRowView({
       </PluginBoundary>
     );
   }
+  // The compaction command renders in place, not as a bubble: one grey line
+  // that stays after the compaction ends.
+  if (row.kind === "curtain") return <CompactionCurtain />;
   // Every process run — thinking, tools, or both — folds into the same
   // collapsed summary line ("思考 N 次 工具调用 M 次 >"); expanding shows
   // the per-step details.
@@ -102,6 +105,21 @@ const TimelineRowView = memo(function TimelineRowView({
     />
   );
 });
+
+/** The one trace host automatic compaction leaves in the transcript: a grey,
+ *  right-aligned line where the /compact bubble used to be. It belongs to the
+ *  row, so it survives the compaction ending; the engine's own mid-turn
+ *  compaction has no row and mounts this component as the tail instead. */
+export function CompactionCurtain() {
+  const { t } = useTranslation();
+  return (
+    <div className="flex justify-end py-2 pr-1" data-testid="compaction-curtain">
+      <span className="text-caption-1-medium text-text-tertiary">
+        {`< ${t("chat.compactingContext")} >`}
+      </span>
+    </div>
+  );
+}
 
 const LazyMarkdown = lazy(() => import("./Markdown"));
 
@@ -689,16 +707,12 @@ export const MessageTimeline = memo(function MessageTimeline({
                 className="py-2"
               >
                 {isTail ? (
-                  session.compaction ? (
-                    // Compaction is plumbing, not conversation: one grey line
-                    // on the right replaces the tail indicator while it runs
-                    // (no "/compact" bubble, no model/usage chrome).
-                    <div className="flex justify-end py-2 pr-1">
-                      <span className="text-caption-1-medium text-text-tertiary">
-                        {`< ${t("chat.compactingContext")} >`}
-                      </span>
-                    </div>
-                  ) : (
+                  // A host-sent compaction already shows in place (its /compact
+                  // row became the grey line), so the tail only carries the
+                  // engine's own mid-turn compaction — a flag with no row.
+                  session.compaction?.automatic ? (
+                    <CompactionCurtain />
+                  ) : session.compaction ? null : (
                     <AgentThinking
                       variant="wave"
                       label={t("chat.thinking")}

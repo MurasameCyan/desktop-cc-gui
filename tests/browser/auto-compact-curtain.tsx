@@ -1,11 +1,12 @@
 // Open /tests/browser/auto-compact-curtain.html with the Vite dev server
 // running. Static acceptance for the compaction "curtain": the host's own
-// scheduling rows ("/compact" and the resume nudge) must never render, and
-// while a compaction runs the timeline tail is one grey right-aligned line.
-// The buttons switch the session state; the readout reports what the DOM
-// actually shows, so the two failure modes (a plumbing row in the
-// transcript, a missing/positioned-wrong hint) read as FAIL.
-// No model, no IPC, no saved conversation.
+// scheduling rows must never render as bubbles — the "/compact" row becomes
+// one grey right-aligned line that survives the compaction ending, and the
+// resume nudge disappears entirely (the reply it triggers is the visible
+// part). An engine-reported mid-turn compaction has no row behind it and
+// mounts the same line at the tail. The buttons switch the session state; the
+// readout reports what the DOM actually shows, so a leaked bubble or a
+// missing/lost line reads as FAIL. No model, no IPC, no saved conversation.
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
@@ -51,16 +52,20 @@ function stateFor(mode: Mode): SessionState {
 }
 
 interface Readout {
-  storeRows: number;
+  storedRows: number;
   bubbles: string[];
-  hint: boolean;
-  hintColor: string | null;
-  hintJustify: string | null;
-  compactRow: boolean;
-  resumeRow: boolean;
+  lines: number;
+  lineColor: string | null;
+  lineAlign: string | null;
+  leakedCompact: boolean;
+  leakedResume: boolean;
   thinking: boolean;
   pass: boolean;
 }
+
+/** Expected grey lines: the stored /compact row always; the engine's own
+ *  mid-turn compaction adds a second one at the tail. */
+const EXPECTED_LINES: Record<Mode, number> = { idle: 1, host: 1, engine: 2, resume: 1 };
 
 function Harness() {
   const [mode, setMode] = useState<Mode>("host");
@@ -73,27 +78,19 @@ function Harness() {
       const bubbles = [...root.querySelectorAll(".bg-bubble-user")].map(
         (el) => (el.textContent ?? "").trim(),
       );
-      const spans = [...root.querySelectorAll("span")];
-      const hint = spans.find(
-        (el) => (el.textContent ?? "").trim() === `< ${i18n.t("chat.compactingContext")} >`,
-      );
-      const compactRow = bubbles.some((text) => text.startsWith("/compact"));
-      const resumeRow = bubbles.some((text) => text.includes(RESUME));
-      const hintText = Boolean(hint);
-      const hintJustify = hint?.parentElement
-        ? getComputedStyle(hint.parentElement).justifyContent
-        : null;
-      const compacting = mode === "host" || mode === "engine";
+      const lines = [...root.querySelectorAll('[data-testid="compaction-curtain"]')];
+      const leakedCompact = bubbles.some((text) => text.startsWith("/compact"));
+      const leakedResume = bubbles.some((text) => text.includes(RESUME));
       const next: Readout = {
-        storeRows: MESSAGES.length,
+        storedRows: MESSAGES.length,
         bubbles,
-        hint: hintText,
-        hintColor: hint ? getComputedStyle(hint).color : null,
-        hintJustify,
-        compactRow,
-        resumeRow,
+        lines: lines.length,
+        lineColor: lines[0] ? getComputedStyle(lines[0].querySelector("span")!).color : null,
+        lineAlign: lines[0] ? getComputedStyle(lines[0]).justifyContent : null,
+        leakedCompact,
+        leakedResume,
         thinking: (root.textContent ?? "").includes(i18n.t("chat.thinking")),
-        pass: !compactRow && !resumeRow && hintText === compacting,
+        pass: lines.length === EXPECTED_LINES[mode] && !leakedCompact && !leakedResume,
       };
       // The virtualizer mounts its rows a frame or two after the first paint,
       // so a once-per-mode read would sample an empty timeline.
@@ -109,6 +106,9 @@ function Harness() {
   return (
     <div className="flex h-[900px] flex-col bg-background-primary-default text-text-primary">
       <div className="flex items-center gap-2 border-b border-border-button-default px-3 py-2">
+        <span className="text-caption-1-medium text-text-secondary">
+          组件夹具（只渲染消息幕布，不是完整 GUI）
+        </span>
         {MODES.map(({ mode: value, label }) => (
           <button
             key={value}
@@ -144,4 +144,6 @@ function Harness() {
   );
 }
 
+// The app's canvas colour, so the preview does not read as a blank page.
+document.body.className = "bg-background-primary-default text-text-primary";
 createRoot(document.getElementById("fixture")!).render(<Harness />);

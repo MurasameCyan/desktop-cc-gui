@@ -406,39 +406,53 @@ describe("host compaction rows", () => {
   }
 
   const hintText = () => `< ${i18n.t("chat.compactingContext")} >`;
+  const curtains = () => container.querySelectorAll('[data-testid="compaction-curtain"]');
 
-  it("hides the /compact and resume rows, leaving one grey hint line", async () => {
+  it("keeps the compaction as one grey line in place and drops the resume nudge", async () => {
     const messages: Message[] = [
       { seq: 1, role: "user", text: "读一下那个文件", ts: null },
       { seq: 2, role: "user", text: "/compact", ts: null },
       { seq: 3, role: "user", text: i18n.t("chat.autoCompactResume"), ts: null },
       { seq: 4, role: "assistant", text: "文件已经读完了。", ts: null },
     ];
-    await renderCompacting(messages, { automatic: false, startedAt: 1 }, true);
+    // Settled: no compaction running, which is exactly when the line has to
+    // stay — it is the transcript's only record of the compaction.
+    await renderCompacting(messages, null, false);
 
     expect(container.textContent).toContain("读一下那个文件");
     // The rows stay in the store (compact-turn detection reads them) and are
-    // filtered at render time — including on a history page reloaded from the
+    // handled at render time — including on a history page reloaded from the
     // engine's transcript, where only the texts identify them.
     expect(container.textContent).not.toContain("/compact");
     expect(container.textContent).not.toContain(i18n.t("chat.autoCompactResume"));
 
-    const hint = [...container.querySelectorAll("span")].find(
-      (span) => span.textContent === hintText(),
-    );
-    expect(hint).toBeTruthy();
-    expect(hint!.className).toContain("text-text-tertiary");
-    expect(hint!.parentElement?.className).toContain("justify-end");
+    expect(curtains().length).toBe(1);
+    const line = curtains()[0];
+    expect(line.textContent).toBe(hintText());
+    expect(line.querySelector("span")?.className).toContain("text-text-tertiary");
+    expect(line.className).toContain("justify-end");
   });
 
-  it("holds the hint through the gap between the compact and resume turns", async () => {
+  it("does not double the line while a host compaction runs", async () => {
+    const messages: Message[] = [
+      { seq: 1, role: "user", text: "继续", ts: null },
+      { seq: 2, role: "user", text: "/compact", ts: null },
+    ];
+    await renderCompacting(messages, { automatic: false, startedAt: 1 }, true);
+    // The row already shows it; the tail must stay quiet instead of adding a
+    // second line or the ordinary thinking indicator.
+    expect(curtains().length).toBe(1);
+    expect(container.textContent).not.toContain(i18n.t("chat.thinking"));
+  });
+
+  it("mounts the line at the tail for an engine compaction, then returns to the indicator", async () => {
     const messages: Message[] = [{ seq: 1, role: "user", text: "继续", ts: null }];
-    // Between the two sends nothing streams; the hint must not blink out.
-    await renderCompacting(messages, { automatic: false, startedAt: 1 }, false);
-    expect(container.textContent).toContain(hintText());
+    await renderCompacting(messages, { automatic: true, startedAt: 1 }, true);
+    expect(curtains().length).toBe(1);
+    expect(container.textContent).not.toContain(i18n.t("chat.thinking"));
 
     await renderCompacting(messages, null, true);
-    expect(container.textContent).not.toContain(hintText());
+    expect(curtains().length).toBe(0);
     expect(container.textContent).toContain(i18n.t("chat.thinking"));
   });
 });
