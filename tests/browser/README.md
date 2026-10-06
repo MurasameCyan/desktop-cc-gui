@@ -274,3 +274,14 @@ painted ~190px across the rail, and the pinned 1042px rail could only be read
 by scrolling the README to its end. The readout reports PASS plus the measured
 boxes, `clientHeight`/`scrollHeight` and the page's scrollTop. No app shell,
 no backend, no saved state.
+
+Open `/tests/browser/auto-compact-curtain.html` for the compaction curtain:
+the host's own scheduling rows — the `/compact` command and the resume nudge
+the auto-compaction sends to pick a task back up — must never appear as
+bubbles, no matter how the engine's transcript is replayed, and while a
+compaction runs the timeline tail must be exactly one grey right-aligned
+`< 正在压缩上下文 >` line (host-sent and engine-reported compactions alike)
+instead of the wave indicator. The four buttons switch idle / host / engine /
+resume states; the readout reports the rendered bubbles against the five
+stored rows, the hint's computed colour and alignment, and PASS/FAIL. No model,
+no IPC, no saved conversation.
