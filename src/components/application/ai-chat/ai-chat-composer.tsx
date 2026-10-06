@@ -9,6 +9,7 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import GitMerge from "lucide-react/dist/esm/icons/git-merge";
 import Globe from "lucide-react/dist/esm/icons/globe";
@@ -33,7 +34,7 @@ import { ComposerResizeHandle } from "@/components/application/ai-chat/composer-
 import { ComposerEditable } from "@/components/application/ai-chat/composer-editable";
 import { ComposerToolbar } from "@/components/application/ai-chat/composer-toolbar";
 import { ComposerPickerMenus } from "@/components/application/ai-chat/composer-picker-menus";
-import { SelectedAgentChip } from "@/components/application/ai-chat/composer-agent-chip";
+import { SelectedBotChip } from "@/components/application/ai-chat/composer-bot-chip";
 import { useComposerPickers } from "@/components/application/ai-chat/use-composer-pickers";
 import { useComposerInputHandle } from "@/components/application/ai-chat/use-composer-input-handle";
 import { useResizableComposer } from "@/components/application/ai-chat/use-resizable-composer";
@@ -49,6 +50,7 @@ import { ipc } from "@/lib/ipc";
 import { listenSettingsChanged } from "@/lib/events";
 import { useTauriEvent } from "@/hooks/use-tauri-event";
 import { ASSUMED_CONTEXT_WINDOW } from "@/features/chat/usage";
+import type { AutoCompactSettings } from "@/features/chat/auto-compact-context";
 import {
   usePromptCompletion,
   usePromptHistoryNav,
@@ -163,7 +165,7 @@ export function Composer({
     if (el && !isComposingRef.current) renderFileTags(el);
   }, []);
 
-  // `@` mention / `/` slash / `#` agent / `!` prompt pickers: trigger
+  // `@` mention / `/` slash / `#` bot / `!` prompt pickers: trigger
   // tracking, priority arbitration, and select actions live in
   // useComposerPickers. The parent owns the wrapper ref (root div + popover
   // anchor).
@@ -180,16 +182,16 @@ export function Composer({
   const {
     mention,
     slash,
-    agent,
+    bot,
     prompt,
     mentionMenuRef,
     slashMenuRef,
-    agentMenuRef,
+    botMenuRef,
     promptMenuRef,
     updateSlashTrigger,
     updateTriggers,
-    selectedAgent,
-    clearSelectedAgent,
+    selectedBot,
+    clearSelectedBot,
   } = pickers;
 
   // Ghost-text completion from prompt history (desktop-cc-gui parity):
@@ -286,10 +288,10 @@ export function Composer({
         pickers={pickers}
       />
 
-      {/* Pinned-agent chip above the input, styled after the attachment
+      {/* Pinned-bot chip above the input, styled after the attachment
           chips (ConversationFooter); × clears the selection. */}
-      {!isCollapsed && selectedAgent && (
-        <SelectedAgentChip agent={selectedAgent} onClear={clearSelectedAgent} />
+      {!isCollapsed && selectedBot && (
+        <SelectedBotChip bot={selectedBot} onClear={clearSelectedBot} />
       )}
 
       {!isCollapsed && (
@@ -298,7 +300,7 @@ export function Composer({
           sendShortcut={sendShortcut}
           mentionOpen={mention != null}
           slashOpen={slash != null}
-          agentOpen={agent != null}
+          botOpen={bot != null}
           promptOpen={prompt != null}
           completionSuffix={completion.suffix}
           acceptCompletion={completion.accept}
@@ -306,7 +308,7 @@ export function Composer({
           handleHistoryKeyDown={handleHistoryKeyDown}
           mentionMenuRef={mentionMenuRef}
           slashMenuRef={slashMenuRef}
-          agentMenuRef={agentMenuRef}
+          botMenuRef={botMenuRef}
           promptMenuRef={promptMenuRef}
           isComposingRef={isComposingRef}
           lastCompositionEndTimeRef={lastCompositionEndTimeRef}
@@ -370,19 +372,27 @@ function isUsableProxyUrl(value: string | null): boolean {
   );
 }
 
+type ProxyQuickToggleState = { enabled: boolean; url: string | null };
+
+/** Decide whether an unconfigured footer glyph should open proxy settings. */
+export function getProxyQuickToggleAction(state: ProxyQuickToggleState): "settings" | "toggle" {
+  if (!state.enabled && !isUsableProxyUrl(state.url)) return "settings";
+  return "toggle";
+}
+
 /**
  * One-click network-proxy switch for the composer footer: the glyph carries
  * the state (dim = off, green = on) and the click persists `systemProxyEnabled`
  * through the same read-modify-write funnel the settings page uses, so the two
  * surfaces can never clobber each other.
  *
- * Hidden entirely while off without a usable proxy URL — enabling would fail
- * backend validation anyway, so the entry only appears once the settings page
- * has a valid URL to flip on.
+ * When off without a usable proxy URL, clicking the visible glyph opens the
+ * proxy settings instead of attempting an invalid enable operation.
  */
 function ProxyQuickToggle() {
   const { t } = useTranslation();
-  const [state, setState] = useState<{ enabled: boolean; url: string | null } | null>(null);
+  const navigate = useNavigate();
+  const [state, setState] = useState<ProxyQuickToggleState | null>(null);
   const [busy, setBusy] = useState(false);
 
   const read = useCallback(() => {
@@ -400,6 +410,10 @@ function ProxyQuickToggle() {
 
   const toggle = useCallback(async () => {
     if (busy || !state) return;
+    if (getProxyQuickToggleAction(state) === "settings") {
+      navigate("/settings?page=proxy");
+      return;
+    }
     setBusy(true);
     try {
       const latest = await ipc.getAppSettings();
@@ -412,15 +426,19 @@ function ProxyQuickToggle() {
     } finally {
       setBusy(false);
     }
-  }, [busy, state]);
+  }, [busy, navigate, state]);
 
   if (!state) return null;
   const { enabled } = state;
-  // Off + no valid URL → enabling is impossible; hide the entry. On → always
-  // shown, disabling never fails validation.
-  if (!enabled && !isUsableProxyUrl(state.url)) return null;
-  const label = enabled ? t("chat.proxyOn") : t("chat.proxyOff");
-  const tip = enabled ? t("chat.proxyTipOn") : t("chat.proxyTipOff");
+  const action = getProxyQuickToggleAction(state);
+  const label =
+    action === "settings" ? t("chat.proxyConfigure") : enabled ? t("chat.proxyOn") : t("chat.proxyOff");
+  const tip =
+    action === "settings"
+      ? t("chat.proxyTipConfigure")
+      : enabled
+        ? t("chat.proxyTipOn")
+        : t("chat.proxyTipOff");
   // Mirror the context-meter button exactly: react-aria AriaButton, the same
   // shape/focus classes, colour carries the state. That control never shows
   // a stray circle, so this one should not either.
@@ -428,7 +446,7 @@ function ProxyQuickToggle() {
     <Tooltip>
       <AriaButton
         aria-label={label}
-        aria-pressed={enabled}
+        aria-pressed={action === "toggle" ? enabled : undefined}
         isDisabled={busy}
         onPress={() => void toggle()}
         className={cx(
@@ -480,30 +498,31 @@ export function StatusBar({
   compacting,
   refreshing,
   canCompact,
+  autoCompact,
+  autoCompactDisabled,
+  onAutoCompactEnabledChange,
+  onAutoCompactThresholdChange,
 }: {
   branch?: string;
-  /** Local and remote-tracking branches for the switcher; empty until the
-   *  first load. */
   branches?: BranchMenuItem[];
-  /** Repository display name when the chip tracks a nested repo (file-tree
-   *  selection inside a subfolder repository); prefixes the branch label. */
   branchRepoName?: string;
-  /** Present → the branch label becomes a switcher dropdown. */
   onBranchSelect?: (name: string) => void;
-  /** Workspace folder display names. */
   folders?: string[];
   selectedFolder?: string;
   onFolderSelect?: (name: string) => void;
   usagePct?: number;
-  /** Context window size in tokens for the breakdown card. */
   contextMax?: number;
-  /** Token buckets for the breakdown card; empty until usage is reported. */
   contextSegments?: ContextSegment[];
   onCompactContext?: () => void;
   onRefreshUsage?: () => void;
   compacting?: boolean;
   refreshing?: boolean;
   canCompact?: boolean;
+  autoCompact?: AutoCompactSettings;
+  /** No active session: keep the controls visible but inert. */
+  autoCompactDisabled?: boolean;
+  onAutoCompactEnabledChange?: (enabled: boolean) => void;
+  onAutoCompactThresholdChange?: (threshold: number) => void;
 }) {
   const { t } = useTranslation();
   // `isNonModal` popovers don't dismiss on outside press (react-aria couples
@@ -535,6 +554,10 @@ export function StatusBar({
       refreshUsage: t("chat.refreshUsage"),
       refreshUsageTooltip: t("chat.refreshUsageTooltip"),
       refreshing: t("chat.refreshing"),
+      autoCompactThreshold: t("chat.autoCompactThreshold"),
+      autoCompactEnable: t("chat.autoCompactEnable"),
+      autoCompactDisable: t("chat.autoCompactDisable"),
+      autoCompactNoSession: t("chat.autoCompactNoSession"),
     }),
     [t],
   );
@@ -612,6 +635,16 @@ export function StatusBar({
                 compacting={compacting}
                 refreshing={refreshing}
                 canCompact={canCompact}
+                autoCompact={
+                  autoCompact
+                    ? {
+                        ...autoCompact,
+                        disabled: autoCompactDisabled === true,
+                        onEnabledChange: onAutoCompactEnabledChange ?? (() => {}),
+                        onThresholdChange: onAutoCompactThresholdChange ?? (() => {}),
+                      }
+                    : undefined
+                }
               />
             </AriaDialog>
           </AriaPopover>

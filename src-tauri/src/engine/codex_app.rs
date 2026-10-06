@@ -1686,6 +1686,7 @@ pub(crate) async fn run_plan_decision(
         prompt: spec.prompt,
         // 内部校验 spawn:不属于任何插件回合,没有可注入的贡献。
         prompt_contributions: Vec::new(),
+        native_compact: false,
         images: Vec::new(),
         // Settings inherit the thread's reported model/effort instead.
         model: None,
@@ -1695,6 +1696,7 @@ pub(crate) async fn run_plan_decision(
         additional_dirs: state.db.granted_roots().unwrap_or_default(),
         provider_id,
         computer_use: None,
+        memory_bot: None,
         allowed_tools: None,
     };
     let mut built = super::codex::CodexEngine.host_command(&req, &bin)?;
@@ -2025,6 +2027,7 @@ mod tests {
             workspace: workspace.clone(),
             prompt: "not sent".into(),
             prompt_contributions: Vec::new(),
+            native_compact: false,
             images: vec![],
             model: Some("probe".into()),
             effort: None,
@@ -2033,6 +2036,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         };
         assert!(crate::engine::codex::CodexEngine
@@ -2108,6 +2112,7 @@ mod tests {
             workspace: directory.clone(),
             prompt: "hi".into(),
             prompt_contributions: Vec::new(),
+            native_compact: false,
             images: vec![],
             model: None,
             effort: None,
@@ -2116,6 +2121,7 @@ mod tests {
             additional_dirs: vec![],
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         };
         let built = BuiltCommand {

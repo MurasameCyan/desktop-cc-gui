@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  KNOWN_PERMISSIONS,
   execGrantAllows,
   isKnownPermission,
   isValidPluginId,
@@ -8,7 +9,14 @@ import {
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
 
 describe("isKnownPermission", () => {
-  it("accepts generic lifecycle and conversation capabilities", () => {
+  it("accepts every permission registered in the spec", () => {
+    for (const p of Object.keys(KNOWN_PERMISSIONS)) {
+      expect(isKnownPermission(p)).toBe(true);
+    }
+    // Count derives from the spec, not a hand-maintained literal: adding a
+    // permission to spec/permissions.json must never stale-fail this test.
+    expect(Object.keys(KNOWN_PERMISSIONS)).toHaveLength(spec.knownPermissions.length);
+    // 兼容线新声明的细粒度能力也必须真在 spec 里（不是只有文档承诺）。
     for (const permission of [
       "session.lifecycle.read",
       "runtime.events.read",
@@ -16,7 +24,14 @@ describe("isKnownPermission", () => {
       "prompt.contribute.internal",
       "workspace.metadata.read",
       "plugin.storage",
+      "ui:overlay",
+      "ui:workspace-menu",
+      "assets:bundle",
+      "assets:directory",
       "ui:conversation-mode",
+      "host:worktree",
+      "host:window",
+      "host:models",
     ]) {
       expect(isKnownPermission(permission)).toBe(true);
     }

@@ -1,7 +1,7 @@
 use super::discovery::{
     codex_candidates, discover_agy, discover_claude, discover_grok, discover_kimi,
-    discover_opencode, discover_qoder, dsh_candidates, identify_head, is_codex_subagent_file,
-    is_dsh_subagent_file, path_is_under, pi_family_candidates,
+    discover_minimax, discover_opencode, discover_qoder, dsh_candidates, identify_head,
+    is_codex_subagent_file, is_dsh_subagent_file, path_is_under, pi_family_candidates,
 };
 use super::{same_or_child, scan_summary_file, stat_signature, ScanSummary};
 use serde::Serialize;
@@ -15,10 +15,12 @@ use std::sync::Arc;
 pub(super) static SCAN_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Bump when indexed title or preview derivation changes so unchanged files
-/// are rebuilt from the current normalized history rows. v9: internal frames
-/// are hidden only when a live capture validator recorded their identity, so
-/// summaries derived by the older "any JSON-valid frame" guess are stale.
-const TITLE_VERSION: &str = "9";
+/// are rebuilt from the current normalized history rows rather than trusted as
+/// current. v9: envelope/title-noise migration (<local-command-*>,
+/// slash-prefixed titles). v10: internal frames are hidden only when a live
+/// capture validator recorded their identity, so summaries derived by the
+/// older "any JSON-valid frame" guess are stale.
+const TITLE_VERSION: &str = "10";
 
 // ==================== Scan ====================
 
@@ -86,6 +88,7 @@ fn gather_candidates(workspaces: &[String]) -> Vec<Candidate> {
             .chain(discover_kimi(&workspace))
             .chain(discover_grok(&workspace))
             .chain(discover_agy(&workspace))
+            .chain(discover_minimax(&workspace))
             .chain(discover_qoder(
                 &workspace,
                 crate::engine::qoder::QoderDistribution::Global,

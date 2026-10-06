@@ -35,12 +35,20 @@ import { installHardening, runAsPlugin } from "./hardening";
 // composer.setDraft 的 store 落点由 composer-draft.test.ts 单独覆盖；
 // 这里只验证权限门与委派，不拉入 chat store 依赖链。
 vi.mock("./composer-draft", () => ({ setActiveComposerDraft: vi.fn() }));
+// worktrees.create 的宿主实现（worktree-bridge）依赖 worktree/chat store，
+// 这里同样只验证权限门与委派，桥本身由 worktree-bridge.test.ts 覆盖。
+vi.mock("./worktree-bridge", () => ({ createPluginWorktree: vi.fn(async () => ({ worktreePath: "/x" })) }));
+// sessions.startRun/interruptRun 的宿主实现在 session-run-bridge（依赖聊天管线），
+// 这里只验证权限门与委派。
+vi.mock("./session-run-bridge", () => ({
+  startPluginChatRun: vi.fn(async () => ({ runId: "run-1", sessionId: "sess-1" })),
+  interruptPluginChatRun: vi.fn(async () => undefined),
+}));
 
 function fakeStorage(): PluginContextBackend & {
   data: Map<string, unknown>;
   bridgeInvoke: Mock;
   workspaceMetadata: Mock;
-  workspaceList: Mock;
   pickDirectory: Mock;
   documentStorageGetLocation: Mock;
   documentStorageSelectLocation: Mock;
@@ -57,10 +65,6 @@ function fakeStorage(): PluginContextBackend & {
     set: async (id, key, value) => void data.set(`${id}:${key}`, value),
     delete: async (id, key) => void data.delete(`${id}:${key}`),
     workspaceMetadata: vi.fn(async () => ({ id: "workspace-id", path: "C:/work" })),
-    workspaceList: vi.fn(async () => [
-      { id: "workspace-id", name: "Work", path: "C:/work" },
-      { id: "other-id", name: "Other", path: "D:/other" },
-    ]),
     pickDirectory: vi.fn(async () => "C:/chosen"),
     documentStorageGetLocation: vi.fn(async () => ({
       kind: "data" as const,
@@ -226,6 +230,117 @@ describe("createPluginContext", () => {
     expect(conversationModeRegistry.getSnapshot()).toEqual([]);
   });
 
+  it("gates and validates the controlled main-window API", async () => {
+    const backend = {
+      ...fakeStorage(),
+      windowGetState: vi.fn(async () => ({
+        bounds: { x: 10, y: 20, width: 1000, height: 800 },
+        state: "normal" as const,
+        scaleFactor: 1.25,
+      })),
+      windowSetNormalBounds: vi.fn(async (_id: string, bounds: { x: number; y: number; width: number; height: number }) => ({
+        bounds,
+        state: "normal" as const,
+        scaleFactor: 1.25,
+      })),
+      windowSampleWechat: vi.fn(async () => ({
+        bounds: { x: 30, y: 40, width: 1100, height: 850 },
+        executable: "Weixin.exe" as const,
+      })),
+    };
+    const denied = createPluginContext(manifest([]), backend, { appVersion: "1", isWeb: false });
+    await expect(denied.ctx.window.getState()).rejects.toThrow(/host:window/);
+    expect(backend.windowGetState).not.toHaveBeenCalled();
+
+    const { ctx } = createPluginContext(manifest(["host:window"]), backend, {
+      appVersion: "1",
+      isWeb: false,
+    });
+    expect((await ctx.window.getState()).state).toBe("normal");
+    expect(backend.windowGetState).toHaveBeenCalledWith("test-plugin");
+    await expect(ctx.window.setNormalBounds({ x: 0, y: 0, width: 639, height: 480 })).rejects.toThrow(/Invalid window bounds/);
+    expect(backend.windowSetNormalBounds).not.toHaveBeenCalled();
+    await ctx.window.setNormalBounds({ x: -100, y: 20, width: 800, height: 600 });
+    expect(backend.windowSetNormalBounds).toHaveBeenCalledWith("test-plugin", { x: -100, y: 20, width: 800, height: 600 });
+    expect((await ctx.window.sampleWechat()).executable).toBe("Weixin.exe");
+
+    const remote = createPluginContext(manifest(["host:window"]), backend, {
+      appVersion: "1",
+      isWeb: true,
+    });
+    await expect(remote.ctx.window.getState()).rejects.toThrow(/remote web hosts/);
+  });
+
+  it("gates authoritative model discovery and preserves only catalog fields", async () => {
+    const modelResult = {
+      models: [{ id: "provider/model", name: "Model", provider: "provider", contextWindow: 128000 }],
+      authoritative: true,
+      remote: false,
+    };
+    const engineResult = {
+      id: "codex",
+      available: true,
+      enabled: true,
+      supportsImages: true,
+      supportsComputerUse: false,
+      supportsEffort: true,
+      supportsToolConstraints: false,
+      permissions: ["default"],
+    };
+    const backend = {
+      ...fakeStorage(),
+      modelListEngines: vi.fn(async () => [engineResult]),
+      modelListEngineModels: vi.fn(async () => modelResult),
+      modelCatalog: vi.fn(async () => ({
+        engines: [{ engine: engineResult, sources: [{
+          id: "codex:cli",
+          name: "CLI",
+          kind: "cli" as const,
+          authoritative: true,
+          remote: false,
+          models: modelResult.models,
+          refreshedAt: 1,
+        }] }],
+        errors: [{ engine: "dsh", message: "model catalog unavailable" }],
+        refreshedAt: 1,
+      })),
+    };
+    const denied = createPluginContext(manifest([]), backend, { appVersion: "1" });
+    await expect(denied.ctx.models.listEngines()).rejects.toThrow(/host:models/);
+    expect(backend.modelListEngines).not.toHaveBeenCalled();
+
+    const { ctx } = createPluginContext(manifest(["host:models"]), backend, { appVersion: "1" });
+    await expect(ctx.models.listEngineModels(" ")).rejects.toThrow(/non-empty/);
+    const catalog = await ctx.models.listEngineModels("codex", "/workspace");
+    expect(catalog.authoritative).toBe(true);
+    expect(catalog.models[0]).toEqual({ id: "provider/model", name: "Model", provider: "provider", contextWindow: 128000 });
+    expect(catalog.models[0]).not.toHaveProperty("apiKey");
+    expect(backend.modelListEngineModels).toHaveBeenCalledWith("test-plugin", "codex", "/workspace");
+    const aggregate = await ctx.models.catalog();
+    expect(aggregate.engines[0].sources[0]).toEqual({
+      id: "codex:cli",
+      name: "CLI",
+      kind: "cli",
+      authoritative: true,
+      remote: false,
+      models: modelResult.models,
+      refreshedAt: 1,
+    });
+    expect(aggregate.errors[0].message).toBe("model catalog unavailable");
+    expect(backend.modelCatalog).toHaveBeenLastCalledWith("test-plugin", undefined);
+    await ctx.models.catalog({ workspace: "/workspace", refreshProviders: true });
+    expect(backend.modelCatalog).toHaveBeenLastCalledWith("test-plugin", {
+      workspace: "/workspace",
+      refreshProviders: true,
+    });
+    await expect(ctx.models.catalog(null as never)).rejects.toThrow(/object/);
+    await expect(ctx.models.catalog([] as never)).rejects.toThrow(/object/);
+    await expect(ctx.models.catalog({ workspace: 1 as never })).rejects.toThrow(/string/);
+    await expect(
+      ctx.models.catalog({ refreshProviders: "yes" as unknown as boolean }),
+    ).rejects.toThrow(/boolean/);
+  });
+
   it("gates the private agent catalog seam and forwards readOnly", async () => {
     const backend = { ...fakeStorage(), agentCatalog: vi.fn(async () => []) };
     const denied = createPluginContext(manifest([]), backend, { appVersion: "1" });
@@ -281,6 +396,114 @@ describe("createPluginContext", () => {
     ).toThrow(/ui:add-menu/);
     expect(() => ctx.theme.injectCss(".a{}")).toThrow(/theme/);
     return expect(ctx.storage.get("k")).rejects.toThrow(/storage/);
+  });
+
+  it("workspaces.list is gated by host:workspace and projects the store rows", async () => {
+    const { useChatStore } = await import("@/features/chat/store");
+    const previous = useChatStore.getState().workspaces;
+    useChatStore.setState({
+      workspaces: [
+        {
+          id: "w1",
+          path: "/Users/me/proj",
+          name: "proj",
+          lastOpenedAt: 17,
+          sortOrder: null,
+          groupId: "g1",
+          meta: { secret: "must-not-leak" },
+        },
+        {
+          id: "w2",
+          path: "/Users/me/proj-worktrees/pr-1",
+          name: "pr-1",
+          lastOpenedAt: null,
+          sortOrder: 2,
+          groupId: null,
+          kind: "worktree",
+          parentId: "w1",
+          meta: { worktree: { branch: "pr-1" } },
+        },
+      ],
+    });
+    try {
+      const backend = fakeStorage();
+      const { ctx } = createPluginContext(manifest(["host:workspace"]), backend, { appVersion: "1" });
+      await expect(ctx.workspaces.list()).resolves.toEqual([
+        { id: "w1", path: "/Users/me/proj", name: "proj", groupId: "g1", lastOpenedAt: 17 },
+        {
+          id: "w2",
+          path: "/Users/me/proj-worktrees/pr-1",
+          name: "pr-1",
+          kind: "worktree",
+          groupId: null,
+          parentId: "w1",
+          lastOpenedAt: null,
+          // meta.worktree 的公开部分（分支/来源 PR）另外投影出来
+          worktree: { branch: "pr-1" },
+        },
+      ]);
+      // meta 是宿主/其它插件的私有载荷，不进读接口
+      const rows = await ctx.workspaces.list();
+      expect(rows.every((row) => !("meta" in row))).toBe(true);
+    } finally {
+      useChatStore.setState({ workspaces: previous });
+    }
+  });
+
+  it("workspaces.list throws without host:workspace", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["storage"]), backend, { appVersion: "1" });
+    expect(() => ctx.workspaces.list()).toThrow(/host:workspace/);
+  });
+
+  it("worktrees.create is gated by host:worktree and delegates with the plugin id", async () => {
+    const bridge = await import("./worktree-bridge");
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:worktree"]), backend, { appVersion: "1" });
+    const def = {
+      repoPath: "/Users/me/proj",
+      parentWorkspaceId: "w1",
+      branch: "pr-9-x",
+      prNumber: 9,
+    };
+    await expect(ctx.worktrees.create(def)).resolves.toEqual({ worktreePath: "/x" });
+    expect(bridge.createPluginWorktree).toHaveBeenCalledWith("test-plugin", def);
+  });
+
+  it("worktrees.create throws without host:worktree", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:workspace"]), backend, { appVersion: "1" });
+    expect(() =>
+      ctx.worktrees.create({ repoPath: "/r", parentWorkspaceId: "w", branch: "b" }),
+    ).toThrow(/host:worktree/);
+  });
+
+  it("sessions.startRun / interruptRun are gated by host:session and delegate", async () => {
+    const bridge = await import("./session-run-bridge");
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["host:session"]), backend, { appVersion: "1" });
+    const def = { engine: "pi", prompt: "review", workspacePath: "/w" };
+    await expect(ctx.sessions.startRun(def)).resolves.toEqual({ runId: "run-1", sessionId: "sess-1" });
+    expect(bridge.startPluginChatRun).toHaveBeenCalledWith("test-plugin", def);
+    await expect(
+      ctx.sessions.interruptRun({ engine: "pi", workspacePath: "/w", sessionId: "sess-1" }),
+    ).resolves.toBeUndefined();
+    expect(bridge.interruptPluginChatRun).toHaveBeenCalledWith("test-plugin", {
+      engine: "pi",
+      workspacePath: "/w",
+      sessionId: "sess-1",
+    });
+  });
+
+  it("sessions.startRun throws without host:session", () => {
+    const backend = fakeStorage();
+    const { ctx } = createPluginContext(manifest(["agent"]), backend, { appVersion: "1" });
+    expect(() => ctx.sessions.startRun({ engine: "pi", prompt: "p", workspacePath: "/w" })).toThrow(
+      /host:session/,
+    );
+    expect(() => ctx.sessions.interruptRun({ engine: "pi", workspacePath: "/w" })).toThrow(
+      /host:session/,
+    );
   });
 
   it("storage round-trips through the backend in the plugin's namespace", async () => {
@@ -460,11 +683,6 @@ describe("createPluginContext", () => {
       path: "C:/work",
     });
     expect(backend.workspaceMetadata).toHaveBeenCalledWith("test-plugin");
-    await expect(ctx.workspaces.list()).resolves.toEqual([
-      { id: "workspace-id", name: "Work", path: "C:/work" },
-      { id: "other-id", name: "Other", path: "D:/other" },
-    ]);
-    expect(backend.workspaceList).toHaveBeenCalledWith("test-plugin");
 
     await expect(ctx.documentStorage.getLocation()).resolves.toEqual({
       kind: "data",
@@ -567,8 +785,6 @@ describe("createPluginContext", () => {
     await expect(ctx.workspace.getMetadata()).rejects.toThrow(/workspace\.metadata\.read/);
     await expect(ctx.documentStorage.getLocation()).rejects.toThrow(/plugin\.storage/);
     expect(backend.workspaceMetadata).not.toHaveBeenCalled();
-    await expect(ctx.workspaces.list()).rejects.toThrow(/workspace\.metadata\.read/);
-    expect(backend.workspaceList).not.toHaveBeenCalled();
     expect(backend.documentStorageGetLocation).not.toHaveBeenCalled();
   });
 

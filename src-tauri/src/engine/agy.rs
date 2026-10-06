@@ -266,6 +266,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/ws"),
             prompt: "hi".to_string(),
             prompt_contributions: Vec::new(),
+            native_compact: false,
             images: Vec::new(),
             model: None,
             effort: None,
@@ -274,6 +275,7 @@ mod tests {
             additional_dirs: Vec::new(),
             provider_id: None,
             computer_use: None,
+            memory_bot: None,
             allowed_tools: None,
         }
     }

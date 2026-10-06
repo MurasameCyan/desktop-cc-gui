@@ -172,6 +172,7 @@ async fn send(
         Vec::new(),
         None,
         None,
+        None,
         (engine_id == "kimi").then(|| "medium".to_string()),
         Some(
             if engine_id == "kimi" {
@@ -183,6 +184,7 @@ async fn send(
         ),
         None,
         Some(run_id.to_string()),
+        None,
         None,
     )
     .await
@@ -425,12 +427,14 @@ async fn send_with_images(
         None,
         prompt.to_string(),
         Vec::new(),
+        None,
         Some(images),
         None,
         None,
         Some("bypass".to_string()),
         None,
         Some(run_id.to_string()),
+        None,
         None,
     )
     .await
@@ -507,11 +511,13 @@ async fn kimi_explicit_k3_256k_medium_official_channel() {
         PROMPT.into(),
         Vec::new(),
         None,
+        None,
         Some("kimi-code/k3-256k".into()),
         Some("medium".into()),
         Some("auto".into()),
         Some("__local_settings_json__".into()),
         Some("run-kimi-explicit-model".into()),
+        None,
         None,
     )
     .await
@@ -611,11 +617,13 @@ async fn kimi_invalid_model_exposes_the_setup_error() {
         "do not run".into(),
         Vec::new(),
         None,
+        None,
         Some("ccgui-nonexistent-model".into()),
         None,
         Some("auto".into()),
         Some("__local_settings_json__".into()),
         Some("run-kimi-invalid-model".into()),
+        None,
         None,
     )
     .await

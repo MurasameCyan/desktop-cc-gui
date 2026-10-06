@@ -21,16 +21,6 @@ pub struct WorkspaceMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
 }
-/// Minimal workspace identity exposed through the plugin capability boundary.
-/// UI-only ordering/grouping and opaque metadata stay inside the host.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginWorkspaceSummary {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-}
-
 pub struct Db(pub Mutex<Connection>);
 
 impl Db {
@@ -55,6 +45,10 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // The memory MCP child (a separate process the CLI spawns) writes
+        // through its own connection while the app holds one: a busy writer
+        // must wait for the short write lock, not fail the tool call.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // ON DELETE CASCADE keeps session_messages/messages_fts and
         // fts_state in step with every sessions-row delete path (session
         // delete, stale pruning, workspace removal) without each site
@@ -115,27 +109,6 @@ impl Db {
         }
         Ok(metadata)
     }
-    /// List registered workspaces for the plugin read-only capability.
-    pub fn workspace_list(&self) -> Result<Vec<PluginWorkspaceSummary>, String> {
-        let conn = self.0.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, name, path FROM workspaces
-                 ORDER BY sort_order IS NULL, sort_order, COALESCE(last_opened_at, 0) DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(PluginWorkspaceSummary {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
-
     /// Directories the user explicitly granted file access to on top of the
     /// registered workspaces (the on-demand grant flow, files::grant_root).
     pub fn granted_roots(&self) -> Result<Vec<String>, String> {
@@ -570,24 +543,6 @@ pub fn workspace_metadata(
     db.workspace_metadata(workspace_path.trim())?
         .ok_or_else(|| format!("workspace is not registered: {}", workspace_path.trim()))
 }
-#[tauri::command]
-pub fn plugin_list_workspaces(
-    db: tauri::State<'_, std::sync::Arc<Db>>,
-    plugin_id: String,
-) -> Result<Vec<PluginWorkspaceSummary>, String> {
-    let (enabled, quarantined, permissions) = crate::plugins::plugin_access(&plugin_id)?;
-    if !enabled {
-        return Err(format!("{plugin_id}: plugin is disabled"));
-    }
-    if quarantined {
-        return Err(format!("{plugin_id}: plugin is quarantined"));
-    }
-    if !permissions.iter().any(|permission| permission == "workspace.metadata.read") {
-        return Err(format!("{plugin_id}: missing workspace.metadata.read permission"));
-    }
-    db.workspace_list()
-}
-
 /// One-time import of the legacy desktop-cc-gui workspace list
 /// (`paths::legacy_workspaces_path`): old users open the upgrade and find
 /// their sidebar intact. Rows already registered (same path) only adopt the
@@ -971,6 +926,37 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_plan_reviews_session
             ON plan_reviews(engine, session_id);
+        -- 持久记忆条目(memory.rs):每个 Bot 一份 MEMORY(target='memory',
+        -- bot_id=Bot id),全局共用一份 USER(target='user', bot_id='')。
+        -- 上限是写入时的闸,不是存储的约束:超限的写入被拒绝而不是截断。
+        CREATE TABLE IF NOT EXISTS memory_entries(
+            id TEXT PRIMARY KEY,
+            target TEXT NOT NULL,
+            bot_id TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'user',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_scope
+            ON memory_entries(target, bot_id);
+        -- 待审批写入(memory/pending.rs):开启「写入需要审批」后,模型/复盘的
+        -- 写入先落在这里,用户批准才执行。target_snapshot 是暂存时目标条目的
+        -- 原文,审批时原文已变就拒绝执行(而不是覆盖用户的编辑)。
+        CREATE TABLE IF NOT EXISTS pending_memory_writes(
+            id TEXT PRIMARY KEY,
+            target TEXT NOT NULL,
+            bot_id TEXT NOT NULL DEFAULT '',
+            op TEXT NOT NULL,
+            content TEXT,
+            old_text TEXT,
+            target_entry_id TEXT,
+            target_snapshot TEXT,
+            origin TEXT NOT NULL DEFAULT 'agent',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_memory_scope
+            ON pending_memory_writes(target, bot_id);
         ",
     )?;
     // NB: no `cache_version` meta row — it was written but never read; cache
@@ -1526,32 +1512,6 @@ mod tests {
         assert_eq!(indexed.signature, signature);
         assert!(!table_signature.is_empty());
         assert!(index.get("codex").is_none());
-    }
-
-    #[test]
-    fn plugin_workspace_list_returns_only_identity_fields() {
-        let scratch = Scratch::new();
-        let db = Db::open_at(&scratch.path("app.db")).unwrap();
-        {
-            let conn = db.0.lock();
-            conn.execute(
-                "INSERT INTO workspaces(id, path, name, sort_order, group_id, meta)
-                 VALUES('plugin-id', '/ws/plugin', 'Plugin', 0, 'group', '{\"secret\":true}')",
-                [],
-            )
-            .unwrap();
-        }
-        let rows = db.workspace_list().unwrap();
-        assert_eq!(rows, vec![PluginWorkspaceSummary {
-            id: "plugin-id".into(),
-            name: "Plugin".into(),
-            path: "/ws/plugin".into(),
-        }]);
-        let json = serde_json::to_value(&rows[0]).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 3);
-        assert!(json.get("meta").is_none());
-        assert!(json.get("groupId").is_none());
-        assert!(json.get("sortOrder").is_none());
     }
 
     #[test]

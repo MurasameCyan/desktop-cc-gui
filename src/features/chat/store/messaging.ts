@@ -48,14 +48,19 @@ import type { SendOptions } from "./types";
 import { patchPlanReview } from "./plan-review";
 import { effectivePermission } from "./permissions";
 import {
-  buildAgentBlock,
+  buildBotBlock,
   hasAgentBlock,
 } from "../components/agent-block";
 import {
-  clearSelectedAgent,
-  getSelectedAgent,
-  migrateSelectedAgent,
-} from "@/features/agents/selected-agent";
+  clearSelectedBot,
+  freezeSelectedBotBlock,
+  getSelectedBot,
+  migrateSelectedBot,
+} from "@/features/bots/selected-bot";
+import { buildBotPromptBlock } from "@/features/bots/bot-block";
+import { engineSupportsMemory } from "@/features/bots/memory";
+import { botById } from "@/features/bots/bot-store";
+import { assembleBotPrompt, builtInBotShell } from "@/features/bots/bot-prompt";
 import { appendCommittedRows } from "./session-utils";
 import {
   prepareSessionContributions,
@@ -163,37 +168,60 @@ export function createMessagingActions(
     options?: SendOptions,
   ) {
     if (!prompt.trim() && images.length === 0) return;
-    // A pinned agent's instructions ride along as a tail block the
+    // A pinned bot's assembled prompt rides along as a tail block the
     // transcript keeps (the bubble strips it back out for display). Slash
     // prompts ("/compact") never get it, and a re-sent committed message
     // already carries its block, so re-injecting would duplicate it.
-    const selectedAgent = getSelectedAgent(tab.workspacePath, tab.sessionId);
+    //
+    // The block is frozen on first send: the rest of this session reuses that
+    // exact text, so editing the bot mid-conversation cannot change a prompt
+    // the model has already been primed with (and the prefix cache holds).
+    const selectedBot = getSelectedBot(tab.workspacePath, tab.sessionId);
+    // 记忆工具每次发送都要重新挂载（每次发送都是一个新进程）；冻结的只是
+    // 提示词。能挂的条件：选中了自定义 Bot、它开着记忆、这个引擎支持 MCP。
+    const pinnedBot = selectedBot ? botById(selectedBot.id) : null;
+    const memoryToolAvailable =
+      pinnedBot !== null &&
+      pinnedBot.memory.enabled !== false &&
+      engineSupportsMemory(get().engines, tab.engine);
     // Built-in resolve failures are re-flagged after the optimistic-turn
     // patch below (which resets `error` for the new turn).
     let agentResolveError: string | null = null;
-    if (selectedAgent && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
-      // Built-in picks store no prompt: resolve the current catalog prompt
-      // at send time. A since-disabled catalog entry fails the resolve —
-      // drop the stale pin, surface the session error banner, and still
-      // send the bare text.
-      if (selectedAgent.source === "builtIn") {
+    if (selectedBot && !prompt.startsWith("/") && !hasAgentBlock(prompt)) {
+      if (selectedBot.block) {
+        prompt += `\n\n${selectedBot.block}`;
+      } else if (selectedBot.source === "builtIn") {
+        // Built-in picks store no prompt: resolve the current catalog prompt
+        // at send time. A since-disabled catalog entry fails the resolve —
+        // drop the stale pin, surface the session error banner, and still
+        // send the bare text.
         try {
-          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedAgent.id);
-          prompt += buildAgentBlock({
+          const resolved = await ipc.resolveEnabledBuiltInAgent(selectedBot.id);
+          const block = buildBotBlock({
             name: resolved.name,
             icon: resolved.icon ?? undefined,
-            prompt: resolved.prompt,
+            body: assembleBotPrompt({
+              bot: builtInBotShell(resolved.name, resolved.prompt),
+            }).text,
           });
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
         } catch {
-          clearSelectedAgent(tab.workspacePath, tab.sessionId);
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
           agentResolveError = i18n.t("chat.agentUnavailable");
         }
-      } else if (selectedAgent.prompt) {
-        prompt += buildAgentBlock({
-          name: selectedAgent.name,
-          icon: selectedAgent.icon,
-          prompt: selectedAgent.prompt,
-        });
+      } else {
+        const bot = botById(selectedBot.id);
+        if (bot) {
+          const block = await buildBotPromptBlock(bot, { memoryToolAvailable });
+          freezeSelectedBotBlock(tab.workspacePath, tab.sessionId, block);
+          prompt += `\n\n${block}`;
+        } else {
+          // The bot was deleted between picking and sending. Say so instead
+          // of silently sending a bare prompt the user did not ask for.
+          clearSelectedBot(tab.workspacePath, tab.sessionId);
+          agentResolveError = i18n.t("chat.botUnavailable");
+        }
       }
     }
     const engine = tab.engine;
@@ -381,6 +409,7 @@ export function createMessagingActions(
         sessionId: tab.sessionId,
         prompt,
         promptContributions,
+        nativeCompact: options?.nativeCompact === true,
         imagePaths: images.length ? images : null,
         model,
         effort,
@@ -391,6 +420,7 @@ export function createMessagingActions(
         ),
         providerId: provider,
         computerUse: options?.computerUse === true,
+        memoryBot: memoryToolAvailable ? pinnedBot.id : null,
       });
       confirmPromptContributions(promptContributions);
       if (switchEvent) {
@@ -409,6 +439,9 @@ export function createMessagingActions(
         runRouting.delete(requestedRunId);
         untrackRun(requestedRunId);
       }
+      // 宿主能力（插件轮次）靠这个钩子在 spawn 成功后拿到轮次身份；
+      // 聊天发送不传，行为不变。
+      options?.onStarted?.({ runId: result.runId, sessionId: result.sessionId ?? null });
       // A whole turn can finish while invoke is still pending. Its session
       // event has then moved the state and done has removed the routing entry.
       const knownKey = runRouting.get(result.runId) ?? Object.keys(get().bySession).find(
@@ -424,7 +457,7 @@ export function createMessagingActions(
       if (result.sessionId && !tab.sessionId
           && (!settled || (knownKey && get().bySession[knownKey]?.interrupted) || stillPending)) {
         // Preassigned native id (grok): adopt immediately.
-        migrateSelectedAgent(tab.workspacePath, result.sessionId);
+        migrateSelectedBot(tab.workspacePath, result.sessionId);
         const newKey = sessionKey(
           engine,
           result.sessionId,
@@ -936,7 +969,7 @@ export function createMessagingActions(
       await interruptByKey(key);
     },
 
-    compactContext: async (key?: string) => {
+    compactContext: async (key?: string, options?: { trigger?: "manual" | "threshold" }) => {
       const { active, streamingByKey, openTabs } = get();
       const targetKey =
         key ??
@@ -952,10 +985,17 @@ export function createMessagingActions(
         ) ?? active;
       if (!targetTab) return;
 
-      // Manual-compaction flag: the tail status strip swaps to the compacting
-      // label for the whole run. Cleared in the finally below.
+      // The tail status strip swaps its label for the whole run. `automatic`
+      // stays false: this is a /compact turn we own, so the settle path below
+      // (and the done/end handlers) clear it. The engine's own mid-turn
+      // compaction events are the only producer of automatic: true, and they
+      // must not take ownership of this flag. `trigger` records who asked.
       patchSession(set, targetKey, {
-        compaction: { automatic: false, startedAt: Date.now() },
+        compaction: {
+          automatic: false,
+          startedAt: Date.now(),
+          trigger: options?.trigger ?? "manual",
+        },
       });
 
       // Track the compaction turn completion so callers (and UI) can await it.
@@ -997,7 +1037,7 @@ export function createMessagingActions(
       });
 
       try {
-        await sendPrompt(targetTab, "/compact", []);
+        await sendPrompt(targetTab, "/compact", [], { nativeCompact: true });
       } catch (error) {
         cleanup?.();
         patchSession(set, targetKey, { compaction: null });

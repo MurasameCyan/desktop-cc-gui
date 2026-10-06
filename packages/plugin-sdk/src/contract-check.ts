@@ -26,6 +26,17 @@ import type {
   PluginContext,
   PluginConversationProps,
   PluginAgentCatalogEntry,
+  PluginEngineCatalog,
+  PluginEngineInfo,
+  PluginEngineModel,
+  PluginModelCatalogEngine,
+  PluginModelCatalogError,
+  PluginModelCatalogResult,
+  PluginModelSource,
+  PluginWindowBounds,
+  PluginWindowSnapshot,
+  PluginWechatWindow,
+  PluginWorkspaceRow,
   PluginManifest,
   PluginTier,
   PromptContribution,
@@ -46,7 +57,6 @@ import type {
   WorkspaceMenuLabelValue,
   WorkspaceMenuStatusTone,
   WorkspaceMetadata,
-  RegisteredWorkspace,
 } from "./index";
 
 /**
@@ -85,11 +95,21 @@ export type _PluginTier = Assert<Mutual<PluginTier, Pub.PluginTier>>;
 export type _Disposer = Assert<Mutual<Disposer, Pub.Disposer>>;
 export type _PluginIdValidator = Assert<Mutual<typeof isValidPluginId, typeof Pub.isValidPluginId>>;
 export type _WorkspaceMetadata = Assert<Mutual<WorkspaceMetadata, Pub.WorkspaceMetadata>>;
-export type _RegisteredWorkspace = Assert<Mutual<RegisteredWorkspace, Pub.RegisteredWorkspace>>;
+export type _PluginWorkspaceRow = Assert<Mutual<PluginWorkspaceRow, Pub.PluginWorkspaceRow>>;
 export type _ExternalSessionRow = Assert<Mutual<ExternalSessionRow, Pub.ExternalSessionRow>>;
 export type _WorkspaceMenuStatusTone = Assert<Mutual<WorkspaceMenuStatusTone, Pub.WorkspaceMenuStatusTone>>;
 export type _WorkspaceMenuLabel = Assert<Mutual<WorkspaceMenuLabel, Pub.WorkspaceMenuLabel>>;
 export type _WorkspaceMenuLabelValue = Assert<Mutual<WorkspaceMenuLabelValue, Pub.WorkspaceMenuLabelValue>>;
+export type _WindowBounds = Assert<Mutual<PluginWindowBounds, Pub.PluginWindowBounds>>;
+export type _WindowSnapshot = Assert<Mutual<PluginWindowSnapshot, Pub.PluginWindowSnapshot>>;
+export type _WechatWindow = Assert<Mutual<PluginWechatWindow, Pub.PluginWechatWindow>>;
+export type _EngineInfo = Assert<Mutual<PluginEngineInfo, Pub.PluginEngineInfo>>;
+export type _EngineModel = Assert<Mutual<PluginEngineModel, Pub.PluginEngineModel>>;
+export type _EngineCatalog = Assert<Mutual<PluginEngineCatalog, Pub.PluginEngineCatalog>>;
+export type _ModelCatalogEngine = Assert<Mutual<PluginModelCatalogEngine, Pub.PluginModelCatalogEngine>>;
+export type _ModelSource = Assert<Mutual<PluginModelSource, Pub.PluginModelSource>>;
+export type _ModelCatalogError = Assert<Mutual<PluginModelCatalogError, Pub.PluginModelCatalogError>>;
+export type _ModelCatalogResult = Assert<Mutual<PluginModelCatalogResult, Pub.PluginModelCatalogResult>>;
 
 export type _PromptContribution = Assert<Mutual<PromptContribution, Pub.PromptContribution>>;
 export type _InternalMessageCapture = Assert<Mutual<InternalMessageCapture, Pub.InternalMessageCapture>>;
@@ -156,7 +176,10 @@ export type _StorageKeys = Assert<KeyParity<PluginContext["storage"], Pub.Plugin
 export type _EventsKeys = Assert<KeyParity<PluginContext["events"], Pub.PluginContext["events"]>>;
 export type _ComposerKeys = Assert<KeyParity<PluginContext["composer"], Pub.PluginContext["composer"]>>;
 export type _WorkspacesKeys = Assert<KeyParity<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;
+export type _WorktreesKeys = Assert<KeyParity<PluginContext["worktrees"], Pub.PluginContext["worktrees"]>>;
 export type _SessionsKeys = Assert<KeyParity<PluginContext["sessions"], Pub.PluginContext["sessions"]>>;
+export type _WindowKeys = Assert<KeyParity<PluginContext["window"], Pub.PluginContext["window"]>>;
+export type _ModelsKeys = Assert<KeyParity<PluginContext["models"], Pub.PluginContext["models"]>>;
 export type _BridgeKeys = Assert<KeyParity<PluginContext["bridge"], Pub.PluginContext["bridge"]>>;
 export type _HostKeys = Assert<KeyParity<PluginContext["host"], Pub.PluginContext["host"]>>;
 export type _HooksKeys = Assert<KeyParity<PluginContext["hooks"], Pub.PluginContext["hooks"]>>;
@@ -176,7 +199,10 @@ export type _StorageShape = Assert<Mutual<PluginContext["storage"], Pub.PluginCo
 export type _EventsShape = Assert<Mutual<PluginContext["events"], Pub.PluginContext["events"]>>;
 export type _ComposerShape = Assert<Mutual<PluginContext["composer"], Pub.PluginContext["composer"]>>;
 export type _WorkspacesShape = Assert<Mutual<PluginContext["workspaces"], Pub.PluginContext["workspaces"]>>;
+export type _WorktreesShape = Assert<Mutual<PluginContext["worktrees"], Pub.PluginContext["worktrees"]>>;
 export type _SessionsShape = Assert<Mutual<PluginContext["sessions"], Pub.PluginContext["sessions"]>>;
+export type _WindowShape = Assert<Mutual<PluginContext["window"], Pub.PluginContext["window"]>>;
+export type _ModelsShape = Assert<Mutual<PluginContext["models"], Pub.PluginContext["models"]>>;
 export type _BridgeShape = Assert<Mutual<PluginContext["bridge"], Pub.PluginContext["bridge"]>>;
 export type _HostShape = Assert<Mutual<PluginContext["host"], Pub.PluginContext["host"]>>;
 export type _HooksShape = Assert<Mutual<PluginContext["hooks"], Pub.PluginContext["hooks"]>>;

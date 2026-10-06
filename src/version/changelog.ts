@@ -29,6 +29,22 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.1.2",
+    date: "2026-10-05",
+    content: {
+      zh: `✨ 新功能
+- **上下文窗口自动压缩**：自动压缩阈值和纯图标开关按单个会话保存；当前会话达到配置的百分比且空闲时，自动复用 compact 命令压缩上下文，压缩完成后自动把任务接回去（压缩失败则等用量继续增长后重试，不会闩死）。压缩的调度行不进对话：压缩指令变成一行灰色的「正在压缩上下文」提示并留在原处（压缩完成后仍可回溯），续接提示完全不显示。
+
+🐛 修复
+- **Pi / OMP 请求参数兼容性**：移除自 1.0.6 引入的通用推理字段注入，由 CLI 按实际模型与供应商协议生成请求，修复 OMP OpenAI Codex 通道的 Unsupported parameter: reasoning_effort 错误；保留原生推理档位传递，无需降低 xhigh。`,
+      en: `✨ Features
+- **Per-session automatic context compaction**: The threshold and icon-only toggle are stored per conversation; when an idle session reaches its configured percentage, the existing compact command compacts the context and the task picks itself back up afterwards (a failed compaction retries once the context grows again, so the session never latches shut). The scheduling rows stay out of the transcript: the compact command becomes a single grey "Compacting context" line in place (still there after the compaction finishes) and the resume nudge never renders.
+
+🐛 Fixes
+- **Pi / OMP request compatibility**: Remove the generic reasoning-field injection introduced in 1.0.6 and let the CLI encode requests for the selected model and provider. This fixes Unsupported parameter: reasoning_effort on OMP's OpenAI Codex channel while preserving native thinking-level selection, with no need to lower xhigh.`,
+    },
+  },
+  {
     version: "1.1.0",
     date: "2026-09-28",
     content: {

@@ -23,6 +23,9 @@ const BASE_LABELS: Record<string, string> = {
   "host:session": "hostSession",
   "host:workspace": "hostWorkspace",
   "host:workspace:remote": "hostWorkspaceRemote",
+  "host:worktree": "hostWorktree",
+  "host:window": "hostWindow",
+  "host:models": "hostModels",
   "network:none": "networkNone",
 };
 

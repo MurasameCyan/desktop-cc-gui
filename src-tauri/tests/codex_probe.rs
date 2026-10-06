@@ -143,6 +143,14 @@ fn build_state(home: &std::path::Path) -> (AppState, Arc<Capture>) {
             ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
         ),
         terminals: ccgui_next_lib::terminal::TerminalRegistry::default(),
+        plugin_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::PLUGIN_AGENT_EVENT_NAME,
+        ),
+        mission_sink: EventSink::with_name(
+            Arc::clone(&emitter),
+            ccgui_next_lib::event_sink::MISSION_AGENT_EVENT_NAME,
+        ),
         processes: Arc::new(ProcessRegistry::default()),
         emitters: BroadcastEmit::new(emitter),
         web: ccgui_next_lib::web::WebAccessState::default(),
@@ -175,7 +183,9 @@ async fn send_codex_and_wait(
         None,
         None,
         None,
+        None,
         Some("run-client-probe".into()),
+        None,
         None,
     )
     .await

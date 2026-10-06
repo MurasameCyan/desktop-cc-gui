@@ -115,6 +115,8 @@ async fn send_message_streams_events_end_to_end() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .await
     .expect("send_message must succeed");
@@ -218,6 +220,8 @@ sleep 60
         None,
         "hi".to_string(),
         Vec::new(),
+        None,
+        None,
         None,
         None,
         None,
@@ -335,6 +339,7 @@ fn ipc_send_message_accepts_camel_case_args() {
                 "workspacePath": workspace.to_string_lossy(),
                 "sessionId": null,
                 "prompt": "hi",
+                "promptContributions": [],
                 "imagePaths": null,
                 "model": null,
             })),
@@ -397,6 +402,8 @@ echo '{"type":"agent_end"}'
             None,
             "hi".into(),
             Vec::new(),
+            None,
+            None,
             None,
             None,
             None,

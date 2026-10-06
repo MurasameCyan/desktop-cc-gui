@@ -94,10 +94,95 @@ type LineExtractor<'a> = Box<dyn Fn(&Value) -> LineRows + 'a>;
 fn extractor_for(engine: &str, images: ImageMode) -> LineExtractor<'static> {
     if engine == "dsh" {
         Box::new(extract_dsh_line)
+    } else if engine == "claude" {
+        // Local slash commands span several user lines. `Fn` extractors can't
+        // capture `&mut`, so the window lives in a Cell across calls.
+        let local_command = std::cell::Cell::new(false);
+        Box::new(move |value| {
+            let mut open = local_command.get();
+            let drop_line = claude_drop_local_command(value, &mut open);
+            local_command.set(open);
+            if drop_line {
+                return Vec::new();
+            }
+            extract_claude_line(value, images)
+        })
     } else {
         let engine = engine.to_string();
         Box::new(move |value| extract_line_messages(&engine, value, images))
     }
+}
+
+/// Plain text of a Claude user turn, ignoring tool results and images.
+fn claude_plain_user_text(value: &Value) -> Option<String> {
+    if type_str(value) != "user" {
+        return None;
+    }
+    let content = value.get("message")?.get("content");
+    match content {
+        Some(Value::Array(blocks)) => {
+            let mut text = String::new();
+            for block in blocks {
+                if block.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            Some(text)
+        }
+        other => Some(content_text(other)),
+    }
+}
+
+fn wrapped_tag_only(text: &str, tag: &str) -> bool {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let trimmed = text.trim();
+    let Some(inner) = trimmed.strip_prefix(&open) else {
+        return false;
+    };
+    let Some(body) = inner.strip_suffix(&close) else {
+        return false;
+    };
+    !body.contains(&open)
+}
+
+/// Claude Code logs local slash commands (`/model`, `/login`, `/clear`) as
+/// CLI chrome: a `<local-command-caveat>` line, the command envelope, and
+/// sometimes `<local-command-stdout>`. None of that belongs in the
+/// conversation. The caveat opens a window that swallows the envelope until
+/// the next real user turn. Skill commands have no caveat, so `/name args`
+/// still shows as what was typed.
+fn claude_drop_local_command(value: &Value, open: &mut bool) -> bool {
+    let Some(text) = claude_plain_user_text(value) else {
+        return false;
+    };
+    let trimmed = text.trim();
+    if trimmed.starts_with("<local-command-caveat>") {
+        *open = true;
+        return true;
+    }
+    if wrapped_tag_only(trimmed, "local-command-stdout") {
+        return true;
+    }
+    if *open {
+        // Tool-result turns carry no plain text. Leave them for the extractor
+        // and keep the window open until the next real prompt.
+        if trimmed.is_empty() {
+            return false;
+        }
+        if super::slash_command_envelope_only(trimmed) {
+            return true;
+        }
+        // isMeta expansions inside the window are not the user's next prompt.
+        if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+        *open = false;
+    }
+    false
 }
 
 /// Line-loop skeleton shared by the full parse and the scan summary: decode
@@ -631,9 +716,155 @@ fn extract_line_messages(engine: &str, value: &Value, images: ImageMode) -> Line
         "codex" => extract_codex_line(value, images),
         "pi" | "omp" => extract_pi_family_line(value, images),
         "qoder" | "qoder-cn" => extract_qoder_line(value, images),
+        "minimax" => extract_minimax_line(value),
         _ => Vec::new(),
     }
 }
+
+// ==================== MiniMax Code ====================
+
+/// MiniMax Code transcript lines: `{message_id, turn_id, message:{role,
+/// content:[parts], timestamp(ms), usage?, model?, toolCallId?, toolName?}}`
+/// (shape verified against a live install's
+/// `~/.minimax/v2/sessions/<…>/messages.jsonl`). Content parts spell
+/// `text` / `thinking` / `toolCall`; a `toolResult` message resolves the
+/// matching call by its `toolCallId`.
+fn extract_minimax_line(value: &Value) -> LineRows {
+    let Some(message) = value.get("message") else {
+        return Vec::new();
+    };
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+    let ts = message
+        .get("timestamp")
+        .and_then(Value::as_i64)
+        .map(|ms| ms.to_string());
+    match role {
+        "user" => {
+            let text = minimax_text_of_content(message.get("content"));
+            // Strip the ACP image-injection marker block (same `<image
+            // path>` tag format as kimi, so one tag parser serves both).
+            let (display, images) = match text.find(crate::engine::images::MINIMAX_IMAGE_MARKER) {
+                Some(idx) => (
+                    text[..idx].trim_end().to_string(),
+                    kimi_image_paths(&text[idx..]),
+                ),
+                None => (text, Vec::new()),
+            };
+            if display.trim().is_empty() && images.is_empty() {
+                Vec::new()
+            } else {
+                vec![LineRow {
+                    images,
+                    ..LineRow::new("user", display, ts)
+                }]
+            }
+        }
+        "assistant" => {
+            let mut out = Vec::new();
+            let mut text = String::new();
+            for part in message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            text.push_str(t);
+                        }
+                    }
+                    Some("thinking") => {
+                        pi_flush_text(&mut out, &mut text, &ts, "assistant");
+                        if let Some(t) = part.get("thinking").and_then(Value::as_str) {
+                            out.push(LineRow::new("thinking", t.to_string(), ts.clone()));
+                        }
+                    }
+                    Some("toolCall") => {
+                        pi_flush_text(&mut out, &mut text, &ts, "assistant");
+                        let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let arguments = part.get("arguments");
+                        out.push(LineRow {
+                            path: arguments.and_then(crate::engine::tool_path_arg),
+                            args: arguments.and_then(crate::engine::parse_tool_args_value),
+                            tool_call_id: part
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            todos: arguments.and_then(crate::engine::parse_todo_args),
+                            ..LineRow::new("tool", name.to_string(), ts.clone())
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            pi_flush_text(&mut out, &mut text, &ts, "assistant");
+            if let Some(row) = out.iter_mut().rev().find(|row| row.role == "assistant") {
+                row.model = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            if let Some(usage) = minimax_usage(message.get("usage")) {
+                out.push(LineRow {
+                    usage: Some(usage),
+                    ..LineRow::new("__usage__", String::new(), ts)
+                });
+            }
+            out
+        }
+        "toolResult" => {
+            let text = minimax_text_of_content(message.get("content"));
+            let mut result = serde_json::Map::new();
+            result.insert("text".to_string(), serde_json::Value::String(text));
+            if message.get("isError").and_then(Value::as_bool) == Some(true) {
+                result.insert("isError".to_string(), serde_json::Value::Bool(true));
+            }
+            vec![LineRow {
+                tool_call_id: message
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                result: Some(serde_json::Value::Object(result)),
+                ..LineRow::new("__tool_result__", String::new(), ts)
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Join the `text` payloads of a minimax content block list.
+fn minimax_text_of_content(content: Option<&Value>) -> String {
+    content
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| type_str(part) == "text")
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+/// minimax usage `{input, output, totalTokens, cacheRead…}` → the snake_case
+/// keys the history ledger stores.
+fn minimax_usage(usage: Option<&Value>) -> Option<Value> {
+    let usage = usage?.as_object()?;
+    let get = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let input = get("input")?;
+    let output = get("output")?;
+    let total = usage.get("totalTokens").and_then(Value::as_u64)?;
+    Some(serde_json::json!({
+        "input_tokens": input,
+        "output_tokens": output,
+        "total_tokens": total,
+        "cache_read": get("cacheRead"),
+    }))
+}
+
+// ==================== OpenCode ====================
 
 /// Codex rollout lines: {timestamp, type, payload}. Messages are
 /// response_item payloads of type "message".
@@ -1357,21 +1588,43 @@ fn opencode_usage(part: &Value) -> Option<Value> {
     }))
 }
 
-/// Walk the storage tree behind one session-metadata file into extracted
-/// rows. `part_byte_cap` bounds per-part reads (scan mode); None reads fully
-/// (reader mode).
+/// Walk one OpenCode session into extracted rows. `part_byte_cap` bounds
+/// per-part reads (scan mode); None reads fully (reader mode). The session is
+/// addressed either by a legacy storage-tree metadata path or by the virtual
+/// SQLite address emitted by `discover_opencode`.
 fn opencode_rows(
-    session_meta: &Path,
+    session_path: &Path,
     images: ImageMode,
     part_byte_cap: Option<u64>,
     accepted_internal_frames: &HashSet<String>,
 ) -> LineRows {
+    let messages = match super::split_opencode_db_path(session_path) {
+        Some((db, session_id)) => opencode_db_messages(&db, &session_id, part_byte_cap),
+        None => opencode_tree_messages(session_path, part_byte_cap),
+    };
     let mut out = Vec::new();
+    for (message, parts) in messages {
+        out.extend(opencode_message_rows(
+            &message,
+            &parts,
+            images,
+            accepted_internal_frames,
+        ));
+    }
+    out
+}
+
+/// One session's `(message, parts)` pairs from the legacy JSON storage tree:
+/// `message/<sessionId>/<messageId>.json` plus `part/<messageId>/<partId>.json`.
+fn opencode_tree_messages(
+    session_meta: &Path,
+    part_byte_cap: Option<u64>,
+) -> Vec<(Value, Vec<Value>)> {
     let Some(storage) = opencode_storage_root(session_meta) else {
-        return out;
+        return Vec::new();
     };
     let Some(session_id) = session_meta.file_stem().and_then(|s| s.to_str()) else {
-        return out;
+        return Vec::new();
     };
     let message_dir = storage.join("message").join(session_id);
     // Sort by time.created (name order only works while ids stay
@@ -1390,139 +1643,213 @@ fn opencode_rows(
             })
             .collect();
     messages.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    for (_, _, message) in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
-        if role != "user" && role != "assistant" {
-            continue;
+    messages
+        .into_iter()
+        .map(|(_, _, message)| {
+            let message_id = message.get("id").and_then(Value::as_str).unwrap_or("");
+            let part_dir = storage.join("part").join(message_id);
+            let parts = opencode_list_json(&part_dir, MAX_OPENCODE_PARTS_PER_MESSAGE)
+                .into_iter()
+                .filter_map(|path| read_json_file(&path, part_byte_cap))
+                .collect();
+            (message, parts)
+        })
+        .collect()
+}
+
+/// One session's `(message, parts)` pairs from the OpenCode ≥1.18 SQLite
+/// database. `message.data` / `part.data` hold the same JSON shapes the tree
+/// files did; ids and ordering live in columns. `part_byte_cap` skips
+/// oversized parts in scan mode — the tree reader truncates such a file and
+/// fails to parse it, so both paths drop the part.
+fn opencode_db_messages(
+    db: &Path,
+    session_id: &str,
+    part_byte_cap: Option<u64>,
+) -> Vec<(Value, Vec<Value>)> {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) =
+        conn.prepare("SELECT id, data FROM message WHERE session_id=?1 ORDER BY time_created, id LIMIT ?2")
+    else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(
+        rusqlite::params![session_id, MAX_OPENCODE_MESSAGES as i64],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    ) else {
+        return Vec::new();
+    };
+    let mut raw: Vec<(String, Value)> = Vec::new();
+    for row in rows.flatten() {
+        let (message_id, data) = row;
+        if let Ok(value) = serde_json::from_str::<Value>(&data) {
+            raw.push((message_id, value));
         }
-        let Some(message_id) = message.get("id").and_then(Value::as_str) else {
+    }
+    let Ok(mut part_stmt) =
+        conn.prepare("SELECT data FROM part WHERE message_id=?1 ORDER BY time_created, id LIMIT ?2")
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(raw.len());
+    for (message_id, message) in raw {
+        let parts = part_stmt
+            .query_map(
+                rusqlite::params![message_id, MAX_OPENCODE_PARTS_PER_MESSAGE as i64],
+                |r| r.get::<_, String>(0),
+            )
+            .map(|rows| {
+                rows.flatten()
+                    .filter(|data| part_byte_cap.is_none_or(|cap| data.len() as u64 <= cap))
+                    .filter_map(|data| serde_json::from_str::<Value>(&data).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.push((message, parts));
+    }
+    out
+}
+
+/// Project one OpenCode `(message, parts)` pair onto extracted rows. Shared by
+/// the tree reader and the SQLite reader.
+fn opencode_message_rows(
+    message: &Value,
+    parts: &[Value],
+    images: ImageMode,
+    accepted_internal_frames: &HashSet<String>,
+) -> LineRows {
+    let mut out = Vec::new();
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+    if role != "user" && role != "assistant" {
+        return out;
+    }
+    let time = message.get("time");
+    let created_ms = time.and_then(|t| t.get("created")).and_then(Value::as_i64);
+    let created = created_ms.map(|ms| ms.to_string());
+    let duration_ms = time
+        .and_then(|t| t.get("completed"))
+        .and_then(Value::as_i64)
+        .zip(created_ms)
+        .and_then(|(completed, created)| (completed >= created).then_some(completed - created));
+    // Tree files nest `model.modelID`; the db stores a flat `modelID`.
+    let model = message
+        .get("model")
+        .and_then(|m| m.get("modelID"))
+        .or_else(|| message.get("modelID"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // Parts carry the content. Text accumulates per message so several
+    // text parts land as one row; reasoning/tool parts flush it first,
+    // keeping calls where they happened.
+    let mut text = String::new();
+    let mut collected_images: Vec<String> = Vec::new();
+    let mut message_rows: Vec<LineRow> = Vec::new();
+    // step-finish usage lands after the message's own text row exists;
+    // buffered here and attached below (a mid-loop __usage__ row would
+    // fold onto the *previous* message's assistant row).
+    let mut pending_usage: Option<Value> = None;
+    for part in parts {
+        let part_ts = part
+            .get("time")
+            .and_then(|t| opencode_ts(t, &["start"]))
+            .or_else(|| created.clone());
+        match part.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            Some("reasoning") => {
+                pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    if !t.trim().is_empty() {
+                        message_rows.push(LineRow::new("thinking", t.to_string(), part_ts));
+                    }
+                }
+            }
+            Some("tool") => {
+                pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
+                let name = part
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                let state = part.get("state");
+                let input = state.and_then(|s| s.get("input"));
+                let output = state
+                    .and_then(|s| s.get("output"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                message_rows.push(LineRow {
+                    path: input.and_then(crate::engine::tool_path_arg),
+                    args: input.and_then(crate::engine::parse_tool_args_value),
+                    todos: input.and_then(crate::engine::parse_todo_args),
+                    tool_call_id: part
+                        .get("callID")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    result: if output.trim().is_empty() {
+                        None
+                    } else {
+                        Some(Value::String(output.to_string()))
+                    },
+                    ..LineRow::new("tool", name, part_ts)
+                });
+            }
+            Some("step-finish") => {
+                if let Some(usage) = opencode_usage(part) {
+                    pending_usage = Some(usage);
+                }
+            }
+            // [INFERENCE] shape from upstream opencode: image attachments
+            // arrive as `{type:"file", mime, url}` with a data URL.
+            Some("file") if images == ImageMode::Collect => {
+                let is_image = part
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("image/"));
+                if is_image {
+                    if let Some(url) = part.get("url").and_then(Value::as_str) {
+                        collected_images.push(url.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !text.trim().is_empty() || !collected_images.is_empty() {
+        message_rows.push(LineRow {
+            model,
+            duration_ms,
+            images: collected_images,
+            ..LineRow::new(role, text, created)
+        });
+    }
+    if let Some(usage) = pending_usage {
+        // Attach to this message's own last content row (the flushed text
+        // when present); fall back to the shared __usage__ fold.
+        match message_rows
+            .iter_mut()
+            .rev()
+            .find(|row| row.role == role || row.role == "thinking")
+        {
+            Some(row) => row.usage = Some(usage),
+            None => message_rows.push(LineRow {
+                usage: Some(usage),
+                ..LineRow::new("__usage__", String::new(), None)
+            }),
+        }
+    }
+    for row in message_rows {
+        let Some(row) = normalize_extracted_row(row, accepted_internal_frames) else {
             continue;
         };
-        let time = message.get("time");
-        let created_ms = time.and_then(|t| t.get("created")).and_then(Value::as_i64);
-        let created = created_ms.map(|ms| ms.to_string());
-        let duration_ms = time
-            .and_then(|t| t.get("completed"))
-            .and_then(Value::as_i64)
-            .zip(created_ms)
-            .and_then(|(completed, created)| (completed >= created).then_some(completed - created));
-        let model = message
-            .get("model")
-            .and_then(|m| m.get("modelID"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        // Parts carry the content. Text accumulates per message so several
-        // text parts land as one row; reasoning/tool parts flush it first,
-        // keeping calls where they happened.
-        let mut text = String::new();
-        let mut collected_images: Vec<String> = Vec::new();
-        let mut message_rows: Vec<LineRow> = Vec::new();
-        // step-finish usage lands after the message's own text row exists;
-        // buffered here and attached below (a mid-loop __usage__ row would
-        // fold onto the *previous* message's assistant row).
-        let mut pending_usage: Option<Value> = None;
-        let part_dir = storage.join("part").join(message_id);
-        for part_path in opencode_list_json(&part_dir, MAX_OPENCODE_PARTS_PER_MESSAGE) {
-            let Some(part) = read_json_file(&part_path, part_byte_cap) else {
-                continue;
-            };
-            let part_ts = part
-                .get("time")
-                .and_then(|t| opencode_ts(t, &["start"]))
-                .or_else(|| created.clone());
-            match part.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(t) = part.get("text").and_then(Value::as_str) {
-                        text.push_str(t);
-                    }
-                }
-                Some("reasoning") => {
-                    pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
-                    if let Some(t) = part.get("text").and_then(Value::as_str) {
-                        if !t.trim().is_empty() {
-                            message_rows.push(LineRow::new("thinking", t.to_string(), part_ts));
-                        }
-                    }
-                }
-                Some("tool") => {
-                    pi_flush_text(&mut message_rows, &mut text, &part_ts, role);
-                    let name = part
-                        .get("tool")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string();
-                    let state = part.get("state");
-                    let input = state.and_then(|s| s.get("input"));
-                    let output = state
-                        .and_then(|s| s.get("output"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    message_rows.push(LineRow {
-                        path: input.and_then(crate::engine::tool_path_arg),
-                        args: input.and_then(crate::engine::parse_tool_args_value),
-                        todos: input.and_then(crate::engine::parse_todo_args),
-                        tool_call_id: part
-                            .get("callID")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        result: if output.trim().is_empty() {
-                            None
-                        } else {
-                            Some(Value::String(output.to_string()))
-                        },
-                        ..LineRow::new("tool", name, part_ts)
-                    });
-                }
-                Some("step-finish") => {
-                    if let Some(usage) = opencode_usage(&part) {
-                        pending_usage = Some(usage);
-                    }
-                }
-                // [INFERENCE] shape from upstream opencode: image attachments
-                // arrive as `{type:"file", mime, url}` with a data URL.
-                Some("file") if images == ImageMode::Collect => {
-                    let is_image = part
-                        .get("mime")
-                        .and_then(Value::as_str)
-                        .is_some_and(|mime| mime.starts_with("image/"));
-                    if is_image {
-                        if let Some(url) = part.get("url").and_then(Value::as_str) {
-                            collected_images.push(url.to_string());
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !text.trim().is_empty() || !collected_images.is_empty() {
-            message_rows.push(LineRow {
-                model,
-                duration_ms,
-                images: collected_images,
-                ..LineRow::new(role, text, created)
-            });
-        }
-        if let Some(usage) = pending_usage {
-            // Attach to this message's own last content row (the flushed text
-            // when present); fall back to the shared __usage__ fold.
-            match message_rows
-                .iter_mut()
-                .rev()
-                .find(|row| row.role == role || row.role == "thinking")
-            {
-                Some(row) => row.usage = Some(usage),
-                None => message_rows.push(LineRow {
-                    usage: Some(usage),
-                    ..LineRow::new("__usage__", String::new(), None)
-                }),
-            }
-        }
-        for row in message_rows {
-            let Some(row) = normalize_extracted_row(row, accepted_internal_frames) else {
-                continue;
-            };
-            out.push(row);
-        }
+        out.push(row);
     }
     out
 }
@@ -1844,6 +2171,118 @@ mod tests {
             }
         });
         assert!(extract_claude_line(&expansion, ImageMode::Collect).is_empty());
+    }
+
+    fn claude_user(text: &str, is_meta: bool) -> Value {
+        serde_json::json!({
+            "type": "user",
+            "isMeta": is_meta,
+            "timestamp": "2026-09-28T11:51:19.751Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": text}]
+            }
+        })
+    }
+
+    fn claude_texts(lines: &[Value]) -> Vec<String> {
+        let input = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let extractor = extractor_for("claude", ImageMode::Collect);
+        collect_session(std::io::Cursor::new(input), &extractor, &HashSet::new())
+            .messages
+            .into_iter()
+            .map(|m| m.text)
+            .collect()
+    }
+
+    #[test]
+    fn claude_local_commands_stay_out_of_the_conversation() {
+        let caveat = "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>";
+        let model = "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>";
+        let stdout = "<local-command-stdout>Set model to `Opus 5.5` and saved as your default for new sessions</local-command-stdout>";
+        let login = "<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>";
+        let lines = vec![
+            claude_user(caveat, true),
+            claude_user(model, false),
+            claude_user(stdout, false),
+            claude_user("review下本地代码", false),
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-09-28T12:00:25.817Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "看过了"}]}
+            }),
+            claude_user(caveat, true),
+            claude_user(login, false),
+            claude_user("<local-command-stdout>Login successful</local-command-stdout>", false),
+            claude_user("你能干啥", false),
+        ];
+        assert_eq!(
+            claude_texts(&lines),
+            ["review下本地代码", "看过了", "你能干啥"]
+        );
+
+        let input = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut acc = ScanAcc::default();
+        walk_lines(
+            std::io::Cursor::new(input),
+            &extractor_for("claude", ImageMode::SkipDataUrls),
+            &HashSet::new(),
+            |row| acc.accept(row),
+        );
+        assert_eq!(acc.finish().title, "review下本地代码");
+    }
+
+    #[test]
+    fn claude_skill_command_without_caveat_stays_visible() {
+        let text = "<command-message>aimax:code-review</command-message>\n<command-name>/aimax:code-review</command-name>\n<command-args>审查1772</command-args>";
+        assert_eq!(
+            claude_texts(&[claude_user(text, false)]),
+            ["/aimax:code-review 审查1772"]
+        );
+    }
+
+    #[test]
+    fn claude_local_command_string_content_is_dropped() {
+        let lines = vec![
+            serde_json::json!({
+                "type": "user",
+                "isMeta": true,
+                "message": {"role": "user", "content": "<local-command-caveat>Caveat: local command.</local-command-caveat>"}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "<command-name>/effort</command-name>\n            <command-message>effort</command-message>\n            <command-args></command-args>"}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "<local-command-stdout>Set effort level to xhigh</local-command-stdout>"}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "你再设计下看看"}
+            }),
+        ];
+        assert_eq!(claude_texts(&lines), ["你再设计下看看"]);
+    }
+
+    #[test]
+    fn claude_clear_without_stdout_does_not_become_the_title() {
+        let caveat = "<local-command-caveat>Caveat: local command.</local-command-caveat>";
+        let clear = "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>";
+        let lines = vec![
+            claude_user(caveat, true),
+            claude_user(clear, false),
+            claude_user("你好", false),
+        ];
+        assert_eq!(claude_texts(&lines), ["你好"]);
     }
 
     #[test]
@@ -2309,6 +2748,180 @@ mod tests {
     fn opencode_scan_summary_from_storage_tree() {
         let (dir, meta) = opencode_fixture();
         let summary = scan_summary_file("opencode", &meta, &HashSet::new()).unwrap();
+        assert_eq!(summary.title, "hello opencode");
+        assert_eq!(summary.preview, "done");
+        assert_eq!(summary.first_ts, Some(1_700_000_000_000));
+        assert_eq!(summary.last_ts, Some(1_700_000_001_000));
+        assert_eq!(summary.message_count, 4);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// minimax transcript line: content parts spell text/thinking/toolCall,
+    /// usage rides the assistant message, toolResult resolves by toolCallId,
+    /// and the ACP image-injection marker is stripped from user turns.
+    #[test]
+    fn minimax_lines_project_roles_parts_usage_and_images() {
+        let rows = extract_line_messages(
+            "minimax",
+            &serde_json::json!({
+                "message_id": "m1", "turn_id": "t1",
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "看这张图"},
+                    {"type": "text", "text": "\n\n<!-- ccgui:minimax-image-attachments -->\n附件如下\n1. /tmp/pic.png\n<image path=\"/tmp/pic.png\"></image>\n"}
+                ], "timestamp": 1_700_000_000_000i64}
+            }),
+            ImageMode::SkipDataUrls,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "user");
+        assert_eq!(rows[0].text, "看这张图");
+        assert_eq!(rows[0].images, vec!["/tmp/pic.png".to_string()]);
+
+        let rows = extract_line_messages(
+            "minimax",
+            &serde_json::json!({
+                "message_id": "m2", "turn_id": "t1",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "想一下"},
+                    {"type": "text", "text": "答案是 "},
+                    {"type": "text", "text": "42"},
+                    {"type": "toolCall", "id": "call-9", "name": "read_file", "arguments": {"path": "/tmp/a"}}
+                ], "timestamp": 1_700_000_001_000i64,
+                "model": "minimax/MiniMax-M2.7",
+                "usage": {"input": 10, "output": 5, "totalTokens": 15, "cacheRead": 2}}
+            }),
+            ImageMode::SkipDataUrls,
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.role.as_str()).collect::<Vec<_>>(),
+            ["thinking", "assistant", "tool", "__usage__"]
+        );
+        assert_eq!(rows[1].text, "答案是 42");
+        assert_eq!(rows[1].model.as_deref(), Some("minimax/MiniMax-M2.7"));
+        assert_eq!(rows[2].text, "read_file");
+        assert_eq!(rows[2].tool_call_id.as_deref(), Some("call-9"));
+        assert_eq!(rows[3].usage.as_ref().unwrap()["total_tokens"], 15);
+
+        let rows = extract_line_messages(
+            "minimax",
+            &serde_json::json!({
+                "message_id": "m3", "turn_id": "t1",
+                "message": {"role": "toolResult", "toolCallId": "call-9",
+                    "content": [{"type": "text", "text": "文件内容"}],
+                    "timestamp": 1_700_000_002_000i64}
+            }),
+            ImageMode::SkipDataUrls,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, "__tool_result__");
+        assert_eq!(rows[0].tool_call_id.as_deref(), Some("call-9"));
+        assert_eq!(rows[0].result.as_ref().unwrap()["text"], "文件内容");
+    }
+
+    /// OpenCode ≥1.18 SQLite fixture: `message.data` / `part.data` carry the
+    /// same JSON shapes the tree files held; ids and order live in columns.
+    /// Also covers the flat `modelID` the db rows use versus the tree's nested
+    /// `model.modelID`.
+    fn opencode_db_fixture() -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ccgui-extract-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        let insert_message = |id: &str, created: i64, data: Value| {
+            conn.execute(
+                "INSERT INTO message VALUES(?1,'ses_db',?2,?3)",
+                rusqlite::params![id, created, data.to_string()],
+            )
+            .unwrap();
+        };
+        insert_message(
+            "msg_1000",
+            1_700_000_000_000,
+            serde_json::json!({"role": "user", "time": {"created": 1_700_000_000_000i64}}),
+        );
+        insert_message(
+            "msg_2000",
+            1_700_000_001_000,
+            serde_json::json!({"role": "assistant", "modelID": "claude-sonnet-4-5",
+                "time": {"created": 1_700_000_001_000i64, "completed": 1_700_000_002_000i64}}),
+        );
+        let insert_part = |id: &str, message_id: &str, created: i64, data: Value| {
+            conn.execute(
+                "INSERT INTO part VALUES(?1,?2,?3,?4)",
+                rusqlite::params![id, message_id, created, data.to_string()],
+            )
+            .unwrap();
+        };
+        insert_part(
+            "prt_01",
+            "msg_1000",
+            1,
+            serde_json::json!({"type": "text", "text": "hello opencode"}),
+        );
+        insert_part(
+            "prt_02",
+            "msg_2000",
+            2,
+            serde_json::json!({"type": "reasoning", "text": "ponder"}),
+        );
+        insert_part(
+            "prt_03",
+            "msg_2000",
+            3,
+            serde_json::json!({"type": "tool", "callID": "c1", "tool": "read",
+                "state": {"status": "completed", "input": {"path": "src/main.rs"},
+                "output": "file body"}}),
+        );
+        insert_part(
+            "prt_04",
+            "msg_2000",
+            4,
+            serde_json::json!({"type": "text", "text": "done"}),
+        );
+        insert_part(
+            "prt_05",
+            "msg_2000",
+            5,
+            serde_json::json!({"type": "step-finish",
+                "tokens": {"input": 10, "output": 5, "reasoning": 0, "cache": {"read": 1, "write": 2}}}),
+        );
+        drop(conn);
+        (dir, db)
+    }
+
+    #[test]
+    fn opencode_db_parse_reads_sqlite_rows() {
+        let (dir, db) = opencode_db_fixture();
+        let address = super::super::opencode_db_session_path(&db, "ses_db");
+        let parsed = parse_session_file("opencode", &address, &HashSet::new()).unwrap();
+        let roles: Vec<&str> = parsed.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "thinking", "tool", "assistant"]);
+        assert_eq!(parsed.messages[0].text, "hello opencode");
+        assert_eq!(parsed.messages[2].text, "read");
+        assert_eq!(parsed.messages[2].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(
+            parsed.messages[2].result,
+            Some(serde_json::json!("file body"))
+        );
+        let answer = &parsed.messages[3];
+        assert_eq!(answer.text, "done");
+        assert_eq!(answer.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(answer.duration_ms, Some(1000));
+        let usage = answer.usage.as_ref().expect("usage folded");
+        assert_eq!(usage.get("input_tokens").and_then(Value::as_i64), Some(10));
+        assert_eq!(
+            usage.get("cache_read_input_tokens").and_then(Value::as_i64),
+            Some(1)
+        );
+
+        let summary = scan_summary_file("opencode", &address, &HashSet::new()).unwrap();
         assert_eq!(summary.title, "hello opencode");
         assert_eq!(summary.preview, "done");
         assert_eq!(summary.first_ts, Some(1_700_000_000_000));
