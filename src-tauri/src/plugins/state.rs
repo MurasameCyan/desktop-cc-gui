@@ -58,9 +58,9 @@ pub struct PluginsState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DocumentStorageSelection {
-    pub(crate) kind: String,
-    pub(crate) custom_path: Option<String>,
+pub struct DocumentStorageSelection {
+    pub kind: String,
+    pub custom_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

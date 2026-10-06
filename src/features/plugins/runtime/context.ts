@@ -209,7 +209,11 @@ export function createPluginContext(
     hooks: {
       registerSessionHooks(hooks) {
         requirePermission("session.lifecycle.read");
-        return track(registerSessionHooks(id, hooks));
+        // Snapshot at registration: the runtime dispatches the stored fields,
+        // so the checked surface must be what is stored — never the live,
+        // plugin-owned object (see registerTurnHooks, where mutation would
+        // smuggle beforeTurn past its permission gate).
+        return track(registerSessionHooks(id, { ...hooks }));
       },
       registerTurnHooks(hooks) {
         if (hooks.onTurnStarted || hooks.onRuntimeEvent || hooks.afterTurn) {
@@ -218,11 +222,11 @@ export function createPluginContext(
         if (hooks.beforeTurn || hooks.onInternalMessage) {
           requirePermission("prompt.contribute.internal");
         }
-        return track(registerTurnHooks(id, hooks));
+        return track(registerTurnHooks(id, { ...hooks }));
       },
       registerRuntimeSwitchHooks(hooks) {
         requirePermission("runtime.switch.observe");
-        return track(registerRuntimeSwitchHooks(id, hooks));
+        return track(registerRuntimeSwitchHooks(id, { ...hooks }));
       },
     },
     workspace: {
@@ -665,7 +669,7 @@ export function createPluginContext(
         if (def.requestId !== undefined && !/^[a-fA-F0-9]{32}$/.test(def.requestId)) {
           throw new Error("Plugin agent requestId must contain exactly 32 hexadecimal characters");
         }
-        return backend.bridgeInvoke("plugin_agent_start", {
+        return withAuthorizedHostInvoke(() => backend.bridgeInvoke("plugin_agent_start", {
           pluginId: id,
           engine: def.engine,
           prompt: def.prompt,
@@ -675,11 +679,11 @@ export function createPluginContext(
           sessionId: def.sessionId ?? null,
           readOnly: def.readOnly ?? false,
           requestId: def.requestId ?? null,
-        }) as Promise<{ runId: string; sessionId: string | null }>;
+        })) as Promise<{ runId: string; sessionId: string | null }>;
       },
       async interrupt(runId) {
         requirePermission("agent");
-        return await backend.bridgeInvoke("plugin_agent_interrupt", { pluginId: id, runId }) as boolean;
+        return await withAuthorizedHostInvoke(() => backend.bridgeInvoke("plugin_agent_interrupt", { pluginId: id, runId })) as boolean;
       },
     },
     bridge: {

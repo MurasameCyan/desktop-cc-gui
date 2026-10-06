@@ -414,13 +414,28 @@ impl Db {
         workspace_path: &str,
     ) -> Result<bool, String> {
         let conn = self.0.lock();
+        let changed = conn
+            .execute(
+                "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash, workspace_path)
+                 VALUES(?1, ?2, ?3, ?4)",
+                rusqlite::params![engine, session_id, frame_hash, workspace_path],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        // The FTS stamp only tracks file stat + INDEX_VERSION, so a frame the
+        // engine already wrote (and the indexer may already have ingested)
+        // would stay searchable forever. Drop the stamp under the same lock:
+        // PENDING_FROM treats a missing row as pending and the next pass
+        // re-indexes with this identity hidden. Stale session_messages rows
+        // are replaced by that re-index.
         conn.execute(
-            "INSERT OR IGNORE INTO accepted_internal_frames(engine, session_id, frame_hash, workspace_path)
-             VALUES(?1, ?2, ?3, ?4)",
-            rusqlite::params![engine, session_id, frame_hash, workspace_path],
+            "DELETE FROM fts_state WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, session_id],
         )
-        .map(|changed| changed != 0)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        Ok(true)
     }
 
     pub fn accepted_internal_frames(
@@ -1420,6 +1435,63 @@ mod tests {
             db.plugin_kv_get("p2", "k").unwrap(),
             Some(serde_json::json!(true))
         );
+    }
+
+    #[test]
+    fn record_accepted_internal_frame_hash_invalidates_fts_stamp() {
+        // The FTS stamp tracks only file stat + INDEX_VERSION; a newly
+        // recorded identity must re-pend the session so frame text ingested
+        // before the record is re-indexed hidden.
+        let scratch = Scratch::new();
+        let db = Db::open_at(&scratch.path("app.db")).unwrap();
+        db.0.lock()
+            .execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title)
+                 VALUES('claude', 's1', '/ws', 'f.jsonl', 10, 20, 'first message')",
+                [],
+            )
+            .unwrap();
+        db.0.lock()
+            .execute(
+                "INSERT INTO fts_state(engine, session_id, file_size, file_mtime_ms, version, indexed_at)
+                 VALUES('claude', 's1', 10, 20, '1', 30)",
+                [],
+            )
+            .unwrap();
+        assert!(db
+            .record_accepted_internal_frame_hash("claude", "s1", &"a".repeat(64), "C:/repo")
+            .unwrap());
+        let remaining: i64 = db
+            .0
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM fts_state WHERE engine='claude' AND session_id='s1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        // A duplicate record changes nothing and must leave stamps alone.
+        db.0.lock()
+            .execute(
+                "INSERT INTO fts_state(engine, session_id, file_size, file_mtime_ms, version, indexed_at)
+                 VALUES('claude', 's1', 10, 20, '1', 30)",
+                [],
+            )
+            .unwrap();
+        assert!(!db
+            .record_accepted_internal_frame_hash("claude", "s1", &"a".repeat(64), "C:/repo")
+            .unwrap());
+        let remaining: i64 = db
+            .0
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM fts_state WHERE engine='claude' AND session_id='s1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
     }
 
     #[test]

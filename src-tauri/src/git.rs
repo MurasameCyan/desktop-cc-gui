@@ -51,11 +51,19 @@ pub struct WorkspaceVcsMetadata {
 /// Small read-only VCS summary used by the generic workspace metadata API.
 pub fn workspace_vcs_metadata(path: &Path) -> Option<WorkspaceVcsMetadata> {
     let repo = Repository::discover(path).ok()?;
-    let git_branch = repo.head().ok().and_then(|head| head.shorthand().map(str::to_owned));
-    let git_head = repo.head().ok().and_then(|head| head.target()).map(|oid| oid.to_string());
+    let head = repo.head().ok();
+    // A detached HEAD's shorthand is the literal "HEAD" — that is not a
+    // branch name, and plugins key per-branch state off this field.
+    let git_branch = head
+        .as_ref()
+        .filter(|_| !repo.head_detached().unwrap_or(false))
+        .and_then(|head| head.shorthand().map(str::to_owned));
+    let git_head = head.as_ref().and_then(|head| head.target()).map(|oid| oid.to_string());
     let mut opts = StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
-    let dirty = repo.statuses(Some(&mut opts)).map(|statuses| !statuses.is_empty()).unwrap_or(false);
+    // Unknown is not clean: a failed status read must not report a spotless
+    // worktree. Conservative dirty=true only makes a plugin refresh more.
+    let dirty = repo.statuses(Some(&mut opts)).map(|statuses| !statuses.is_empty()).unwrap_or(true);
     Some(WorkspaceVcsMetadata { git_branch, git_head, dirty })
 }
 

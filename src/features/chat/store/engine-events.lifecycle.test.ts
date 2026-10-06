@@ -10,6 +10,7 @@ import {
   handleEngineEvents,
   registerPendingRunLifecycle,
   replayBufferedEngineEvents,
+  settleOrphanedRuns,
   unregisterRunLifecycle,
 } from "./engine-events";
 
@@ -510,6 +511,57 @@ describe("binding a run that outran the send result", () => {
 
     expect(afterTurn).toHaveBeenCalledTimes(1);
     expect(state.bySession[key].streaming).toBe(false);
+  });
+
+  it("settles the plugin lifecycle when a run is swept as orphaned", async () => {
+    // The orphan sweep reaps runs whose done/error never arrive (a hung or
+    // dead engine): it must deliver the terminal afterTurn and release the
+    // lifecycle, or both leak and the plugin waits forever.
+    const afterTurn = vi.fn();
+    const dispose = registerTurnHooks("test.orphan-sweep", { afterTurn });
+    const settleLaunch = await pending("placeholder-a");
+    bindRunLifecycle("placeholder-a", "run-x");
+    settleLaunch();
+    const key = "claude/session-1";
+    const state = {
+      bySession: {
+        [key]: {
+          messages: [],
+          queue: [],
+          streaming: true,
+          interrupted: false,
+          error: null,
+          turnStartedAt: 123,
+          activeModel: null,
+          activeEffort: null,
+          usage: null,
+          turnUsage: null,
+          nextBefore: null,
+          loading: false,
+          retry: null,
+          compaction: null,
+        },
+      },
+      streamingByKey: { [key]: true },
+      retryingByKey: {},
+    };
+    settleOrphanedRuns(
+      ((update: (current: typeof state) => Partial<typeof state>) =>
+        Object.assign(state, update(state))) as never,
+      [["run-x", key]],
+    );
+    await Promise.resolve();
+    dispose();
+
+    expect(afterTurn).toHaveBeenCalledTimes(1);
+    expect(afterTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "run-x", status: "failed" }),
+    );
+    expect(state.bySession[key].streaming).toBe(false);
+    expect(state.streamingByKey[key]).toBeFalsy() /* setStreamingFlag drops the key when the flag clears */;
+    // The lifecycle is gone: a late internal frame is no longer filtered.
+    const frame = '<CCGUI_INTERNAL_abc123>{"ok":true}</CCGUI_INTERNAL_abc123>';
+    expect(filterInternalFrameDelta("run-x", frame)).toBe(frame);
   });
 
   it("drains the buffered prefix when ownership resolves before the send result", async () => {

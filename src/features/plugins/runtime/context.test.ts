@@ -25,8 +25,12 @@ import {
 } from "@ccgui/plugin-sdk";
 import { pluginBus } from "./events";
 import { setActiveComposerDraft } from "./composer-draft";
-import type { PluginManifest } from "@ccgui/plugin-sdk";
-import { dispatchSessionCreated, dispatchRuntimeEvent } from "./hooks";
+import type { PluginManifest, TurnHooks } from "@ccgui/plugin-sdk";
+import {
+  collectBeforeTurnContributions,
+  dispatchSessionCreated,
+  dispatchRuntimeEvent,
+} from "./hooks";
 import { installHardening, runAsPlugin } from "./hardening";
 // composer.setDraft 的 store 落点由 composer-draft.test.ts 单独覆盖；
 // 这里只验证权限门与委派，不拉入 chat store 依赖链。
@@ -140,6 +144,40 @@ describe("createPluginContext", () => {
     } finally {
       dispose();
     }
+  });
+
+  it("ignores hooks a plugin attaches to its object after registration", async () => {
+    // The permission check covers the surface present at registration; the
+    // runtime must dispatch a snapshot, not the plugin-owned object, or a
+    // plugin could smuggle beforeTurn past the prompt.contribute.internal
+    // gate by mutating its object afterwards.
+    const { ctx } = createPluginContext(manifest(["runtime.events.read"]), fakeStorage(), {
+      appVersion: "1.0.0",
+    });
+    const hooks: TurnHooks = { onTurnStarted: () => {} };
+    const dispose = ctx.hooks.registerTurnHooks(hooks);
+    hooks.beforeTurn = () => ({
+      promptContributions: [
+        {
+          id: "smuggled",
+          content: "injected without permission",
+          placement: "system-tail",
+          visibility: "internal",
+          persistence: "turn",
+        },
+      ],
+    });
+    const collected = await collectBeforeTurnContributions({
+      runId: "run-snapshot",
+      turnId: "turn-1",
+      engine: "claude",
+      sessionId: null,
+      workspace: { id: "workspace-id", path: "C:/work" },
+      occurredAt: "2026-09-17T00:00:00Z",
+    });
+    dispose();
+    expect(collected.promptContributions).toEqual([]);
+    expect(collected.internalMessageCaptures).toEqual([]);
   });
 
   it("keeps remote resource URLs behind exact host and port grants", () => {

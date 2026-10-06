@@ -56,6 +56,7 @@ import {
   isInternalMessageCaptureActive,
 } from "@/features/plugins/runtime/hooks";
 import { normalizeEngineEvent, type EngineTerminalFact } from "../normalized-runtime-events";
+import { workspaceMetadata } from "./lifecycle";
 import type { AfterTurnEvent, InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 import { migrateSelectedAgent } from "@/features/agents/selected-agent";
 interface RunLifecycle {
@@ -213,12 +214,15 @@ function bindUnboundRun(event: ChatEngineEvent): boolean {
   for (const [placeholder, lifecycle] of pendingRuns) {
     if (lifecycle.engine !== event.engine) continue;
     if (
-      event.sessionId !== null &&
       lifecycle.sessionId !== null &&
+      // Engine events broadcast to every attached client. A pending send that
+      // already knows its native session must only adopt events carrying that
+      // exact id: an identity-less event can belong to a foreign run (a phone
+      // driving the same engine), and binding it would rekey this turn's
+      // capture buffer and hooks onto the wrong run. Unbound events are
+      // buffered and replayed once the send resolves, so nothing is lost.
       lifecycle.sessionId !== event.sessionId
-    ) {
-      continue;
-    }
+    ) continue;
     if (match !== undefined) return false;
     match = placeholder;
   }
@@ -922,10 +926,13 @@ function onSession(
     deps.set((s) => ({
       createdSessionKeys: { ...s.createdSessionKeys, [createdKey]: true },
     }));
-    const workspace = lifecycle?.workspace ?? {
-      id: workspacePath,
-      path: workspacePath,
-    };
+    // One workspace, one identity: fall back to the same metadata helper every
+    // other hook event uses — fabricating id = path would hand plugins a
+    // second identity for the same directory.
+    // Test doubles and early boot states may lack the workspaces list; the
+    // helper derives a stable id from the path either way.
+    const workspace =
+      lifecycle?.workspace ?? workspaceMetadata(deps.get().workspaces ?? [], workspacePath);
     dispatchSessionCreated({
       engine: event.engine,
       sessionId: nativeId,
@@ -976,7 +983,17 @@ export function settleOrphanedRuns(
   orphaned: Array<[string, string]>,
 ) {
   if (orphaned.length === 0) return;
-  for (const [runId] of orphaned) dropRunUsage(runId);
+  for (const [runId, key] of orphaned) {
+    dropRunUsage(runId);
+    // An orphaned run is exactly the case where done/error never arrive
+    // (engine hung or died), so settle its plugin lifecycle here: flush any
+    // buffered partial frame back to visible text like onError does, and
+    // deliver the terminal afterTurn — otherwise the lifecycle and capture
+    // buffer leak and a plugin that saw onTurnStarted waits forever.
+    const buffered = flushInternalFrameDelta(runId);
+    if (buffered) bufferStreamPart(key, "delta", buffered, null);
+    finishRunLifecycle(runId, "failed");
+  }
   for (const [, key] of orphaned) retryingKeys.delete(key);
   set((s) => {
     let streamingByKey = s.streamingByKey;

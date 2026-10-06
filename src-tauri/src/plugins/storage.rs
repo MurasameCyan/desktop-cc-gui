@@ -61,8 +61,6 @@ pub struct ResolvedStorageLocation {
     pub kind: StorageLocationKind,
     pub display_path: String,
     pub writable: bool,
-    #[serde(skip)]
-    root: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,7 +244,6 @@ fn get_location_at(
         kind,
         display_path: root.to_string_lossy().into_owned(),
         writable: is_existing_base_writable(&base),
-        root: root.to_string_lossy().into_owned(),
     })
 }
 
@@ -442,7 +439,6 @@ fn resolved_location(
         kind,
         display_path: root.to_string_lossy().into_owned(),
         writable: true,
-        root: root.to_string_lossy().into_owned(),
     })
 }
 
@@ -1086,7 +1082,7 @@ mod tests {
             "vendor.one",
             StorageLocationSelection { kind: StorageLocationKind::Custom, path: Some(scratch.path("chosen").to_string_lossy().into()) },
         ).unwrap();
-        assert_eq!(PathBuf::from(selected.root), scratch.path("chosen").join("plugin-data").join("vendor.one"));
+        assert_eq!(PathBuf::from(selected.display_path), scratch.path("chosen").join("plugin-data").join("vendor.one"));
         assert!(scratch.path("chosen").is_dir());
         assert!(!scratch.path("chosen/plugin-data/vendor.one").exists());
     }
@@ -1115,7 +1111,7 @@ mod tests {
         .unwrap();
 
         let new_root = plugin_root(&custom, id);
-        assert_eq!(PathBuf::from(selected.root), new_root);
+        assert_eq!(PathBuf::from(selected.display_path), new_root);
         assert_eq!(std::fs::read_to_string(new_root.join("state/nested/doc.json")).unwrap(), "document");
         assert!(!old_root.exists(), "old canonical root remained visible");
     }
@@ -1232,7 +1228,7 @@ mod tests {
             assert!(error.contains("simulated state write failure"));
             let selected = get_location_at(&state_path, &roots, id).unwrap();
             assert_eq!(selected.kind, old_kind);
-            assert_eq!(PathBuf::from(selected.root), old_root);
+            assert_eq!(PathBuf::from(selected.display_path), old_root);
             assert_eq!(std::fs::read_to_string(old_root.join("doc")).unwrap(), "preserve");
             let restored_target = plugin_root(&new_base, id);
             assert!(restored_target.is_dir());

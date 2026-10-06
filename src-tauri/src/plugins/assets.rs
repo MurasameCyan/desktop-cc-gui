@@ -134,6 +134,28 @@ fn check_absolute_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Directories a plugin must never hold as a grant root, matching the scope
+/// the rest of the app already enforces (tauri.conf.json assetProtocol.deny
+/// and web.rs read_scoped_file): the credential/app-data dirs under $HOME,
+/// $HOME itself, and the filesystem root. Compared in both directions —
+/// granting an ancestor of a denied dir exposes it just as surely as
+/// granting the denied dir itself.
+fn denied_grant_root(canonical: &Path) -> bool {
+    if canonical.parent().is_none() {
+        return true;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    if canonical == home {
+        return true;
+    }
+    [".ssh", ".aws", ".gnupg", ".ccgui-next"].iter().any(|denied| {
+        let denied = home.join(denied);
+        canonical.starts_with(&denied) || denied.starts_with(canonical)
+    })
+}
+
 fn grant_directory_at(
     state_path: &Path,
     id: &str,
@@ -147,6 +169,15 @@ fn grant_directory_at(
         return Err("asset directory must be an existing directory".into());
     }
     let canonical = dunce::canonicalize(path).map_err(|e| e.to_string())?;
+    // The SDK routes grants through the host's directory picker, but the IPC
+    // boundary is the real edge: a plugin invoking this command directly must
+    // not be able to self-authorize a credential directory.
+    if denied_grant_root(&canonical) {
+        return Err(format!(
+            "refusing to grant a sensitive directory: {}",
+            canonical.display()
+        ));
+    }
     let _guard = state::lock_state(state_path)?;
     let mut state = authorized_state(state_path, id)?;
     require_permission(&state, id, "assets:directory")?;
@@ -172,9 +203,9 @@ fn grant_directory_at(
 }
 
 fn list_directories_at(state_path: &Path, id: &str) -> Result<Vec<AssetDirectoryGrant>, String> {
-    let mut state = authorized_state(state_path, id)?;
+    let state = authorized_state(state_path, id)?;
     require_permission(&state, id, "assets:directory")?;
-    Ok(state.asset_directories.remove(id).unwrap_or_default())
+    Ok(state.asset_directories.get(id).cloned().unwrap_or_default())
 }
 
 fn revoke_directory_at(state_path: &Path, id: &str, grant_id: &str) -> Result<(), String> {
@@ -357,6 +388,11 @@ fn read_local_at(
     };
     let safe = storage::safe_relative_path(relative).map_err(|_| AssetError::BadRequest)?;
     let root = local_root(state_path, plugins_dir, roots, id, source)?;
+    // Defense in depth for grants recorded before the grant-time deny list
+    // existed: a sensitive root is never served, however it was recorded.
+    if matches!(source, AssetSource::Directory { .. }) && denied_grant_root(&root) {
+        return Err(AssetError::Forbidden);
+    }
     if !root.exists() {
         return Err(AssetError::NotFound);
     }
@@ -585,6 +621,39 @@ mod tests {
             )
             .unwrap_err()
             .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn sensitive_directories_are_refused_at_grant_and_at_read() {
+        let scratch = Scratch::new();
+        let state_path = fixture(&scratch);
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        // $HOME ancestors the credential dirs, so it is refused at grant time;
+        // a missing credential dir also errors (canonicalize fails) — both
+        // outcomes are refusals, never grants.
+        assert!(grant_directory_at(&state_path, "vendor.one", &home).is_err());
+        assert!(grant_directory_at(&state_path, "vendor.one", &home.join(".ssh")).is_err());
+        // A grant recorded before the deny list existed is refused at read
+        // time as well.
+        let mut state = state::read_state(&state_path).unwrap();
+        state
+            .asset_directories
+            .entry("vendor.one".into())
+            .or_default()
+            .push(AssetDirectoryGrant {
+                grant_id: "legacy".into(),
+                path: home.to_string_lossy().into_owned(),
+            });
+        state::write_state(&state_path, &state).unwrap();
+        let source = AssetSource::Directory { grant_id: "legacy".into(), relative: "x".into() };
+        assert_eq!(
+            read_local_at(&state_path, &scratch.path("plugins"), None, "vendor.one", &source)
+                .unwrap_err()
+                .status(),
             StatusCode::FORBIDDEN
         );
     }

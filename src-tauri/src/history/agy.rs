@@ -42,7 +42,11 @@ pub(super) fn parse_agy_session(
                 STEP_USER => {
                     if let Some(turn) = user_iter.next() {
                         seq += 1;
-                        messages.push(plain_message(seq, "user", turn.text, turn.ts_ms));
+                        // agy's history.jsonl records the effective prompt verbatim,
+                        // internal system/request tail included — strip it
+                        // exactly like the other engines' user rows.
+                        let visible = super::extract::strip_internal_prompt_tail(&turn.text);
+                        messages.push(plain_message(seq, "user", visible.to_string(), turn.ts_ms));
                     }
                 }
                 STEP_ASSISTANT => {
@@ -76,7 +80,8 @@ pub(super) fn parse_agy_session(
     // Conversation db unreadable / older than the prompt log: still show users.
     for turn in user_iter {
         seq += 1;
-        messages.push(plain_message(seq, "user", turn.text, turn.ts_ms));
+        let visible = super::extract::strip_internal_prompt_tail(&turn.text);
+        messages.push(plain_message(seq, "user", visible.to_string(), turn.ts_ms));
     }
 
     ParsedSession { messages }
@@ -583,6 +588,43 @@ mod tests {
         assert!(!looks_like_assistant(
             r#"ommandLine":"for f in /tmp/feishu_*.json; do jq -r '.try'"#
         ));
+    }
+
+    #[test]
+    fn user_turns_strip_the_internal_prompt_tail() {
+        // agy's history.jsonl records the effective prompt verbatim, internal
+        // system/request tail included; user rows must strip it like every
+        // other engine's.
+        let scratch =
+            std::env::temp_dir().join(format!("ccgui-agy-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let previous = std::env::var_os("ANTIGRAVITY_HOME");
+        std::env::set_var("ANTIGRAVITY_HOME", &scratch);
+        let id = "conv-strip-tail";
+        std::fs::write(
+            scratch.join("history.jsonl"),
+            concat!(
+                "{\"conversationId\":\"conv-strip-tail\",\"timestamp\":1,",
+                "\"display\":\"hello\\n\\n[CCGUI internal system-tail]\\nprivate protocol\"}\n"
+            ),
+        )
+        .unwrap();
+        // No readable steps db: the fallback loop still surfaces user turns.
+        let session = scratch.join(format!("{id}.db"));
+        std::fs::write(&session, b"").unwrap();
+        let parsed = parse_agy_session(&session, &HashSet::new());
+        match previous {
+            Some(value) => std::env::set_var("ANTIGRAVITY_HOME", value),
+            None => std::env::remove_var("ANTIGRAVITY_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+        let users: Vec<&str> = parsed
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(users, ["hello"]);
     }
 
     #[test]

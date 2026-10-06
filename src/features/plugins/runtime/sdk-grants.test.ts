@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   execGrantAllows,
   isKnownPermission,
+  isValidPluginId,
   networkGrantAllows,
 } from "@ccgui/plugin-sdk";
 import spec from "../../../../packages/plugin-sdk/spec/permissions.json";
@@ -174,6 +175,17 @@ describe("spec/permissions.json vectors", () => {
   it("drives execAllow vectors through execGrantAllows", () => {
     for (const v of spec.execAllow) {
       expect(execGrantAllows(v.grants, v.bin), JSON.stringify(v)).toBe(v.allowed);
+    }
+  });
+
+  // 插件 id 同时用作目录名（路径穿越护栏），这组向量与 Rust
+  // plugins/manifest.rs::is_valid_id 逐字节对齐，两侧同跑防漂移。
+  it("drives pluginIdShapes vectors through isValidPluginId", () => {
+    for (const id of spec.pluginIdShapes.valid) {
+      expect(isValidPluginId(id), id).toBe(true);
+    }
+    for (const id of spec.pluginIdShapes.invalid) {
+      expect(isValidPluginId(id), id).toBe(false);
     }
   });
 });

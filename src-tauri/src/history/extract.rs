@@ -481,7 +481,10 @@ const INTERNAL_PROMPT_MARKERS: [&str; 2] = [
     "\n\n[CCGUI internal request-tail]\n",
 ];
 
-fn strip_internal_prompt_tail(text: &str) -> &str {
+/// agy records the full effective prompt (internal tail included) in its own
+/// history, so its user turns strip through the same helper every other
+/// engine's user rows already pass through.
+pub(super) fn strip_internal_prompt_tail(text: &str) -> &str {
     INTERNAL_PROMPT_MARKERS
         .iter()
         .filter_map(|marker| text.find(marker))

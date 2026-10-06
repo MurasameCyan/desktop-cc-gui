@@ -1134,6 +1134,16 @@ pub async fn record_accepted_internal_frame(
         if !inserted {
             return Ok(false);
         }
+        // The FTS stamp tracks only file stat + INDEX_VERSION, so frame text
+        // ingested between the transcript write and this record would stay
+        // searchable forever. Drop the stamp under the same lock: PENDING_FROM
+        // treats a missing row as pending, and the scan below chains into
+        // spawn_index, which re-indexes with this identity hidden.
+        conn.execute(
+            "DELETE FROM fts_state WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, session_id],
+        )
+        .map_err(|error| error.to_string())?;
         // Only an indexed session has a stored summary that now hides fewer
         // frames than it should. One the scanner has never reached derives its
         // summary from the identity set current at that time, so rescanning for
