@@ -12,9 +12,9 @@
 //!
 //! Wire (verified against the installed CLI, whose shipped JSON schema is the
 //! source of truth here): `initialize {clientInfo}` → `thread/start
-//! {cwd, sandbox, approvalPolicy}` (or `thread/resume {threadId}` for a session
-//! the app already holds) → `turn/start {threadId, input}`, which acknowledges
-//! immediately with `{turn:{id}}`; the work then streams as `item/*` and
+//! {cwd, sandbox, approvalPolicy}` (or `thread/resume {threadId, excludeTurns}`
+//! for a session the app already holds) → `turn/start {threadId, input}`, which
+//! acknowledges immediately with `{turn:{id}}`; the work then streams as `item/*` and
 //! `item/agentMessage/delta` notifications and only `turn/completed` ends the
 //! turn. Two schema facts shape the code below: `turn/completed` carries no
 //! usage (it arrives earlier via `thread/tokenUsage/updated`), and there is no
@@ -1386,7 +1386,10 @@ async fn handshake_and_start(
     // schema: the client must opt into the experimental API to negotiate
     // them. If the server then refuses the fields, the rpc error fails the
     // turn — there is no degraded fallback.
-    let experimental = codex_read_only::requested(req)
+    // Codex 0.150 requires this opt-in for `thread/resume.excludeTurns`;
+    // the field is stable from 0.151, which also accepts the capability.
+    let experimental = req.session_id.is_some()
+        || codex_read_only::requested(req)
         || decision.is_some()
         || req.permission.as_deref() == Some("plan");
     let key = server
@@ -1455,10 +1458,7 @@ async fn handshake_and_start(
         } else {
             THREAD_TIMEOUT
         };
-    let (method, mut params) = match req.session_id.as_deref() {
-        Some(thread_id) => ("thread/resume", json!({ "threadId": thread_id })),
-        None => ("thread/start", json!({})),
-    };
+    let (method, mut params) = thread_open_request(req.session_id.as_deref());
     params["cwd"] = json!(req.workspace.to_string_lossy());
     params["sandbox"] = json!(sandbox_for(req.permission.as_deref()));
     params["approvalPolicy"] = json!("never");
@@ -1598,6 +1598,20 @@ async fn handshake_and_start(
         .and_then(Value::as_str)
         .map(str::to_string);
     Ok(Some(TurnStarted { thread_id, turn_id }))
+}
+
+/// A resume reply is one NDJSON frame. Asking Codex to hydrate every prior
+/// turn can make that otherwise valid frame exceed the host's safety bound.
+/// `excludeTurns` only omits history from the reply; Codex still resumes its
+/// own persisted context for the next turn.
+fn thread_open_request(session_id: Option<&str>) -> (&'static str, Value) {
+    match session_id {
+        Some(thread_id) => (
+            "thread/resume",
+            json!({ "threadId": thread_id, "excludeTurns": true }),
+        ),
+        None => ("thread/start", json!({})),
+    }
 }
 
 /// Everything after the `turn/start` ack: stream the turn to its terminal
@@ -2352,6 +2366,119 @@ mod tests {
         // default here.
         assert_eq!(sandbox_for(Some("plan")), "workspace-write");
         assert_eq!(sandbox_for(None), "workspace-write");
+    }
+
+    #[test]
+    fn resumed_threads_skip_full_history_hydration() {
+        let (method, params) = thread_open_request(Some("thread-123"));
+        assert_eq!(method, "thread/resume");
+        assert_eq!(params["threadId"], json!("thread-123"));
+        assert_eq!(params["excludeTurns"], json!(true));
+
+        let (method, params) = thread_open_request(None);
+        assert_eq!(method, "thread/start");
+        assert!(params.get("excludeTurns").is_none());
+    }
+
+    #[tokio::test]
+    async fn metadata_only_resume_preserves_the_turn_and_plan_verification_handshake() {
+        // Exercise the real pipe, request builder and reply parser. The peer
+        // enforces the older experimental gate and sends no hydrated turns.
+        let peer = r#"
+const assert = require('node:assert/strict');
+const mode = process.argv[1];
+const resumed = mode !== 'new';
+const methods = ['initialize', resumed ? 'thread/resume' : 'thread/start'];
+if (mode === 'decision') methods.push('thread/turns/list');
+methods.push('turn/start');
+let step = 0;
+require('node:readline').createInterface({input: process.stdin}).on('line', line => {
+  const {id, method, params} = JSON.parse(line);
+  assert.equal(method, methods[step++]);
+  let result;
+  if (method === 'initialize') {
+    assert.equal(params.capabilities.experimentalApi, resumed);
+    result = {};
+  } else if (method === 'thread/resume' || method === 'thread/start') {
+    assert.equal(params.approvalPolicy, 'never');
+    assert.equal(params.sandbox, 'workspace-write');
+    assert.equal(params.excludeTurns, resumed ? true : undefined);
+    assert.equal(params.threadId, resumed ? 'thread-123' : undefined);
+    assert.equal(params.history, undefined);
+    result = {thread: {id: 'thread-123', turns: []}, model: 'test-model', reasoningEffort: 'high'};
+  } else if (method === 'thread/turns/list') {
+    assert.equal(params.threadId, 'thread-123');
+    assert.equal(params.itemsView, 'full');
+    result = {data: [{id: 'plan-turn', items: [{id: 'plan-1', type: 'plan', text: '# Plan'}]}]};
+  } else {
+    assert.equal(params.threadId, 'thread-123');
+    assert.equal(params.input[0].text, 'Continue the conversation');
+    assert.equal(params.history, undefined);
+    if (mode === 'decision') {
+      assert.equal(params.collaborationMode.mode, 'default');
+      assert.equal(params.collaborationMode.settings.model, 'test-model');
+      assert.equal(params.collaborationMode.settings.reasoning_effort, 'high');
+    }
+    result = {turn: {id: 'next-turn'}};
+  }
+  process.stdout.write(JSON.stringify({jsonrpc: '2.0', id, result}) + '\n', () => {
+    if (method === 'turn/start') process.exit(0);
+  });
+});
+"#;
+        for mode in ["new", "resume", "decision"] {
+            let mut child = Command::new("node")
+                .args(["-e", peer, mode])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("protocol test requires the project's Node runtime");
+            let stdin = Arc::new(TokioMutex::new(child.stdin.take()));
+            let mut server = AppServer::new(stdin, child.stdout.take().unwrap());
+            let req = SendRequest {
+                session_id: (mode != "new").then(|| "thread-123".into()),
+                workspace: std::env::temp_dir(),
+                prompt: "Continue the conversation".into(),
+                prompt_contributions: Vec::new(),
+                native_compact: false,
+                images: Vec::new(),
+                model: None,
+                effort: None,
+                service_tier: None,
+                permission: Some("auto".into()),
+                additional_dirs: Vec::new(),
+                provider_id: None,
+                computer_use: None,
+                memory_bot: None,
+                allowed_tools: None,
+            };
+            let decision = (mode == "decision").then(|| DecisionCheck {
+                mode: "default",
+                native_plan_id: "plan-1".into(),
+                content_hash: plan_review::content_hash("# Plan"),
+            });
+            let (core, _registry, _emitter) = test_core();
+            let result = handshake_and_start(
+                &mut server,
+                &core,
+                &mut TurnState::new(req.session_id.clone()),
+                &mut TurnView::default(),
+                &req,
+                &Arc::new(AtomicBool::new(false)),
+                decision.as_ref(),
+                Duration::from_secs(5),
+            )
+            .await;
+            let status = timeout(Duration::from_secs(5), child.wait())
+                .await
+                .expect("protocol peer must exit")
+                .unwrap();
+            assert!(status.success(), "{mode}: peer rejected the handshake");
+            let started = result.expect(mode).expect("turn must be acknowledged");
+            assert_eq!(started.thread_id, "thread-123");
+            assert_eq!(started.turn_id.as_deref(), Some("next-turn"));
+        }
     }
 
     #[test]
