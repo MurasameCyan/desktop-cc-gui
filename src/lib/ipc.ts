@@ -595,6 +595,7 @@ export interface FileIndexEntry {
   isDir: boolean;
 }
 
+
 /** What a `/` picker entry is. Commands (`.claude/commands/*.md`) and
  *  skills (`.claude/skills/<name>/SKILL.md`) share the picker but stay
  *  distinct: the menu keys icons/badges/section grouping off this field,
@@ -1215,6 +1216,36 @@ export interface PluginUpdate {
   latestVersion: string;
 }
 
+export interface PluginWorkspaceMetadata {
+  id: string;
+  path: string;
+  gitBranch?: string;
+  gitHead?: string;
+  dirty?: boolean;
+}
+export type PluginDocumentStorageLocationKind = "data" | "program" | "custom";
+
+/** Raw Rust response. The context boundary drops writable and renames
+ * displayPath to the SDK's path field. */
+export interface PluginDocumentStorageLocationResponse {
+  kind: PluginDocumentStorageLocationKind;
+  displayPath: string;
+  writable: boolean;
+}
+
+export interface PluginDocumentReadResponse {
+  content: string;
+  version: string;
+}
+
+export type PluginDocumentWriteResponse =
+  | { status: "written"; version: string }
+  | { status: "conflict"; currentVersion: string | null };
+
+export type PluginDocumentRemoveResponse =
+  | { status: "removed" }
+  | { status: "conflict"; currentVersion: string | null };
+
 export interface OfficialConfigFile {
   /** Absolute path — the pane label, and the write-back key. */
   path: string;
@@ -1349,6 +1380,13 @@ export const ipc = {
     workspacePath: string;
     sessionId: string | null;
     prompt: string;
+    promptContributions: Array<{
+      id: string;
+      content: string;
+      placement: "system-tail" | "request-tail";
+      visibility: "internal";
+      persistence: "turn" | "session";
+    }>;
     /** ccgui 自己拦下来的 `/compact`（底部按钮或内置 app 命令）：OMP 改走
      *  原生 compact RPC 命令。用户自定义的同名目录命令不会带这个标记，
      *  仍然作为普通提示词发给 CLI。 */
@@ -1395,6 +1433,22 @@ export const ipc = {
   missionAgentInterrupt: (runId: string) =>
     invoke<boolean>("mission_agent_interrupt", { runId }),
   listEngines: () => invoke<EngineInfo[]>("list_engines"),
+  /** Record a complete internal frame already accepted by its live capture
+   * validator, so history reload can hide only that exact frame.
+   * `workspacePath` is the only key a workspace removal can reclaim the
+   * identity by: a remote session never gets a `sessions` row to join through. */
+  recordAcceptedInternalFrame: (
+    engine: string,
+    sessionId: string,
+    frame: string,
+    workspacePath: string,
+  ) =>
+    invoke<void>("record_accepted_internal_frame", {
+      engine,
+      sessionId,
+      frame,
+      workspacePath,
+    }),
   /** Persist a clipboard image to app home; returns its absolute path so it
    * can flow through the same path-based image pipeline as picked files. */
   savePastedImage: (dataBase64: string, extension: string) =>
@@ -1450,9 +1504,16 @@ export const ipc = {
     invoke<void>("delete_session", { engine, sessionId }),
   /** Remote (plugin-fed, e.g. WSL distro) session delete: no local db row
    *  exists, so the host rm's the validated remotePath over the same remote
-   *  channel loadRemoteSessionPage reads through. */
-  deleteRemoteSession: (workspacePath: string, engine: string, remotePath: string) =>
-    invoke<void>("delete_remote_session", { workspacePath, engine, remotePath }),
+   *  channel loadRemoteSessionPage reads through. The native id travels with
+   *  it because no local row can recover it, and the accepted-frame
+   *  identities recorded for this session are reclaimed with the transcript. */
+  deleteRemoteSession: (
+    workspacePath: string,
+    engine: string,
+    sessionId: string,
+    remotePath: string,
+  ) =>
+    invoke<void>("delete_remote_session", { workspacePath, engine, sessionId, remotePath }),
   pinSession: (engine: string, sessionId: string, pinned: boolean) =>
     invoke<void>("pin_session", { engine, sessionId, pinned }),
   renameSession: (engine: string, sessionId: string, title: string) =>
@@ -1746,6 +1807,51 @@ export const ipc = {
     invoke<void>("plugin_storage_set", { id, key, value }),
   pluginStorageDelete: (id: string, key: string) =>
     invoke<void>("plugin_storage_delete", { id, key }),
+  pluginWorkspaceMetadata: (pluginId: string, workspacePath: string) =>
+    invoke<PluginWorkspaceMetadata>("workspace_metadata", { pluginId, workspacePath }),
+  pluginDocumentStorageGetLocation: (pluginId: string) =>
+    invoke<PluginDocumentStorageLocationResponse>("plugin_document_storage_get_location", {
+      pluginId,
+    }),
+  pluginDocumentStorageSelectLocation: (
+    pluginId: string,
+    kind: PluginDocumentStorageLocationKind,
+    customPath: string | null,
+  ) =>
+    invoke<PluginDocumentStorageLocationResponse>("plugin_document_storage_select_location", {
+      pluginId,
+      kind,
+      customPath,
+    }),
+  pluginDocumentStorageReadText: (pluginId: string, relativePath: string) =>
+    invoke<PluginDocumentReadResponse | null>("plugin_document_storage_read_text", {
+      pluginId,
+      relativePath,
+    }),
+  pluginDocumentStorageWriteTextAtomic: (
+    pluginId: string,
+    relativePath: string,
+    content: string,
+    expectedVersion: string | null,
+  ) =>
+    invoke<PluginDocumentWriteResponse>("plugin_document_storage_write_text_atomic", {
+      pluginId,
+      relativePath,
+      content,
+      expectedVersion,
+    }),
+  pluginDocumentStorageRemove: (
+    pluginId: string,
+    relativePath: string,
+    expectedVersion: string | null,
+  ) =>
+    invoke<PluginDocumentRemoveResponse>("plugin_document_storage_remove", {
+      pluginId,
+      relativePath,
+      expectedVersion,
+    }),
+  pluginDocumentStorageList: (pluginId: string, prefix?: string) =>
+    invoke<string[]>("plugin_document_storage_list", { pluginId, prefix: prefix ?? null }),
   // plugin marketplace (Phase 3, plan §6) — install is desktop-only on the
   // web bridge; fetch/checkUpdates ride the read-only whitelist.
   pluginFetchIndex: (force = false) =>

@@ -222,6 +222,7 @@ mod tests {
             session_id: None,
             workspace: std::env::temp_dir(),
             prompt: "run the tests".into(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: vec![],
             model: Some("minimax/MiniMax-M2.7".into()),

@@ -184,6 +184,15 @@ function backend(opts: { engines?: unknown[]; mode?: "prs" | "issues"; report?: 
     set: async () => {},
     delete: async () => {},
     agentCatalog: async () => (opts.engines ?? CATALOG) as never,
+    // 插件上下文后端里这条用例用不到的宿主能力：给最小桩，保持类型完整。
+    workspaceMetadata: async () => ({ id: "ws", path: "/repo" }) as never,
+    pickDirectory: async () => null,
+    documentStorageGetLocation: async () => ({ kind: "data" as const, displayPath: "/data", writable: true }),
+    documentStorageSelectLocation: async (_id, kind) => ({ kind, displayPath: "/data", writable: true }),
+    documentStorageReadText: async () => null,
+    documentStorageWriteTextAtomic: async () => ({ status: "written" as const, version: "v1" }),
+    documentStorageRemove: async () => ({ status: "removed" as const }),
+    documentStorageList: async () => [],
     bridgeInvoke: async (command, args) => {
       if (command !== "plugin_exec_run") return null;
       const argv = (args.args as string[]) || [];

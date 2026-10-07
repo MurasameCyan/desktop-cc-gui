@@ -1684,6 +1684,8 @@ pub(crate) async fn run_plan_decision(
         session_id: Some(thread_id.clone()),
         workspace: PathBuf::from(&review.workspace_path),
         prompt: spec.prompt,
+        // 内部校验 spawn:不属于任何插件回合,没有可注入的贡献。
+        prompt_contributions: Vec::new(),
         native_compact: false,
         images: Vec::new(),
         // Settings inherit the thread's reported model/effort instead.
@@ -2024,6 +2026,7 @@ mod tests {
             session_id: None,
             workspace: workspace.clone(),
             prompt: "not sent".into(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: vec![],
             model: Some("probe".into()),
@@ -2108,6 +2111,7 @@ mod tests {
             session_id: None,
             workspace: directory.clone(),
             prompt: "hi".into(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: vec![],
             model: None,

@@ -1,6 +1,6 @@
 use super::{
-    command_for_binary, images, push_session_id, tool_call_message, tool_call_patch, BuiltCommand,
-    Engine, EngineEvent, SendRequest,
+    command_for_binary, images, push_session_id, tool_call_message_with_id,
+    tool_call_patch_with_id, BuiltCommand, Engine, EngineEvent, SendRequest,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -27,6 +27,7 @@ struct PendingTool {
     name: String,
     id: Option<String>,
     json: String,
+    tool_call_id: Option<String>,
 }
 
 impl ClaudeEngine {
@@ -380,9 +381,8 @@ impl Engine for ClaudeEngine {
                                 continue;
                             }
                             let res = value.get("toolUseResult").or_else(|| block.get("content"));
-                            let name = block
-                                .get("tool_use_id")
-                                .and_then(Value::as_str)
+                            let tool_call_id = block.get("tool_use_id").and_then(Value::as_str);
+                            let name = tool_call_id
                                 .and_then(|id| {
                                     self.tool_names
                                         .lock()
@@ -390,7 +390,7 @@ impl Engine for ClaudeEngine {
                                         .and_then(|map| map.get(id).cloned())
                                 })
                                 .unwrap_or_default();
-                            out.push(super::tool_result_patch(name, res));
+                            out.push(super::tool_result_patch_with_id(name, res, tool_call_id));
                         }
                     }
                 }
@@ -801,6 +801,7 @@ fn parse_content_block_start(
             }
         }
     }
+    let tool_call_id = block.get("id").and_then(Value::as_str).map(str::to_string);
     if let Some(index) = event.get("index").and_then(Value::as_u64) {
         if let Ok(mut map) = pending.lock() {
             map.insert(
@@ -809,13 +810,14 @@ fn parse_content_block_start(
                     name: name.clone(),
                     id: block.get("id").and_then(Value::as_str).map(str::to_string),
                     json: String::new(),
+                    tool_call_id: tool_call_id.clone(),
                 },
             );
         }
     }
     // Name-only start so the timeline can show the tool immediately; args
     // patch in when the JSON stream completes (or if input is already full).
-    out.push(tool_call_message(name, input));
+    out.push(tool_call_message_with_id(name, input, tool_call_id.as_deref()));
 }
 
 fn parse_content_block_stop(
@@ -842,7 +844,11 @@ fn parse_content_block_stop(
             map.insert(id.clone(), path);
         }
     }
-    out.push(tool_call_patch(tool.name, Some(&args)));
+    out.push(tool_call_patch_with_id(
+        tool.name,
+        Some(&args),
+        tool.tool_call_id.as_deref(),
+    ));
 }
 
 #[cfg(test)]
@@ -1045,11 +1051,16 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0] {
             EngineEvent::Message {
-                role, text, args, ..
+                role,
+                text,
+                args,
+                tool_call_id,
+                ..
             } => {
                 assert_eq!(role, "tool");
                 assert_eq!(text, "Bash");
                 assert!(args.is_none());
+                assert_eq!(tool_call_id.as_deref(), Some("toolu_1"));
             }
             _ => panic!("expected tool message"),
         }
@@ -1094,12 +1105,14 @@ mod tests {
                 path,
                 args,
                 patch,
+                tool_call_id,
                 ..
             } => {
                 assert_eq!(text, "Read");
                 assert_eq!(path.as_deref(), Some("src/a.ts"));
                 assert_eq!(args, &Some(serde_json::json!({"file_path": "src/a.ts"})));
                 assert!(*patch);
+                assert_eq!(tool_call_id.as_deref(), Some("toolu_1"));
             }
             _ => panic!("expected patched tool message"),
         }
@@ -1148,11 +1161,13 @@ mod tests {
                 text,
                 result,
                 patch,
+                tool_call_id,
                 ..
             } => {
                 assert_eq!(text, "Bash");
                 assert_eq!(result, &Some(serde_json::json!("On branch main")));
                 assert!(*patch);
+                assert_eq!(tool_call_id.as_deref(), Some("toolu_1"));
             }
             _ => unreachable!(),
         }
@@ -1615,6 +1630,7 @@ mod tests {
         let mut request = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            prompt_contributions: vec![],
             native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
@@ -1666,6 +1682,7 @@ mod tests {
         let request = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),

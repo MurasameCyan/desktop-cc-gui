@@ -809,15 +809,20 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
             let intent = value.get("intent").and_then(Value::as_str);
-            out.push(super::tool_call_message(
+            out.push(super::tool_call_message_with_id(
                 tool_label(name, intent),
                 value.get("args"),
+                value.get("toolCallId").and_then(Value::as_str),
             ));
         }
         "tool_execution_end" => {
             let name = value.get("toolName").and_then(Value::as_str).unwrap_or("");
             let result = value.get("result");
-            out.push(super::tool_result_patch(name, result));
+            out.push(super::tool_result_patch_with_id(
+                name,
+                result,
+                value.get("toolCallId").and_then(Value::as_str),
+            ));
         }
         "message_end" => {
             if let Some(model) = value
@@ -1101,6 +1106,7 @@ mod tests {
             session_id: None,
             workspace: std::path::PathBuf::from("/tmp/ccgui-pi-family-test"),
             prompt: "规划一下".to_string(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: Vec::new(),
             model: None,
@@ -1680,6 +1686,7 @@ mod tests {
                 text,
                 path,
                 args,
+                tool_call_id,
                 ..
             } => {
                 assert_eq!(role, "tool");
@@ -1689,6 +1696,7 @@ mod tests {
                     args,
                     &Some(serde_json::json!({"path": "src/app.tsx", "input": {}}))
                 );
+                assert_eq!(tool_call_id.as_deref(), Some("tool_1"));
             }
             _ => panic!("expected tool message"),
         }
@@ -1705,11 +1713,41 @@ mod tests {
         let mut out = Vec::new();
         parse_pi_family_line(&line, &mut out);
         match &out[0] {
-            EngineEvent::Message { path, args, .. } => {
+            EngineEvent::Message {
+                path,
+                args,
+                tool_call_id,
+                ..
+            } => {
                 assert_eq!(*path, None);
                 assert_eq!(args, &Some(serde_json::json!({"command": "ls"})));
+                assert_eq!(tool_call_id.as_deref(), Some("tool_2"));
             }
             _ => panic!("expected tool message"),
+        }
+    }
+
+    #[test]
+    fn tool_execution_end_carries_tool_call_identity() {
+        let line = serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "tool_2",
+            "toolName": "bash",
+            "result": { "exitCode": 3 }
+        })
+        .to_string();
+        let mut out = Vec::new();
+        parse_pi_family_line(&line, &mut out);
+        match &out[0] {
+            EngineEvent::Message {
+                tool_call_id,
+                result,
+                ..
+            } => {
+                assert_eq!(tool_call_id.as_deref(), Some("tool_2"));
+                assert_eq!(result, &Some(serde_json::json!({"exitCode": 3})));
+            }
+            _ => panic!("expected tool result"),
         }
     }
 
@@ -1990,6 +2028,7 @@ mod tests {
         let req = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            prompt_contributions: vec![],
             native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
@@ -2019,6 +2058,7 @@ mod tests {
         let req = SendRequest {
             session_id: Some("s1".into()),
             prompt: "hi".into(),
+            prompt_contributions: vec![],
             native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),
@@ -2069,6 +2109,7 @@ mod tests {
         let req = SendRequest {
             session_id: None,
             prompt: "hi".into(),
+            prompt_contributions: vec![],
             native_compact: false,
             images: vec![],
             workspace: std::path::PathBuf::from("/tmp"),

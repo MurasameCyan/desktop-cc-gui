@@ -845,6 +845,7 @@ mod tests {
             session_id: None,
             workspace: std::path::PathBuf::from("/tmp"),
             prompt: "测试提问".to_string(),
+            prompt_contributions: Vec::new(),
             native_compact: false,
             images: Vec::new(),
             model: None,

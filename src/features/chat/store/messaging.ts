@@ -27,10 +27,14 @@ import {
 } from "./stream";
 import { mergeUsage, parseUsage } from "../usage";
 import {
+  bindRunLifecycle,
+  finishRunLifecycle,
   dropRunUsage,
   firstLineTitle,
   optimisticMeta,
   patchGrantBySeq,
+  registerPendingRunLifecycle,
+  replayBufferedEngineEvents,
   rememberModelForRun,
   rememberEffortForRun,
   patchQuestionByRequestId,
@@ -58,6 +62,25 @@ import { engineSupportsMemory } from "@/features/bots/memory";
 import { botById } from "@/features/bots/bot-store";
 import { assembleBotPrompt, builtInBotShell } from "@/features/bots/bot-prompt";
 import { appendCommittedRows } from "./session-utils";
+import {
+  prepareSessionContributions,
+  sessionContributionScope,
+} from "./session-contributions";
+import {
+  adoptNativeContributions,
+  sessionLifecycleBase,
+  workspaceMetadata,
+} from "./lifecycle";
+import {
+  collectBeforeTurnContributions,
+  confirmPromptContributions,
+  dispatchAfterSwitch,
+  dispatchSessionCreated,
+  dispatchTurnStarted,
+  isInternalMessageCaptureActive,
+  runBeforeSwitch,
+} from "@/features/plugins/runtime/hooks";
+import type { RuntimeSwitchEvent } from "@ccgui/plugin-sdk";
 import type { ChatStore } from "./types";
 import type {
   LoadHistoryPage,
@@ -129,6 +152,9 @@ export function createMessagingActions(
   markUnseenIfBackground: (key: string) => void;
 } {
   const { set, get, loadHistoryPage, subscribe } = deps;
+  // A replacement turn can reset the session's shared interrupted flag.
+  // Keep cancellation attached to the send waiting on hooks or its ACK.
+  const pendingSends = new Map<string, { cancelled: boolean }>();
 
   /**
    * Send a prompt to a specific tab. Unlike the public `send` action this is
@@ -260,6 +286,14 @@ export function createMessagingActions(
       }
     }
     // Optimistic user message.
+    const workspace = workspaceMetadata(get().workspaces, tab.workspacePath);
+    const hookRunId = newId();
+    const previousSend = pendingSends.get(key);
+    if (previousSend) previousSend.cancelled = true;
+    const pendingSend = { cancelled: false };
+    pendingSends.set(key, pendingSend);
+    // Optimistic user message, right away: the hooks below can take up to
+    // their timeout, and the turn must be visible (and stoppable) meanwhile.
     set((s) => ({
       streamingByKey: setStreamingFlag(s.streamingByKey, key, true),
     }));
@@ -290,9 +324,61 @@ export function createMessagingActions(
         turnUsage: null,
       },
     );
+    // A pending switch prepares its handoff in beforeSwitch, which must run
+    // before the turn's contributions are collected so the first target turn
+    // carries the handoff (and not the second one).
+    const pendingSwitch = get().pendingRuntimeSwitch;
+    let switchEvent: RuntimeSwitchEvent | null = null;
+    if (
+      pendingSwitch &&
+      pendingSwitch.targetEngine === engine &&
+      pendingSwitch.workspacePath === tab.workspacePath
+    ) {
+      switchEvent = {
+        switchId: hookRunId,
+        sourceEngine: pendingSwitch.sourceEngine,
+        targetEngine: pendingSwitch.targetEngine,
+        sourceSessionId: pendingSwitch.sourceSessionId,
+        targetSessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      };
+      await runBeforeSwitch(switchEvent);
+      if (pendingSend.cancelled) return;
+    }
+    const scope = sessionContributionScope(engine, tab.sessionId, tab.workspacePath);
+    const beforeTurn = await collectBeforeTurnContributions({
+      runId: hookRunId,
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      occurredAt: new Date().toISOString(),
+    });
+    if (pendingSend.cancelled) return;
+    // Retire old owners and withdraw their native-history instructions once.
+    const prepared = prepareSessionContributions(
+      get().sessionContributions,
+      scope,
+      beforeTurn.promptContributions,
+      tab.sessionId !== null,
+    );
+    if (prepared.next) set({ sessionContributions: prepared.next });
+    const promptContributions = prepared.promptContributions;
+    // Register the run lifecycle BEFORE the send: a fast engine's
+    // session/delta/done events may outrun the send result, and unregistered
+    // events would lose their runtime and afterTurn delivery.
+    const settleLaunch = registerPendingRunLifecycle(hookRunId, {
+      turnId: hookRunId,
+      engine,
+      sessionId: tab.sessionId,
+      workspace,
+      captures: beforeTurn.internalMessageCaptures.filter(isInternalMessageCaptureActive),
+    });
     // Refresh independently: a slow history read must not delay sending or Stop.
     void get().refreshSessionUsage(key);
-    const requestedRunId = `run-${newId()}`;
+    // Stop and early events must address the same lifecycle registered above.
+    const requestedRunId = hookRunId;
     settleOrphanedRuns(set, routeRun(requestedRunId, key));
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
@@ -304,12 +390,25 @@ export function createMessagingActions(
       void ipc.computerUseSetActive?.(true)?.catch(() => {});
     }
     try {
+      // Read-only launch observation, after the lifecycle registration so a
+      // fast engine's events cannot precede it, and before the send so the
+      // hook sees the turn start rather than its result. Same turnId as
+      // beforeTurn/afterTurn.
+      dispatchTurnStarted({
+        runId: hookRunId,
+        turnId: hookRunId,
+        engine,
+        sessionId: tab.sessionId,
+        workspace,
+        occurredAt: new Date().toISOString(),
+      });
       const result = await ipc.sendMessage({
         runId: requestedRunId,
         engine,
         workspacePath: tab.workspacePath,
         sessionId: tab.sessionId,
         prompt,
+        promptContributions,
         nativeCompact: options?.nativeCompact === true,
         imagePaths: images.length ? images : null,
         model,
@@ -323,6 +422,18 @@ export function createMessagingActions(
         computerUse: options?.computerUse === true,
         memoryBot: memoryToolAvailable ? pinnedBot.id : null,
       });
+      confirmPromptContributions(promptContributions);
+      if (switchEvent) {
+        set((s) => ({
+          pendingRuntimeSwitch:
+            s.pendingRuntimeSwitch === pendingSwitch ? null : s.pendingRuntimeSwitch,
+        }));
+        dispatchAfterSwitch({ ...switchEvent, occurredAt: new Date().toISOString() });
+      }
+      // Rekey the pre-registered lifecycle to the real run id (a no-op when an
+      // early event already bound it) and adopt the native session id.
+      bindRunLifecycle(hookRunId, result.runId, result.sessionId ?? tab.sessionId);
+      settleLaunch(result.sessionId ?? tab.sessionId);
       // Older backends choose their own id. Retire the provisional route.
       if (result.runId !== requestedRunId) {
         runRouting.delete(requestedRunId);
@@ -352,6 +463,7 @@ export function createMessagingActions(
           result.sessionId,
           tab.workspacePath,
         );
+        adoptNativeContributions(set, engine, tab.workspacePath, result.sessionId);
         if (model) {
           void ipc
             .rememberSessionModel?.(engine, result.sessionId, model)
@@ -419,6 +531,14 @@ export function createMessagingActions(
             firstLineTitle(prompt),
           ),
         );
+        const createdTab = { ...tab, sessionId: result.sessionId };
+        const createdKey = sessionKey(engine, result.sessionId, tab.workspacePath);
+        if (!get().createdSessionKeys[createdKey]) {
+          set((s) => ({
+            createdSessionKeys: { ...s.createdSessionKeys, [createdKey]: true },
+          }));
+          dispatchSessionCreated(sessionLifecycleBase(get, createdTab));
+        }
       } else if (!runRouting.has(result.runId) && !settled && get().bySession[key]) {
         // The engine can announce its session id while the invoke is in
         // flight; onSession rekeys the run to the native key then, and
@@ -428,28 +548,34 @@ export function createMessagingActions(
         // the id back would resurrect a dead pending key on the next event.
         settleOrphanedRuns(set, routeRun(result.runId, key));
       }
-      // Stop can precede native spawn while invoke is still in flight.
-      // Retry the interrupt now that the backend has registered the child.
-      // A native id adopted
-      // just above moved the state to a new key, so read the key the turn
-      // actually lives under.
+      replayBufferedEngineEvents(result.runId, {
+        set,
+        get,
+        drainQueue,
+        markUnseenIfBackground,
+        upsertSessionMeta: (meta) => upsertSessionMetaInto(set, meta),
+        refreshSessionUsage: (sessionKey) => get().refreshSessionUsage(sessionKey),
+      });
+      // Stop can precede native spawn while invoke is still in flight; retry
+      // the interrupt now that the backend has registered the child.
+      // Session adoption may have moved the state, so read the live key.
       const liveKey = runRouting.get(result.runId) ?? knownKey ?? (
         result.sessionId && !tab.sessionId
           ? sessionKey(engine, result.sessionId, tab.workspacePath)
           : key);
-      if (get().bySession[liveKey]?.interrupted) {
+      if (pendingSend.cancelled || get().bySession[liveKey]?.interrupted) {
+        finishRunLifecycle(result.runId, "cancelled");
         patchSession(set, liveKey, { settledRunIds: rememberSettledRun(get().bySession[liveKey], result.runId) });
         runRouting.delete(result.runId);
         untrackRun(result.runId);
         dropRunUsage(result.runId);
-        await Promise.all([
-          ipc.interruptSession(result.runId).catch(() => false),
-          ...(result.sessionId
-            ? [ipc.interruptSession(result.sessionId).catch(() => false)]
-            : []),
-        ]);
+        // A replacement may already own the same native session. Only the
+        // immutable run id belongs to this late acknowledgement.
+        await ipc.interruptSession(result.runId).catch(() => false);
       }
     } catch (error) {
+      finishRunLifecycle(hookRunId, "failed", String(error));
+      settleLaunch();
       const failedKey = runRouting.get(requestedRunId) ?? key;
       runRouting.delete(requestedRunId);
       untrackRun(requestedRunId);
@@ -471,6 +597,8 @@ export function createMessagingActions(
       // the queue instead of looping.
       void get().refreshSessionUsage(failedKey);
       if (!get().bySession[failedKey]?.interrupted) drainQueue(failedKey);
+    } finally {
+      if (pendingSends.get(key) === pendingSend) pendingSends.delete(key);
     }
   }
 
@@ -509,6 +637,13 @@ export function createMessagingActions(
   /** 按会话 key 中断：公共 `interrupt(target)` 与队列「立即发送」共用。
    *  key 而不是会话对象，是因为后台会话的排队项只有 key。 */
   async function interruptByKey(key: string) {
+    // An in-flight send is awaiting plugin beforeTurn hooks: mark it cancelled
+    // so its late launch does not start a run the user already stopped.
+    const pendingSend = pendingSends.get(key);
+    if (pendingSend) {
+      pendingSend.cancelled = true;
+      pendingSends.delete(key);
+    }
     // Settle locally FIRST: the killed run's done event can arrive while
     // the kill IPCs below are still in flight, and onDone drains the queue
     // whenever interrupted is still false — that would fire the next
@@ -553,6 +688,9 @@ export function createMessagingActions(
     // The runs are dead: drop their routing and usage entries so the maps
     // cannot grow forever. (A late done event would also remove them.)
     for (const runId of deadRunIds) {
+      // Plugins observing this turn must receive its cancelled terminal state;
+      // without it a registered lifecycle never settles.
+      finishRunLifecycle(runId, "cancelled");
       patchSession(set, key, {
         settledRunIds: rememberSettledRun(get().bySession[key], runId),
       });
