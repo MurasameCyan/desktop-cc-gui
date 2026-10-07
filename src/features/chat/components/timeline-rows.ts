@@ -143,8 +143,11 @@ export function buildRows(messages: Message[]): TimelineRow[] {
     }
   }
   // Footer (copy + meta) renders only on a reply's final assistant segment:
-  // walk backwards, resetting at each user message. turnFinal variants are
-  // cached too — a flip swaps in the other cached wrapper, no mutation.
+  // walk backwards, resetting at each user message. Cards (grant / question /
+  // plan review) render their own chrome and must not consume the slot — a
+  // denied tool used to leave the last assistant reply footerless. turnFinal
+  // variants are cached too — a flip swaps in the other cached wrapper, no
+  // mutation.
   let seenAssistant = false;
   for (let j = rows.length - 1; j >= 0; j--) {
     const row = rows[j];
@@ -157,7 +160,7 @@ export function buildRows(messages: Message[]): TimelineRow[] {
     if (row.kind !== "msg") continue;
     if (row.message.role === "user") {
       seenAssistant = false;
-    } else {
+    } else if (row.message.role === "assistant") {
       const turnFinal = !seenAssistant;
       seenAssistant = true;
       if (row.turnFinal !== turnFinal) rows[j] = getMsgRow(row.message, turnFinal);

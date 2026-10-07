@@ -78,6 +78,13 @@ export interface Message {
   model?: string | null;
   /** Reasoning effort level ("low" | "medium" | "high" | "xhigh" | "max" | "ultra") */
   effort?: string | null;
+  /** Requested vs served model/effort recorded when the turn settled (see
+   *  the response check in the tail indicator). Runtime-only: the CLI
+   *  transcript does not carry it, so a reloaded session shows no badge. */
+  responseCheck?: {
+    requested: { model: string | null; effort: string | null };
+    served: { model: string | null; effort: string | null };
+  } | null;
   /** Turn duration in milliseconds (measured from prompt send to turn completion) */
   durationMs?: number | null;
   /** True while the row belongs to the in-flight stream and may still grow. */

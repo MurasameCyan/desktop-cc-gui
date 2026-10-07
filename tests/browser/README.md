@@ -152,6 +152,19 @@ warning tone at the end of the meta row, carry the provider's own reason as
 its tooltip, and be absent entirely when nothing is being retried. No model,
 no IPC, no saved conversation.
 
+Open `/tests/browser/response-check.html` to check the tail indicator's
+response check. Synthetic `launch`/`served` engine events run through the real
+store: 一致 must show the default-colored circled check, 模型不一致 (both
+sides differ) and 档位降级 (same model, downgraded level) the amber circled
+caution, 版本差异 a dated snapshot of the requested family (a match, not a
+substitution), and 未上报 no badge at all — an unreported side is unknown,
+never a pass. 已结算 drives a `done` event through the store and renders the
+real settled row (`MessageRow`): the recorded check must survive the turn's
+end and stay reachable (hover the row, then the badge). Hovering the badge
+must open the card (请求模型 / 响应模型 / 请求档位 / 响应档位, with 不一致 on
+a differing response value, 未上报 on a missing one). No model, no IPC, no
+saved conversation.
+
 Open `/tests/browser/touch-scroll-follow.html` in a **touch-emulated** viewport
 (390x844) to check the timeline's tail-follow intent on a phone, where the
 web-remote UI runs. Swipe up into history and the fixture's refs must read

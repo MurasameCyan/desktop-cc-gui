@@ -1,4 +1,5 @@
 import type { Message, TodosPayload } from "@/lib/ipc";
+import type { ResponseCheckState } from "../response-check";
 
 /**
  * Streaming buffers and bySession write helpers. Leaf module: functions are
@@ -36,6 +37,10 @@ export interface SessionState {
   activeEffort?: string | null;
   /** In-app channel this session runs; spawn injects its env. */
   activeProvider?: string | null;
+  /** Requested vs served model/effort for the run in flight: the `launch`
+   *  event opens it, `served` events fill the response side. Null outside a
+   *  checked turn (reset on send and by the next launch). */
+  responseCheck?: ResponseCheckState | null;
   /** Whether the turn currently running was sent with 电脑操控; read by
    *  resendLastUser so a retry repeats the same kind of turn. */
   activeComputerUse?: boolean;
@@ -82,6 +87,7 @@ export const EMPTY_SESSION: SessionState = {
   activeModel: null,
   activeEffort: null,
   activeProvider: null,
+  responseCheck: null,
   usage: null,
   turnUsage: null,
   error: null,

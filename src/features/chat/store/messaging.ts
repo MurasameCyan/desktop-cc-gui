@@ -322,6 +322,8 @@ export function createMessagingActions(
         activeComputerUse: options?.computerUse === true,
         // The tail indicator counts this reply, not the one before it.
         turnUsage: null,
+        // The check belongs to this run: the launch event reopens it.
+        responseCheck: null,
       },
     );
     // A pending switch prepares its handoff in beforeSwitch, which must run

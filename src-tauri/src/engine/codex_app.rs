@@ -432,6 +432,25 @@ fn handle_notification(
                 core.dispatch_event(state, EngineEvent::SessionId(thread_id.to_string()));
             }
         }
+        // The server moved this turn to another model (safety reroute): the
+        // response's own account of what is answering, so the check flags it
+        // instead of leaving the launch selection looking confirmed.
+        "model/rerouted" => {
+            if let Some(to) = params
+                .get("toModel")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|to| !to.is_empty())
+            {
+                core.dispatch_event(
+                    state,
+                    EngineEvent::Served {
+                        model: Some(to.to_string()),
+                        effort: None,
+                    },
+                );
+            }
+        }
         // Terminal. A failed turn arrives here as a completion whose status is
         // `failed` with an explanatory message, so both shapes are read the
         // same; `turn/failed` is handled defensively in case a newer CLI emits
@@ -1487,6 +1506,17 @@ async fn handshake_and_start(
         .or_else(|| req.session_id.clone())
         .ok_or_else(|| format!("{method} returned no thread id"))?;
     core.dispatch_event(state, EngineEvent::SessionId(thread_id.clone()));
+    // The request side of the response check: what this client asked for,
+    // before the thread's own settings are known.
+    if req.model.is_some() || req.effort.is_some() {
+        core.dispatch_event(
+            state,
+            EngineEvent::Launch {
+                model: req.model.clone(),
+                effort: req.effort.clone(),
+            },
+        );
+    }
     let thread_model = result.get("model").and_then(Value::as_str).map(str::to_string);
     if let Some(model) = thread_model.as_deref() {
         core.dispatch_event(state, EngineEvent::Model(model.to_string()));
@@ -1498,6 +1528,18 @@ async fn handshake_and_start(
         .map(str::to_string);
     if let Some(effort) = req.effort.as_deref().or(reported_effort.as_deref()) {
         core.dispatch_event(state, EngineEvent::Effort(effort.to_string()));
+    }
+    // The thread's effective settings are the closest thing codex has to a
+    // served selection: codex can clamp what it cannot honor, and a later
+    // `model/rerouted` notification supersedes them.
+    if thread_model.is_some() || reported_effort.is_some() {
+        core.dispatch_event(
+            state,
+            EngineEvent::Served {
+                model: thread_model.clone(),
+                effort: reported_effort.clone(),
+            },
+        );
     }
     // A decision turn may only start once the reviewed plan is proven live and
     // unchanged: re-fetch the final plan item from the thread and compare id +
@@ -2346,6 +2388,36 @@ mod tests {
     // Every test below drives the router, so each needs a runtime: the sink
     // schedules its batch flush with `tokio::spawn`, and an error dispatch
     // kills the run through `spawn_blocking`.
+
+    #[tokio::test]
+    async fn model_reroute_reports_the_served_model() {
+        let (core, _registry, emitter) = test_core();
+        let mut state = TurnState::new(None);
+        let mut view = TurnView::default();
+        route(
+            &core,
+            &mut state,
+            &mut view,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "model/rerouted",
+                "params": {
+                    "fromModel": "gpt-5.6-luna",
+                    "reason": "highRiskCyberActivity",
+                    "threadId": "t-1",
+                    "toModel": "gpt-5.6-cyber",
+                    "turnId": "u-1",
+                },
+            }),
+        );
+        let events = flushed(&core, &emitter);
+        assert!(
+            events.iter().any(|(kind, data)| {
+                kind == "served" && data.get("model").and_then(Value::as_str) == Some("gpt-5.6-cyber")
+            }),
+            "{events:?}"
+        );
+    }
 
     #[tokio::test]
     async fn route_parks_a_question_and_the_answer_frame_reads_what_it_parked() {

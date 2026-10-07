@@ -23,6 +23,7 @@ import { buildRows, collectToolKeys, rowKey, type TimelineRow } from "./timeline
 import { formatDuration } from "./format-duration";
 import { modelDisplayName } from "@/features/settings/usage-model";
 import { ProcessDisclosure, type ProcessSearchTarget } from "./ProcessDisclosure";
+import { ResponseCheckBadge } from "./response-check-badge";
 import { CollapsibleMessage } from "./CollapsibleMessage";
 import { useScrollFollow, useTailPin } from "./use-scroll-follow";
 import { ScrollControl } from "./ScrollControl";
@@ -201,10 +202,17 @@ function MessageMeta({ message }: { message: Message }) {
     modelFormatted,
     effortText,
   ].filter((p): p is string => Boolean(p));
-  if (parts.length === 0) return null;
+  const check = message.responseCheck ?? null;
+  if (parts.length === 0 && !check) return null;
   return (
     <span className="text-caption-1-regular tabular-nums text-text-tertiary opacity-0 transition-opacity duration-150 group-hover:opacity-100">
       {parts.join(" · ")}
+      {/* Recorded at settle: the response check outlives the tail indicator. */}
+      {check && (
+        <span className="ml-1.5 inline-flex items-center align-middle">
+          <ResponseCheckBadge check={check} />
+        </span>
+      )}
     </span>
   );
 }
@@ -722,6 +730,7 @@ export const MessageTimeline = memo(function MessageTimeline({
                       model={activeModelFormatted}
                       effort={activeEffortFormatted}
                       usage={liveUsage}
+                      metaExtra={<ResponseCheckBadge check={session.responseCheck} />}
                       retry={
                         session.retry
                           ? session.retry.max > 0
