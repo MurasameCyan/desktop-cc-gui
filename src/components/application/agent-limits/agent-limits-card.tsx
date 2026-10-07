@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ComponentType } from "react";
+import { useMemo, useState, type ComponentType } from "react";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ArrowRight from "lucide-react/dist/esm/icons/arrow-right";
 import ChevronRight from "lucide-react/dist/esm/icons/chevron-right";
@@ -373,9 +373,8 @@ function AutoCompactControls({
 }) {
   const [draft, setDraft] = useState(String(settings.threshold));
 
-  useEffect(() => {
-    setDraft(String(settings.threshold));
-  }, [settings.threshold]);
+  // No threshold-sync effect: the parent keys this component by threshold, so
+  // a change from outside remounts it with the right draft.
 
   const commitThreshold = (value = draft) => {
     const next = normalizeAutoCompactThreshold(value, settings.threshold);
@@ -474,7 +473,17 @@ function ContextActions({
   if (!onCompact && !onRefresh && !autoCompact) return null;
   return (
     <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-border-button-default/40 pt-2.5">
-      {autoCompact ? <AutoCompactControls settings={autoCompact} text={text} /> : <span />}
+      {autoCompact ? (
+        // Keyed by threshold: an external change (settings sync, another
+        // surface) remounts the control instead of syncing state in an effect.
+        <AutoCompactControls
+          key={autoCompact.threshold}
+          settings={autoCompact}
+          text={text}
+        />
+      ) : (
+        <span />
+      )}
       <div className="flex items-center gap-2">
         {onCompact && (
           <CardActionButton

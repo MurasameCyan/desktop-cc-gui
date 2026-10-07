@@ -1059,6 +1059,9 @@ describe("permissioned SDK calls from guarded plugin callbacks", () => {
   it("persists workspace menu changes while rejecting direct IPC in that callback", async () => {
     const data = new Map<string, unknown>();
     nativeInvoke.mockImplementation(async (cmd, args) => {
+      // Emulates the native storage handler's own JSON boundary, where plain
+      // payloads arrive round-tripped — structuredClone would not be faithful.
+      // oxlint-disable-next-line react-doctor/no-json-parse-stringify-clone -- deliberate boundary emulation
       const input = JSON.parse(JSON.stringify(args)) as { id: string; key: string; value?: unknown };
       const key = `${input.id}:${input.key}`;
       if (cmd === "plugin_storage_set") data.set(key, input.value);
@@ -1140,6 +1143,9 @@ describe("permissioned SDK calls from guarded plugin callbacks", () => {
   });
 
   it("rejects an executable replaced during JSON serialization before dispatch", async () => {
+    // The test is about JSON serialization semantics; clone the same way the
+    // production host does at the IPC boundary.
+    // oxlint-disable-next-line react-doctor/no-json-parse-stringify-clone -- deliberate boundary emulation
     nativeInvoke.mockImplementation(async (_cmd, args) => JSON.parse(JSON.stringify(args)));
     const { ctx } = createPluginContext(manifest(["exec:tool"]), ipcStorage(), { appVersion: "1.0.0" });
     const result = runAsPlugin(() => ctx.bridge.invoke("plugin_exec_run", {

@@ -816,6 +816,9 @@ export function createPluginContext(
         // reject，不打 IPC。通过后注入 pluginId 再 invoke。
         // Serialize before granting authority: getters/toJSON cannot change the
         // checked payload or carry executable Tauri serialization hooks onward.
+        // JSON (not structuredClone) is the point: it snapshots getters and
+        // drops toJSON/executable hooks exactly like the IPC boundary does.
+        // oxlint-disable-next-line react-doctor/no-json-parse-stringify-clone -- deliberate security serialization
         const hostArgs: Record<string, unknown> = { ...JSON.parse(JSON.stringify(args)), pluginId: id };
         if (command === "plugin_http_request") {
           const url = typeof hostArgs.url === "string" ? hostArgs.url : "";
