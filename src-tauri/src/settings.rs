@@ -135,6 +135,8 @@ pub struct AppSettings {
     pub sidebar_search_shortcut: Option<String>,
     #[serde(default = "default_chat_search_shortcut")]
     pub chat_search_shortcut: Option<String>,
+    #[serde(default = "default_close_tab_shortcut")]
+    pub close_tab_shortcut: Option<String>,
     #[serde(default = "default_toggle_terminal_shortcut")]
     pub toggle_terminal_shortcut: Option<String>,
     #[serde(default = "default_toggle_sidebar_shortcut")]
@@ -231,6 +233,9 @@ fn default_sidebar_search_shortcut() -> Option<String> {
 }
 fn default_chat_search_shortcut() -> Option<String> {
     Some("cmd+f".to_string())
+}
+fn default_close_tab_shortcut() -> Option<String> {
+    Some("cmd+w".to_string())
 }
 fn default_toggle_terminal_shortcut() -> Option<String> {
     Some("cmd+j".to_string())
@@ -356,6 +361,7 @@ impl Default for AppSettings {
             command_palette_shortcut: default_command_palette_shortcut(),
             sidebar_search_shortcut: default_sidebar_search_shortcut(),
             chat_search_shortcut: default_chat_search_shortcut(),
+            close_tab_shortcut: default_close_tab_shortcut(),
             toggle_terminal_shortcut: default_toggle_terminal_shortcut(),
             toggle_sidebar_shortcut: default_toggle_sidebar_shortcut(),
             toggle_side_panel_shortcut: default_toggle_side_panel_shortcut(),

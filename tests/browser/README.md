@@ -269,12 +269,20 @@ the final file. The metrics output reports requests, mounted rows and actions.
 
 Open `/tests/browser/markdown-preview.html` to check the files-feature Markdown
 preview (Streamdown) against a document covering GFM tables, heading levels,
-lists, task list, blockquote, fenced code, KaTeX math and a Mermaid diagram:
+lists, task list, blockquote, fenced code, KaTeX math, a Mermaid diagram and
+inline links:
 tables render with a bordered wrapper and styled header row, code blocks carry
 language header + copy/download controls with `files.markdown.*` labels, the
 block formula renders via KaTeX, and the Mermaid diagram stays an empty
 container until scrolled into view (IntersectionObserver lazy render), then
-draws the flow SVG. No app, no backend, no saved state.
+draws the flow SVG. Links (both the external and relative `plan.md` targets)
+must read as links: green with a dotted underline (`.md-preview-link`), not
+body text. The `toggle search` button opens the real find bar top-right (the
+preview has no header in this fixture, so use the button instead of ⌘F):
+typing `退款` shows a live `n/total` count, every match gets the yellow
+highlight and the current one the stronger orange, Enter / Shift+Enter walk
+the matches scrolling each into view, Esc closes and clears the highlights.
+No app, no backend, no saved state.
 
 Open `/tests/browser/plugin-detail-rail.html` to check the plugin detail page
 at a desktop width (1145x731 in the verification run, with the app's 40px tab
