@@ -2461,6 +2461,7 @@ require('node:readline').createInterface({input: process.stdin}).on('line', line
                 computer_use: None,
                 memory_bot: None,
                 allowed_tools: None,
+                auto_compact_threshold_tokens: None,
             };
             let decision = (mode == "decision").then(|| DecisionCheck {
                 mode: "default",
