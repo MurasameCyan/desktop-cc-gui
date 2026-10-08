@@ -371,7 +371,6 @@ export const en: Messages = {
     autoCompactDisable: "Disable auto-compact",
     autoCompactNoSession: "Open or start a chat to configure; the threshold is saved per session",
     autoCompactNextSend: "Claude/Codex apply this setting on the next send, not the response already running. Claude requires 100,000–1,000,000 tokens.",
-    autoCompactOmpLive: "Applies immediately to supported OMP live runs; OMP resumes the task after compaction.",
     autoCompactPercentRange: "Enter a whole-number threshold from {{min}}% to {{max}}% for this context window.",
     autoCompactUnavailableRange: "This context window cannot represent a valid native threshold. Disable auto-compact or choose another model.",
     autoCompactClaudeRange: "Auto-compact threshold {{tokens}} tokens is invalid: Claude requires 100,000–1,000,000 tokens. Adjust the threshold or disable auto-compact.",

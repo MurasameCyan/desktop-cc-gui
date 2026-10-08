@@ -356,7 +356,6 @@ export const zh = {
     autoCompactDisable: "关闭自动压缩",
     autoCompactNoSession: "新建或打开一个会话后可设置；阈值按会话保存",
     autoCompactNextSend: "Claude/Codex 的设置从下次发送起生效，不改变正在进行的响应。Claude 阈值须为 100,000–1,000,000 tokens。",
-    autoCompactOmpLive: "对支持实时压缩的 OMP 回合立即生效；压缩后由 OMP 原生续接任务。",
     autoCompactPercentRange: "当前上下文窗口允许的整数阈值为 {{min}}%–{{max}}%。",
     autoCompactUnavailableRange: "当前上下文窗口无法换算出有效的原生阈值，请关闭自动压缩或更换模型。",
     autoCompactClaudeRange: "自动压缩阈值 {{tokens}} tokens 无效：Claude 要求 100,000–1,000,000 tokens，请调整阈值或关闭自动压缩。",

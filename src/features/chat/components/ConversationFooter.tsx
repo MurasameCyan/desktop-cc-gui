@@ -444,7 +444,7 @@ function FooterStatusBar({
           thresholdUnavailable: !thresholdRange,
           validationHint: thresholdHint,
           error: thresholdInvalid ? thresholdHint : undefined,
-          hint: nativeAutoCompact ? t("chat.autoCompactNextSend") : active?.engine === "omp" ? t("chat.autoCompactOmpLive") : undefined,
+          hint: nativeAutoCompact ? t("chat.autoCompactNextSend") : undefined,
         }}
         autoCompactDisabled={!sessionKeyValue}
         onAutoCompactEnabledChange={(enabled) => setAutoCompactEnabled(sessionKeyValue, enabled)}
