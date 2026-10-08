@@ -406,6 +406,10 @@ function useTimelineSearch({
   useEffect(
     () =>
       registerShortcutHandler("chatSearch", () => {
+        // 对话面可能只是保活挂载（文件/浏览器等中心面在视）。不可见时让位，
+        // 否则 ⌘F 会在看不到的对话里开关搜索（Markdown 预览的搜索同时点亮）。
+        const el = scrollRef.current;
+        if (!el || getComputedStyle(el).visibility === "hidden") return;
         if (searchOpenRef.current) {
           setSearchOpen(false);
           return;
@@ -416,7 +420,7 @@ function useTimelineSearch({
           searchInputRef.current?.select();
         });
       }),
-    [],
+    [scrollRef],
   );
   const searchMatches = useMemo(
     () => (searchOpen ? findTimelineMatches(rows, searchQuery) : []),

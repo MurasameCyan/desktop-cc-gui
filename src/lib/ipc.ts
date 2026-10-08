@@ -483,6 +483,7 @@ export interface AppSettings {
   commandPaletteShortcut?: string | null;
   sidebarSearchShortcut?: string | null;
   chatSearchShortcut?: string | null;
+  closeTabShortcut?: string | null;
   toggleTerminalShortcut?: string | null;
   toggleSidebarShortcut?: string | null;
   toggleSidePanelShortcut?: string | null;
