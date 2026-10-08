@@ -10,6 +10,8 @@ export interface EngineEventPayload {
   kind:
     | "delta"
     | "thinking"
+    | "assistant_message_start"
+    | "assistant_message_end"
     | "message"
     | "session"
     | "usage"

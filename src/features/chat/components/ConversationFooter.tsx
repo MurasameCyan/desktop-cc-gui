@@ -424,7 +424,7 @@ function FooterStatusBar({
         folders={statusFolders}
         selectedFolder={active ? baseName(active.workspacePath) : undefined}
         onFolderSelect={handleFolderSelect}
-        usagePct={usage?.pct}
+        usagePct={usage ? Math.round(usage.pct) : undefined}
         contextMax={contextMax}
         contextSegments={contextSegments}
         onCompactContext={handleCompact}

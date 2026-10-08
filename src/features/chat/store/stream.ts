@@ -315,6 +315,27 @@ export function applyStreamParts(
   return out;
 }
 
+/** Native message boundaries affect only the unfinished assistant/thinking
+ * tail. Tools and settled history are never part of a replaceable message. */
+export function applyAssistantMessageBoundary(
+  messages: Message[],
+  boundary: "start" | "end",
+): Message[] {
+  let start = messages.length;
+  while (start > 0) {
+    const message = messages[start - 1];
+    if (!message.live || (message.role !== "assistant" && message.role !== "thinking")) break;
+    start--;
+  }
+  if (start === messages.length) return messages;
+  if (boundary === "start") return messages.slice(0, start);
+  const settled = messages.slice();
+  for (let i = start; i < settled.length; i++) {
+    settled[i] = { ...settled[i], live: false };
+  }
+  return settled;
+}
+
 /** Clear the live flag on every row; identity-preserving when nothing is
  * live. Rows stop growing once their segment is over (tool start, turn end). */
 export function settleLiveRows(messages: Message[]): Message[] {

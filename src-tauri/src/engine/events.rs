@@ -11,6 +11,12 @@ pub enum EngineEvent {
     Delta(String),
     /// Reasoning/thinking delta (append).
     Thinking(String),
+    /// A native assistant message opened. Replaces only an unfinished prior
+    /// assistant message in the same run; not a run/compaction boundary.
+    AssistantMessageStart,
+    /// A native assistant message committed successfully. Commits streamed
+    /// text/thinking without copying a snapshot or completing the run.
+    AssistantMessageEnd,
     /// A completed message block (role, text). `path` carries the target
     /// file of a tool call (read/edit/write/...) so the UI can render a
     /// file chip; None for everything else. `args` is the tool-call payload

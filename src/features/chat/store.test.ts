@@ -7,8 +7,8 @@ import {
 } from "@/features/plugins/runtime/events";
 import { setPluginSessionEffort, useChatStore } from "./store";
 import { OPEN_TABS_KEY } from "./store/persistence";
-import { EMPTY_SESSION, routeRun, runRouting, untrackRun } from "./store/stream";
-import { handleEngineEvents, settledRuns, type EngineEventDeps } from "./store/engine-events";
+import { EMPTY_SESSION, flushPendingStreams, routeRun, runRouting, untrackRun } from "./store/stream";
+import { handleEngineEvents, settledRuns, type ChatEngineEvent, type EngineEventDeps } from "./store/engine-events";
 import { registerSessionHooks, registerTurnHooks } from "@/features/plugins/runtime/hooks";
 import { getConversationModeState } from "@/features/plugins/conversation/state";
 import { getAutoCompactSettings, setAutoCompactEnabled, setAutoCompactThreshold } from "./auto-compact-context";
@@ -87,6 +87,208 @@ function engineDeps(): EngineEventDeps {
     upsertSessionMeta: () => {},
   };
 }
+
+describe("native assistant message boundaries", () => {
+  beforeEach(resetStore);
+
+  const tab = { engine: "omp", sessionId: "message-boundaries", workspacePath: WS };
+  const key = "omp/message-boundaries";
+  const runId = "run-message-boundaries";
+  const history = [
+    { seq: 1, role: "user", text: "压缩后继续任务", ts: null },
+    { seq: 2, role: "assistant", text: "准备完成。", ts: null },
+    { seq: 3, role: "tool", text: "读取资料", ts: null },
+  ];
+
+  function prepare() {
+    useChatStore.setState({
+      active: tab,
+      openTabs: [tab],
+      bySession: { [key]: { ...EMPTY_SESSION, messages: history, streaming: true } },
+      streamingByKey: { [key]: true },
+    });
+    routeRun(runId, key);
+  }
+
+  function emit(kind: ChatEngineEvent["kind"], data: unknown = null) {
+    handleEngineEvents([{ engine: "omp", sessionId: tab.sessionId, runId, seq: 1, kind, data }], engineDeps());
+  }
+
+  it.each([false, true])("replaces an unfinished native message across compaction (already painted: %s)", (painted) => {
+    prepare();
+    emit("assistant_message_start");
+    emit("thinking", "尚未写完的思考");
+    emit("delta", "压缩前未完成的半句");
+    if (painted) flushPendingStreams(useChatStore.setState);
+
+    // Manual OMP compaction disconnects before aborting: no message_end
+    // arrives for the old text. The resumed model opens a new message.
+    emit("assistant_message_start");
+    emit("thinking", "重新生成的思考");
+    const answer = "**新的正文**🙂\n\n```ts\nconst n = 1;\n```";
+    emit("delta", answer);
+    emit("assistant_message_end");
+    emit("done", { usage: null });
+
+    const session = useChatStore.getState().bySession[key];
+    expect(session.messages.filter((m) => m.role === "assistant").map((m) => m.text)).toEqual(["准备完成。", answer]);
+    expect(session.messages.filter((m) => m.role === "thinking").map((m) => m.text)).toEqual(["重新生成的思考"]);
+    expect(session.messages.slice(0, history.length)).toEqual(history);
+    expect(session.streaming).toBe(false);
+  });
+
+  it("keeps consecutive committed assistant messages separate", () => {
+    prepare();
+    emit("assistant_message_start");
+    emit("delta", "第一条已完成正文。");
+    emit("assistant_message_end");
+    emit("assistant_message_start");
+    emit("delta", "第二条已完成正文。");
+    emit("assistant_message_end");
+    emit("done", { usage: null });
+    expect(useChatStore.getState().bySession[key].messages.filter((m) => m.role === "assistant").map((m) => m.text))
+      .toEqual(["准备完成。", "第一条已完成正文。", "第二条已完成正文。"]);
+  });
+
+  it("keeps user-stopped partial output and ignores a late restart", async () => {
+    prepare();
+    emit("assistant_message_start");
+    emit("delta", "用户主动停止时已经看到的内容");
+    await useChatStore.getState().interrupt(tab);
+    emit("assistant_message_start");
+    emit("delta", "迟到的旧回合内容");
+    const session = useChatStore.getState().bySession[key];
+    expect(session.messages.filter((m) => m.role === "assistant").map((m) => m.text))
+      .toEqual(["准备完成。", "用户主动停止时已经看到的内容"]);
+    expect(session.streaming).toBe(false);
+  });
+
+  it("commits interleaved channels before a same-batch restart without settling the run", () => {
+    prepare();
+    const compaction = { automatic: false, startedAt: 1, runId };
+    const usage = { input_tokens: 100 };
+    useChatStore.setState((s) => ({
+      bySession: { ...s.bySession, [key]: { ...s.bySession[key], compaction, usage, turnUsage: usage, liveCompactRunId: runId } },
+    }));
+    const deps = { ...engineDeps(), drainQueue: vi.fn(), markUnseenIfBackground: vi.fn() };
+    const events: Array<[ChatEngineEvent["kind"], unknown]> = [
+      ["assistant_message_start", null],
+      ["delta", "first "],
+      ["thinking", "reason "],
+      ["delta", "answer"],
+      ["thinking", "complete"],
+      ["assistant_message_end", null],
+      ["assistant_message_start", null],
+      ["delta", "second answer"],
+      ["assistant_message_end", null],
+    ];
+    handleEngineEvents(events.map(([kind, data], seq) => ({ engine: "omp", sessionId: tab.sessionId, runId, seq, kind, data })), deps);
+
+    const session = useChatStore.getState().bySession[key];
+    expect(session.messages.slice(history.length)).toEqual([
+      expect.objectContaining({ role: "assistant", text: "first answer", live: false }),
+      expect.objectContaining({ role: "thinking", text: "reason complete", live: false }),
+      expect.objectContaining({ role: "assistant", text: "second answer", live: false }),
+    ]);
+    expect(session.streaming).toBe(true);
+    expect(useChatStore.getState().streamingByKey[key]).toBe(true);
+    expect(session.compaction).toBe(compaction);
+    expect(session.usage).toBe(usage);
+    expect(session.turnUsage).toBe(usage);
+    expect(session.liveCompactRunId).toBe(runId);
+    expect(runRouting.get(runId)).toBe(key);
+    expect(deps.drainQueue).not.toHaveBeenCalled();
+    expect(deps.markUnseenIfBackground).not.toHaveBeenCalled();
+  });
+
+  it("discards a failed attempt's painted and pending tails but retains tools and other sessions", () => {
+    prepare();
+    emit("assistant_message_start");
+    emit("delta", "committed before tool");
+    emit("assistant_message_end");
+    emit("message", { role: "tool", text: "read", args: { path: "notes.txt" } });
+    emit("message", { role: "tool_result", text: "read", patch: true, result: { content: "kept" } });
+    const committed = useChatStore.getState().bySession[key].messages;
+    emit("assistant_message_start");
+    emit("delta", "failed partial");
+    emit("thinking", "failed reasoning");
+    flushPendingStreams(useChatStore.setState);
+    emit("delta", " not painted");
+    emit("retry", { attempt: 1, max: 3, message: "temporary failure" });
+    const otherKey = "omp/other-boundary-session";
+    routeRun("other-boundary-run", otherKey);
+    useChatStore.setState((s) => ({ bySession: { ...s.bySession, [otherKey]: { ...EMPTY_SESSION, streaming: true } } }));
+    handleEngineEvents([{ engine: "omp", sessionId: "other-boundary-session", runId: "other-boundary-run", seq: 1, kind: "delta", data: "other pending text" }], engineDeps());
+
+    emit("assistant_message_start");
+    expect(useChatStore.getState().bySession[key].retry?.attempt).toBe(1);
+    emit("thinking", "fresh reasoning");
+    emit("delta", "recovered answer");
+    emit("assistant_message_end");
+    flushPendingStreams(useChatStore.setState);
+
+    const session = useChatStore.getState().bySession[key];
+    committed.forEach((message, index) => expect(session.messages[index]).toBe(message));
+    expect(session.messages.slice(committed.length).map((m) => [m.role, m.text, m.live])).toEqual([
+      ["thinking", "fresh reasoning", false],
+      ["assistant", "recovered answer", false],
+    ]);
+    expect(session.retry).toBeNull();
+    expect(useChatStore.getState().bySession[otherKey].messages[0].text).toBe("other pending text");
+    expect(useChatStore.getState().bySession[otherKey].streaming).toBe(true);
+  });
+
+  it.each([false, true])("replaces unfinished content after native session rekey (already painted: %s)", (painted) => {
+    prepare();
+    emit("assistant_message_start");
+    emit("delta", "old session prefix");
+    if (painted) flushPendingStreams(useChatStore.setState);
+    emit("session", "rekeyed-boundary-session");
+    const newKey = "omp/rekeyed-boundary-session";
+    expect(runRouting.get(runId)).toBe(newKey);
+    emit("assistant_message_start");
+    emit("delta", "fresh native answer");
+    emit("assistant_message_end");
+    flushPendingStreams(useChatStore.setState);
+
+    expect(useChatStore.getState().bySession[key]).toBeUndefined();
+    expect(useChatStore.getState().bySession[newKey].messages.map((m) => m.text)).toEqual([
+      ...history.map((m) => m.text), "fresh native answer",
+    ]);
+  });
+
+  it("keeps row and session identities for empty boundaries", () => {
+    prepare();
+    const before = useChatStore.getState().bySession[key];
+    emit("assistant_message_start");
+    emit("assistant_message_end");
+    expect(useChatStore.getState().bySession[key]).toBe(before);
+    expect(useChatStore.getState().bySession[key].messages).toBe(history);
+  });
+
+  it("ignores late boundaries from a stopped run while a newer run is streaming", async () => {
+    prepare();
+    emit("assistant_message_start");
+    emit("delta", "stopped partial");
+    await useChatStore.getState().interrupt(tab);
+    const nextRunId = "boundary-next-run";
+    routeRun(nextRunId, key);
+    handleEngineEvents([
+      { engine: "omp", sessionId: tab.sessionId, runId: nextRunId, seq: 1, kind: "assistant_message_start", data: null },
+      { engine: "omp", sessionId: tab.sessionId, runId: nextRunId, seq: 2, kind: "delta", data: "new pending text" },
+    ], engineDeps());
+    emit("assistant_message_end");
+    emit("assistant_message_start");
+    flushPendingStreams(useChatStore.setState);
+
+    const session = useChatStore.getState().bySession[key];
+    expect(session.messages.filter((m) => m.role === "assistant").map((m) => [m.text, m.live])).toEqual([
+      ["准备完成。", undefined], ["stopped partial", false], ["new pending text", true],
+    ]);
+    expect(session.streaming).toBe(true);
+    expect(runRouting.get(nextRunId)).toBe(key);
+  });
+});
 
 describe("per-session composer selection", () => {
   beforeEach(resetStore);
