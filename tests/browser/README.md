@@ -323,3 +323,19 @@ browser — not CPU/GPU cost, and not the native WKWebView. Drive it with a
 real-clock runner: Chrome's `--virtual-time-budget` fast-forwards `setTimeout`
 without advancing CSS animation clocks, so an autoplay check under it reports a
 false failure.
+
+Open `/tests/browser/omp-custom-provider-edit.html` for the 设置 → CLI 管理 →
+OMP CLI → 自定义供应商 rows. The real `PiFamilyAuthSection` renders against a
+mocked `models.yml` (three providers with real field order), so the per-row
+name / URL pencils can be exercised: each opens a one-line editor whose commit
+writes the *whole* file back. The name pencil renames the provider **key**
+(`providers.<id>`) — that key is what `omp models` lists and what the model
+selector shows, and omp's schema has no provider-level `name` field — while the
+URL pencil rewrites that provider's `baseUrl`. The readout prints each block's
+key plus its `baseUrl` line and the write count. Checks that a rename leaves the
+body (fields, comments, model list) and every sibling untouched, that a rename
+onto an existing key or a blank name is refused (no write, inline error), that
+an empty URL is refused, and that Escape cancels. Also measures the two pencils:
+both glyph and padding are in `em`, so the name pencil must track the 14px name
+line and the URL pencil the 11px code line (and the interface font / zoom with
+them), not a fixed pixel box. No app, no backend, no real config file.
