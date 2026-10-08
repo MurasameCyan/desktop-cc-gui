@@ -673,12 +673,11 @@ const CLAUDE_MANAGED_ENV_KEYS: [&str; 9] = [
 /// Top-level scalars a cc-switch codex config manages. Everything else in
 /// the user's config.toml (notify hooks, project trust, mcp_servers, …)
 /// stays untouched.
-const CODEX_MANAGED_SCALARS: [&str; 5] = [
+const CODEX_MANAGED_SCALARS: [&str; 4] = [
     "model",
     "model_provider",
     "model_reasoning_effort",
     "preferred_auth_method",
-    "disable_response_storage",
 ];
 
 #[cfg(test)]
@@ -1422,7 +1421,7 @@ mod tests {
             "name": "ccs",
             "settingsConfig": {
                 "auth": {"OPENAI_API_KEY": "sk-ccs"},
-                "config": "model_provider = \"acme\"\nmodel = \"gpt-acme\"\nnotify = [\"evil\"]\n\n[model_providers.acme]\nbase_url = \"https://acme.example/v1\"\nenv_key = \"OPENAI_API_KEY\"\n"
+                "config": "disable_response_storage = true\nmodel_provider = \"acme\"\nmodel = \"gpt-acme\"\nnotify = [\"evil\"]\n\n[model_providers.acme]\nbase_url = \"https://acme.example/v1\"\nenv_key = \"OPENAI_API_KEY\"\n"
             }
         });
         apply_codex(&config, &auth, &p).unwrap();
@@ -1432,6 +1431,7 @@ mod tests {
             .unwrap();
         assert_eq!(doc["model"].as_str(), Some("gpt-acme"));
         assert_eq!(doc["model_provider"].as_str(), Some("acme"));
+        assert!(doc.get("disable_response_storage").is_none());
         assert_eq!(
             doc["model_providers"]["acme"]["base_url"].as_str(),
             Some("https://acme.example/v1")
@@ -1451,6 +1451,22 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&auth.path).unwrap()).unwrap();
         assert_eq!(auth_doc["OPENAI_API_KEY"], "sk-ccs");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_codex_channel_preserves_native_storage_settings() {
+        let provider = serde_json::json!({"settingsConfig": {
+            "config": "disable_response_storage = true\nmodel = \"channel-model\"\n"
+        }});
+        for native_value in [false, true] {
+            let base = format!("disable_response_storage = {native_value}\n");
+            let doc = render_codex(&base, &provider)
+                .unwrap()
+                .parse::<DocumentMut>()
+                .unwrap();
+            assert_eq!(doc["disable_response_storage"].as_bool(), Some(native_value));
+            assert_eq!(doc["model"].as_str(), Some("channel-model"));
+        }
     }
 
     #[test]

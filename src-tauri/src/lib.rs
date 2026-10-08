@@ -297,9 +297,6 @@ pub fn run() {
             )
             .title("CC GUI")
             .inner_size(1400.0, 900.0)
-            .visible(false)
-            .focused(false)
-            .position(1270.0, 20.0)
             .min_inner_size(900.0, 600.0);
             #[cfg(target_os = "macos")]
             {
