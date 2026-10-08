@@ -436,6 +436,7 @@ pub fn run() {
             plugin_host::plugin_model_catalog,
             // plugin marketplace (Phase 3, plan §6)
             plugins::market::plugin_fetch_index,
+            plugins::market::plugin_fetch_featured,
             plugins::market::plugin_fetch_market_readme,
             plugins::market::plugin_install_from_marketplace,
             plugins::market::plugin_check_updates,

@@ -144,6 +144,12 @@
 - **阈值控件按会话保存，无会话时可见但不可操作**：阈值数字输入（1–100 整数，`normalizeAutoCompactThreshold` 统一夹取与取整）与闪电开关在状态栏上下文弹层的用量卡底部（`AutoCompactControls`，`agent-limits-card.tsx`），存储键 `ccgui-next.chat.autoCompactBySession`（`auto-compact-context.ts`，默认阈值 `DEFAULT_AUTO_COMPACT_THRESHOLD = 80`），按 `sessionKey` 读写，换会话即换设置、新建待发会话的设置在拿到真实 sessionId 时随会话迁移。没有会话时两个控件保持可见（首启就能看到入口、卡片行高不跳）但禁用：`cursor-not-allowed opacity-50`，输入框走原生 `disabled`；开关**刻意不用原生 `disabled`**——原生禁用收不到 hover/focus，解释禁用原因的 tooltip 就永远读不到，所以用 `aria-disabled` + press 守卫（`agent-limits-card.tsx` 注释），tooltip 文案换成 `chat.autoCompactNoSession`（「新建或打开一个会话后可设置；阈值按会话保存」），可用态才显示「开启 / 关闭自动压缩」。
 - **续接只回到原来那个会话标签页**：自动压缩完成后由 footer 发一次 `chat.autoCompactResume` 把任务接回去，条件收在 `shouldResumeAfterAutoCompact`：必须是阈值触发、同一个会话的标签页仍在 `openTabs` 里、压缩没有报错、用户没有按停止、没有排队消息、会话没有停在问答 / 审批 dock。压缩期间用户关掉了标签页就什么都不做，绝不回落到当前活动会话（`ConversationFooter.tsx` 的 `resumeAfterAutoCompact`，与 `refreshSessionUsage` 的「closed tab 不得回退到 active」是同一条约束）——那条续接指令是一条真实用户消息，落到别的会话会让它真的开始续作。
 
+- **编辑精选轮播（市场首屏）**：首屏轮播是**编辑层**，数据来自索引仓的 `featured.json`（实现见 `src/features/plugins/hub/PluginSpotlight.tsx`）。三条硬约定：
+  - **装饰数据不挡路**：文件缺失/坏掉，或某一行的 `id` 不在索引里，就整块/该行不渲染——不弹错误、不占位、不影响下方表格与筛选（`marketplaceStore.featured` 为空即整块 `return null`，索引本身的失败才进 `error`）。
+  - **进度条就是计时器**：自动播放由 `theme.css` 的 `--animate-spotlight-progress`（6s，`scaleX` 不触发布局）驱动，`animationend` 才翻页。悬停、焦点进入、切到后台、`prefers-reduced-motion`（`useReducedMotion` + `motion-reduce:animate-none`）四路都作用在同一条进度条上，条停 = 翻页停，不存在「条停了还在翻」。手动翻页把进度条重新起跑（进度段 `key={index}`），不接力上一张的进度。
+  - **封面素材链**：编辑封面 `image`（`object-cover` 铺满）→ 插件第一张截图（按原比例 `object-contain` 装帧，**不裁切**——索引里的截图从 3600×740 到 357×425 都有）→ 插件 `icon` → 品牌色首字块；任一环 `onError` 降一级，卡片永远画满。18 个已登记插件只有 6 个带截图，所以「没有图」是正常状态，不是错误态。
+  - 文案压左侧压暗层（`from-black/85 via-black/55`）之上，对比度不依赖封面本身；轮播内键盘 ←/→ 翻页（做法同 `PluginScreenshotCarousel`），`aria-roledescription="carousel"` / `slide` + 非当前页 `aria-hidden`，圆点带「第 n 条精选：名称」。
+
 ## 4. 动作反馈
 
 - **并发会话运行状态点**：侧栏、页签和收起的 worktree 聚合状态复用 `sidebar-thread-status`。运行中保持 0.92s 呼吸节奏，只动画 `transform` / `opacity`，光晕阴影保持静态，避免并发会话逐帧重绘阴影。退避重试与系统减少动态效果下保持静态蓝点，未读完成态保持静态绿点。浏览器回归：`tests/browser/concurrent-status.html`（1 / 6 / 12 会话，侧栏 + 页签，正常 / 重试 / 完成、亮暗主题和减少动态效果）。
@@ -243,7 +249,7 @@ const feedback = useRunningFeedback(store.loading);
 |---|---|---|---|
 | 变更（git）刷新 | `src/features/git/ChangesPanelHeader.tsx` | `useActionFeedback({ spin: true })` | **参考实现**；pull/push 只做 click → 对号 |
 | 文件树刷新 | `src/features/files/FileTreeRow.tsx` | `useRunningFeedback(filesStore.refreshing)` | 入口在工作区根行（合成根节点），随该行悬停出现（同该行「添加到聊天」加号）；刷新可能由别处触发，故走状态驱动 |
-| 插件市场索引 | `src/features/plugins/hub/PluginMarketView.tsx` | `useActionFeedback` | 图标按钮位于筛选工具条（分类 chips + 排序 + 搜索）右侧；`isFailure` 读 `marketplaceStore.error` |
+| 插件市场索引 | `src/features/plugins/hub/PluginMarketView.tsx` | `useActionFeedback` | 图标按钮位于筛选工具条（分类 chips + 排序 + 搜索）右侧；`isFailure` 读 `marketplaceStore.error`。一次刷新同时重读索引与 `featured.json`（精选是软依赖：拉不到只清空轮播，不写 `error`） |
 | 插件重新加载 | `src/features/plugins/hub/PluginInstalledRow.tsx` | `useActionFeedback` | 成功后该行转为健康态、按钮消失 |
 | CLI 版本信息 | `src/features/settings/CliHeaderActions.tsx` | `useRunningFeedback(loading \|\| updating)` | 挂载时的自动探测同样转圈 → 对号 |
 | 刷新用量 | `src/components/application/agent-limits/agent-limits-card.tsx` | `useRunningFeedback(refreshing)` | 带文字标签的卡片按钮，图标区放反馈 |
@@ -279,6 +285,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.80 | 2026-10-08 | 插件市场首屏新增**编辑精选轮播**（方案 A）：数据走索引仓新增的 `featured.json`（后端 `plugin_fetch_featured`，与索引共用 1h 缓存且串行调用以复用同一次索引拉取；id 不在索引 / 重复 / 超 8 条由后端与索引仓 `validate.mjs` 双重拦下）。市场行与轮播共用抽出的 `MarketActionButton`，两处安装/更新/已安装状态永不打架。自动播放由进度条关键帧驱动（悬停 / 焦点 / 后台 / reduced-motion 同点冻结），封面按「编辑封面 → 插件截图（原比例）→ icon → 品牌首字块」四级回落，缺图不留空洞；`plugin_fetch_featured` 同时进 web 只读白名单；§3 补规则、§7 登记刷新范围 |
 | v0.79 | 2026-10-08 | HTML 文件点开即渲染预览：`.html/.htm/.xhtml` 走新增的桌面 `ccgui-preview` 协议（`preview_protocol.rs` 保留真实路径结构，`draft.css` / 脚本 / module / fetch 按浏览器语义解析；asset 协议的单段编码会让同级资源全 404）、iframe sandbox 允许脚本/表单但进不了应用状态，头部与 Markdown 共用「编辑/预览」并新增「刷新」（§7 登记）；`tauri.conf.json` CSP 放行 `frame-src`；web 访问模式保持源码视图；§3 补充规则 |
 | v0.78 | 2026-10-08 | ⌘W 改为关闭当前标签页（新增 `closeTab` 快捷键动作，默认 ⌘W；macOS 由 `app_menu.rs` 重建应用菜单拿掉原生 Close Window，键事件回到 webview）；文件 Markdown 预览链接恢复可见样式并安全处理点击（外链系统浏览器、相对路径开成编辑器页签、锚点 / 未知 scheme 惰性），新增 ⌘F 查找（右上角查找条、全部命中 + 当前项双色高亮、Enter / Shift+Enter 跳转，与对话搜索互不覆盖）；对话内 ⌘F 只在对话面在视时响应；§3 补两条规则 |
 | v0.77 | 2026-10-06 | 项目右键菜单渲染插件注册条目：`workspace-context-menu.tsx` 消费 `workspaceMenuRegistry`（内置项 → 分隔线 → 插件项，`compareByOrder`），目标恒为右键那一行且不改变活动项目；`label` 支持 `{ text, status: { text, tone } }` 状态小字（`success` / `muted` 语义 token）；`label` / `visible` 抛错只丢该条目、`onSelect` 失败只记日志、图标包 `PluginBoundary`；opener 与挂载不再要求宿主回调，仅插件条目也能开菜单，末个插件卸载时自动关闭。修复 CCB 等插件声明 `ui:workspace-menu` 却无入口（宿主只实现注册未消费注册表）；§3 补充规则 |
