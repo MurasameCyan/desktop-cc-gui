@@ -49,6 +49,8 @@ pub enum EngineEvent {
     /// One model attempt ended, but the CLI may retry or compact next.
     /// Keep its outcome for EOF; unlike Error/Done, this never ends the run.
     AttemptEnd { error: Option<String> },
+    /// Native OMP loop readiness, distinct from asynchronous prompt admission.
+    AgentActivity { active: bool },
     /// The CLI is backing off before re-issuing a request (claude
     /// `system/api_retry`, omp `auto_retry_start`). Distinct from `Warn`
     /// because the UI shows it as live progress ("重试中 2/5") in the run

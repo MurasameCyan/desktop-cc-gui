@@ -7,16 +7,20 @@ import {
 } from "@/features/plugins/runtime/events";
 import { setPluginSessionEffort, useChatStore } from "./store";
 import { OPEN_TABS_KEY } from "./store/persistence";
-import { EMPTY_SESSION } from "./store/stream";
-import { handleEngineEvents, type EngineEventDeps } from "./store/engine-events";
+import { EMPTY_SESSION, routeRun, runRouting, untrackRun } from "./store/stream";
+import { handleEngineEvents, settledRuns, type EngineEventDeps } from "./store/engine-events";
 import { registerSessionHooks, registerTurnHooks } from "@/features/plugins/runtime/hooks";
 import { getConversationModeState } from "@/features/plugins/conversation/state";
+import { getAutoCompactSettings, setAutoCompactEnabled, setAutoCompactThreshold } from "./auto-compact-context";
+import { rememberContextWindow } from "./context-window-memory";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
     sendMessage: vi.fn(async () => ({ runId: "run-1", sessionId: null })),
     interruptSession: vi.fn(async () => true),
+    compactActiveRun: vi.fn(async () => {}),
     rememberSessionModel: vi.fn(async () => {}),
+    listEngineModels: vi.fn(async () => ({ models: [], authoritative: false })),
     rememberSessionEffort: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     listArchivedSessions: vi.fn(async () => []),
@@ -42,8 +46,16 @@ const WS = "/tmp/ws";
 
 function resetStore() {
   localStorage.clear();
+  window.dispatchEvent(new Event("storage"));
+  settledRuns.clear();
+  vi.mocked(ipc.listEngineModels).mockReset().mockResolvedValue({ models: [], authoritative: false });
   resetPluginBusForTests();
   vi.mocked(ipc.sendMessage).mockClear();
+  vi.mocked(ipc.compactActiveRun).mockClear();
+  for (const runId of [...runRouting.keys()]) {
+    runRouting.delete(runId);
+    untrackRun(runId);
+  }
   vi.mocked(ipc.interruptSession).mockClear();
   vi.mocked(ipc.archiveSession).mockClear();
   vi.mocked(ipc.listArchivedSessions).mockResolvedValue([]);
@@ -283,7 +295,7 @@ describe("stop during an in-flight send", () => {
     const tab = { engine: "omp", sessionId: "overlap-session", workspacePath: WS };
     const key = "omp/overlap-session";
     useChatStore.setState({ activeEngine: "omp", openTabs: [tab], active: tab });
-    const oldLaunch = Promise.withResolvers<{ runId: string; sessionId: string | null }>();
+    const oldLaunch = Promise.withResolvers<{ runId: string; sessionId: string | null; liveCompact?: boolean }>();
     vi.mocked(ipc.sendMessage).mockReturnValueOnce(oldLaunch.promise);
     const started: string[] = [];
     const finished: Array<{ turnId: string; status: string }> = [];
@@ -295,16 +307,17 @@ describe("stop during an in-flight send", () => {
     try {
       await vi.waitFor(() => expect(ipc.sendMessage).toHaveBeenCalledTimes(1));
       await useChatStore.getState().interrupt();
-      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-overlap-b", sessionId: tab.sessionId });
+      vi.mocked(ipc.sendMessage).mockResolvedValueOnce({ runId: "run-overlap-b", sessionId: tab.sessionId, liveCompact: true });
       await useChatStore.getState().send("replacement", []);
       const replacementTurnId = started[1];
       vi.mocked(ipc.interruptSession).mockClear();
-      oldLaunch.resolve({ runId: "run-overlap-a", sessionId: tab.sessionId });
+      oldLaunch.resolve({ runId: "run-overlap-a", sessionId: tab.sessionId, liveCompact: true });
       await oldSending;
       expect(ipc.interruptSession).toHaveBeenCalledWith("run-overlap-a");
       expect(ipc.interruptSession).not.toHaveBeenCalledWith(tab.sessionId);
       expect(ipc.interruptSession).not.toHaveBeenCalledWith("run-overlap-b");
       expect(useChatStore.getState().streamingByKey[key]).toBe(true);
+      expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBe("run-overlap-b");
       expect(finished).toEqual([{ turnId: started[0], status: "cancelled" }]);
       handleEngineEvents([
         { runId: "run-overlap-b", sessionId: tab.sessionId, engine: "omp", seq: 1, kind: "done", data: { usage: null } },
@@ -319,6 +332,104 @@ describe("stop during an in-flight send", () => {
       await oldSending;
       dispose();
     }
+  });
+});
+
+describe("native auto threshold sends and live capability ACKs", () => {
+  beforeEach(resetStore);
+
+  it.each([
+    { usage: { input_tokens: 1, contextWindow: 1_000_000 }, remembered: 500_000, catalog: 300_000, expected: 500_000 },
+    { usage: null, remembered: 500_000, catalog: 300_000, expected: 250_000 },
+    { usage: null, remembered: 0, catalog: 300_000, expected: 150_000 },
+    { usage: null, remembered: 0, catalog: 0, expected: 100_000 },
+  ])("uses the gauge window priority for a background send ($expected tokens)", async ({ usage, remembered, catalog, expected }) => {
+    const tab = { engine: "claude", sessionId: "native-threshold", workspacePath: "/background", model: "chosen" };
+    const key = "claude/native-threshold";
+    const other = { engine: "codex", sessionId: "foreground", workspacePath: "/foreground" };
+    useChatStore.setState({ active: other, openTabs: [tab, other], bySession: { [key]: { ...EMPTY_SESSION, usage } } });
+    setAutoCompactEnabled(key, true);
+    setAutoCompactThreshold(key, 50);
+    if (remembered) rememberContextWindow("claude", "chosen", remembered);
+    vi.mocked(ipc.listEngineModels).mockResolvedValueOnce({ models: catalog ? [{ id: "chosen", provider: "test", contextWindow: catalog }] : [], authoritative: false });
+    await useChatStore.getState().send("continue", [], {}, tab);
+    expect(ipc.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ autoCompactThresholdTokens: expected }));
+    expect(useChatStore.getState().active).toBe(other);
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(true);
+    if (!usage && !remembered) expect(ipc.listEngineModels).toHaveBeenCalledWith("claude", "/background");
+  });
+
+  it("rejects invalid enabled Claude thresholds visibly and sends normally when disabled", async () => {
+    const tab = { engine: "claude", sessionId: "invalid-threshold", workspacePath: WS };
+    const key = "claude/invalid-threshold";
+    useChatStore.setState({ active: tab, openTabs: [tab], bySession: { [key]: { ...EMPTY_SESSION, usage: { input_tokens: 1, contextWindow: 200_000 } } } });
+    setAutoCompactThreshold(key, 5);
+    setAutoCompactEnabled(key, true);
+    await useChatStore.getState().send("first", []);
+    expect(ipc.sendMessage).not.toHaveBeenCalled();
+    expect(useChatStore.getState().bySession[key]?.error).toContain("100,000");
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(false);
+    setAutoCompactEnabled(key, false);
+    await useChatStore.getState().send("second", []);
+    expect(vi.mocked(ipc.sendMessage).mock.calls[0][0]).not.toHaveProperty("autoCompactThresholdTokens");
+    expect(useChatStore.getState().bySession[key]?.error).toBeNull();
+  });
+
+  it("migrates settings on a send-result-only native adoption and retains the confirmed immutable run", async () => {
+    const tab = { engine: "omp", sessionId: null, workspacePath: WS };
+    const pendingKey = `new:omp:${WS}`;
+    useChatStore.setState({ active: tab, openTabs: [tab] });
+    setAutoCompactEnabled(pendingKey, true);
+    setAutoCompactThreshold(pendingKey, 35);
+    vi.mocked(ipc.sendMessage).mockImplementationOnce(async ({ runId }) => ({ runId: runId!, sessionId: "adopted", liveCompact: true }));
+    await useChatStore.getState().send("first", []);
+    const session = useChatStore.getState().bySession["omp/adopted"];
+    expect(useChatStore.getState().bySession[pendingKey]).toBeUndefined();
+    expect(getAutoCompactSettings("omp/adopted")).toEqual({ enabled: true, threshold: 35 });
+    expect(session?.liveCompactRunId).toBe(vi.mocked(ipc.sendMessage).mock.calls[0][0].runId);
+    await useChatStore.getState().compactContext("omp/adopted");
+    expect(session?.streaming).toBe(true);
+    expect(useChatStore.getState().bySession["omp/adopted"]?.compaction?.runId).toBe(session?.liveCompactRunId);
+  });
+
+  it("does not restore a capability when Done outruns the send ACK", async () => {
+    const tab = { engine: "omp", sessionId: "early-done", workspacePath: WS };
+    const key = "omp/early-done";
+    useChatStore.setState({ active: tab, openTabs: [tab] });
+    vi.mocked(ipc.sendMessage).mockImplementationOnce(async ({ runId }) => {
+      handleEngineEvents([{ seq: 1, engine: "omp", runId: runId!, sessionId: tab.sessionId, kind: "done", data: { usage: null } }], engineDeps());
+      return { runId: runId!, sessionId: tab.sessionId, liveCompact: true };
+    });
+    await useChatStore.getState().send("quick", []);
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(false);
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBeNull();
+  });
+  it("preserves native readiness that arrives before a false send ACK", async () => {
+    const tab = { engine: "omp", sessionId: "ready-before-ack", workspacePath: WS };
+    const key = "omp/ready-before-ack";
+    useChatStore.setState({ active: tab, openTabs: [tab] });
+    vi.mocked(ipc.sendMessage).mockImplementationOnce(async ({ runId }) => {
+      handleEngineEvents([{ seq: 1, engine: "omp", runId: runId!, sessionId: tab.sessionId, kind: "live_compact_ready", data: { active: true } }], engineDeps());
+      return { runId: runId!, sessionId: tab.sessionId, liveCompact: false };
+    });
+    await useChatStore.getState().send("first", []);
+    const runId = vi.mocked(ipc.sendMessage).mock.calls[0][0].runId;
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBe(runId);
+    handleEngineEvents([{ seq: 2, engine: "omp", runId: "unrelated-ready", sessionId: tab.sessionId, kind: "live_compact_ready", data: { active: false } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBe(runId);
+    handleEngineEvents([{ seq: 3, engine: "omp", runId: runId!, sessionId: tab.sessionId, kind: "live_compact_ready", data: { active: false } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBeNull();
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(true);
+  });
+
+  it("does not let readiness events revive a locally stopped run", () => {
+    const key = "omp/stopped-readiness";
+    useChatStore.setState({ bySession: { [key]: { ...EMPTY_SESSION, interrupted: true } }, streamingByKey: {} });
+    routeRun("stopped-readiness", key);
+    handleEngineEvents([{ seq: 1, engine: "omp", runId: "stopped-readiness", sessionId: "stopped-readiness", kind: "live_compact_ready", data: { active: true } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBeNull();
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(false);
+    expect(useChatStore.getState().streamingByKey[key]).toBeUndefined();
   });
 });
 
@@ -620,6 +731,141 @@ describe("compactContext and refreshSessionUsage", () => {
     expect(useChatStore.getState().bySession[key]?.usage).toEqual(newUsage);
     expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
   });
+
+  it("compacts a streaming OMP run in place through its own stdin", async () => {
+    // The bug: a turn that never settles (long tool loop) kept the host
+    // from compacting at all — the action returned early on `streaming`.
+    const tab = { engine: "omp", sessionId: "sess-live", workspacePath: WS };
+    const key = "omp/sess-live";
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [tab],
+      active: tab,
+      bySession: { [key]: { ...EMPTY_SESSION, streaming: true, liveCompactRunId: "run-live" } },
+      streamingByKey: { [key]: true },
+    });
+    routeRun("run-live", key);
+
+    await useChatStore.getState().compactContext(key, { trigger: "threshold" });
+
+    expect(ipc.compactActiveRun).toHaveBeenCalledWith("run-live");
+    // No second turn: no /compact prompt, no 「继续」 nudge.
+    expect(ipc.sendMessage).not.toHaveBeenCalled();
+    expect(useChatStore.getState().bySession[key]?.compaction).toMatchObject({
+      automatic: false,
+      trigger: "threshold",
+    });
+    await useChatStore.getState().compactContext(key);
+    expect(ipc.compactActiveRun).toHaveBeenCalledTimes(1);
+    handleEngineEvents([{ seq: 1, engine: "omp", runId: "run-live", sessionId: "sess-live", kind: "compaction", data: { active: false, reason: "auto" } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.compaction).not.toBeNull();
+    handleEngineEvents([{ seq: 2, engine: "omp", runId: "run-live", sessionId: "sess-live", kind: "compaction", data: { active: false, reason: "ccgui-live-compact:1" } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
+    expect(useChatStore.getState().bySession[key]?.streaming).toBe(true);
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBeNull();
+    await useChatStore.getState().compactContext(key);
+    expect(ipc.compactActiveRun).toHaveBeenCalledTimes(1);
+    handleEngineEvents([{ seq: 3, engine: "omp", runId: "run-live", sessionId: "sess-live", kind: "live_compact_ready", data: { active: true } }], engineDeps());
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBe("run-live");
+  });
+
+  it("leaves a streaming non-OMP run alone: it has no resume-safe compact", async () => {
+    const tab = { engine: "claude", sessionId: "sess-busy", workspacePath: WS };
+    const key = "claude/sess-busy";
+    useChatStore.setState({
+      activeEngine: "claude",
+      openTabs: [tab],
+      active: tab,
+      bySession: { [key]: { ...EMPTY_SESSION, streaming: true } },
+      streamingByKey: { [key]: true },
+    });
+    routeRun("run-claude", key);
+
+    await useChatStore.getState().compactContext(key, { trigger: "threshold" });
+
+    expect(ipc.compactActiveRun).not.toHaveBeenCalled();
+    expect(ipc.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("clears compaction state when the live compact request fails", async () => {
+    const tab = { engine: "omp", sessionId: "sess-fail", workspacePath: WS };
+    const key = "omp/sess-fail";
+    useChatStore.setState({
+      activeEngine: "omp",
+      openTabs: [tab],
+      active: tab,
+      bySession: { [key]: { ...EMPTY_SESSION, streaming: true, liveCompactRunId: "run-dead" } },
+      streamingByKey: { [key]: true },
+    });
+    routeRun("run-dead", key);
+    vi.mocked(ipc.compactActiveRun).mockRejectedValueOnce(new Error("run is gone"));
+
+    await expect(
+      useChatStore.getState().compactContext(key, { trigger: "manual" }),
+    ).rejects.toThrow("run is gone");
+    expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
+  });
+  it("does not compact an unrelated active tab when the requested tab is absent", async () => {
+    const tab = { engine: "omp", sessionId: "active", workspacePath: WS };
+    useChatStore.setState({ active: tab, openTabs: [tab], bySession: { "omp/active": { ...EMPTY_SESSION } } });
+    await useChatStore.getState().compactContext("omp/closed");
+    expect(ipc.sendMessage).not.toHaveBeenCalled();
+    expect(useChatStore.getState().bySession["omp/closed"]).toBeUndefined();
+  });
+
+  it("requires a backend-confirmed capability and blocks native maintenance", async () => {
+    const tab = { engine: "omp", sessionId: "capability", workspacePath: WS };
+    const key = "omp/capability";
+    useChatStore.setState({ active: tab, openTabs: [tab], bySession: { [key]: { ...EMPTY_SESSION, streaming: true } }, streamingByKey: { [key]: true } });
+    routeRun("run-capability", key);
+    await useChatStore.getState().compactContext(key);
+    expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
+    useChatStore.setState({ bySession: { [key]: { ...useChatStore.getState().bySession[key], liveCompactRunId: "run-capability", compaction: { automatic: true, startedAt: 1 } } } });
+    await useChatStore.getState().compactContext(key);
+    expect(ipc.compactActiveRun).not.toHaveBeenCalled();
+    expect(useChatStore.getState().bySession[key]?.compaction?.automatic).toBe(true);
+  });
+
+  it("keeps a replacement compaction when an earlier delivery fails after Stop", async () => {
+    const tab = { engine: "omp", sessionId: "replacement", workspacePath: WS };
+    const key = "omp/replacement";
+    useChatStore.setState({ active: tab, openTabs: [tab], bySession: { [key]: { ...EMPTY_SESSION, streaming: true, liveCompactRunId: "run-old" } }, streamingByKey: { [key]: true } });
+    routeRun("run-old", key);
+    const delivery = Promise.withResolvers<void>();
+    vi.mocked(ipc.compactActiveRun).mockReturnValueOnce(delivery.promise);
+    const compact = useChatStore.getState().compactContext(key);
+    await useChatStore.getState().interrupt(tab);
+    expect(useChatStore.getState().bySession[key]?.liveCompactRunId).toBeNull();
+    expect(useChatStore.getState().bySession[key]?.compaction).toBeNull();
+    const replacement = { automatic: false, startedAt: 2, runId: "run-new" };
+    useChatStore.setState({ bySession: { [key]: { ...useChatStore.getState().bySession[key], compaction: replacement, liveCompactRunId: "run-new" } } });
+    delivery.reject(new Error("old delivery failed"));
+    await expect(compact).rejects.toThrow("old delivery failed");
+    expect(useChatStore.getState().bySession[key]?.compaction).toBe(replacement);
+  });
+  it("follows a pending session rekey without writing a delivery error to the active tab", async () => {
+    const tab = { engine: "omp", sessionId: null, workspacePath: WS };
+    const key = `new:omp:${WS}`;
+    const other = { engine: "claude", sessionId: "unrelated", workspacePath: "/other" };
+    useChatStore.setState({ active: tab, openTabs: [tab, other], bySession: {
+      [key]: { ...EMPTY_SESSION, streaming: true, liveCompactRunId: "rekey-live" },
+      "claude/unrelated": { ...EMPTY_SESSION },
+    }, streamingByKey: { [key]: true } });
+    routeRun("rekey-live", key);
+    const delivery = Promise.withResolvers<void>();
+    vi.mocked(ipc.compactActiveRun).mockReturnValueOnce(delivery.promise);
+    const compact = useChatStore.getState().compactContext(key);
+    handleEngineEvents([{ seq: 1, engine: "omp", runId: "rekey-live", sessionId: "rekeyed", kind: "session", data: "rekeyed" }], engineDeps());
+    useChatStore.setState({ active: other });
+    expect(useChatStore.getState().bySession[key]).toBeUndefined();
+    expect(useChatStore.getState().bySession["omp/rekeyed"]?.compaction?.runId).toBe("rekey-live");
+    delivery.reject(new Error("rekey delivery failed"));
+    await expect(compact).rejects.toThrow("rekey delivery failed");
+    expect(useChatStore.getState().bySession["omp/rekeyed"]?.compaction).toBeNull();
+    expect(useChatStore.getState().bySession["omp/rekeyed"]?.error).toBe("rekey delivery failed");
+    expect(useChatStore.getState().bySession["claude/unrelated"]?.error).toBeNull();
+  });
+
 });
 
 describe("model selection is per session", () => {

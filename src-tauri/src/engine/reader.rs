@@ -341,6 +341,12 @@ impl TurnCore {
             return;
         }
         match event {
+            EngineEvent::AgentActivity { active } => {
+                if self.registry.set_agent_active(&self.run_id, active) {
+                    state.push(&self.sink, &self.run_id, &self.engine_id,
+                        "live_compact_ready", serde_json::json!({"active": active}));
+                }
+            }
             EngineEvent::Delta(text) => {
                 state.gen_begin(false);
                 state.push(
@@ -463,6 +469,9 @@ impl TurnCore {
                 tokio::task::spawn_blocking(move || registry.kill(&run_id));
             }
             EngineEvent::Compaction { active, reason } => {
+                if !self.registry.observe_compaction(&self.run_id, active, reason.as_deref()) {
+                    return;
+                }
                 // Not terminal: compaction is a mid-turn pause while the CLI
                 // summarizes; the UI swaps its status label until the end
                 // event (or turn settle) clears it.
@@ -1338,6 +1347,7 @@ mod staging_tests {
             stdin: None,
             questions: Arc::new(Mutex::new(HashMap::new())),
             plans: Arc::new(Mutex::new(HashMap::new())),
+            live_compact: None,
         };
         registry.insert("run-abort".into(), entry.clone());
         registry.insert_alias("session-abort".into(), entry);
@@ -1394,6 +1404,7 @@ mod staging_tests {
             stdin: None,
             questions: Arc::new(Mutex::new(HashMap::new())),
             plans: Arc::new(Mutex::new(HashMap::new())),
+            live_compact: None,
         };
         registry.insert("run-v".into(), entry.clone());
         registry.insert_alias("session-v".into(), entry);
@@ -1409,6 +1420,7 @@ mod staging_tests {
                 stdin: None,
                 questions: Arc::new(Mutex::new(HashMap::new())),
                 plans: Arc::new(Mutex::new(HashMap::new())),
+                live_compact: None,
             },
         );
 
@@ -1634,6 +1646,7 @@ mod terminal_event_tests {
                     stdin: None,
                     questions: Arc::new(Mutex::new(std::collections::HashMap::new())),
                     plans: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    live_compact: None,
                 },
             );
             let context = RunContext {
@@ -1750,6 +1763,7 @@ mod plan_dispatch_tests {
                 stdin: None,
                 questions: Arc::new(Mutex::new(HashMap::new())),
                 plans: Arc::new(Mutex::new(HashMap::new())),
+                live_compact: None,
             },
         );
         (core, collector, db)
