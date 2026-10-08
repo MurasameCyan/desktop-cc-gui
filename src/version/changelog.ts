@@ -29,6 +29,16 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.1.2",
+    date: "2026-10-08",
+    content: {
+      zh: `修复
+- **响应中的上下文压缩**：手动压缩按钮在 OMP 回合响应期间可用，压缩在同一进程内原地完成，原任务继续跑，不再中断重发；自动压缩不再要求会话空闲，持续响应中实时占用越过阈值即在当前回合内压缩，压缩后由 OMP 原生续接，不补发「继续」。Codex / Claude 改为每次发送下发该会话阈值，由引擎在安全边界自行压缩；其余引擎保持空闲回合压缩。`,
+      en: `Fixes
+- **Compaction during a response**: The manual compact button is available while an OMP turn is streaming; the compaction runs in place inside the same process and the original task keeps going, with no interrupt-and-resend. Automatic compaction no longer waits for an idle session: once live usage crosses the threshold during a long response, the current turn compacts and OMP's own loop continues the task, so no "continue" nudge is sent. Codex and Claude now receive the session threshold on every send and compact at their own safe boundaries; other engines keep idle-turn compaction.`,
+    },
+  },
+  {
     version: "1.1.1",
     date: "2026-10-07",
     content: {
@@ -50,7 +60,6 @@ export const CHANGELOG_DATA: ChangelogEntry[] = [
 🐛 修复
 - **Pi / OMP 请求参数兼容性**：移除自 1.0.6 引入的通用推理字段注入，由 CLI 按实际模型与供应商协议生成请求，修复 OMP OpenAI Codex 通道的 Unsupported parameter: reasoning_effort 错误；保留原生推理档位传递，无需降低 xhigh。
 - **OMP 内置 /compact 压缩后会话卡住**：内置 compact 被当成普通提示词发给 OMP，OMP 识别为本地 slash 命令后直接短路（agentInvoked:false），既不启动模型回合也不产生任何宿主用于结算的终态事件，于是 streaming 永远为真、压缩 Promise 永不 resolve；现在宿主发起的 /compact 与用户自定义的 /compact 目录命令显式区分，前者改走 OMP 原生 compact RPC，压缩完成后会话正常继续。
-- **响应中的上下文压缩**：手动压缩按钮在 OMP 回合响应期间可用，压缩在同一进程内原地完成，原任务继续跑，不再中断重发；自动压缩不再要求会话空闲，持续响应中实时占用越过阈值即在当前回合内压缩，压缩后由 OMP 原生续接，不补发「继续」。Codex / Claude 改为每次发送下发该会话阈值，由引擎在安全边界自行压缩；其余引擎保持空闲回合压缩。
 - **老 WKWebView / 老 WebKit 打开即崩**：Safari / WKWebView < 16.4（macOS < 13.3）无法解析 lookbehind，渲染任何 Markdown 都会在 remark-gfm 的邮件自动链接正则上抛 Invalid regular expression: invalid group specifier name，而应用启动就会解析 Markdown（恢复会话、升级后首启打开版本说明）；补丁回退该正则（2.0.0 本来就是无 lookbehind 的写法，2.0.1 的性能重构才引入），行为不变并加守卫用例。同时在入口最早处补齐旧引擎缺失的内建方法（Object.hasOwn、Array.prototype.at、Promise.withResolvers、URL.canParse、structuredClone 与 dialog.showModal 的兜底，原生存在即跳过），修掉 Markdown 渲染、Mermaid 预览、局域网网页模式、图片灯箱等路径上的第二类崩溃。
 - **局域网（非安全 HTTP）下复制即崩**：非 localhost 的 HTTP 源拿不到 navigator.clipboard（规范要求安全上下文），任何复制操作（代码块、消息内容、诊断报告、Web 访问链接、配对密钥、抖音号）与右键菜单复制都会抛 TypeError 并被顶层错误边界接管成崩溃页，崩溃页上的「复制诊断报告」还会再崩一次；现在提供 copyText 与降级 polyfill（优先原生，缺失时回退 execCommand），Web 授权卡补齐复制 → 对号反馈。
 - **Claude 本地指令不再显示成对话**：/model、/login、/clear、/effort 这类本地指令在记录里是 caveat、指令正文与可选 stdout，此前被当成用户消息，侧边栏标题与对话正文都会出现；现在按记录结构处理（看到 local-command-caveat 就丢掉后续指令正文与 stdout），不写死指令名。
@@ -87,7 +96,6 @@ export const CHANGELOG_DATA: ChangelogEntry[] = [
 🐛 Fixes
 - **Pi / OMP request compatibility**: Remove the generic reasoning-field injection introduced in 1.0.6 and let the CLI encode requests for the selected model and provider. This fixes Unsupported parameter: reasoning_effort on OMP's OpenAI Codex channel while preserving native thinking-level selection, with no need to lower xhigh.
 - **OMP's built-in /compact no longer stalls the session**: the built-in compact was sent to OMP as ordinary prompt text, and once OMP recognised it as a local slash command it short-circuited (agentInvoked:false) without starting a model turn or emitting any of the terminal events the host settles on, so streaming stayed true forever and the compaction promise never resolved; the host's /compact is now explicitly distinguished from a user-defined /compact directory command and goes through OMP's native compact RPC, so the session continues normally afterwards.
-- **Compaction during a response**: The manual compact button is available while an OMP turn is streaming; the compaction runs in place inside the same process and the original task keeps going, with no interrupt-and-resend. Automatic compaction no longer waits for an idle session: once live usage crosses the threshold during a long response, the current turn compacts and OMP's own loop continues the task, so no "continue" nudge is sent. Codex and Claude now receive the session threshold on every send and compact at their own safe boundaries; other engines keep idle-turn compaction.
 - **Old WKWebView / old WebKit crashed on open**: Safari / WKWebView < 16.4 (macOS < 13.3) cannot parse lookbehind, so rendering any Markdown threw Invalid regular expression: invalid group specifier name from remark-gfm's email autolink pattern — and the app parses Markdown on start (restoring sessions, opening the release notes after an upgrade). A patch reverts that pattern (2.0.0 never had the lookbehind; the 2.0.1 performance refactor introduced it), behaviour is unchanged and a guard test fails if it ever comes back. At the same time the earliest entry point now installs fallbacks for the built-ins old engines lack (Object.hasOwn, Array.prototype.at, Promise.withResolvers, URL.canParse, structuredClone and dialog.showModal, each skipped when the native one exists), fixing the second class of crashes across Markdown rendering, Mermaid previews, the LAN web mode and the image lightbox.
 - **Copying over insecure HTTP (LAN) crashed the app**: a non-localhost HTTP origin has no navigator.clipboard (the spec requires a secure context), so every copy action (code block, message content, diagnostics report, web-access link, pairing key, Douyin handle) and every context-menu copy threw a TypeError that the top-level error boundary turned into the crash page — where "Copy error" then crashed again. A copyText helper with a polyfill now prefers the native API and falls back to execCommand, and the web authorization card gained its copy → check feedback.
 - **Claude local commands no longer show up as conversation**: /model, /login, /clear, /effort and friends are stored as a caveat, the command text and optional stdout, but they were parsed as user messages, so they appeared as sidebar titles and in the transcript; they are now handled by record structure (seeing local-command-caveat drops the following command text and stdout) without hard-coding command names.
