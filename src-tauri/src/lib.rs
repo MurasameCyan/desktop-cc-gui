@@ -1,5 +1,6 @@
 pub mod agent_catalog;
 pub mod app_info;
+pub mod app_menu;
 pub mod bots;
 pub mod baidu_tongji;
 pub mod browser;
@@ -317,6 +318,12 @@ pub fn run() {
             window_builder
                 .build()
                 .expect("failed to create main window");
+            // Replace the automatic macOS menu with the same one minus its
+            // Close Window (⌘W) item; the frontend shortcut runtime owns that
+            // key and closes the tab in view (see app_menu.rs).
+            if let Err(error) = app_menu::install(app.handle()) {
+                eprintln!("[menu] install failed: {error}");
+            }
             // Cmd+Q / AppleScript `quit` bypass both the window X's
             // CloseRequested and Tauri's ExitRequested on macOS; without
             // this hook one stray quit kills every live engine run with no
