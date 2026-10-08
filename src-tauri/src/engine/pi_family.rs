@@ -856,7 +856,12 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
     match event_type {
         // Response stream opens: reader.rs starts the genMs window here so
         // TTFT and tool-argument decoding are counted, not just text deltas.
-        "message_start" => out.push(EngineEvent::Generation { active: true }),
+        "message_start" => {
+            out.push(EngineEvent::Generation { active: true });
+            if value.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
+                out.push(EngineEvent::AssistantMessageStart);
+            }
+        }
         "session" => {
             push_session_id(&value, "id", out);
         }
@@ -994,6 +999,15 @@ fn parse_pi_family_line(line: &str, out: &mut Vec<EngineEvent>) {
             // (or process EOF) decides the run's outcome.
             if let Some(error) = nested_error_text(&value, &["message"]) {
                 out.push(EngineEvent::Warn(error));
+            } else if value.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+                && matches!(
+                    value.pointer("/message/stopReason").and_then(Value::as_str),
+                    Some("stop" | "length" | "toolUse")
+                )
+            {
+                // Aborted/error attempts remain replaceable by the next
+                // assistant start, including compact's missing message_end.
+                out.push(EngineEvent::AssistantMessageEnd);
             }
         }
         "auto_compaction_start" => {
@@ -1516,13 +1530,110 @@ mod tests {
     }
 
     #[test]
-    fn message_start_opens_the_generation_window() {
+    fn assistant_message_start_preserves_generation_accounting() {
         let mut out = Vec::new();
         let line = r#"{"type":"message_start","message":{"role":"assistant","content":[]}}"#;
         parse_pi_family_line(line, &mut out);
-        match &out[..] {
-            [EngineEvent::Generation { active: true }] => {}
-            other => panic!("expected generation start, got {other:?}"),
+        assert!(matches!(
+            &out[..],
+            [EngineEvent::Generation { active: true }, EngineEvent::AssistantMessageStart]
+        ), "got {out:?}");
+    }
+
+    #[test]
+    fn consecutive_completed_assistant_messages_have_distinct_boundaries() {
+        for engine in [omp(), pi()] {
+            let mut out = Vec::new();
+            for stop_reason in ["stop", "toolUse", "length"] {
+                for line in [
+                    serde_json::json!({"type":"message_start","message":{"role":"assistant"}}),
+                    serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"reason"}}),
+                    serde_json::json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"answer"}}),
+                    serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":stop_reason,"content":[{"type":"text","text":"answer"}]}}),
+                ] {
+                    engine.parse_line(&line.to_string(), &mut out);
+                }
+            }
+            assert_eq!(out.len(), 15, "got {out:?}");
+            for message in out.chunks_exact(5) {
+                assert!(matches!(
+                    message,
+                    [EngineEvent::Generation { active: true },
+                     EngineEvent::AssistantMessageStart,
+                     EngineEvent::Thinking(thinking),
+                     EngineEvent::Delta(text),
+                     EngineEvent::AssistantMessageEnd]
+                        if thinking == "reason" && text == "answer"
+                ), "got {message:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn assistant_restart_without_message_end_starts_a_replacement() {
+        let mut out = Vec::new();
+        for line in [
+            r#"{"type":"message_start","message":{"role":"assistant"}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"unfinished"}}"#,
+            r#"{"type":"auto_compaction_start","reason":"manual"}"#,
+            r#"{"type":"auto_compaction_end"}"#,
+            r#"{"type":"message_start","message":{"role":"assistant"}}"#,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"restarted"}}"#,
+            r#"{"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}"#,
+        ] {
+            parse_pi_family_line(line, &mut out);
+        }
+        assert!(matches!(
+            &out[..],
+            [EngineEvent::Generation { active: true },
+             EngineEvent::AssistantMessageStart,
+             EngineEvent::Delta(partial),
+             EngineEvent::Compaction { active: true, .. },
+             EngineEvent::Compaction { active: false, .. },
+             EngineEvent::Generation { active: true },
+             EngineEvent::AssistantMessageStart,
+             EngineEvent::Delta(restarted),
+             EngineEvent::AssistantMessageEnd]
+                if partial == "unfinished" && restarted == "restarted"
+        ), "got {out:?}");
+    }
+
+    #[test]
+    fn non_assistant_messages_do_not_emit_assistant_boundaries() {
+        for role in [Some("user"), Some("toolResult"), Some("tool"), None] {
+            let mut out = Vec::new();
+            for kind in ["message_start", "message_end"] {
+                parse_pi_family_line(
+                    &serde_json::json!({"type":kind,"message":{"role":role,"stopReason":"stop"}}).to_string(),
+                    &mut out,
+                );
+            }
+            assert!(matches!(&out[..], [EngineEvent::Generation { active: true }]),
+                "non-assistant role {role:?}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn failed_or_aborted_assistant_messages_do_not_commit() {
+        for stop_reason in [Some("error"), Some("aborted"), None] {
+            let mut out = Vec::new();
+            parse_pi_family_line(
+                &serde_json::json!({
+                    "type":"message_end",
+                    "message":{
+                        "role":"assistant", "stopReason":stop_reason,
+                        "model":"reported-model", "thinking_effort":"high",
+                        "usage":{"input_tokens":10,"output_tokens":2}
+                    }
+                }).to_string(),
+                &mut out,
+            );
+            assert!(matches!(
+                &out[..],
+                [EngineEvent::Model(model), EngineEvent::Effort(effort),
+                 EngineEvent::Served { .. }, EngineEvent::Usage(_)]
+                    if model == "reported-model" && effort == "high"
+            ), "stop reason {stop_reason:?}: {out:?}");
         }
     }
 
@@ -2149,17 +2260,17 @@ mod tests {
     #[test]
     fn message_end_extracts_nested_error_shapes_as_warn() {
         for line in [
-            serde_json::json!({"type":"message_end","message":{"errorMessage":"upstream 429"}}),
-            serde_json::json!({"type":"message_end","errorMessage":"top-level 429"}),
-            serde_json::json!({"type":"message_end","error":{"message":"nested 429"}}),
-            serde_json::json!({"type":"message_end","message":{"error":"message.error 429"}}),
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","errorMessage":"upstream 429"}}),
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop"},"errorMessage":"top-level 429"}),
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop"},"error":{"message":"nested 429"}}),
+            serde_json::json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","error":"message.error 429"}}),
         ] {
             let mut out = Vec::new();
             parse_pi_family_line(&line.to_string(), &mut out);
-            match out.last() {
-                Some(EngineEvent::Warn(text)) => assert!(text.contains("429"), "{line}"),
-                other => panic!("expected Warn for {line}, got {other:?}"),
-            }
+            assert!(matches!(
+                &out[..],
+                [EngineEvent::Warn(text)] if text.contains("429")
+            ), "expected only Warn for {line}, got {out:?}");
         }
     }
 

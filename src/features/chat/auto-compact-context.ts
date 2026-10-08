@@ -161,10 +161,9 @@ export interface AutoCompactDecisionInput {
   usagePct: number | undefined;
   streaming: boolean;
   compacting: boolean;
-  /** Usage pct of this session's last threshold-triggered attempt; null =
-   *  nothing tried (or re-armed). Only context that grew past that level may
-   *  fire again, so a compaction that failed (or one that left usage above
-   *  the threshold) cannot spin — and does not disarm the session either. */
+  /** Exact usage pct at the last attempt; null means untried or re-armed.
+   *  Repeat attempts retain whole-percent growth buckets, so exposing more
+   *  precise usage cannot turn tiny increments into a compaction loop. */
   attemptedAtPct: number | null;
   /** Confirmed live transport capability. OMP aborts and resumes natively;
    *  the host must not start a second chat turn to continue it. */
@@ -186,7 +185,7 @@ export function shouldAutoCompact({
       !compacting &&
       usagePct !== undefined &&
       usagePct >= threshold &&
-      (attemptedAtPct === null || usagePct > attemptedAtPct),
+      (attemptedAtPct === null || Math.round(usagePct) > Math.round(attemptedAtPct)),
   );
 }
 

@@ -13,6 +13,7 @@ import { migrateAutoCompactSettings } from "../auto-compact-context";
 import {
   EMPTY_SESSION,
   appendToolMessages,
+  applyAssistantMessageBoundary,
   applyStreamParts,
   bufferStreamPart,
   drainPending,
@@ -709,6 +710,55 @@ function onServed(
  *  store read path on purpose: the delta handlers test this set (O(1)) rather
  *  than reading `bySession` for every streamed token. */
 const retryingKeys = new Set<string>();
+
+function onAssistantMessageStart(
+  event: ChatEngineEvent,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  // A restarted native message supersedes only its uncommitted predecessor.
+  // Keep the run's capture registration and already accepted frame identities.
+  drainPending(key);
+  const capture = captureBuffers.get(event.runId);
+  if (capture) capture.text = "";
+  deps.set((s) => {
+    const prev = s.bySession[key] ?? EMPTY_SESSION;
+    const messages = applyAssistantMessageBoundary(prev.messages, "start");
+    if (messages === prev.messages) return s;
+    return { bySession: { ...s.bySession, [key]: { ...prev, messages } } };
+  });
+}
+
+function onAssistantMessageEnd(
+  event: ChatEngineEvent,
+  key: string,
+  deps: EngineEventDeps,
+) {
+  // An incomplete internal frame is ordinary visible text at a committed
+  // message boundary; it cannot be joined to a later message's capture.
+  const buffered = flushInternalFrameDelta(event.runId);
+  if (buffered) {
+    bufferStreamPart(
+      key,
+      "delta",
+      buffered,
+      stampedModel(deps, event.engine, key),
+      stampedEffort(deps, event.engine, key),
+    );
+  }
+  const pending = drainPending(key);
+  deps.set((s) => {
+    const prev = s.bySession[key] ?? EMPTY_SESSION;
+    const messages = applyAssistantMessageBoundary(
+      pending
+        ? applyStreamParts(prev.messages, pending.parts, pending.model, pending.effort)
+        : prev.messages,
+      "end",
+    );
+    if (messages === prev.messages) return s;
+    return { bySession: { ...s.bySession, [key]: { ...prev, messages } } };
+  });
+}
 
 function onDelta(
   event: ChatEngineEvent,
@@ -2058,6 +2108,12 @@ export function handleEngineEvents(
     }
 
     switch (event.kind) {
+      case "assistant_message_start":
+        onAssistantMessageStart(event, key, deps);
+        break;
+      case "assistant_message_end":
+        onAssistantMessageEnd(event, key, deps);
+        break;
       case "delta":
         onDelta(event, key, deps);
         break;

@@ -1,6 +1,6 @@
 # CC GUI 界面与交互规范（UI/UX Spec）
 
-> **版本**：v0.1（首版，随实现增量维护）
+> **版本**：v0.78（随实现增量维护）
 > **适用范围**：`src/styles`、`src/components`、`src/features` 中所有用户可见的界面与交互
 > **关联代码**：`src/styles/theme.css`（设计 token）、`src/styles/typography.css`（文本样式）、`src/components/base/*`（基础组件）、`src/i18n/{zh,en}.ts`（文案）
 
@@ -140,6 +140,8 @@
 - **压缩期间尾部指示器让位，但槽位保留**：`session.compaction` 非空时 tail 槽位不再渲染 `AgentThinking` 波浪行（原位或尾部的幕布已经在表达进行中），`null` 占位而不是把槽位整个拿掉；`count = rows.length + (streaming || session.compaction ? 1 : 0)` 保证压缩轮与续接轮之间的空档幕布不闪断、结束后也不留悬空占位。
 - **阈值控件按会话保存，无会话时可见但不可操作**：阈值数字输入（1–100 整数，`normalizeAutoCompactThreshold` 统一夹取与取整）与闪电开关在状态栏上下文弹层的用量卡底部（`AutoCompactControls`，`agent-limits-card.tsx`），存储键 `ccgui-next.chat.autoCompactBySession`（`auto-compact-context.ts`，默认阈值 `DEFAULT_AUTO_COMPACT_THRESHOLD = 80`），按 `sessionKey` 读写，换会话即换设置、新建待发会话的设置在拿到真实 sessionId 时随会话迁移。没有会话时两个控件保持可见（首启就能看到入口、卡片行高不跳）但禁用：`cursor-not-allowed opacity-50`，输入框走原生 `disabled`；开关**刻意不用原生 `disabled`**——原生禁用收不到 hover/focus，解释禁用原因的 tooltip 就永远读不到，所以用 `aria-disabled` + press 守卫（`agent-limits-card.tsx` 注释），tooltip 文案换成 `chat.autoCompactNoSession`（「新建或打开一个会话后可设置；阈值按会话保存」），可用态才显示「开启 / 关闭自动压缩」。
 - **续接只回到原来那个会话标签页**：自动压缩完成后由 footer 发一次 `chat.autoCompactResume` 把任务接回去，条件收在 `shouldResumeAfterAutoCompact`：必须是阈值触发、同一个会话的标签页仍在 `openTabs` 里、压缩没有报错、用户没有按停止、没有排队消息、会话没有停在问答 / 审批 dock。压缩期间用户关掉了标签页就什么都不做，绝不回落到当前活动会话（`ConversationFooter.tsx` 的 `resumeAfterAutoCompact`，与 `refreshSessionUsage` 的「closed tab 不得回退到 active」是同一条约束）——那条续接指令是一条真实用户消息，落到别的会话会让它真的开始续作。
+- **压缩续接的正文边界由原生消息起止决定**：OMP 的原地压缩会先断开事件订阅再中断当前回合，被打断的那条消息**没有** `message_end`，所以宿主不能靠「上一行还活着」继续往里追加。后端按原生消息边界下发 `assistant_message_start` / `assistant_message_end`（`pi_family.rs` 只在 assistant `message_start` 发起始、只在 assistant 且 `stopReason` 为 `stop`/`length`/`toolUse` 时发结束，`reader.rs` 以 `data: null` 走既有有序信封）。前端收到起始时只丢弃**尚未结束**的 assistant / thinking 活动行与未刷新的 chunk（`stream.ts` 的 `applyAssistantMessageBoundary`），已落定正文、工具行与其它会话不动；收到结束时把缓冲内容落定成一条独立消息。因此压缩前的半句不会和续接后的新正文拼成一段，连续两条正常消息也不会被并进同一行。两个边界都不是回合终态：`streaming`、压缩状态与路由保持不变，用户按停止后已输出的半句仍保留，迟到的边界不会复活已结束的回合。
+- **阈值判定用真实占用，显示仍是整数**：`usageBreakdown` 的 `pct` 现在是未取整的真实比例（`usage-breakdown.ts`），仪表与用量卡在渲染时才 `Math.round`（`ConversationFooter.tsx`）。判定与重新布防都用真实值：18,410 / 400,000 实为 4.6025%，显示成 5% 但不再触发 5% 阈值，回合收尾因此不会再多发一次压缩、也不会出现 `Nothing to compact (session too small)` 告警；真正达到或越过阈值（如 20,000 / 400,000 = 5%）照常触发。重试间距保持整百分点：`shouldAutoCompact` 比较两侧取整后的百分比（`auto-compact-context.ts`），所以更高的精度不会把微小增长变成压缩风暴。
 
 ## 4. 动作反馈
 
@@ -275,6 +277,7 @@ const feedback = useRunningFeedback(store.loading);
 
 | 版本 | 时间 | 内容 |
 |---|---|---|
+| v0.78 | 2026-10-08 | 压缩续接与阈值精度（§3.1）：按原生 `assistant_message_start` / `assistant_message_end` 界定正文，起始只替换未结束的 assistant / thinking 活动行、结束落定独立消息，两者都不是回合终态（停止后已输出内容保留、迟到边界不复活回合）；阈值判定与重新布防改用未取整的真实占用，仪表显示仍取整，整百分点的重试间距不变 |
 | v0.77 | 2026-10-06 | 项目右键菜单渲染插件注册条目：`workspace-context-menu.tsx` 消费 `workspaceMenuRegistry`（内置项 → 分隔线 → 插件项，`compareByOrder`），目标恒为右键那一行且不改变活动项目；`label` 支持 `{ text, status: { text, tone } }` 状态小字（`success` / `muted` 语义 token）；`label` / `visible` 抛错只丢该条目、`onSelect` 失败只记日志、图标包 `PluginBoundary`；opener 与挂载不再要求宿主回调，仅插件条目也能开菜单，末个插件卸载时自动关闭。修复 CCB 等插件声明 `ui:workspace-menu` 却无入口（宿主只实现注册未消费注册表）；§3 补充规则 |
 | v0.76 | 2026-10-06 | 自动压缩的用户可见契约（§3.1）：宿主 `/compact` 在时间线原位留下常驻幕布行、引擎回合中压缩挂尾部；压缩期间尾部 `AgentThinking` 隐藏但槽位保留；阈值输入与闪电开关按会话保存，无会话时可见但禁用（`aria-disabled` + `chat.autoCompactNoSession` tooltip，不用原生 `disabled`）；续接只发回原会话标签页，压缩期间关掉标签页不续接也不落到活动会话 |
 | v0.75 | 2026-10-05 | 插件中心「已安装」页头新增来源筛选下拉（全部 / 最近安装（3 天内，按安装时间倒序）/ 市场安装 / 本地安装），按安装记录的 `source` 与 Unix 秒 `installedAt` 判定，重装 / 更新不刷新首次安装时间；筛到空可一键清除筛选；§3 补充规则 |

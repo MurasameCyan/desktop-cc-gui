@@ -142,6 +142,8 @@ describe("shouldAutoCompact", () => {
     expect(shouldAutoCompact({ ...base, attemptedAtPct: 80 })).toBe(false);
     expect(shouldAutoCompact({ ...base, attemptedAtPct: 79 })).toBe(true);
     expect(shouldAutoCompact({ ...base, usagePct: 82, attemptedAtPct: 80 })).toBe(true);
+    expect(shouldAutoCompact({ ...base, usagePct: 80.2, attemptedAtPct: 80.1 })).toBe(false);
+    expect(shouldAutoCompact({ ...base, usagePct: 80.6, attemptedAtPct: 80.1 })).toBe(true);
   });
 
   it("compacts inside a live turn only when the run can compact while streaming", () => {
