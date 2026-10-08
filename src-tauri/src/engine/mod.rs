@@ -166,6 +166,12 @@ pub struct SendRequest {
     /// 逐次调用的工具白名单（任务工作台只读节点）：引擎必须真正把它兑现
     /// 为运行时约束，否则 prepare_launch 直接拒绝——不允许用节点名假装。
     pub allowed_tools: Option<Vec<String>>,
+    /// Session-scoped native auto-compaction threshold in tokens, for the
+    /// engines that own a resume-safe in-turn compaction (claude
+    /// `--autocompact`, codex `model_auto_compact_token_limit`). Set only
+    /// while the session has auto-compaction enabled: `None` leaves the
+    /// CLI's own configuration alone. Engines without the knob ignore it.
+    pub auto_compact_threshold_tokens: Option<u64>,
 }
 pub struct BuiltCommand {
     pub command: Command,
@@ -362,6 +368,8 @@ fn fallback_home() -> PathBuf {
 pub struct SendResult {
     pub run_id: String,
     pub session_id: Option<String>,
+    /// Confirmed transport capability for this exact run, not its engine label.
+    pub live_compact: bool,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -528,6 +536,7 @@ fn prepare_launch(
     computer_use: Option<bool>,
     memory_bot: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    auto_compact_threshold_tokens: Option<u64>,
     wsl: bool,
 ) -> Result<Launch, String> {
     let engine_impl = engine_by_id(engine).ok_or_else(|| format!("unknown engine: {engine}"))?;
@@ -622,6 +631,10 @@ fn prepare_launch(
             })
             .filter(|_| engine_impl.supports_memory()),
         allowed_tools,
+        // Only engines with a resume-safe in-turn compaction take this; the
+        // rest keep waiting for idle and the host's own `/compact`.
+        auto_compact_threshold_tokens: auto_compact_threshold_tokens
+            .filter(|_| matches!(engine, "claude" | "codex")),
     };
     let bin = engine_bin(&settings, engine);
     // Host-transport engines spawn through their driver instead: codex/grok
@@ -658,6 +671,9 @@ fn prepare_launch(
             codex::apply_channel(&mut built.command, provider, &channel_env, &req)
         }
         ("grok", Some(provider)) => grok::isolate_channel(&mut built, provider, &req),
+        ("omp", _) if !wsl && !pi_family::acp_plan_requested(&req) && built.keep_stdin_open => {
+            pi_family::enable_live_compact(&mut built)
+        }
         _ => Ok(()),
     };
     if let Err(error) = configured {
@@ -692,6 +708,7 @@ pub async fn send_message(
     run_id: Option<String>,
     computer_use: Option<bool>,
     memory_bot: Option<String>,
+    auto_compact_threshold_tokens: Option<u64>,
 ) -> Result<SendResult, String> {
     send_message_inner(
         &state,
@@ -709,6 +726,7 @@ pub async fn send_message(
         run_id,
         computer_use,
         memory_bot,
+        auto_compact_threshold_tokens,
     )
     .await
 }
@@ -755,6 +773,9 @@ pub(crate) async fn plugin_agent_send(
         None,
         None,
         allowed_tools,
+        // Plugin agent turns are host-owned and short; no session-level
+        // auto-compaction setting applies to them.
+        None,
     )
     .await
 }
@@ -817,6 +838,8 @@ pub(crate) async fn mission_agent_send(
         None,
         None,
         allowed_tools,
+        // Mission nodes are host-owned turns, not chat sessions.
+        None,
     )
     .await
 }
@@ -838,6 +861,7 @@ pub async fn send_message_inner(
     run_id: Option<String>,
     computer_use: Option<bool>,
     memory_bot: Option<String>,
+    auto_compact_threshold_tokens: Option<u64>,
 ) -> Result<SendResult, String> {
     send_message_inner_with_sink(
         state,
@@ -857,6 +881,7 @@ pub async fn send_message_inner(
         computer_use,
         memory_bot,
         None,
+        auto_compact_threshold_tokens,
     )
     .await
 }
@@ -880,6 +905,7 @@ async fn send_message_inner_with_sink(
     computer_use: Option<bool>,
     memory_bot: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    auto_compact_threshold_tokens: Option<u64>,
 ) -> Result<SendResult, String> {
     let run_id = run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if run_id.is_empty()
@@ -921,6 +947,7 @@ async fn send_message_inner_with_sink(
                 stdin: None,
                 questions: Arc::new(Mutex::new(HashMap::new())),
                 plans: Arc::new(Mutex::new(HashMap::new())),
+                live_compact: None,
             },
         );
     }
@@ -945,6 +972,7 @@ async fn send_message_inner_with_sink(
         computer_use,
         memory_bot,
         allowed_tools,
+        auto_compact_threshold_tokens,
     )
     .await;
     if result.is_err() {
@@ -977,6 +1005,7 @@ async fn send_reserved(
     computer_use: Option<bool>,
     memory_bot: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    auto_compact_threshold_tokens: Option<u64>,
 ) -> Result<SendResult, String> {
     // WSL 远程工作区:引擎进程经 ssh 在发行版内执行(见 wsl_transport)。
     let wsl_tp = wsl_transport::transport_for_workspace(&state.db, &workspace_path);
@@ -999,6 +1028,7 @@ async fn send_reserved(
         computer_use,
         memory_bot,
         allowed_tools,
+        auto_compact_threshold_tokens,
         wsl_tp.is_some(),
     )?;
     // Host-stream engines drive their own transport: no child process — the
@@ -1146,6 +1176,10 @@ async fn send_reserved(
         }
     };
     let child = Arc::new(TokioMutex::new(child));
+    // Only local rpc-ui has the session-scoped native continuation overlay.
+    // ACP returned above; remote runs retain their existing launch behavior.
+    let live_compact = (engine == "omp" && wsl_tp.is_none() && kept_stdin.is_some())
+        .then(|| Arc::new(parking_lot::Mutex::new(registry::LiveCompactionState::default())));
     state.processes.insert(
         run_id.clone(),
         ChildEntry {
@@ -1157,6 +1191,7 @@ async fn send_reserved(
             stdin: kept_stdin.clone(),
             questions: Arc::clone(&questions),
             plans: Arc::clone(&plans),
+            live_compact: live_compact.clone(),
         },
     );
     if let Some(session_id) = launch.built.preassigned_session_id.as_deref() {
@@ -1171,6 +1206,7 @@ async fn send_reserved(
                 stdin: kept_stdin.clone(),
                 questions: Arc::clone(&questions),
                 plans: Arc::clone(&plans),
+                live_compact: live_compact.clone(),
             },
         );
     }
@@ -1220,6 +1256,7 @@ async fn send_reserved(
     Ok(SendResult {
         run_id,
         session_id: launch.built.preassigned_session_id,
+        live_compact: live_compact.as_ref().is_some_and(|state| state.lock().ready),
     })
 }
 /// Virtual run path for engines that drive their own transport
@@ -1245,6 +1282,7 @@ async fn send_host_stream(
         stdin: None,
         questions: Arc::new(Mutex::new(HashMap::new())),
         plans: Arc::new(Mutex::new(HashMap::new())),
+        live_compact: None,
     };
     state.processes.insert(run_id.clone(), entry.clone());
     if let Some(session_id) = launch.req.session_id.as_deref() {
@@ -1314,6 +1352,7 @@ async fn send_host_stream(
     Ok(SendResult {
         run_id,
         session_id: resume_session_id,
+        live_compact: false,
     })
 }
 /// Async + spawn_blocking: the kill waits for the Windows tree walk to
@@ -1328,6 +1367,17 @@ pub async fn interrupt_session(
     tauri::async_runtime::spawn_blocking(move || registry.kill(&session_id))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Deliver native compact + a post-compaction state read to a confirmed
+/// local OMP rpc-ui run. ACK means delivered, not completed; stdout owns
+/// progress and the native continuation keeps the original chat run alive.
+#[tauri::command]
+pub async fn compact_active_run(
+    state: tauri::State<'_, crate::AppState>,
+    run_id: String,
+) -> Result<(), String> {
+    state.processes.compact_run(&run_id).await
 }
 /// Answer a pending question card. Five transports share this command:
 /// - claude (control protocol): the answers merge into the parked tool input
@@ -1882,6 +1932,7 @@ mod permission_tests {
             computer_use: None,
             memory_bot: None,
             allowed_tools: None,
+            auto_compact_threshold_tokens: None,
         }
     }
 
@@ -2744,6 +2795,7 @@ mod retry_lifecycle_tests {
                     stdin: None,
                     questions: Arc::new(Mutex::new(HashMap::new())),
                     plans: Arc::new(Mutex::new(HashMap::new())),
+                    live_compact: None,
                 },
             );
         }
@@ -2940,6 +2992,7 @@ mod plan_respond_tests {
                 stdin,
                 questions: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 plans: Arc::new(Mutex::new(plans)),
+                live_compact: None,
             },
         );
     }

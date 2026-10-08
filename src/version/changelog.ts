@@ -29,6 +29,16 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.1.2",
+    date: "2026-10-08",
+    content: {
+      zh: `修复
+- **响应中的上下文压缩**：手动压缩按钮在 OMP 回合响应期间可用，压缩在同一进程内原地完成，原任务继续跑，不再中断重发；自动压缩不再要求会话空闲，持续响应中实时占用越过阈值即在当前回合内压缩，压缩后由 OMP 原生续接，不补发「继续」。Codex / Claude 改为每次发送下发该会话阈值，由引擎在安全边界自行压缩；其余引擎保持空闲回合压缩。`,
+      en: `Fixes
+- **Compaction during a response**: The manual compact button is available while an OMP turn is streaming; the compaction runs in place inside the same process and the original task keeps going, with no interrupt-and-resend. Automatic compaction no longer waits for an idle session: once live usage crosses the threshold during a long response, the current turn compacts and OMP's own loop continues the task, so no "continue" nudge is sent. Codex and Claude now receive the session threshold on every send and compact at their own safe boundaries; other engines keep idle-turn compaction.`,
+    },
+  },
+  {
     version: "1.1.1",
     date: "2026-10-07",
     content: {

@@ -29,6 +29,14 @@ export interface SessionState {
   nextBefore: number | null;
   loading: boolean;
   streaming: boolean;
+  /** Immutable run id currently cleared for an in-place compaction. The send
+   *  ACK only proves transport support; the engine grants real readiness with
+   *  `live_compact_ready` once its agent loop starts. The grant is one-shot:
+   *  `compact_run` spends the backend's `ready`, so the correlated completion
+   *  retires this id and the loop's next `agent_start` re-grants it. */
+  liveCompactRunId?: string | null;
+  /** Last host threshold attempt; follows the session across views/rekeying. */
+  autoCompactAttemptedAtPct?: number | null;
   /** Epoch ms when the current streaming turn began; drives the tail
    * indicator's elapsed timer so it survives the indicator's unmount/remount
    * cycle (idle ↔ growing) instead of restarting from 0 every pause. */
@@ -57,14 +65,10 @@ export interface SessionState {
    * not a failure: it clears on the next content event or when the turn
    * settles. `null` when nothing is being retried. */
   retry: { attempt: number; max: number; message: string } | null;
-  /** Context compaction in progress. `automatic` means the engine started it
-   *  mid-turn (omp rpc-ui `auto_compaction_*`) and the engine's own events
-   *  clear it; a compaction we send ourselves keeps `automatic: false` and is
-   *  cleared when the compact turn settles. `trigger` records who asked for
-   *  ours: the composer action ("manual") or the per-session usage threshold
-   *  ("threshold"); it only labels the indicator and never gates cleanup. */
+  /** Engine maintenance owns automatic progress; host live requests own their
+   *  runId until the correlated completion. Idle /compact owns the turn. */
   compaction:
-    | { automatic: boolean; startedAt: number; trigger?: "manual" | "threshold" }
+    | { automatic: boolean; startedAt: number; trigger?: "manual" | "threshold"; runId?: string }
     | null;
   /** Messages typed while a turn streams; sent FIFO when the turn ends. */
   queue: QueuedMessage[];
@@ -83,6 +87,7 @@ export const EMPTY_SESSION: SessionState = {
   nextBefore: null,
   loading: false,
   streaming: false,
+  liveCompactRunId: null,
   turnStartedAt: null,
   activeModel: null,
   activeEffort: null,
@@ -206,6 +211,23 @@ export function touchRun(runId: string) {
 /** Forget a settled run (its routing entry is dropped by the settling path). */
 export function untrackRun(runId: string) {
   runActivity.delete(runId);
+}
+
+/** The live run id routed to `key`, for stdin control frames that must hit
+ *  the turn that is actually running (live compaction). A session owns at
+ *  most one live chat run, so more than one routed run means the host cannot
+ *  prove ownership — return null rather than compact a stranger's task. The
+ *  session key can be rekeyed mid-turn (pending tab adopting a native id),
+ *  which is exactly why the immutable run id is what gets written. */
+export function findActiveRunForKey(key: string): string | null {
+  if (!key) return null;
+  let found: string | null = null;
+  for (const [runId, routedKey] of runRouting) {
+    if (routedKey !== key) continue;
+    if (found !== null) return null;
+    found = runId;
+  }
+  return found;
 }
 
 /** Drop routing entries silent past the TTL — their done/error never came. */
