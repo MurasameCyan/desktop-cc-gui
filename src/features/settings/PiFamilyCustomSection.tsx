@@ -343,15 +343,18 @@ function CustomProviderRow({
       ? "settings.piAuthCustomHasKey"
       : "settings.piAuthCustomNoKey",
   );
-  const nameValue = provider.name ?? provider.id;
   const editingName = editingField?.id === provider.id && editingField.field === "id";
   const editingUrl = editingField?.id === provider.id && editingField.field === "baseUrl";
+  // The row shows the provider key: that is what omp lists, what the model
+  // selector shows, and what the name pencil rewrites. A provider-level `name`
+  // (omp's schema has none — a stray one is ignored by the CLI) stays out of
+  // the display so the label and the pencil never disagree.
   const editLabel = (field: CustomProviderField) =>
     t(
       field === "id"
         ? "settings.piAuthCustomEditName"
         : "settings.piAuthCustomEditUrl",
-      { name: nameValue },
+      { name: provider.id },
     );
   const pencil = (field: CustomProviderField) => (
     <button
@@ -383,7 +386,7 @@ function CustomProviderRow({
             />
           ) : (
             <p className="flex min-w-0 items-center gap-1 text-body-regular text-text-primary">
-              <span className="truncate">{nameValue}</span>
+              <span className="truncate">{provider.id}</span>
               {pencil("id")}
             </p>
           )}

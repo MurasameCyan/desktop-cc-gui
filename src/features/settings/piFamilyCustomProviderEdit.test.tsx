@@ -242,7 +242,7 @@ describe("PiFamilyAuthSection custom provider inline edit", () => {
     expect(rowOf("last").textContent).toContain("last");
   });
 
-  it("shows the stored provider name and edits it back to blank", async () => {
+  it("keeps the key as the row label even when a stray name field exists", async () => {
     read.mockImplementation(async () => {
       const config = modelsConfig(MODELS_YML);
       return {
@@ -255,19 +255,21 @@ describe("PiFamilyAuthSection custom provider inline edit", () => {
     });
     await render();
 
-    expect(rowOf("target").textContent).toContain("别名");
+    // omp ignores a provider-level `name`, so the row must show (and edit) the
+    // key rather than a label the CLI never reads.
+    const row = rowOf("target");
+    expect(row.textContent).not.toContain("别名");
     await act(async () => {
-      pencilOf("别名", "settings.piAuthCustomEditName").click();
+      pencilOf("target", "settings.piAuthCustomEditName").click();
     });
-    const input = fieldInput("别名", "settings.piAuthCustomEditName");
+    const input = fieldInput("target", "settings.piAuthCustomEditName");
     expect(input.value).toBe("target");
 
-    await typeInto(input, "");
+    await typeInto(input, "renamed");
     await press(input, "Enter");
 
-    expect(write).not.toHaveBeenCalled();
-    expect(container.textContent).toContain(
-      i18n.t("settings.piAuthCustomFieldEmptyId"),
-    );
+    const text = write.mock.calls[0][1];
+    expect(text).toContain("  renamed:\n    name: 别名");
+    expect(text).not.toContain("  target:");
   });
 });
