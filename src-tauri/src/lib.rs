@@ -31,6 +31,7 @@ pub mod pets;
 pub mod plugin_caps;
 pub mod plugin_host;
 pub mod plugins;
+pub mod preview_protocol;
 pub mod prompts;
 pub mod provider_files;
 pub mod provider_models;
@@ -112,7 +113,7 @@ pub fn run() {
         settings::apply_codex_home(&settings);
     }
 
-    plugins::asset_protocol::register(tauri::Builder::default())
+    plugins::asset_protocol::register(preview_protocol::register(tauri::Builder::default()))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
