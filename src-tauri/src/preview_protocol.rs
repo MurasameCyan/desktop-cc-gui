@@ -245,11 +245,15 @@ mod tests {
             .unwrap()
     }
 
-    /// The frontend contract in one helper: slashes stay real, everything else
-    /// in a segment is percent-encoded (`encodeURIComponent` per segment).
+    /// The frontend contract in one helper: `previewFileUrl` turns Windows
+    /// separators into `/` first, then keeps slashes real and percent-encodes
+    /// everything else in a segment (`encodeURIComponent` per segment).
+    /// Normalizing here is what keeps a Windows base (`C:\…`, no leading
+    /// slash to trim) the same URL shape the app asks for, instead of one
+    /// backslashed segment `parse_path` has to reject.
     fn encode_uri_path(path: &str) -> String {
         let mut out = String::new();
-        for byte in path.bytes() {
+        for byte in path.replace('\\', "/").bytes() {
             let safe =
                 byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~');
             if safe {
@@ -287,6 +291,15 @@ mod tests {
         );
         assert_eq!(
             parse_path("/C%3A/x/y.css"),
+            Some(PathBuf::from("C:/x/y.css"))
+        );
+        // The drive path as Windows hands it to the URL builder: `C:\x\y.css`
+        // with no leading slash to trim. The helper has to normalize the
+        // separators the way `previewFileUrl` does, or the whole path lands in
+        // one segment and `parse_path` rejects it (regression: Windows CI).
+        let windows_base = format!("/{}", "C:\\x\\y.css".trim_start_matches('/'));
+        assert_eq!(
+            parse_path(&encode_uri_path(&windows_base)),
             Some(PathBuf::from("C:/x/y.css"))
         );
     }
