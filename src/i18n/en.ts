@@ -1196,6 +1196,13 @@ export const en: Messages = {
     piAuthCustomParseError:
       "Failed to parse the config — fix it in the editor below",
     piAuthCustomModelCount: "{{count}} models",
+    piAuthCustomEditName: "Rename \"{{name}}\"",
+    piAuthCustomEditUrl: "Edit the endpoint URL of \"{{name}}\"",
+    piAuthCustomUrlPlaceholder: "Endpoint baseUrl (blank clears it)",
+    piAuthCustomFieldSave: "Save",
+    piAuthCustomFieldEmptyUrl: "The endpoint URL cannot be empty",
+    piAuthCustomFieldEmptyId: "The name cannot be empty",
+    piAuthCustomFieldDuplicateId: "A provider named \"{{id}}\" already exists",
     piAuthCustomHasKey: "Has key",
     piAuthCustomNoKey: "No key",
     piAuthCustomEmpty: "No custom providers defined yet",
