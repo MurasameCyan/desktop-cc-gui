@@ -117,6 +117,7 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
       return Promise.resolve();
     });
   };
+
   // Resolve a CodeMirror grammar from the file extension (lazy-loaded).
   useEffect(() => {
     let cancelled = false;
