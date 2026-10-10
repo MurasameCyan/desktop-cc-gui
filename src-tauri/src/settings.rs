@@ -166,6 +166,11 @@ pub struct AppSettings {
     /// until the user folds it (设置 → 通用 → 行为 → 思考过程).
     #[serde(default)]
     pub thinking_auto_collapse: Option<bool>,
+    /// Chat content column width (设置 → 通用 → 外观 → 宽幕布): None/Some(false)
+    /// = the default centered column, Some(true) = the timeline, composer and
+    /// docks fill their pane (only the 16px gutter stays).
+    #[serde(default)]
+    pub chat_wide_layout: Option<bool>,
     /// Beta entry points (设置 → 其他 → 内测功能): feature id -> enabled.
     /// Empty/missing = the entry stays hidden; every id is off by default.
     #[serde(default)]
@@ -399,6 +404,7 @@ impl Default for AppSettings {
             decrease_ui_scale_shortcut: default_decrease_ui_scale_shortcut(),
             reset_ui_scale_shortcut: default_reset_ui_scale_shortcut(),
             thinking_auto_collapse: None,
+            chat_wide_layout: None,
             beta_features: HashMap::new(),
             terminal_shell_path: None,
             dsh_host: None,
@@ -1193,6 +1199,25 @@ mod tests {
         assert!(serde_json::to_string(&mac)
             .unwrap()
             .contains("\"titlebar\":\"mac\""));
+    }
+
+    /// 宽幕布（设置 → 通用 → 外观）：缺字段 / false 都是默认列宽，true 才会占满窗格，
+    /// 且 camelCase 键名要能往返（前端 `AppSettings.chatWideLayout` 直接读写）。
+    #[test]
+    fn chat_wide_layout_defaults_to_narrow_and_round_trips() {
+        assert_eq!(AppSettings::default().chat_wide_layout, None);
+        let parsed: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            parsed.chat_wide_layout, None,
+            "旧设置文件没有 chatWideLayout → 保持默认列宽，不能崩"
+        );
+        let wide: AppSettings = serde_json::from_str(r#"{"chatWideLayout":true}"#).unwrap();
+        assert_eq!(wide.chat_wide_layout, Some(true));
+        assert!(serde_json::to_string(&wide)
+            .unwrap()
+            .contains("\"chatWideLayout\":true"));
+        let narrow: AppSettings = serde_json::from_str(r#"{"chatWideLayout":false}"#).unwrap();
+        assert_eq!(narrow.chat_wide_layout, Some(false));
     }
     #[test]
     fn font_fields_default_to_bundled_and_round_trip_camel_case() {

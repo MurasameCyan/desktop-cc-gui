@@ -717,6 +717,9 @@ export const en: Messages = {
     uiFontWeight_standard: "Standard",
     uiFontWeight_medium: "Medium",
     uiFontWeight_bold: "Bold",
+    chatWideLayout: "Wide canvas",
+    chatWideLayoutDesc:
+      "Let chat content fill the window width instead of the centered column; off keeps the current default width",
     fontFamily: "Interface font",
     codeFontFamily: "Code font",
     codeFontFamilyDesc: "Chat code blocks and the built-in terminal",

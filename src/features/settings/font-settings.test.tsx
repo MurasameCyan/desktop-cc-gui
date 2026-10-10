@@ -46,6 +46,7 @@ import {
   uiFontStack,
 } from "./font";
 import { GeneralSection } from "./GeneralSection";
+import { useChatStore } from "@/features/chat/store";
 import { terminalFontFamily } from "@/features/terminal/appearance";
 import { changeZoom, onZoomChange, readZoomPct, ZOOM_KEY } from "@/lib/zoom";
 
@@ -294,7 +295,7 @@ describe("interface zoom", () => {
   });
 });
 
-describe("General section font rows", () => {
+describe("General section rows", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -473,5 +474,23 @@ describe("General section font rows", () => {
   it("zoom select writes the shared zoom storage the status bar reads", async () => {
     await selectOption("uiZoom", "120%");
     expect(readZoomPct()).toBe(120);
+  });
+
+  it("宽幕布 switch drives the chat column and persists the app setting", async () => {
+    const toggle = row("chatWideLayout").querySelector<HTMLElement>('input[type="checkbox"]');
+    expect(toggle).not.toBeNull();
+    expect(useChatStore.getState().wideLayout).toBe(false);
+
+    await press(toggle!);
+    expect(useChatStore.getState().wideLayout).toBe(true);
+    expect(updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ chatWideLayout: true }),
+    );
+
+    await press(toggle!);
+    expect(useChatStore.getState().wideLayout).toBe(false);
+    expect(updateAppSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ chatWideLayout: false }),
+    );
   });
 });

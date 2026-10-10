@@ -96,6 +96,14 @@ const generalEntries: SettingsSearchEntry[] = [
   },
   {
     page: "general",
+    anchor: "chatWideLayout",
+    labelKey: "settings.chatWideLayout",
+    sectionKey: "settings.appearance",
+    // 「宽幕布」是自有叫法，搜索习惯里的宽度说法另外补。
+    keywords: ["wide", "width", "layout", "full width", "宽度", "全宽", "留白"],
+  },
+  {
+    page: "general",
     anchor: "fontFamily",
     labelKey: "settings.fontFamily",
     sectionKey: "settings.appearance",

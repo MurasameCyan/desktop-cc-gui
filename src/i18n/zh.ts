@@ -693,6 +693,8 @@ export const zh = {
     uiFontWeight_standard: "标准",
     uiFontWeight_medium: "稍粗",
     uiFontWeight_bold: "加粗",
+    chatWideLayout: "宽幕布",
+    chatWideLayoutDesc: "聊天内容占满窗口宽度，不再居中留白；关闭保持当前默认宽度",
     fontFamily: "界面字体",
     codeFontFamily: "代码字体",
     codeFontFamilyDesc: "聊天代码块与内置终端",
