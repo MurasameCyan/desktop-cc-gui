@@ -215,53 +215,19 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
-/// Relay url + key to dial at launch, when the switch was left on. The tunnel
-/// is what makes the machine reachable without anyone at the desk, so an app
-/// relaunch (update, crash, reboot) has to bring it back — losing it there
-/// would need a human to notice and click.
-pub fn autostart_target(settings: &crate::settings::AppSettings) -> Option<(String, String)> {
-    if settings.web_relay_on != Some(true) {
-        return None;
-    }
-    let url = settings.web_relay_url.as_deref()?.trim();
-    let key = settings.web_relay_key.as_deref()?.trim();
-    if url.is_empty() || key.is_empty() {
-        return None;
-    }
-    Some((url.to_string(), key.to_string()))
-}
-
+/// Remember the relay address a start was pointed at, so the settings fields
+/// come back filled next time. The on/off position itself is *not* stored: the
+/// switch is session-only, and a relaunch starts with the tunnel off until the
+/// user turns it on again.
 ///
-/// Caller must hold `crate::settings::settings_write_lock()`: the read above
-/// and the persist below are one atomic read-modify-write, and start/stop
-/// linearize through that lock together with their state swap.
-fn persist_relay_state(
-    enabled: bool,
-    target: Option<(&str, &str)>,
-) -> Result<Option<String>, String> {
+/// Caller must hold `crate::settings::settings_write_lock()`: the read and the
+/// persist are one atomic read-modify-write, and starts linearize through that
+/// lock together with their state swap.
+fn persist_relay_target(url: &str, key: &str) -> Result<Option<String>, String> {
     let mut settings = crate::settings::read_settings()?;
-    if let Some((url, key)) = target {
-        settings.web_relay_url = Some(url.to_string());
-        settings.web_relay_key = Some(key.to_string());
-    }
-    settings.web_relay_on = Some(enabled);
+    settings.web_relay_url = Some(url.to_string());
+    settings.web_relay_key = Some(key.to_string());
     crate::settings::persist_settings_committed(&mut settings)
-}
-
-/// Stop half of the switch: persist first — the durable switch is
-/// authoritative, so if writing it fails the published relay and its agent
-/// task stay untouched and restart cannot silently disagree with the running
-/// state — then take the published relay down. Splitting it this way keeps
-/// the disk write outside the `relay.inner` critical section.
-fn stop_relay_after_persist(
-    persist: impl FnOnce() -> Result<Option<String>, String>,
-    take_running: impl FnOnce() -> Option<Running>,
-) -> Result<Option<String>, String> {
-    let warning = persist()?;
-    if let Some(running) = take_running() {
-        let _ = running.stop.send(true);
-    }
-    Ok(warning)
 }
 
 #[tauri::command]
@@ -287,13 +253,13 @@ pub async fn web_relay_start(
     };
     let (stop_tx, stop_rx) = watch::channel(false);
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    // Persist and publish are one settings-lock section so start/stop
-    // linearize as a single state transition, while the disk write stays out
-    // of the relay.inner critical section. On failure an existing relay
-    // remains untouched.
+    // Remembering the address and publishing the relay are one settings-lock
+    // section, so two starts cannot interleave their state swaps, while the
+    // disk write stays out of the relay.inner critical section. On failure an
+    // existing relay remains untouched.
     let persisted = {
         let _settings_guard = crate::settings::settings_write_lock();
-        match persist_relay_state(true, Some((&url, &key))) {
+        match persist_relay_target(&url, &key) {
             Ok(warning) => {
                 let mut guard = state.relay.inner.lock();
                 if let Some(previous) = guard.take() {
@@ -329,25 +295,19 @@ pub async fn web_relay_start(
     Ok(info)
 }
 
+/// Stop half of the switch. The switch position is session-only, so stopping is
+/// purely runtime: take the published relay down and signal its agent task.
+/// Nothing is written to disk — a failing write can then never leave the switch
+/// and the tunnel disagreeing — and the address stays on file for the next
+/// start.
 #[tauri::command]
 pub fn web_relay_stop(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
-    let persisted = {
-        let _settings_guard = crate::settings::settings_write_lock();
-        stop_relay_after_persist(
-            || persist_relay_state(false, None),
-            || state.relay.inner.lock().take(),
-        )
-    };
-    broadcast_relay(&app);
-    match persisted {
-        Ok(Some(warning)) => {
-            eprintln!("[relay] settings committed with warning: {warning}");
-            Ok(())
-        }
-        Ok(None) => Ok(()),
-        Err(error) => Err(error),
+    if let Some(running) = state.relay.inner.lock().take() {
+        let _ = running.stop.send(true);
     }
+    broadcast_relay(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1498,66 +1458,6 @@ mod tests {
             reported.lock().as_slice(),
             &[1, 2, 3, 4, 5, 6],
             "the switch can show how many times it has tried"
-        );
-    }
-
-    /// A relaunch restores the tunnel only when the user left it on: an address
-    /// on file is not a switch, and switching off has to stick.
-    #[test]
-    fn autostart_follows_the_remembered_switch() {
-        let mut settings = crate::settings::AppSettings::default();
-        assert!(
-            autostart_target(&settings).is_none(),
-            "off until switched on"
-        );
-        settings.web_relay_url = Some("https://relay.example".into());
-        settings.web_relay_key = Some("KEY".into());
-        assert!(
-            autostart_target(&settings).is_none(),
-            "an address is not a switch"
-        );
-        settings.web_relay_on = Some(true);
-        assert_eq!(
-            autostart_target(&settings),
-            Some(("https://relay.example".to_string(), "KEY".to_string()))
-        );
-        settings.web_relay_on = Some(false);
-        assert!(autostart_target(&settings).is_none(), "off stays off");
-    }
-
-    #[test]
-    fn stop_persistence_failure_preserves_the_running_relay() {
-        let (stop, stop_rx) = watch::channel(false);
-        let mut slot = Some(Running {
-            info: RelayInfo {
-                url: "https://relay.example".into(),
-                agent_url: "wss://relay.example/agent?key=KEY".into(),
-                connected: true,
-                error: None,
-            },
-            stop,
-            generation: 1,
-        });
-
-        let error = stop_relay_after_persist(
-            || Err("settings disk is read-only".to_string()),
-            || slot.take(),
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "settings disk is read-only");
-        assert!(slot.is_some(), "the live relay remains published");
-        assert!(!*stop_rx.borrow(), "the agent task was not stopped");
-
-        stop_relay_after_persist(
-            || Ok(Some("unrelated setting was rejected".to_string())),
-            || slot.take(),
-        )
-        .unwrap();
-        assert!(slot.is_none(), "a committed stop removes the relay");
-        assert!(
-            *stop_rx.borrow(),
-            "a committed warning still stops the agent"
         );
     }
 
