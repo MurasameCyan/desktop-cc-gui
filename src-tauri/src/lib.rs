@@ -243,9 +243,23 @@ pub fn run() {
                     }
                 });
             }
-            // No relay autostart: the 中转服务 switch is session-only, so every
-            // launch starts with the tunnel off and the user turns it on again
-            // (设置 → 远程访问 → 外网访问). Only the address and key stay on file.
+            // Relay 无人值守 autostart: the tunnel comes back on launch only
+            // when the user asked for it — the relay switch itself is
+            // session-only, so a plain relaunch starts with it off. Failures
+            // are logged, never fatal; the running task retries the dial by
+            // itself from there.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let settings = settings::read_settings().unwrap_or_default();
+                    let Some((url, key)) = relay::autostart_target(&settings) else {
+                        return;
+                    };
+                    if let Err(error) = relay::web_relay_start(handle, url, key).await {
+                        eprintln!("[relay] unattended autostart failed: {error}");
+                    }
+                });
+            }
             // Web access autostart (设置 → 远程访问 → 内网访问: 随应用自动开启)
             {
                 let handle = app.handle().clone();
@@ -592,6 +606,7 @@ pub fn run() {
             web::remote_control_active,
             relay::web_relay_start,
             relay::web_relay_stop,
+            relay::web_relay_unattended_set,
             relay::web_relay_status,
             relay::relay_deploy_pack,
             relay::relay_deploy,

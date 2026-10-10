@@ -80,9 +80,18 @@ pub struct AppSettings {
     /// Shared key the relay worker checks.
     #[serde(default)]
     pub web_relay_key: Option<String>,
+    /// 无人值守 switch (设置 → 远程访问 → 外网访问). When on, the relay dials the
+    /// stored address at launch and keeps redialing — the machine stays
+    /// reachable with nobody at the desk. Off (the default) means the relay
+    /// switch itself is session-only: the user turns it on by hand after every
+    /// launch. Off/absent ⇒ false.
+    #[serde(default)]
+    pub web_relay_unattended: Option<bool>,
     // The relay on/off position is deliberately NOT a setting: the switch is
     // session-only, so every launch starts with the tunnel off and the user
-    // turns it on again (设置 → 远程访问 → 外网访问 → 中转服务).
+    // turns it on again unless 无人值守 asked for the autostart above. Redials
+    // while the tunnel is running are unconditional — they are not gated on
+    // 无人值守.
 
     /// LAN web access auto-start switch (设置 → 远程访问 → 内网访问: 随应用自动开启).
     /// Some(true) starts the LAN bridge at application launch.
@@ -339,6 +348,7 @@ impl Default for AppSettings {
             web_auth_key: None,
             web_relay_url: None,
             web_relay_key: None,
+            web_relay_unattended: None,
             web_access_auto_start: None,
             web_access_port: None,
             web_access_token: None,
@@ -930,7 +940,7 @@ pub fn rotate_web_auth_key(app: &tauri::AppHandle) -> Result<(), String> {
 
 /// Through the sink: the webview *and* every browser attached over the bridge
 /// must see the new code, or a phone would keep showing one that is spent.
-fn announce_settings(app: &tauri::AppHandle) {
+pub(crate) fn announce_settings(app: &tauri::AppHandle) {
     use crate::event_sink::Emit;
     use tauri::Manager;
     app.state::<crate::AppState>()
@@ -1135,6 +1145,7 @@ mod tests {
         for enabled in [true, false] {
             let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
                 "webRelayOn": enabled,
+                "webRelayUnattended": enabled,
                 "webRelayUrl": "https://relay.example",
                 "webRelayKey": "SAVED_KEY"
             }))
@@ -1144,6 +1155,11 @@ mod tests {
             let saved: Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert!(saved.get("webRelayOn").is_none(), "the switch is session-only");
+            assert_eq!(
+                saved["webRelayUnattended"].as_bool(),
+                Some(enabled),
+                "无人值守 is a setting and round-trips"
+            );
             assert_eq!(saved["webRelayUrl"], "https://relay.example");
             assert_eq!(saved["webRelayKey"], "SAVED_KEY");
         }

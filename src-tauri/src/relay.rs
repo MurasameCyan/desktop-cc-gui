@@ -215,6 +215,31 @@ fn urlencode(value: &str) -> String {
         .collect()
 }
 
+/// Relay url + key to dial at launch, when 无人值守 was left on. The tunnel is
+/// what makes the machine reachable without anyone at the desk, so an app
+/// relaunch (update, crash, reboot) brings it back — but only for a user who
+/// asked for that: the plain relay switch is session-only, and this marker is
+/// the one piece of it that persists.
+pub fn autostart_target(settings: &crate::settings::AppSettings) -> Option<(String, String)> {
+    if settings.web_relay_unattended != Some(true) {
+        return None;
+    }
+    let url = settings.web_relay_url.as_deref()?.trim();
+    let key = settings.web_relay_key.as_deref()?.trim();
+    if url.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((url.to_string(), key.to_string()))
+}
+
+/// Write the 无人值守 marker. Caller must hold
+/// `crate::settings::settings_write_lock()`.
+fn persist_relay_unattended(enabled: bool) -> Result<Option<String>, String> {
+    let mut settings = crate::settings::read_settings()?;
+    settings.web_relay_unattended = Some(enabled);
+    crate::settings::persist_settings_committed(&mut settings)
+}
+
 /// Remember the relay address a start was pointed at, so the settings fields
 /// come back filled next time. The on/off position itself is *not* stored: the
 /// switch is session-only, and a relaunch starts with the tunnel off until the
@@ -295,16 +320,40 @@ pub async fn web_relay_start(
     Ok(info)
 }
 
+/// 无人值守 switch (设置 → 远程访问 → 外网访问). On writes the autostart marker —
+/// the card then dials the tunnel right away through `web_relay_start`, so this
+/// command stays a settings write. Off only clears the marker: dropping the
+/// current tunnel is the relay button's job, not this one's.
+#[tauri::command]
+pub fn web_relay_unattended_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let warning = {
+        let _guard = crate::settings::settings_write_lock();
+        persist_relay_unattended(enabled)?
+    };
+    if let Some(warning) = warning {
+        eprintln!("[relay] settings committed with warning: {warning}");
+    }
+    crate::settings::announce_settings(&app);
+    Ok(())
+}
+
 /// Stop half of the switch. The switch position is session-only, so stopping is
-/// purely runtime: take the published relay down and signal its agent task.
-/// Nothing is written to disk — a failing write can then never leave the switch
-/// and the tunnel disagreeing — and the address stays on file for the next
-/// start.
+/// purely runtime — but 无人值守 is cleared first: the user asked for the tunnel
+/// to stop, and leaving the marker set would dial it again on the next launch
+/// (persisting first means a failed write keeps the tunnel running instead of
+/// half-applying). The address stays on file for the next start.
 #[tauri::command]
 pub fn web_relay_stop(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AppState>();
+    let warning = {
+        let _guard = crate::settings::settings_write_lock();
+        persist_relay_unattended(false)?
+    };
     if let Some(running) = state.relay.inner.lock().take() {
         let _ = running.stop.send(true);
+    }
+    if let Some(warning) = warning {
+        eprintln!("[relay] settings committed with warning: {warning}");
     }
     broadcast_relay(&app);
     Ok(())
@@ -824,8 +873,8 @@ where
 /// Keeps the agent socket up. A socket that lived and then died is redialed —
 /// a blip on the desktop's uplink should not cost the phone its link — and a
 /// dial that never comes up is retried on a capped backoff. Nothing but
-/// switching the relay off stops it: unattended machines are expected to be
-/// reachable when the Worker comes back, however long that takes.
+/// switching the relay off stops it: retries follow the running tunnel and are
+/// **not** gated on 无人值守, which only decides whether a launch dials at all.
 async fn run_agent(
     app: tauri::AppHandle,
     agent: String,
@@ -1458,6 +1507,34 @@ mod tests {
             reported.lock().as_slice(),
             &[1, 2, 3, 4, 5, 6],
             "the switch can show how many times it has tried"
+        );
+    }
+
+    /// 无人值守 is what makes a relaunch dial: an address on file is not
+    /// enough, and the marker needs both halves of the address to be usable.
+    #[test]
+    fn autostart_follows_the_unattended_marker() {
+        let mut settings = crate::settings::AppSettings::default();
+        assert!(autostart_target(&settings).is_none(), "off until asked for");
+        settings.web_relay_url = Some("https://relay.example".into());
+        settings.web_relay_key = Some("KEY".into());
+        assert!(
+            autostart_target(&settings).is_none(),
+            "an address alone is not a request to reconnect"
+        );
+        settings.web_relay_unattended = Some(true);
+        assert_eq!(
+            autostart_target(&settings),
+            Some(("https://relay.example".to_string(), "KEY".to_string()))
+        );
+        settings.web_relay_unattended = Some(false);
+        assert!(autostart_target(&settings).is_none(), "off stays off");
+
+        settings.web_relay_unattended = Some(true);
+        settings.web_relay_key = Some("   ".into());
+        assert!(
+            autostart_target(&settings).is_none(),
+            "a blank key cannot dial"
         );
     }
 
