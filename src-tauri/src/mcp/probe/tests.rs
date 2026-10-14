@@ -71,6 +71,20 @@ fn payload_parses_plain_json_and_sse() {
     assert!(response_payload("not json", 1).is_none());
 }
 
+/// 界面上的数量必须是服务声明的实际工具数：详情只列前 `MAX_TOOLS` 个名字，
+/// 但计数不能被截断（rea 声明 139 个，早先界面只显示 40）。
+#[test]
+fn assemble_reports_the_declared_tool_count_not_the_truncated_list() {
+    let tools = json!({
+        "tools": (0..MAX_TOOLS + 99)
+            .map(|index| json!({ "name": format!("tool-{index}") }))
+            .collect::<Vec<_>>()
+    });
+    let result = assemble(json!({}), tools);
+    assert_eq!(result.tools.len(), MAX_TOOLS);
+    assert_eq!(result.tool_count, MAX_TOOLS + 99);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn stdio_probe_completes_the_handshake_and_reports_tools() {
@@ -90,6 +104,7 @@ done
     assert_eq!(result.server_name.as_deref(), Some("fake"));
     assert_eq!(result.protocol_version.as_deref(), Some("2025-06-18"));
     assert_eq!(result.tools, vec!["alpha", "beta"]);
+    assert_eq!(result.tool_count, 2);
     let _ = std::fs::remove_file(script);
 }
 
@@ -112,6 +127,7 @@ done
     assert_eq!(result.status, "connected", "{:?}", result.message);
     assert_eq!(result.server_name.as_deref(), Some("noisy"));
     assert!(result.tools.is_empty());
+    assert_eq!(result.tool_count, 0);
     let _ = std::fs::remove_file(script);
 }
 
@@ -263,6 +279,7 @@ async fn http_probe_parses_json_and_sse_responses() {
     assert_eq!(result.status, "connected", "{:?}", result.message);
     assert_eq!(result.server_name.as_deref(), Some("remote"));
     assert_eq!(result.tools, vec!["search"]);
+    assert_eq!(result.tool_count, 1);
 }
 
 #[tokio::test]

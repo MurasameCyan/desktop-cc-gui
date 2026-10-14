@@ -23,7 +23,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(12);
 /// `tools/list` 也可能很大（rea 的 139 个工具实测 ≈1.9 MB），旧值 1 MiB
 /// 会把整条响应丢掉，界面上看起来像「连不上」。
 const MAX_LINE: usize = crate::engine::MAX_LINE_BYTES;
-/// tools/list 返回的条目上限。
+/// tools/list 详情里最多列出的工具名数量（`tool_count` 计数不受它影响）。
 const MAX_TOOLS: usize = 40;
 const CLIENT_NAME: &str = "ccgui";
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -69,7 +69,11 @@ pub(crate) struct McpProbeResult {
     /// connected | needs_auth | failed | unsupported
     pub status: String,
     pub message: Option<String>,
+    /// 工具名，最多 `MAX_TOOLS` 个（详情列表用）。
     pub tools: Vec<String>,
+    /// `tools/list` 声明的工具总数：不受 `MAX_TOOLS` 截断影响，界面上的
+    /// 数量必须用它（rea 这类服务声明 139 个，列表里只列前 40 个）。
+    pub tool_count: usize,
     pub server_name: Option<String>,
     pub protocol_version: Option<String>,
     pub elapsed_ms: u64,
@@ -97,6 +101,7 @@ impl Default for McpProbeResult {
             status: "failed".to_string(),
             message: None,
             tools: Vec::new(),
+            tool_count: 0,
             server_name: None,
             protocol_version: None,
             elapsed_ms: 0,
@@ -515,9 +520,9 @@ fn assemble(initialized: Value, tools: Value) -> McpProbeResult {
         .and_then(|info| info.get("name"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    result.tools = tools
-        .get("tools")
-        .and_then(Value::as_array)
+    let items = tools.get("tools").and_then(Value::as_array);
+    result.tool_count = items.map_or(0, Vec::len);
+    result.tools = items
         .map(|items| {
             items
                 .iter()
