@@ -41,12 +41,22 @@ vi.mock("@/lib/events", () => ({
   listenComputerUseEscape: vi.fn(async () => () => {}),
 }));
 // The footer's heavy children are irrelevant here; only its compaction
-// orchestration is under test.
+// orchestration and the props handed to StatusBar are under test.
+const statusBarProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
 vi.mock("@/components/application/ai-chat/ai-chat-composer", () => ({
   Composer: () => null,
-  StatusBar: ({ compacting, canCompact, onCompactContext, compactHint }: { compacting: boolean; canCompact: boolean; onCompactContext: () => void; compactHint?: string }) => (
-    <button disabled={!canCompact} onClick={onCompactContext} title={compactHint}>{compacting ? "busy" : "compact"}</button>
-  ),
+  StatusBar: (props: Record<string, unknown>) => {
+    statusBarProps.current = props;
+    const compacting = props.compacting === true;
+    const canCompact = props.canCompact === true;
+    const onCompactContext = props.onCompactContext as () => void;
+    const compactHint = typeof props.compactHint === "string" ? props.compactHint : undefined;
+    return (
+      <button disabled={!canCompact} onClick={onCompactContext} title={compactHint}>
+        {compacting ? "busy" : "compact"}
+      </button>
+    );
+  },
 }));
 vi.mock("@/components/application/ai-chat/message-queue", () => ({
   MessageQueue: () => null,
@@ -289,5 +299,60 @@ describe("ConversationFooter compaction ownership", () => {
     expect(container.querySelector("button")?.title).toBe(i18n.t("chat.compactUnsupportedBusy"));
     expect(useChatStore.getState().bySession[KEY_OMP]?.compaction).toBeNull();
     expect(ipc.compactActiveRun).not.toHaveBeenCalled();
+  });
+});
+
+describe("ConversationFooter 状态栏文件夹显示", () => {
+  const ws = (id: string, path: string) => ({
+    id,
+    path,
+    name: path.split("/").pop() ?? path,
+    lastOpenedAt: null,
+    sortOrder: null,
+    groupId: null,
+  });
+
+  beforeEach(() => {
+    statusBarProps.current = null;
+    // These tests render with the armed threshold from the outer beforeEach;
+    // neutralize compaction so it can't fire async noise mid-assertion.
+    useChatStore.setState({ compactContext: vi.fn(async () => {}) as never });
+  });
+
+  it("文件夹列表与当前项优先显示工作区别名，未设别名回退到文件夹名", async () => {
+    const workspaces = [ws("w1", "/tmp/alpha"), ws("w2", WS)];
+    useChatStore.setState({
+      workspaces,
+      workspaceAliases: { w2: "我的项目" },
+      archivedWorkspaces: [],
+    });
+
+    await act(async () => {
+      root.render(<ConversationFooter {...footerProps()} workspaces={workspaces} />);
+    });
+
+    const props = statusBarProps.current!;
+    // w1 has no alias → folder basename; w2 (the active workspace) → alias.
+    expect(props.folders).toEqual(["alpha", "我的项目"]);
+    expect(props.selectedFolder).toBe("我的项目");
+  });
+
+  it("重名工作区按下标选择目标，不会字符串匹配到第一个同名项", async () => {
+    const startNewChat = vi.fn();
+    const workspaces = [ws("w1", "/tmp/one/app"), ws("w2", "/tmp/two/app")];
+    useChatStore.setState({ workspaces, workspaceAliases: {}, archivedWorkspaces: [] });
+
+    await act(async () => {
+      root.render(
+        <ConversationFooter {...footerProps()} workspaces={workspaces} startNewChat={startNewChat} />,
+      );
+    });
+
+    const props = statusBarProps.current!;
+    expect(props.folders).toEqual(["app", "app"]);
+    act(() => {
+      (props.onFolderSelect as (index: number) => void)(1);
+    });
+    expect(startNewChat).toHaveBeenCalledWith("/tmp/two/app");
   });
 });
