@@ -29,6 +29,18 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.1.5",
+    date: "2026-10-16",
+    content: {
+      zh: `🐛 修复
+- **重启客户端后聊天里的图片不再显示**：omp 把图片字节存进自己的内容寻址库（<agent dir>/blobs/<sha256>），转录本里只留 blob:sha256:<hex> 引用；重开客户端后聊天记录由转录本重新解析，而解析器把这条引用本身当成 base64 载荷拼进 data URL，图片于是解不出来（只留一个破图占位）。现在引用必须先是裸 64 位小写十六进制（带后缀、带路径段的引用一律拒绝），再按它到 CLI 的 blob 库取字节转成 data URL，上限 8 MiB（与 composer 附件上限同源，能发出去的图片一定解析得出来）；取不到就不出图，不再造出解不开的图。pi 的内联 base64、claude 的 base64 block、codex 的 data URL 走原路径不变。
+`,
+      en: `🐛 Fixes
+- **Images in the chat no longer disappeared after restarting the client**: omp keeps image bytes in its own content-addressed store (<agent dir>/blobs/<sha256>) and leaves only a blob:sha256:<hex> reference in the transcript; on reopen the chat is rebuilt by re-parsing that transcript, and the parser wrapped the reference itself as the base64 payload of a data URL, so the image could not be decoded and only a broken placeholder remained. A reference is now checked as a bare 64-char lowercase hex digest first (suffixed or path-like references are rejected), then resolved against the CLI's blob store into a data URL, capped at 8 MiB — the same limit the composer applies to attachments, so any image a send can carry still resolves. An unresolvable reference yields no image instead of an undecodable one, and pi's inline base64, claude's base64 blocks and codex's data URLs are untouched.
+`,
+    },
+  },
+  {
     version: "1.1.4",
     date: "2026-10-14",
     content: {
