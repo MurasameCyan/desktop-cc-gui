@@ -233,7 +233,7 @@ function extractContextGroups(source: ts.SourceFile): { groups: ContextGroup[]; 
       const declaration = name ? declarations.get(name) : undefined;
       if (declaration && !visited.has(declaration.name.text)) {
         visited.add(declaration.name.text);
-        definitions.push(declaration.getText(source));
+        definitions.push(declaration.getText(source).replace(/\r\n?/g, "\n"));
         ts.forEachChild(declaration, collect);
       }
       ts.forEachChild(node, collect);
