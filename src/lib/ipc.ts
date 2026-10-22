@@ -1534,6 +1534,8 @@ export const ipc = {
     invoke<SessionFileDocument>("read_session_file", { engine, sessionId, workspacePath, remotePath }),
   writeSessionFile: (engine: string, sessionId: string, content: string, workspacePath?: string, remotePath?: string) =>
     invoke<SessionFileDocument>("write_session_file", { engine, sessionId, content, workspacePath, remotePath }),
+  openSessionFileInDefaultEditor: (engine: string, sessionId: string) =>
+    invoke<void>("open_session_file_in_default_editor", { engine, sessionId }),
   loadSessionPage: (
     engine: string,
     sessionId: string,

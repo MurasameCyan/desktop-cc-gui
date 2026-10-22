@@ -559,6 +559,31 @@ pub async fn read_session_file(state: tauri::State<'_, crate::AppState>, engine:
         .await.map_err(|e| e.to_string())?
 }
 
+fn external_text_source(db: &crate::db::Db, engine: &str, session_id: &str) -> Result<PathBuf, String> {
+    validate_engine(engine)?;
+    validate_session_id(session_id)?;
+    if matches!(engine, "dsh" | "opencode" | "agy") {
+        return Err("native session uses compressed or database storage; use software supporting its format, not a text editor".into());
+    }
+    let source = local_source(db, engine, session_id)?;
+    regular_source(&source)?;
+    Ok(source)
+}
+
+#[tauri::command]
+pub async fn open_session_file_in_default_editor(state: tauri::State<'_, crate::AppState>,
+    engine: String, session_id: String) -> Result<(), String> {
+    let db = Arc::clone(&state.db);
+    let processes = Arc::clone(&state.processes);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _edit = processes.begin_session_edit(&session_id)?;
+        // Resolve the current registered source again. Never launch a stale UI
+        // path or read the oversized transcript into memory just to open it.
+        let source = external_text_source(&db, &engine, &session_id)?;
+        crate::open_app::open_in_default_text_editor(&source)
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn write_session_file(state: tauri::State<'_, crate::AppState>, engine: String,
     session_id: String, content: String, workspace_path: Option<String>, remote_path: Option<String>)
@@ -643,6 +668,38 @@ mod tests {
         let after = saved.text;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
         assert_eq!(read_local(&db, "omp", "sid-one").unwrap().text, after);
+    }
+
+    #[test]
+    fn external_editor_resolves_oversized_registered_source_without_reading_a_prefix() {
+        let scratch = Scratch::new();
+        let db = scratch.db();
+        let path = scratch.path("2026-10-22T12-00-00_sid-one.jsonl");
+        let original = omp_text("sid-one", "汉🦀 original");
+        std::fs::write(&path, &original).unwrap();
+        let size = MAX_SESSION_DOCUMENT_BYTES + 1;
+        OpenOptions::new().write(true).open(&path).unwrap().set_len(size).unwrap();
+        register(&db, "omp", "sid-one", &path);
+        assert!(read_local(&db, "omp", "sid-one").err().unwrap().contains("64 MiB"));
+        assert_eq!(external_text_source(&db, "omp", "sid-one").unwrap(), path);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        let mut prefix = vec![0; original.len()];
+        File::open(&path).unwrap().read_exact(&mut prefix).unwrap();
+        assert_eq!(prefix, original.as_bytes());
+        assert!(external_text_source(&db, "codex", "sid-one").is_err());
+        assert!(external_text_source(&db, "omp", "../sid-one").is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(external_text_source(&db, "omp", "sid-one").is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn external_text_editor_rejects_compressed_and_database_storage() {
+        let scratch = Scratch::new();
+        let db = scratch.db();
+        for engine in ["dsh", "opencode", "agy"] {
+            assert!(external_text_source(&db, engine, "sid-one").unwrap_err().contains("not a text editor"));
+        }
     }
 
     #[test]

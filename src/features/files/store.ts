@@ -59,6 +59,11 @@ export interface OpenFileState {
   name?: string;
 }
 
+type ExternalEditorLaunch =
+  | { status: "opening"; promise: Promise<void> }
+  | { status: "opened" }
+  | { status: "error"; error: string };
+
 interface FilesStore {
   /** Folder the tree is rooted at; "" = unset. Persisted to localStorage. */
   root: string;
@@ -83,6 +88,8 @@ interface FilesStore {
   activeFilePath: string | null;
   /** Paths with unsaved editor drafts (reported by EditorPane). */
   dirtyPaths: Record<string, true>;
+  /** Session-identity launch state survives reloads and pending tab reopens. */
+  externalEditorLaunches: Record<string, ExternalEditorLaunch>;
   /** Tree item staged by the context menu's Copy; consumed by Paste. */
   clipboard: TreeClipboard | null;
   /** Folder the workspace file search is scoped to (absolute); null = closed. */
@@ -103,6 +110,8 @@ interface FilesStore {
   openFile: (path: string) => Promise<void>;
   /** Open the CLI's complete native transcript in the existing editor. */
   openSessionFile: (session: SessionMeta) => Promise<void>;
+  /** Ask the host's default text editor to open a stopped, local transcript. */
+  openSessionFileExternally: (path: string) => Promise<void>;
   saveFile: (path: string, content: string) => Promise<string>;
   /** Switch the center area to an already-open file tab. */
   activateFile: (path: string) => void;
@@ -158,6 +167,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   fileStates: {},
   activeFilePath: null,
   dirtyPaths: {},
+  externalEditorLaunches: {},
   clipboard: null,
   searchRoot: null,
 
@@ -353,6 +363,44 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     }));
     await get().reloadFile(key);
   },
+  openSessionFileExternally: async (path) => {
+    const target = get().fileStates[path]?.session;
+    if (!target) throw new Error("Not a native session editor");
+    const key = `session:${target.engine}/${target.sessionId}`;
+    const current = get().externalEditorLaunches[key];
+    if (current?.status === "opening") return current.promise;
+    const finish = (result: Exclude<ExternalEditorLaunch, { status: "opening" }>) => {
+      set((s) => {
+        const launch = s.externalEditorLaunches[key];
+        if (launch?.status !== "opening" || launch.promise !== promise) return s;
+        const externalEditorLaunches = { ...s.externalEditorLaunches };
+        if (s.fileStates[key]?.session) externalEditorLaunches[key] = result;
+        else delete externalEditorLaunches[key];
+        return { externalEditorLaunches };
+      });
+    };
+    // Publish the promise before any host call or validation can settle it.
+    const promise = Promise.resolve().then(async () => {
+      try {
+        if (target.remote || target.remotePath) throw new Error(i18n.t("files.externalEditorRemote"));
+        if (["dsh", "opencode", "agy"].includes(target.engine)) {
+          throw new Error(i18n.t("files.externalEditorStructured"));
+        }
+        const chatKey = `${target.engine}/${target.sessionId}`;
+        const chat = useChatStore.getState();
+        if (chat.streamingByKey[chatKey] || chat.bySession[chatKey]?.streaming) {
+          throw new Error(i18n.t("chat.sessionEditRunning"));
+        }
+        await ipc.openSessionFileInDefaultEditor(target.engine, target.sessionId);
+        finish({ status: "opened" });
+      } catch (error) {
+        finish({ status: "error", error: errorText(error) });
+        throw error;
+      }
+    });
+    set((s) => ({ externalEditorLaunches: { ...s.externalEditorLaunches, [key]: { status: "opening", promise } } }));
+    await promise;
+  },
 
   saveFile: async (path, content) => {
     const entry = get().fileStates[path];
@@ -436,13 +484,15 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       delete fileStates[path];
       const dirtyPaths = { ...s.dirtyPaths };
       delete dirtyPaths[path];
+      const externalEditorLaunches = { ...s.externalEditorLaunches };
+      if (externalEditorLaunches[path]?.status !== "opening") delete externalEditorLaunches[path];
       let activeFilePath = s.activeFilePath;
       if (activeFilePath === path) {
         const idx = s.openFiles.indexOf(path);
         // Focus the tab that slid into the closed one's slot (or the last).
         activeFilePath = openFiles[Math.min(idx, openFiles.length - 1)] ?? null;
       }
-      return { openFiles, fileStates, dirtyPaths, activeFilePath };
+      return { openFiles, fileStates, dirtyPaths, activeFilePath, externalEditorLaunches };
     }),
   moveOpenFile: (path, toIndex) =>
     set((s) => {
