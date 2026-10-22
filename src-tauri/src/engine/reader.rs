@@ -1631,6 +1631,7 @@ mod terminal_event_tests {
             engine_id: "omp".into(),
             run_id: "assistant-boundary-test".into(),
             db: None,
+            followup: None,
         };
         let mut state = TurnState::new(Some("session".into()));
         state.attempt_error = Some("previous attempt".into());

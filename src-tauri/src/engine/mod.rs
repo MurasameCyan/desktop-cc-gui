@@ -950,6 +950,7 @@ async fn send_message_inner_with_sink(
             return Ok(SendResult {
                 run_id: live_run,
                 session_id,
+                live_compact: false,
             });
         }
     }
@@ -3129,6 +3130,7 @@ mod retry_lifecycle_tests {
                 stdin: Some(stdin),
                 questions: Arc::new(Mutex::new(HashMap::new())),
                 plans: Arc::new(Mutex::new(HashMap::new())),
+                live_compact: None,
             },
         );
         registry.set_awaiting_followup(session_id, run_id, test_followup_prefs());

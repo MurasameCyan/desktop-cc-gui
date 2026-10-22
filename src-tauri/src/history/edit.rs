@@ -742,6 +742,7 @@ mod tests {
             reader_abort: Arc::new(std::sync::OnceLock::new()), stdin: None,
             questions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             plans: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            live_compact: None,
         };
         processes.0.lock().unwrap().insert("sid-one".into(), entry.clone());
         assert!(processes.begin_session_edit("sid-one").is_err());
