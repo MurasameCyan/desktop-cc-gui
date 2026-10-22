@@ -856,6 +856,10 @@ pub(super) async fn dispatch(
             let a: WriteSessionFileArgs = parse_args(&raw)?;
             ser(crate::history::edit::write_session_file(app.state(), a.engine, a.session_id, a.content, a.workspace_path, a.remote_path).await)
         }
+        "open_session_file_in_default_editor" => {
+            let a: EngineSessionArgs = parse_args(&raw)?;
+            ser(crate::history::edit::open_session_file_in_default_editor(app.state(), a.engine, a.session_id).await)
+        }
         "delete_session" => {
             let a: EngineSessionArgs = parse_args(&raw)?;
             ser(crate::history::reader::delete_session(app.state(), a.engine, a.session_id).await)

@@ -483,6 +483,7 @@ pub fn run() {
             history::reader::load_remote_session_page,
             history::edit::read_session_file,
             history::edit::write_session_file,
+            history::edit::open_session_file_in_default_editor,
             history::search::search_messages,
             history::reader::delete_session,
             history::reader::delete_remote_session,
