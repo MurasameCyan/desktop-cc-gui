@@ -4,6 +4,7 @@ import { useGitStore } from "@/features/git/store";
 import { useMissionStore } from "@/features/mission/store";
 import { usePluginHubStore } from "@/features/plugins/hub/store";
 import { usePluginTabsStore } from "@/features/plugins/runtime/center-tabs";
+import { useChatStore } from "@/features/chat/store";
 import { useReleaseNotesTabStore } from "@/features/update/notes-tab";
 import {
   ipc,
@@ -11,8 +12,11 @@ import {
   type FileContent,
   type FileTreeColor,
   type RepositorySummary,
+  type SessionFileDocument,
+  type SessionMeta,
 } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
+import i18n from "@/lib/i18n";
 import { writeStored } from "@/lib/storage";
 import { installFilesBridge, readRemoteAware } from "./remote-files";
 
@@ -49,6 +53,10 @@ export interface OpenFileState {
   error: string | null;
   /** Bumped on every successful (re)load so the editor resets its draft. */
   loadNonce: number;
+  /** Native session tabs are keyed by identity, not a shared database path. */
+  session?: Pick<SessionMeta, "engine" | "sessionId" | "workspacePath" | "remote" | "remotePath">;
+  sourcePath?: string;
+  name?: string;
 }
 
 interface FilesStore {
@@ -93,6 +101,9 @@ interface FilesStore {
   selectPath: (path: string | null, isDir?: boolean) => void;
   /** Open a file as a center tab (or focus its existing tab). */
   openFile: (path: string) => Promise<void>;
+  /** Open the CLI's complete native transcript in the existing editor. */
+  openSessionFile: (session: SessionMeta) => Promise<void>;
+  saveFile: (path: string, content: string) => Promise<string>;
   /** Switch the center area to an already-open file tab. */
   activateFile: (path: string) => void;
   /** Return the center area to the chat (a chat tab was selected). */
@@ -315,6 +326,61 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
     await get().reloadFile(path);
   },
 
+  openSessionFile: async (session) => {
+    const key = `session:${session.engine}/${session.sessionId}`;
+    dismissNonFileSurfaces();
+    const existing = get().fileStates[key];
+    if (existing) {
+      set({ activeFilePath: key });
+      if (existing.error) await get().reloadFile(key);
+      return;
+    }
+    const sourcePath = (session.remote ? session.remotePath : session.filePath) ?? "";
+    const target = {
+      engine: session.engine,
+      sessionId: session.sessionId,
+      workspacePath: session.workspacePath,
+      remote: session.remote,
+      remotePath: session.remotePath,
+    };
+    set((s) => ({
+      openFiles: [...s.openFiles, key],
+      fileStates: {
+        ...s.fileStates,
+        [key]: { path: key, sourcePath, name: fileName(sourcePath), session: target, content: null, loading: true, error: null, loadNonce: 0 },
+      },
+      activeFilePath: key,
+    }));
+    await get().reloadFile(key);
+  },
+
+  saveFile: async (path, content) => {
+    const entry = get().fileStates[path];
+    if (!entry?.content || entry.content.kind !== "text" || entry.content.truncated || entry.content.readOnly) {
+      throw new Error("File is not editable");
+    }
+    const target = entry.session;
+    let savedText = content;
+    let savedDocument: SessionFileDocument | undefined;
+    if (target) {
+      const key = `${target.engine}/${target.sessionId}`;
+      const chat = useChatStore.getState();
+      if (chat.streamingByKey[key] || chat.bySession[key]?.streaming) {
+        throw new Error(i18n.t("chat.sessionEditRunning"));
+      }
+      savedDocument = await ipc.writeSessionFile(target.engine, target.sessionId, content, target.remote ? target.workspacePath : undefined, target.remote ? target.remotePath : undefined);
+      savedText = savedDocument.text;
+    } else {
+      await ipc.writeFile(path, content);
+    }
+    set((s) => {
+      const current = s.fileStates[path];
+      if (!current || !current.content || current.session !== target) return {};
+      return { fileStates: { ...s.fileStates, [path]: { ...current, ...(savedDocument ? { sourcePath: savedDocument.path, name: savedDocument.name } : {}), content: { ...current.content, text: savedText } } } };
+    });
+    return savedText;
+  },
+
   activateFile: (path) => {
     if (get().fileStates[path]) set({ activeFilePath: path });
     // A file taking the center dismisses every other surface in view
@@ -325,6 +391,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
   clearActiveFile: () => set({ activeFilePath: null }),
 
   reloadFile: async (path) => {
+    const target = get().fileStates[path]?.session;
     set((s) => {
       const st = s.fileStates[path];
       if (!st) return s;
@@ -333,14 +400,19 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       };
     });
     try {
-      const content = await readRemoteAware(path, (p) => ipc.readFile(p));
+      const document = target
+        ? await ipc.readSessionFile(target.engine, target.sessionId, target.remote ? target.workspacePath : undefined, target.remote ? target.remotePath : undefined)
+        : null;
+      const content: FileContent = document
+        ? { kind: "text", text: document.text, dataUrl: null, truncated: false }
+        : await readRemoteAware(path, (p) => ipc.readFile(p));
       set((s) => {
         const st = s.fileStates[path];
-        if (!st) return s; // tab closed mid-load
+        if (!st || st.session !== target) return s; // tab closed/reopened mid-load
         return {
           fileStates: {
             ...s.fileStates,
-            [path]: { ...st, content, loading: false, loadNonce: st.loadNonce + 1 },
+            [path]: { ...st, ...(document ? { sourcePath: document.path, name: document.name } : {}), content, loading: false, loadNonce: st.loadNonce + 1 },
           },
         };
       });
@@ -348,7 +420,7 @@ export const useFilesStore = create<FilesStore>((set, get) => ({
       const message = errorText(e);
       set((s) => {
         const st = s.fileStates[path];
-        if (!st) return s;
+        if (!st || st.session !== target) return s;
         return {
           fileStates: { ...s.fileStates, [path]: { ...st, loading: false, error: message } },
         };

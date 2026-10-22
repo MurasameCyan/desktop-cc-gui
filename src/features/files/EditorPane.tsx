@@ -4,7 +4,7 @@ import type { Extension } from "@codemirror/state";
 import { LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { useTranslation } from "react-i18next";
-import { ipc, type FileContent } from "@/lib/ipc";
+import type { FileContent } from "@/lib/ipc";
 import { errorText } from "@/lib/errors";
 import { Button } from "@/components/base/buttons/button";
 import { useActionFeedback } from "@/components/base/action-feedback";
@@ -71,6 +71,8 @@ export function EditorPane({ path }: { path: string }) {
 
 function FileEditor({ path, content }: { path: string; content: FileContent }) {
   const setFileDirty = useFilesStore((s) => s.setFileDirty);
+  const entry = useFilesStore((s) => s.fileStates[path]);
+  const saveFile = useFilesStore((s) => s.saveFile);
   // Inactive (invisible) editors stay mounted; only the visible tab may
   // answer Cmd/Ctrl+S, or every open file would save at once.
   const isActiveTab = useFilesStore((s) => s.activeFilePath === path);
@@ -90,7 +92,7 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
     };
   }, []);
 
-  const name = fileName(path);
+  const name = entry?.name ?? fileName(path);
   const isMarkdown = isMarkdownFile(name);
   const isHtml = isHtmlFile(name);
   // HTML opens rendered too, but only where the asset protocol serves real
@@ -153,14 +155,15 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
     setSaving(true);
     setSaveError(null);
     try {
-      await ipc.writeFile(path, draft);
-      setSavedText(draft);
+      const committed = await saveFile(path, draft);
+      setSavedText(committed);
+      setDraft((current) => current === draft ? committed : current);
     } catch (e) {
       setSaveError(errorText(e));
     } finally {
       setSaving(false);
     }
-  }, [path, draft]);
+  }, [path, draft, saveFile]);
 
   // Cmd/Ctrl+S saves from anywhere while this editor is mounted. The listener
   // subscribes once; refs keep it reading the latest save/dirty/saving so it
@@ -198,7 +201,7 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <FileEditorHeader
-        path={path}
+        path={entry?.sourcePath ?? path}
         name={name}
         dirty={dirty}
         readOnly={readOnly}
@@ -246,7 +249,7 @@ function FileEditor({ path, content }: { path: string; content: FileContent }) {
           onChange={setDraft}
           extensions={langExt}
           theme={dark ? "dark" : "light"}
-          readOnly={readOnly}
+          readOnly={readOnly || (entry?.session !== undefined && saving)}
           basicSetup={CM_BASIC_SETUP}
         />
       )}

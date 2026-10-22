@@ -29,6 +29,18 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
+    version: "1.1.7",
+    date: "2026-10-22",
+    content: {
+      zh: `新功能
+- **会话右键新增「编辑会话」「刷新渲染」**：两项依次放在「复制 ID」下方。「编辑会话」在现有编辑器中打开 CLI 的完整原生会话源，保留 OMP 等引擎的时间戳文件名；DSH 解压后编辑并压回原文件，OpenCode / Antigravity 以会话级原生记录视图编辑并回写实际 JSON / SQLite / protobuf 存储，不另存应用专用副本。保存后的原生快照同步回编辑器，重复打开不丢未保存内容；数据库新快照在提交前检查完整文档上限，AGY 共享提示文件的应用内保存互斥，文件替换保留访问权限并在失败时保全原件。超限、缺失、损坏、运行中或不支持的远端数据库源明确报错。
+- **编辑后可单独刷新对应幕布**：「刷新渲染」强制重读目标会话的原生历史，保留已加载的分页范围与持久化计划卡片，更新消息、子代理历史和用量；其它会话、输入草稿、队列、模型、effort 与渠道保持不变。加载中保留旧幕布，失败显示原因；新回合、删除或归档发生后不应用迟到的旧快照。保存不会自动刷新幕布。`,
+      en: `Features
+- **Edit session and Refresh rendering in the session context menu**: both actions appear below Copy ID. Edit session opens the complete native CLI source in the existing editor, retaining timestamped filenames such as OMP transcripts. DSH edits are recompressed into the original file; OpenCode and Antigravity expose session-scoped native records with writeback to their actual JSON, SQLite and protobuf storage, not an application-only copy. The committed native snapshot is returned to the editor for repeated saves, and reopening keeps unsaved edits. Resulting database documents are checked before commit; in-app AGY saves serialize access to their shared prompt history, and file replacements preserve access permissions and retain originals on failure. Oversized, missing, corrupt, running or unsupported remote database sources report explicit errors.
+- **Refresh just the edited conversation rendering**: Refresh rendering forces a fresh native history read, preserves the already-loaded history range and persisted plan cards, and updates messages, subagent history and usage. Other conversations, input drafts, queued prompts, model, effort and channel remain intact. The previous rendering stays visible while loading or after a failure; late snapshots cannot replace a new live turn or resurrect deleted or archived history. Saving does not automatically refresh the conversation.`,
+    },
+  },
+  {
     version: "1.1.5",
     date: "2026-10-16",
     content: {

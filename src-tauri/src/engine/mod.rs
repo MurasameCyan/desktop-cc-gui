@@ -974,6 +974,7 @@ async fn send_message_inner_with_sink(
     let reader_abort = Arc::new(std::sync::OnceLock::new());
     {
         let mut map = state.processes.0.lock().map_err(|e| e.to_string())?;
+        state.processes.ensure_session_not_editing(session_id.as_deref())?;
         if map.contains_key(&run_id) {
             return Err("run id already active".into());
         }
@@ -982,20 +983,21 @@ async fn send_message_inner_with_sink(
                 "too many concurrent runs ({MAX_CONCURRENT_RUNS}); wait for one to finish"
             ));
         }
-        map.insert(
-            run_id.clone(),
-            ChildEntry {
-                child: None,
-                pid: 0,
-                run_id: run_id.clone(),
-                killed: Arc::clone(&killed),
-                reader_abort: Arc::clone(&reader_abort),
-                stdin: None,
-                questions: Arc::new(Mutex::new(HashMap::new())),
-                plans: Arc::new(Mutex::new(HashMap::new())),
-                live_compact: None,
-            },
-        );
+        let entry = ChildEntry {
+            child: None,
+            pid: 0,
+            run_id: run_id.clone(),
+            killed: Arc::clone(&killed),
+            reader_abort: Arc::clone(&reader_abort),
+            stdin: None,
+            questions: Arc::new(Mutex::new(HashMap::new())),
+            plans: Arc::new(Mutex::new(HashMap::new())),
+            live_compact: None,
+        };
+        if let Some(session_id) = session_id.as_ref() {
+            map.entry(session_id.clone()).or_insert_with(|| entry.clone());
+        }
+        map.insert(run_id.clone(), entry);
     }
     let reserved = run_id.clone();
     let result = send_reserved(

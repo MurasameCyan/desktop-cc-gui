@@ -28,6 +28,8 @@ export interface SessionState {
   subagentHistory: Message[];
   nextBefore: number | null;
   loading: boolean;
+  /** Ownership of an explicit history reload; live updates retain it until completion. */
+  historyReloadId?: number;
   streaming: boolean;
   /** Immutable run id currently cleared for an in-place compaction. The send
    *  ACK only proves transport support; the engine grants real readiness with
