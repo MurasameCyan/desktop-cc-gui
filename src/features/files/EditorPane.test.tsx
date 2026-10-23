@@ -145,6 +145,32 @@ describe("session editor recovery and wrapping", () => {
     expect(container.querySelector(".cm-editor")).toBeNull();
   });
 
+  it.each([1, 2, 3])("selects and deletes only logical line %i from its line number", async (lineNumber) => {
+    const path = `session:${session.engine}/${session.sessionId}`;
+    const rows = [JSON.stringify({ text: "第一行🦀" }), JSON.stringify({ text: "第二行正文" }), JSON.stringify({ text: "末行无换行" })];
+    const original = rows.join("\n");
+    useFilesStore.setState({
+      openFiles: [path], activeFilePath: path,
+      fileStates: { [path]: { path, session, sourcePath: session.filePath, content: { kind: "text", text: original, dataUrl: null, truncated: false }, loading: false, error: null, loadNonce: 1 } },
+    });
+    await act(async () => root.render(<EditorPane path={path} />));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    const line = view.state.doc.line(lineNumber);
+    const block = view.lineBlockAt(line.from);
+    const gutter = [...container.querySelectorAll<HTMLElement>(".cm-lineNumbers .cm-gutterElement")].find((node) => node.textContent === String(lineNumber))!;
+    // Give jsdom the line geometry that a browser measures for this gutter cell.
+    vi.spyOn(gutter, "getBoundingClientRect").mockReturnValue(new DOMRect(0, view.documentTop + block.top, 40, block.height));
+    await act(async () => gutter.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true })));
+    const selected = view.state.selection.main;
+    expect(view.state.sliceDoc(selected.from, selected.to)).toBe(rows[lineNumber - 1] + (lineNumber < rows.length ? "\n" : ""));
+    expect(view.state.doc.toString()).toBe(original);
+    await act(async () => view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true, cancelable: true })));
+    const remaining = lineNumber === rows.length ? rows.slice(0, -1).join("\n") + "\n" : rows.filter((_, index) => index !== lineNumber - 1).join("\n");
+    expect(view.state.doc.toString()).toBe(remaining);
+    await act(async () => view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true, cancelable: true })));
+    expect(view.state.doc.toString()).toBe(original);
+  });
+
   it("keeps edited Unicode text, selection and undo history across wrap toggles", async () => {
     const path = session.filePath;
     const original = `${JSON.stringify({ text: "正文汉🦀".repeat(80) })}\n`;

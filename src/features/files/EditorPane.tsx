@@ -19,11 +19,23 @@ import { HtmlPreview } from "./HtmlPreview";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { isHtmlFile, isMarkdownFile, opensInPreview, type EditorViewMode } from "./editor-view-mode";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
-import { EditorView } from "@codemirror/view";
+import { EditorView, lineNumbers } from "@codemirror/view";
 import { FONT_CHANGE_EVENT } from "@/features/settings/font";
 import { TYPOGRAPHY_CHANGE_EVENT } from "@/features/settings/interface-typography";
 
 const CM_BASIC_SETUP = { foldGutter: false, highlightActiveLine: true };
+const CM_LINE_SELECTION = lineNumbers({
+  domEventHandlers: {
+    mousedown(view, block, event) {
+      if ((event as MouseEvent).button !== 0) return false;
+      const line = view.state.doc.lineAt(block.from);
+      const end = line.to < view.state.doc.length ? line.to + 1 : line.to;
+      view.focus();
+      view.dispatch({ selection: { anchor: line.from, head: end }, userEvent: "select.pointer" });
+      return true;
+    },
+  },
+});
 
 /** Tracks the app theme class on <html> so CodeMirror follows light/dark. */
 function useIsDark(): boolean {
@@ -189,7 +201,7 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
   const [previewSearchOpen, setPreviewSearchOpen] = useState(false);
   const [langExt, setLangExt] = useState<Extension[]>([]);
   const extensions = useMemo(
-    () => wordWrap ? [...langExt, EditorView.lineWrapping] : langExt,
+    () => wordWrap ? [CM_LINE_SELECTION, ...langExt, EditorView.lineWrapping] : [CM_LINE_SELECTION, ...langExt],
     [langExt, wordWrap],
   );
   // Truncated files are partial (editing + saving would clobber the tail);
