@@ -93,9 +93,17 @@ struct PluginIdArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PluginStorageGetArgs {
+struct PluginStorageKeyArgs {
     id: String,
     key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginStorageSetArgs {
+    id: String,
+    key: String,
+    value: Value,
 }
 
 #[derive(Deserialize)]
@@ -1190,6 +1198,10 @@ pub(super) async fn dispatch(
             let a: PathsArgs = parse_args(&raw)?;
             ser(Ok(crate::git::git_repository_summaries(a.paths).await))
         }
+        "git_workspace_owners" => {
+            let a: PathsArgs = parse_args(&raw)?;
+            ser(Ok(crate::git::git_workspace_owners(a.paths).await))
+        }
         "git_file_colors" => {
             let a: GitFilesArgs = parse_args(&raw)?;
             ser(crate::git::git_file_colors(a.path, a.files).await)
@@ -1240,6 +1252,10 @@ pub(super) async fn dispatch(
             let a: GitCreateBranchArgs = parse_args(&raw)?;
             ser(crate::git::git_create_branch(a.path, a.name))
         }
+        "git_init" => {
+            let a: PathArgs = parse_args(&raw)?;
+            ser(crate::git::git_init(app.state(), a.path))
+        }
         // open-app
         "open_workspace_in" => {
             let a: OpenWorkspaceArgs = parse_args(&raw)?;
@@ -1258,6 +1274,7 @@ pub(super) async fn dispatch(
             ser(crate::open_app::reveal_in_file_manager(a.path).await)
         }
         // terminal
+        "terminal_host_info" => ser(Ok(crate::terminal::terminal_host_info())),
         "terminal_open" => {
             let a: TerminalOpenArgs = parse_args(&raw)?;
             ser(crate::terminal::terminal_open(a.id, a.cwd, a.cols, a.rows, app.state()).await)
@@ -1322,9 +1339,13 @@ pub(super) async fn dispatch(
             let a: DeviceIdArgs = parse_args(&raw)?;
             ser(web_device_revoke(app.clone(), a.id))
         }
-        // plugins (plan §9 risk table ruling): read-only commands ride the
-        // bridge so web clients render plugin UI; install/uninstall/enable/
-        // storage writes stay desktop-only and fall through to unknown.
+        // plugins (plan §9 risk table ruling): read commands ride the bridge
+        // so web clients render plugin UI; install/uninstall/enable stay
+        // desktop-only. Storage writes ride it too: the same authenticated
+        // device already reads plugin state, and plugins call `storage.set`
+        // fire-and-forget, so falling through to unknown turned a routine
+        // save into an unhandled rejection (the web crash report). Writes go
+        // through the desktop command's own enabled/quarantined guard.
         "plugin_list" => ser(crate::plugins::plugin_list(app.state()).await),
         "plugin_read_artwork" => {
             let a: PluginReadArtworkArgs = parse_args(&raw)?;
@@ -1335,8 +1356,25 @@ pub(super) async fn dispatch(
             ser(crate::plugins::plugin_read_file(a.id, a.name))
         }
         "plugin_storage_get" => {
-            let a: PluginStorageGetArgs = parse_args(&raw)?;
+            let a: PluginStorageKeyArgs = parse_args(&raw)?;
             ser(crate::plugins::plugin_storage_get(app.state(), a.id, a.key).await)
+        }
+        "plugin_storage_set" => {
+            let a: PluginStorageSetArgs = parse_args(&raw)?;
+            ser(crate::plugins::plugin_storage_set(
+                app.state(),
+                a.id,
+                a.key,
+                a.value,
+            ))
+        }
+        "plugin_storage_delete" => {
+            let a: PluginStorageKeyArgs = parse_args(&raw)?;
+            ser(crate::plugins::plugin_storage_delete(
+                app.state(),
+                a.id,
+                a.key,
+            ))
         }
         // Asset capabilities use the same authenticated bridge and the same
         // backend permission gates as desktop; they grant no general file
