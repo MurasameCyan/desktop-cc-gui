@@ -2082,6 +2082,7 @@ mod codebuddy_launch_tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .unwrap();

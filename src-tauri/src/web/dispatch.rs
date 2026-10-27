@@ -1366,7 +1366,7 @@ pub(super) async fn dispatch(
                 a.id,
                 a.key,
                 a.value,
-            ))
+            ).await)
         }
         "plugin_storage_delete" => {
             let a: PluginStorageKeyArgs = parse_args(&raw)?;
@@ -1374,7 +1374,7 @@ pub(super) async fn dispatch(
                 app.state(),
                 a.id,
                 a.key,
-            ))
+            ).await)
         }
         // Asset capabilities use the same authenticated bridge and the same
         // backend permission gates as desktop; they grant no general file
