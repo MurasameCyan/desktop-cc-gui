@@ -39,8 +39,8 @@ import {
   rememberModelForRun,
   rememberEffortForRun,
   patchQuestionByRequestId,
+  reapOrphanedRuns,
   rememberProviderForRun,
-  settleOrphanedRuns,
   upsertSessionMetaInto,
 } from "./engine-events";
 import { ASK_OTHER_OPTION, askLoops, beginAskSubmit, revertAskSubmit } from "./ask-loop";
@@ -384,7 +384,7 @@ export function createMessagingActions(
     void get().refreshSessionUsage(key);
     // Stop and early events must address the same lifecycle registered above.
     const requestedRunId = hookRunId;
-    settleOrphanedRuns(set, routeRun(requestedRunId, key));
+    void reapOrphanedRuns(set, routeRun(requestedRunId, key));
     if (agentResolveError) {
       patchSession(set, key, { error: agentResolveError });
     }
@@ -484,7 +484,7 @@ export function createMessagingActions(
             .rememberSessionProvider?.(engine, result.sessionId, provider)
             ?.catch(() => {});
         }
-        settleOrphanedRuns(set, routeRun(result.runId, newKey));
+        void reapOrphanedRuns(set, routeRun(result.runId, newKey));
         // Whether this set is the one that hands the active tab its native
         // id: when the session event beat this response, onSession already
         // adopted it and announced the activation.
@@ -587,7 +587,7 @@ export function createMessagingActions(
         // there while the tab renders the native key. If the pending state
         // is already gone the turn migrated (and possibly settled): routing
         // the id back would resurrect a dead pending key on the next event.
-        settleOrphanedRuns(set, routeRun(result.runId, key));
+        void reapOrphanedRuns(set, routeRun(result.runId, key));
       }
       replayBufferedEngineEvents(result.runId, {
         set,
