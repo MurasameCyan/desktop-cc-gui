@@ -118,7 +118,7 @@ impl ProcessRegistry {
     /// Atomically exclude existing/launching turns and new sends to this session.
     pub(crate) fn begin_session_edit<'a>(&'a self, session_id: &'a str) -> Result<SessionEditGuard<'a>, String> {
         let map = self.0.lock().map_err(|_| "native session process registry is unavailable".to_string())?;
-        if map.contains_key(session_id) || map.values().any(|entry| entry.pid == 0) {
+        if map.contains_key(session_id) {
             return Err("native session cannot be edited while a turn is running or launching".into());
         }
         let mut edits = self.3.lock().map_err(|_| "native session edit registry is unavailable".to_string())?;
@@ -1022,8 +1022,22 @@ mod registry_tests {
         assert!(registry.begin_session_edit("edited").is_err());
         registry.remove_run_if_pid("live-run", 101);
         registry.insert("launching-run".into(), stub_entry("launching-run", 0));
+        registry.insert_alias("edited".into(), stub_entry("launching-run", 0));
         assert!(registry.begin_session_edit("edited").is_err());
         registry.remove_reservation("launching-run");
+        assert!(registry.begin_session_edit("edited").is_ok());
+    }
+
+    #[test]
+    fn unrelated_launch_does_not_block_editing_a_stopped_session() {
+        let registry = ProcessRegistry::default();
+        registry.insert("other-run".into(), stub_entry("other-run", 0));
+        registry.insert_alias("other-session".into(), stub_entry("other-run", 0));
+        let edit = registry.begin_session_edit("edited").unwrap();
+        assert!(registry.begin_session_edit("other-session").is_err());
+        assert!(registry.ensure_session_not_editing(Some("edited")).is_err());
+        registry.ensure_session_not_editing(Some("another-session")).unwrap();
+        drop(edit);
         assert!(registry.begin_session_edit("edited").is_ok());
     }
 

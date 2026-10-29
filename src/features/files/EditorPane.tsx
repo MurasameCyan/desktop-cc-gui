@@ -92,6 +92,8 @@ function FileLoadError({ path, entry }: { path: string; entry: OpenFileState }) 
   // Native read commands return strings; all document-size guards name the
   // same limit, including compressed, database and remote read paths.
   const tooLarge = entry.session !== undefined && /\bexceeds\b[^\n]*\b64 MiB\b/.test(entry.error ?? "");
+  const invalidJsonl = entry.session !== undefined && /(?:invalid native JSONL on line|native JSONL line \d+ must be an object)/.test(entry.error ?? "");
+  const externalRecovery = tooLarge || invalidJsonl;
   const unavailableReason = isWeb
     ? "files.externalEditorDesktopOnly"
     : entry.session?.remote || entry.session?.remotePath
@@ -117,14 +119,14 @@ function FileLoadError({ path, entry }: { path: string; entry: OpenFileState }) 
       <p className="max-w-md break-all text-caption-1-regular text-text-tertiary">
         {tooLarge ? t("files.sessionFileTooLarge") : entry.error}
       </p>
-      {tooLarge && unavailableReason && (
+      {externalRecovery && unavailableReason && (
         <p className="max-w-md text-caption-1-regular text-text-tertiary">{t(unavailableReason)}</p>
       )}
-      {tooLarge && entry.sourcePath && (
+      {externalRecovery && entry.sourcePath && (
         <p className="max-w-md break-all text-caption-1-regular text-text-tertiary">{entry.sourcePath}</p>
       )}
       <div className="flex flex-wrap justify-center gap-2">
-        {tooLarge && !unavailableReason && (
+        {externalRecovery && !unavailableReason && (
           <Button
             variant="secondary"
             size="small"

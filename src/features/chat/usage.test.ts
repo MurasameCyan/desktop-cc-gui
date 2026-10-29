@@ -68,8 +68,7 @@ describe("parseUsage", () => {
     // inputTokens is uncached input only, cache read/write are separate (billed
     // input = the three summed). Without these aliases all four buckets read 0
     // — only totalTokens survived — so the breakdown collapsed to a single
-    // total row, per-message readouts vanished, and the ledger dropped the row
-    // outright (usage_record skips a report whose four buckets sum to zero).
+    // total row and per-message readouts vanished.
     const parsed = parseUsage({
       inputTokens: 1000,
       outputTokens: 50,

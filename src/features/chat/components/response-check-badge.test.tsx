@@ -59,6 +59,7 @@ describe("ResponseCheckBadge", () => {
       render({
         requested: { model: "claude-opus-5-5", effort: "xhigh" },
         served: { model: null, effort: null },
+        reportsServed: true,
       });
       expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：无法确认");
       await act(async () => {
@@ -72,6 +73,14 @@ describe("ResponseCheckBadge", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("renders nothing for an engine that never reports the response", () => {
+    render({
+      requested: { model: "kimi-k2", effort: "high" },
+      served: { model: null, effort: null },
+    });
+    expect(trigger()).toBeNull();
   });
 
   it("renders nothing when the run has no request side", () => {
@@ -92,22 +101,22 @@ describe("ResponseCheckBadge", () => {
     expect(button.className).toContain("text-foreground-icon-quaternary");
   });
 
-  it("flags a date-suffixed id as a different model", () => {
+  it("shows a date-suffixed id as a neutral build difference", () => {
     render({
       requested: { model: "claude-opus-4-5", effort: null },
       served: { model: "claude-opus-4-5-20251101", effort: null },
     });
-    expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：与响应不一致");
-    expect(trigger()!.className).toContain("text-text-warning-primary");
+    expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：构建版本不同");
+    expect(trigger()!.className).not.toContain("text-text-warning-primary");
   });
 
-  it("flags a daily build suffix as a different model", () => {
+  it("shows a daily build suffix as a neutral build difference", () => {
     render({
       requested: { model: "ds/deepseek-v4.1-flash", effort: null },
       served: { model: "deepseek/deepseek-v4.1-flash-1017", effort: null },
     });
-    expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：与响应不一致");
-    expect(trigger()!.className).toContain("text-text-warning-primary");
+    expect(trigger()!.getAttribute("aria-label")).toBe("响应校验：构建版本不同");
+    expect(trigger()!.className).not.toContain("text-text-warning-primary");
   });
 
   it("keeps a green check when the model matches but effort is unreported", () => {

@@ -70,12 +70,12 @@ export function parseUsage(usage: unknown): ParsedUsage | null {
   // cacheWriteTokens），语义与 claude 一样「互不重叠」：inputTokens 只算未命缓存
   // 的输入，缓存另计。缺这几个别名时四桶全为 0——只剩 totalTokens 撑起一个总量，
   // 于是弹层分桶退化成一行、每条消息的 token 读数不显示（formatUsage 全 0 时返回
-  // null），台账更会把整行丢掉（后端在四桶和为 0 时不写行）。
+  // null）。
   const reportedInput = num(u, "input_tokens") || num(u, "input") || num(u, "inputTokens");
   const output = num(u, "output_tokens") || num(u, "output") || num(u, "outputTokens");
   // Codex names its cache fields differently (cached_input_tokens /
-  // cache_write_input_tokens): without them a codex report's cache hits land
-  // in the ledger as zero.
+  // cache_write_input_tokens): without them a codex report's cache hits display
+  // as zero.
   const cacheRead =
     num(u, "cache_read_input_tokens") ||
     num(u, "cacheRead") ||

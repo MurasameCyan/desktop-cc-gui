@@ -161,9 +161,15 @@ export function HeaderOpenActions({ workspacePath }: { workspacePath: string }) 
   const { t } = useTranslation();
   // Session tab keys are identities; external editors need their native source.
   // Finder still reveals the workspace folder.
-  const activeFilePath = useFilesStore((s) => s.activeFilePath
-    ? s.fileStates[s.activeFilePath]?.sourcePath ?? s.activeFilePath
-    : null);
+  const activeFilePath = useFilesStore((s) => {
+    const path = s.activeFilePath;
+    if (!path) return null;
+    const entry = s.fileStates[path];
+    if (!entry?.session) return path.startsWith("session:") ? null : path;
+    const target = entry.session;
+    if (target.remote || target.remotePath || ["dsh", "opencode", "agy"].includes(target.engine)) return null;
+    return entry.sourcePath || null;
+  });
   const terminalOpen = useTerminalStore((s) => s.open);
   const toggleTerminal = useTerminalStore((s) => s.toggle);
   const pinnedIds = useSyncExternalStore(subscribePinnedIds, readPinnedIds);

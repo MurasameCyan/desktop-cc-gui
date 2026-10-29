@@ -8,6 +8,15 @@ import {
 } from "./plan-review";
 import { errorText } from "@/lib/errors";
 import { pendingWorkspaceOfKey, dedupeTabs, persistTabs, sessionKey } from "./persistence";
+import {
+  notifyTurnComplete,
+  notifyInterrupted,
+  notifyTurnError,
+  notifyQuestion,
+  notifyPlanReview,
+  notifyPermissionRequest,
+} from "@/lib/notifications";
+import { planRevisionStatus, turnAwaitsUser, turnReplyText } from "./turn-notice";
 import { migrateSessionContributions } from "./session-contributions";
 import { migrateAutoCompactSettings } from "../auto-compact-context";
 import {
@@ -46,7 +55,6 @@ import {
   type AskLoop,
 } from "./ask-loop";
 import { mergeUsage, parseUsage, reportedContextWindow, type ParsedUsage } from "../usage";
-import { usageTrackingEnabled } from "@/features/settings/usage-tracking";
 import type {
   RegisteredInternalMessageCapture,
 } from "@/features/plugins/runtime/hooks";
@@ -59,6 +67,8 @@ import {
 } from "@/features/plugins/runtime/hooks";
 import { normalizeEngineEvent, type EngineTerminalFact } from "../normalized-runtime-events";
 import { workspaceMetadata } from "./lifecycle";
+import { emitSessionActivated } from "@/features/plugins/runtime/events";
+import { sessionSelection } from "./selection";
 import type { AfterTurnEvent, InternalMessageCapture, WorkspaceMetadata } from "@ccgui/plugin-sdk";
 import { migrateSelectedBot } from "@/features/bots/selected-bot";
 interface RunLifecycle {
@@ -544,7 +554,7 @@ export function upsertSessionMetaInto(
   });
 }
 
-/** Rows and the ledger describe this turn, not the next picker selection.
+/** Rows describe this turn, not the next picker selection.
  * activeModel is seeded on send and updated by engine reports; it may be a
  * concrete custom model while the tab deliberately keeps a family alias. */
 function stampedModel(
@@ -648,11 +658,17 @@ function selectionFields(event: ChatEngineEvent): {
 function onLaunch(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   const { model, effort } = selectionFields(event);
   if (!model && !effort) return;
-  const data = event.data as { comparisonModel?: string | null };
+  const data = event.data as {
+    comparisonModel?: string | null;
+    reportsServed?: unknown;
+  };
   const comparison =
     data.comparisonModel === undefined
       ? {}
       : { comparisonModel: data.comparisonModel };
+  // Only an explicit true: older hosts never send the flag, and their
+  // request-only check stays hidden as it always was.
+  const reportsServed = data.reportsServed === true ? { reportsServed: true } : {};
   if (model) applyModelDisplay(model, key, deps);
   if (effort) applyEffortDisplay(effort, key, deps);
   deps.set((s) => {
@@ -666,6 +682,7 @@ function onLaunch(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
           responseCheck: {
             requested: { model, effort, ...comparison },
             served: { model: null, effort: null },
+            ...reportsServed,
           },
         },
       },
@@ -695,7 +712,7 @@ function onServed(
         [key]: {
           ...cur,
           responseCheck: {
-            requested: prev.requested,
+            ...prev,
             served: {
               model: model ?? prev.served.model,
               effort: effort ?? prev.served.effort,
@@ -935,6 +952,14 @@ function onSession(
     deps.get().active?.workspacePath ||
     "";
   const newKey = sessionKey(event.engine, nativeId, workspacePath);
+  // The active tab may be the pending tab about to adopt this native id: its
+  // retained activation (sessionId:null) can never be repaired afterwards —
+  // emitSessionSelectionChanged matches the retained payload on
+  // engine+sessionId — so it needs a fresh activation emit below.
+  const activeAdoptsPending =
+    state.active?.engine === event.engine &&
+    state.active.sessionId === null &&
+    state.active.workspacePath === workspacePath;
   // The event can resolve straight to the native key when it beat the send
   // response (the run had no routing entry yet). The turn rows and streaming
   // flag still sit under the pending key then; migrate from there instead of
@@ -1070,6 +1095,13 @@ function onSession(
     persistTabs(openTabs, s.active);
     return { openTabs };
   });
+  if (activeAdoptsPending && deps.get().active?.sessionId === nativeId) {
+    emitSessionActivated(
+      event.engine,
+      nativeId,
+      sessionSelection(deps.get(), event.engine, nativeId, workspacePath),
+    );
+  }
   const createdKey = sessionKey(event.engine, nativeId, workspacePath);
   if (!deps.get().createdSessionKeys[createdKey]) {
     deps.set((s) => ({
@@ -1113,12 +1145,6 @@ function onSession(
   );
 }
 
-/** Runs whose turn already wrote ledger rows report by report. Every report
- *  is one model response, so each lands in the ledger the moment it arrives —
- *  a codex turn that chats for an hour has to show up while it runs, not when
- *  it ends — and `done` must not write the same tokens again. */
-const liveLedgerRuns = new Set<string>();
-
 /** Running token totals for the reply in flight, keyed by run. `usage` keeps
  *  the newest report (the context meter needs occupancy, not a sum), while
  *  the tail indicator and the settled row show this total: what the reply has
@@ -1127,7 +1153,6 @@ const turnUsageTotals = new Map<string, ParsedUsage>();
 /** Drop a run's usage bookkeeping (settled, interrupted, or swept). */
 export function dropRunUsage(runId: string) {
   turnUsageTotals.delete(runId);
-  liveLedgerRuns.delete(runId);
 }
 
 /** Drop every trace of runs the orphan sweep reaped: their usage maps here
@@ -1183,7 +1208,6 @@ function onUsage(
     usage: mergeUsage(event.data, prev),
     ...(totals ? { turnUsage: usageSnapshot(totals) } : {}),
   });
-  if (parsed && !contextOnly) recordUsageReport(deps, event, key, parsed);
 }
 
 /** Fold one report into its run's running total. */
@@ -1213,47 +1237,6 @@ function usageSnapshot(totals: ParsedUsage): Record<string, number> {
     cache_creation_input_tokens: totals.cacheWrite,
     ...(totals.contextWindow ? { model_context_window: totals.contextWindow } : {}),
   };
-}
-
-/** Ledger one engine report (one request) as it arrives. */
-function recordUsageReport(
-  deps: EngineEventDeps,
-  event: ChatEngineEvent,
-  key: string,
-  parsed: ParsedUsage,
-) {
-  if (!usageTrackingEnabled()) return;
-  liveLedgerRuns.add(event.runId);
-  writeUsageRow(deps, event, key, parsed, 1);
-}
-
-/** Shared writer: one ledger row for the run's model and session. */
-function writeUsageRow(
-  deps: EngineEventDeps,
-  event: ChatEngineEvent,
-  key: string,
-  parsed: ParsedUsage,
-  reports: number,
-) {
-  const state = deps.get();
-  const tab = state.openTabs.find(
-    (t) => sessionKey(t.engine, t.sessionId, t.workspacePath) === key,
-  );
-  void ipc
-    .usageRecord({
-      ts: Date.now(),
-      engine: event.engine,
-      model: stampedModel(deps, event.engine, key),
-      sessionId: event.sessionId ?? tab?.sessionId ?? null,
-      workspacePath: tab?.workspacePath ?? state.active?.workspacePath ?? null,
-      input: parsed.input,
-      output: parsed.output,
-      cacheRead: parsed.cacheRead,
-      cacheWrite: parsed.cacheWrite,
-      reports,
-      durationMs: null,
-    })
-    .catch(() => {});
 }
 
 function onError(
@@ -1333,12 +1316,33 @@ function onError(
   deps.markUnseenIfBackground(key);
   dispatchNormalized(event);
   finishRunLifecycle(event.runId, "failed", typeof event.data === "string" ? event.data : undefined, event.sessionId);
+  if (!prev.interrupted) {
+    const errText = typeof event.data === "string" ? event.data : "";
+    if (looksLikeDisconnection(errText)) {
+      void notifyInterrupted(key, errText);
+    } else {
+      void notifyTurnError(key, errText);
+    }
+  }
   void deps.refreshSessionUsage?.(key).catch(() => {});
   // An error settles the turn exactly like done does — the messages typed
   // behind it are the user's next step, and parking them here left the queue
   // stuck until it was sent or cleared by hand. A stop is still the user's
   // own call: that queue stays parked.
   if (!prev.interrupted) deps.drainQueue(key);
+}
+
+/**
+ * Guess whether a turn error is a connection/stream interruption rather than
+ * a request failure, so it can raise the dedicated "interrupted" notice.
+ * Heuristic over the error text: the engine event carries no error class.
+ * Known false positives: request-level timeouts ("request timeout after 30s",
+ * "turn/start timed out") are classified as interruptions; a "session
+ * interrupted by user" echo from the CLI never reaches here (gated by
+ * `prev.interrupted` upstream).
+ */
+function looksLikeDisconnection(errText: string): boolean {
+  return /中断|disconnect|abort|timeout|timed out/i.test(errText);
 }
 
 /** Patch the grant state of one card row, located by its message seq. */
@@ -1418,9 +1422,11 @@ function onPermissionDenied(
     tool?: string | null;
     path?: string | null;
     message?: string;
+    toolUseId?: string | null;
   };
   const path = data.path?.trim() || null;
   const message = (data.message ?? "").trim();
+  const toolUseId = data.toolUseId?.trim() || null;
   // Fold unflushed chunks first so the card lands after the streamed text.
   const pending = drainPending(key);
   let rowSeq = -1;
@@ -1434,13 +1440,20 @@ function onPermissionDenied(
         )
       : cur.messages;
     const messages = settleLiveRows(base);
+    // The result line repeats the turn's denials, and its copy can disagree
+    // with the mid-turn one on path and text (e.g. a path scraped from the
+    // error text vs none in the tool input): the same call id is the same
+    // denial, even on a card the user already declined.
     const dup = messages.some(
       (m) =>
         m.role === "grant" &&
-        (path ? m.path === path : m.text === message) &&
-        m.grant?.status !== "declined",
+        ((toolUseId !== null && m.grant?.toolUseId === toolUseId) ||
+          ((path ? m.path === path : m.text === message) && m.grant?.status !== "declined")),
     );
-    if (dup) return {};
+    // No new card, but the chunks drained above are out of the buffer now:
+    // keep them (still live, as the scheduled flush would), or the text
+    // streamed before this frame is lost.
+    if (dup) return pending ? { bySession: { ...s.bySession, [key]: { ...cur, messages: base } } } : {};
     const seq = messages.length ? messages[messages.length - 1].seq + 1 : 1;
     rowSeq = seq;
     return {
@@ -1456,7 +1469,7 @@ function onPermissionDenied(
               path,
               ts: new Date().toISOString(),
               seq,
-              grant: { status: "pending" as const },
+              grant: { status: "pending" as const, toolUseId },
             },
           ],
         },
@@ -1472,6 +1485,9 @@ function onPermissionDenied(
         patchGrantBySeq(deps.set, key, rowSeq, (grant) => ({ ...grant, dir })),
       )
       .catch(() => {});
+  }
+  if (rowSeq > 0) {
+    void notifyPermissionRequest(key, path ?? "", message || data.tool?.trim() || "");
   }
 }
 
@@ -1554,7 +1570,10 @@ function onQuestion(
     const dup = messages.some(
       (m) => m.role === "question" && m.question?.requestId === requestId,
     );
-    if (dup) return {};
+    // No new card, but the chunks drained above are out of the buffer now:
+    // keep them (still live, as the scheduled flush would), or the text
+    // streamed before this frame is lost.
+    if (dup) return pending ? { bySession: { ...s.bySession, [key]: { ...cur, messages: base } } } : {};
     const seq = messages.length ? messages[messages.length - 1].seq + 1 : 1;
     rowSeq = seq;
     return {
@@ -1589,6 +1608,10 @@ function onQuestion(
   });
   if (rowSeq > 0 && rpc && multi) {
     openAskLoop(key, { base: frame.base, seq: rowSeq, requestId, runId: event.runId });
+  }
+  if (rowSeq > 0) {
+    const qText = spec?.question || questions[0]?.question || "";
+    void notifyQuestion(key, qText);
   }
 }
 
@@ -1664,9 +1687,19 @@ function onPlanReview(event: ChatEngineEvent, key: string, deps: EngineEventDeps
   ) {
     return;
   }
+  const statusOf = () =>
+    planRevisionStatus(deps.get().bySession[key]?.messages ?? [], record.planId, record.revision);
+  const before = statusOf();
   updatePlanMessages(deps, key, event, (messages) =>
     applyPlanReview(messages, record),
   );
+  // Notify a revision once, when it first enters review (new, or upgraded
+  // from its draft). A re-broadcast, a replay that moves a deferred or
+  // submitting card back, or a stale frame the card rejected stays silent.
+  const firstSight = before === undefined || before === "draft";
+  if (firstSight && statusOf() === "awaiting_review") {
+    void notifyPlanReview(key, record.title);
+  }
 }
 
 function onPlanReviewSettled(
@@ -1897,10 +1930,6 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   dispatchNormalized(event, { status: cancelled ? "cancelled" : "completed" });
   finishRunLifecycle(event.runId, cancelled ? "cancelled" : "completed", undefined, event.sessionId);
   untrackRun(event.runId);
-  // Ledger the turn's tokens now that it is settled: the same report that
-  // stamps the row above, so the usage page counts real engine numbers. The
-  // feature's own switch gates it (localStorage-backed, see usage-tracking.ts).
-  recordTurnUsage(deps, event, key, finalUsage);
   // Native file changed; refresh list cache in background.
   void ipc.rescanSessions().catch(() => {});
   deps.markUnseenIfBackground(key);
@@ -1910,6 +1939,10 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
   // An interrupted turn settles here too: keep the queue parked — the user
   // stopped the session, the next message is theirs to send.
   if (!prev.interrupted) {
+    const finalMessages = deps.get().bySession[key]?.messages ?? [];
+    // A card this turn ended on (question, plan review, trailing grant) may
+    // have raised its own notice already; notifyTurnComplete skips the second.
+    void notifyTurnComplete(key, turnReplyText(finalMessages), turnAwaitsUser(finalMessages));
     deps.drainQueue(key);
     // Claude's result line reports the turn's summed usage (every request of
     // the turn added up), not the occupancy the meter shows — so re-read the
@@ -1923,22 +1956,6 @@ function onDone(event: ChatEngineEvent, key: string, deps: EngineEventDeps) {
       }, 400);
     }
   }
-}
-
-/** Ledger the turn's own report when it never reported live (claude sends one
- *  usage payload, the turn's totals, on its result line). Turns that streamed
- *  reports already have their rows. */
-function recordTurnUsage(
-  deps: EngineEventDeps,
-  event: ChatEngineEvent,
-  key: string,
-  usage: unknown,
-) {
-  if (!usageTrackingEnabled()) return;
-  if (liveLedgerRuns.delete(event.runId)) return;
-  const parsed = parseUsage(usage);
-  if (!parsed) return;
-  writeUsageRow(deps, event, key, parsed, 1);
 }
 
 /** A CLI that kept running after `done` (a background task was pending) opened

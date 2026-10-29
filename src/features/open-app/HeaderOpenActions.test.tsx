@@ -156,6 +156,32 @@ describe("HeaderOpenActions add-program", () => {
     }
   });
 
+  it.each([
+    { engine: "omp", remote: true, sourcePath: "/remote/session.jsonl" },
+    { engine: "omp", remotePath: "/remote/session.jsonl", sourcePath: "/remote/session.jsonl" },
+    { engine: "dsh", sourcePath: "/data/session.jsonl.zstd" },
+    { engine: "opencode", sourcePath: "/data/opencode.db" },
+    { engine: "agy", sourcePath: "/data/session.db" },
+    { engine: "omp", sourcePath: undefined },
+  ])("opens the workspace instead of the $engine remote/structured/unknown native source", async ({ sourcePath, ...target }) => {
+    const previous = useFilesStore.getState();
+    try {
+      const key = `session:${target.engine}/edited`;
+      useFilesStore.setState({ activeFilePath: key, fileStates: { [key]: {
+        path: key, sourcePath, session: { ...target, sessionId: "edited", workspacePath: "/workspace" },
+        content: null, loading: false, error: null, loadNonce: 0,
+      } } });
+      writeCustomApps([{ id: "custom:editor", label: "Editor", path: "/program/editor.exe" }]);
+      writePinnedIds(["custom:editor", "vscode"]);
+      await act(async () => root.render(<HeaderOpenActions workspacePath="/workspace" />));
+      await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="在 Editor 中打开"]')!.click());
+      expect(mocks.openCustomProgram).toHaveBeenLastCalledWith("/program/editor.exe", "/workspace");
+      await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="在 VS Code 中打开"]')!.click());
+      expect(mocks.openWorkspaceIn).toHaveBeenLastCalledWith("/workspace", expect.any(Object));
+    } finally {
+      await act(async () => useFilesStore.setState(previous));
+    }
+  });
   it("adds a custom program: menu row appears, is pinned to the header, persisted", async () => {
     await openMenu();
 

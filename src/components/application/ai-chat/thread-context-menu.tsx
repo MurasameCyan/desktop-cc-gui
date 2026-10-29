@@ -77,20 +77,20 @@ function buildHostSections({
     });
   }
   if (onThreadAction && !isDraft) {
-    actions.push(
-      {
+    if (parseThreadTarget(threadId)?.engine !== "agy") {
+      actions.push({
         id: "edit-session",
         label: t("chat.editSession"),
         icon: <FilePenLine className="size-4" aria-hidden />,
         onSelect: () => onThreadAction(threadId, "edit"),
-      },
-      {
-        id: "refresh-rendering",
-        label: t("chat.refreshSessionRendering"),
-        icon: <RefreshCw className="size-4" aria-hidden />,
-        onSelect: () => onThreadAction(threadId, "refresh"),
-      },
-    );
+      });
+    }
+    actions.push({
+      id: "refresh-rendering",
+      label: t("chat.refreshSessionRendering"),
+      icon: <RefreshCw className="size-4" aria-hidden />,
+      onSelect: () => onThreadAction(threadId, "refresh"),
+    });
     actions.push({
       id: "archive",
       label: t("chat.archiveSession"),

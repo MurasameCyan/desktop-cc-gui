@@ -1,5 +1,20 @@
 # Chat streaming regression
 
+Open `/tests/browser/file-tree-features.html?reset=1` for the real file tree
+against a synthetic directory listing. Expand `a` once to reach
+`a/b/c` and show its file. The readout shows every
+`listDir` call: Expand Loaded must not add calls, Collapse All leaves the
+workspace root open. The Git ignore toggle hides only entries marked ignored;
+dotfiles and tracked `build` remain visible. Switch between workspaces A and B, then reload
+without `?reset=1` to verify independent expanded paths. The
+fixture does not read the real disk or test native directory permissions.
+
+Open `/tests/browser/workspace-pin.html` to try the real workspace sidebar with
+synthetic projects. Right-click a project to pin or unpin it; pinned projects
+stay in their own group and show a small pin icon. Drag the folder handle to
+reorder within pinned or regular projects. The fixture uses in-memory IPC and
+does not change registered workspaces; refresh restores its initial state.
+
 Open `/tests/browser/interface-typography.html` for the real General settings
 controls with in-memory persistence. Expand Advanced and change the UI,
 content and code sizes independently using px inputs (blur or Enter to save).
@@ -100,14 +115,6 @@ its trigger width and popover position while cycling all five reasoning levels.
 The fixture waits for fonts and the entrance animation before measuring; it
 uses local React state and never changes app settings or sends a model request.
 
-Open `/tests/browser/usage-pane.html` to check the usage page against a seeded
-ledger: the same model recorded once as a relay-qualified slug
-("agentrouter qunyou/deepseek-v4-flash") and once as the engine's plain id must
-fold into a single row — in 详细数据 and in the chart's hover breakdown — with
-the totals summed. A cache-bearing turn is seeded too, so the summary row must
-read 累计 = 输入 + 输出 (输入 being the whole prompt side: fresh + cache). It
-also replays a live report (`usage://changed`) to show the page growing
-mid-turn. No app, no database, no saved state.
 Open `/tests/browser/plan-review.html` for the plan preview & approval UI:
 timeline cards in every lifecycle state (draft / awaiting / superseded /
 approved / expired) with accessible status text, the approval dock over the

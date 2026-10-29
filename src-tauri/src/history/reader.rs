@@ -30,13 +30,14 @@ pub(crate) async fn off_ui_thread<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Lock the db, run a parameterless query, and collect rows through `map_row`.
+/// Run a parameterless query on the WAL read connection, so a background
+/// index write cannot stall session/workspace enumeration.
 fn query_rows<T>(
     db: &crate::db::Db,
     sql: &str,
     map_row: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
 ) -> Result<Vec<T>, String> {
-    let conn = db.0.lock();
+    let conn = db.read();
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], map_row).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -49,25 +50,19 @@ fn query_rows<T>(
     Ok(out)
 }
 
-/// Run a sessions-table mutation, then notify listeners.
+/// Run a sessions-table mutation. The caller emits the change notification
+/// after its blocking task completes, so the async command does not hold a
+/// `State` borrow across the await.
 fn mutate_sessions(
-    state: &crate::AppState,
+    db: &crate::db::Db,
     sql: &str,
     params: impl rusqlite::Params,
 ) -> Result<(), String> {
-    let conn = state.db.0.lock();
+    let conn = db.0.lock();
     conn.execute(sql, params).map_err(|e| e.to_string())?;
-    drop(conn);
-    state.sink.emit_sessions_changed();
     Ok(())
 }
 
-/// Async: refreshed on every `sessions://changed`, which fires right before
-/// the full-text index pass starts holding the db lock.
-#[tauri::command]
-pub async fn list_sessions(state: tauri::State<'_, crate::AppState>) -> Result<Vec<SessionMeta>, String> {
-    off_ui_thread(&state.db, list_sessions_from).await
-}
 
 fn list_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, String> {
     query_rows(
@@ -109,8 +104,18 @@ fn list_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, String> {
     )
 }
 
+#[tauri::command]
+pub async fn list_sessions(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<SessionMeta>, String> {
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || list_sessions_from(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn list_archived_sessions_from(db: &crate::db::Db) -> Result<Vec<SessionMeta>, String> {
-    let conn = db.0.lock();
+    let conn = db.read();
     let mut stmt = conn
         .prepare("SELECT snapshot_json FROM session_archives ORDER BY archived_at DESC")
         .map_err(|e| e.to_string())?;
@@ -170,12 +175,16 @@ fn archive_session_in(db: &crate::db::Db, session: &SessionMeta) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn archive_session(
+pub async fn archive_session(
     state: tauri::State<'_, crate::AppState>,
     session: SessionMeta,
 ) -> Result<(), String> {
-    archive_session_in(&state.db, &session)?;
-    state.sink.emit_sessions_changed();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || archive_session_in(&db, &session))
+        .await
+        .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
@@ -190,13 +199,17 @@ fn restore_session_in(db: &crate::db::Db, engine: &str, session_id: &str) -> Res
 }
 
 #[tauri::command]
-pub fn restore_session(
+pub async fn restore_session(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
 ) -> Result<(), String> {
-    restore_session_in(&state.db, &engine, &session_id)?;
-    state.sink.emit_sessions_changed();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || restore_session_in(&db, &engine, &session_id))
+        .await
+        .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
@@ -205,7 +218,7 @@ pub fn restore_session(
 /// name, so this row is what keeps a session's provider and model across
 /// clients and restarts — see [`SessionMeta::model`].
 #[tauri::command]
-pub fn remember_session_model(
+pub async fn remember_session_model(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
@@ -214,21 +227,22 @@ pub fn remember_session_model(
     if model.trim().is_empty() {
         return Ok(());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    state
-        .db
-        .remember_session_model(&engine, &session_id, &model, now)?;
-    state.sink.emit_sessions_changed();
+    let now = crate::db::next_write_stamp();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        db.remember_session_model(&engine, &session_id, &model, now)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
 /// Remember the reasoning effort a session ran, beside its model and for the
 /// same reason — see [`SessionMeta::effort`].
 #[tauri::command]
-pub fn remember_session_effort(
+pub async fn remember_session_effort(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
@@ -237,21 +251,22 @@ pub fn remember_session_effort(
     if effort.trim().is_empty() {
         return Ok(());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    state
-        .db
-        .remember_session_effort(&engine, &session_id, &effort, now)?;
-    state.sink.emit_sessions_changed();
+    let now = crate::db::next_write_stamp();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        db.remember_session_effort(&engine, &session_id, &effort, now)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
 /// Remember the in-app channel a session ran. Spawn injects env from this id
 /// and never rewrites the CLI's own files — see [`SessionMeta::provider`].
 #[tauri::command]
-pub fn remember_session_provider(
+pub async fn remember_session_provider(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
@@ -277,14 +292,15 @@ pub fn remember_session_provider(
     {
         return Err("invalid provider id".into());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    state
-        .db
-        .remember_session_provider(&engine, &session_id, &provider_id, now)?;
-    state.sink.emit_sessions_changed();
+    let now = crate::db::next_write_stamp();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        db.remember_session_provider(&engine, &session_id, &provider_id, now)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
@@ -302,7 +318,7 @@ fn find_session_file_path(
     engine: &str,
     session_id: &str,
 ) -> Result<Option<PathBuf>, String> {
-    let conn = db.0.lock();
+    let conn = db.read();
     conn.query_row(
         "SELECT file_path FROM sessions WHERE engine=?1 AND session_id=?2",
         rusqlite::params![engine, session_id],
@@ -335,6 +351,10 @@ struct CachedSession {
 static PARSED_CACHE: LazyLock<Mutex<HashMap<(PathBuf, i64, i64, String), Arc<CachedSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PARSED_CACHE_BYTES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
+/// Bumped (under the cache lock) by every [`forget_parsed_session`]. A parse
+/// that began before a save may have read the old source under a stat key the
+/// save did not move, so it is served but never published once this changed.
+static PARSED_CACHE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 const PARSED_CACHE_CAPACITY: usize = 32;
 const PARSED_CACHE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
@@ -384,6 +404,23 @@ fn parsed_footprint(parsed: &ParsedSession) -> usize {
     parsed.messages.iter().map(message_footprint).sum()
 }
 
+/// Drop every cached parse of one source after the app rewrote it. A native
+/// save need not change the cache key's stat: an OpenCode tree edit can touch
+/// only part files under unchanged session metadata, SQLite writes land in WAL.
+pub(crate) fn forget_parsed_session(path: &Path) {
+    let mut cache = PARSED_CACHE.lock();
+    let mut bytes = PARSED_CACHE_BYTES.lock();
+    cache.retain(|(cached_path, ..), previous| {
+        if cached_path == path {
+            *bytes -= previous.footprint;
+            false
+        } else {
+            true
+        }
+    });
+    PARSED_CACHE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn cached_session(
     engine: &str,
     path: &Path,
@@ -391,6 +428,7 @@ fn cached_session(
     accepted_signature: &str,
     force_reload: bool,
 ) -> Result<Arc<CachedSession>, String> {
+    let generation = PARSED_CACHE_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
     let Some((size, mtime_ms)) = super::stat_signature(path) else {
         // Unstattable file: let the parse produce the real error.
         let parsed = parse_session_file(engine, path, accepted_frames)?;
@@ -417,12 +455,27 @@ fn cached_session(
             .map(|(_, row)| message_footprint(row))
             .sum::<usize>();
     let cached = Arc::new(CachedSession { parsed, fold, footprint });
+    Ok(publish_parse(key, path, cached, force_reload, generation))
+}
+
+/// Cache a finished parse unless a save evicted the cache while it ran.
+fn publish_parse(
+    key: (PathBuf, i64, i64, String),
+    path: &Path,
+    cached: Arc<CachedSession>,
+    force_reload: bool,
+    generation: u64,
+) -> Arc<CachedSession> {
+    let footprint = cached.footprint;
     let mut cache = PARSED_CACHE.lock();
+    if PARSED_CACHE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != generation {
+        return cached;
+    }
     // An ordinary miss may finish after a forced same-stat reload. Keep the
     // already-published parse rather than overwriting it with that older read.
     if !force_reload {
         if let Some(hit) = cache.get(&key) {
-            return Ok(Arc::clone(hit));
+            return Arc::clone(hit);
         }
     }
     let mut bytes = PARSED_CACHE_BYTES.lock();
@@ -439,7 +492,7 @@ fn cached_session(
     // Oversized parses can still supply the requested page without making the
     // bounded cache oversized or clearing unrelated sessions to admit them.
     if footprint > PARSED_CACHE_BUDGET_BYTES {
-        return Ok(cached);
+        return cached;
     }
     while cache.len() >= PARSED_CACHE_CAPACITY
         || *bytes + footprint > PARSED_CACHE_BUDGET_BYTES
@@ -453,7 +506,7 @@ fn cached_session(
     }
     *bytes += footprint;
     cache.insert(key, Arc::clone(&cached));
-    Ok(cached)
+    cached
 }
 
 /// The fold over a whole session, each row tagged with the index of the
@@ -632,7 +685,7 @@ fn page_from_cached(
 
 /// Sync body of `load_session_page` (parsing multi-MB session files must not
 /// run on the IPC main thread).
-fn load_session_page_blocking(
+pub(super) fn load_session_page_blocking(
     db: &crate::db::Db,
     engine: &str,
     session_id: &str,
@@ -1016,6 +1069,24 @@ fn delete_opencode_db_session(db: &Path, session_id: &str) -> Result<(), String>
     Ok(())
 }
 
+/// A deleted transcript must not survive as its editor backup. Only once the
+/// source is really gone: the layout guards above may refuse a delete.
+fn delete_session_backups(engine: &str, path: &Path) -> Result<(), String> {
+    let gone = super::split_opencode_db_path(path).is_some()
+        || matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    if !gone {
+        return Ok(());
+    }
+    for backup in super::edit::session_backup_files(engine, path) {
+        match std::fs::remove_file(&backup) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove session backup {}: {e}", backup.display())),
+        }
+    }
+    Ok(())
+}
+
 /// Sync body of `delete_session` (disk + db work off the main thread).
 pub(super) fn delete_session_blocking(
     db: &crate::db::Db,
@@ -1036,6 +1107,7 @@ pub(super) fn delete_session_blocking(
     }
     if let Some(path) = path {
         delete_session_disk(engine, &path)?;
+        delete_session_backups(engine, &path)?;
     }
     // No indexed transcript after the scan is a valid empty/failed session.
     // Model and effort can already exist even when no transcript was created.
@@ -1085,12 +1157,13 @@ fn remote_session_delete_script(engine: &str, remote_path: &str) -> Result<Strin
     let quoted = crate::engine::wsl_transport::sh_quote(remote_path);
     // run_script_output checks the final status, without enabling set -e.
     // Only empty-directory cleanup may mask a failure, never transcript rm.
-    let mut script = format!("rm -f -- {quoted} || exit $?");
+    // The editor's previous-version backup (`<source>.ccgui-backup`) goes with it.
+    let mut script = format!("rm -f -- {quoted} || exit $?\nrm -f -- {quoted}.ccgui-backup || exit $?");
     if engine == "dsh" {
         // 世代日志同目录共存(session.jsonl.zstd / session.vN.jsonl.zstd),
         // 只删当前代会留下旧代被插件源重新列出;目录删空才移除。
         script.push_str(&format!(
-            "\ndir=$(dirname -- {quoted}) || exit $?\nrm -f -- \"$dir\"/session.jsonl.zstd \"$dir\"/session.v*.jsonl.zstd || exit $?\nrmdir -- \"$dir\" 2>/dev/null || true"
+            "\ndir=$(dirname -- {quoted}) || exit $?\nrm -f -- \"$dir\"/session.jsonl.zstd \"$dir\"/session.v*.jsonl.zstd \"$dir\"/session.jsonl.zstd.ccgui-backup \"$dir\"/session.v*.jsonl.zstd.ccgui-backup || exit $?\nrmdir -- \"$dir\" 2>/dev/null || true"
         ));
     }
     Ok(script)
@@ -1144,21 +1217,29 @@ pub async fn delete_remote_session(
 }
 
 #[tauri::command]
-pub fn pin_session(
+pub async fn pin_session(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
     pinned: bool,
 ) -> Result<(), String> {
-    mutate_sessions(
-        &state,
-        "UPDATE sessions SET pinned=?3 WHERE engine=?1 AND session_id=?2",
-        rusqlite::params![engine, session_id, pinned as i64],
-    )
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        mutate_sessions(
+            &db,
+            "UPDATE sessions SET pinned=?3 WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, session_id, pinned as i64],
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
+    Ok(())
 }
 
 #[tauri::command]
-pub fn rename_session(
+pub async fn rename_session(
     state: tauri::State<'_, crate::AppState>,
     engine: String,
     session_id: String,
@@ -1169,11 +1250,19 @@ pub fn rename_session(
     } else {
         Some(title.trim().to_string())
     };
-    mutate_sessions(
-        &state,
-        "UPDATE sessions SET custom_title=?3 WHERE engine=?1 AND session_id=?2",
-        rusqlite::params![engine, session_id, value],
-    )
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        mutate_sessions(
+            &db,
+            "UPDATE sessions SET custom_title=?3 WHERE engine=?1 AND session_id=?2",
+            rusqlite::params![engine, session_id, value],
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1315,6 +1404,7 @@ pub struct Workspace {
     pub name: String,
     pub last_opened_at: Option<i64>,
     pub sort_order: Option<i64>,
+    pub pinned: bool,
     /// Sidebar group (工作区分组) this workspace belongs to; None = ungrouped.
     pub group_id: Option<String>,
     /// "worktree" = git worktree child hanging under its parent workspace
@@ -1331,15 +1421,10 @@ pub struct Workspace {
     pub meta: Option<serde_json::Value>,
 }
 
-#[tauri::command]
-pub async fn list_workspaces(state: tauri::State<'_, crate::AppState>) -> Result<Vec<Workspace>, String> {
-    off_ui_thread(&state.db, list_workspaces_from).await
-}
-
 fn list_workspaces_from(db: &crate::db::Db) -> Result<Vec<Workspace>, String> {
     query_rows(
         db,
-        "SELECT id, path, name, last_opened_at, sort_order, group_id, kind, parent_id, meta FROM workspaces
+        "SELECT id, path, name, last_opened_at, sort_order, group_id, kind, parent_id, meta, pinned FROM workspaces
          ORDER BY sort_order IS NULL, sort_order, COALESCE(last_opened_at, 0) DESC",
         |r| {
             let meta_json: Option<String> = r.get(8)?;
@@ -1349,6 +1434,7 @@ fn list_workspaces_from(db: &crate::db::Db) -> Result<Vec<Workspace>, String> {
                 name: r.get(2)?,
                 last_opened_at: r.get(3)?,
                 sort_order: r.get(4)?,
+                pinned: r.get::<_, i64>(9)? != 0,
                 group_id: r.get(5)?,
                 kind: r.get(6)?,
                 parent_id: r.get(7)?,
@@ -1359,7 +1445,17 @@ fn list_workspaces_from(db: &crate::db::Db) -> Result<Vec<Workspace>, String> {
 }
 
 #[tauri::command]
-pub fn add_workspace(
+pub async fn list_workspaces(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<Workspace>, String> {
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || list_workspaces_from(&db))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn add_workspace(
     state: tauri::State<'_, crate::AppState>,
     path: String,
     meta: Option<serde_json::Value>,
@@ -1393,7 +1489,7 @@ pub fn add_workspace(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "kind=\"worktree\" requires parent_id".to_string())?;
             let exists = {
-                let conn = state.db.0.lock();
+                let conn = state.db.read();
                 conn.query_row(
                     "SELECT 1 FROM workspaces WHERE id=?1",
                     rusqlite::params![pid],
@@ -1407,13 +1503,20 @@ pub fn add_workspace(
         }
         Some(other) => return Err(format!("unknown workspace kind: {other}")),
     }
-    add_workspace_inner(&state, &path, meta, kind, parent_id)
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || {
+        add_workspace_inner(&db, &sink, &path, meta, kind, parent_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Shared body of `add_workspace` / `plugin_caps::plugin_add_workspace`:
 /// shape checks + upsert. Grant checks live in the callers.
 pub(crate) fn add_workspace_inner(
-    state: &crate::AppState,
+    db: &Arc<crate::db::Db>,
+    sink: &Arc<crate::event_sink::EventSink>,
     path: &str,
     meta: Option<serde_json::Value>,
     kind: Option<String>,
@@ -1454,7 +1557,7 @@ pub(crate) fn add_workspace_inner(
         .unwrap_or(0);
     let meta_json = meta.as_ref().map(|m| m.to_string());
     {
-        let conn = state.db.0.lock();
+        let conn = db.0.lock();
         conn.execute(
             "INSERT INTO workspaces(id, path, name, last_opened_at, kind, parent_id, meta)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
@@ -1466,13 +1569,14 @@ pub(crate) fn add_workspace_inner(
         )
         .map_err(|e| e.to_string())?;
     }
-    super::scanner::spawn_scan(Arc::clone(&state.db), Arc::clone(&state.sink));
+    super::scanner::spawn_scan(Arc::clone(db), Arc::clone(sink));
     Ok(Workspace {
         id,
         path: trimmed.to_string(),
         name,
         last_opened_at: Some(now),
         sort_order: None,
+        pinned: false,
         group_id: None,
         kind,
         parent_id,
@@ -1482,7 +1586,7 @@ pub(crate) fn add_workspace_inner(
 /// Assign a workspace to a sidebar group (None = ungrouped). The group must
 /// exist in app settings so a deleted group never lingers on a row.
 #[tauri::command]
-pub fn set_workspace_group(
+pub async fn set_workspace_group(
     state: tauri::State<'_, crate::AppState>,
     id: String,
     group_id: Option<String>,
@@ -1496,50 +1600,95 @@ pub fn set_workspace_group(
             return Err(format!("unknown group: {gid}"));
         }
     }
-    let conn = state.db.0.lock();
-    conn.execute(
-        "UPDATE workspaces SET group_id=?2 WHERE id=?1",
-        rusqlite::params![id, group_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.0.lock();
+        conn.execute(
+            "UPDATE workspaces SET group_id=?2 WHERE id=?1",
+            rusqlite::params![id, group_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn reorder_workspaces(
-    state: tauri::State<'_, crate::AppState>,
-    ids: Vec<String>,
-) -> Result<(), String> {
-    let conn = state.db.0.lock();
+fn reorder_workspaces_blocking(db: &crate::db::Db, ids: &[String]) -> Result<(), String> {
+    let mut conn = db.0.lock();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     for (index, id) in ids.iter().enumerate() {
-        conn.execute(
+        tx.execute(
             "UPDATE workspaces SET sort_order=?2 WHERE id=?1",
             rusqlite::params![id, index as i64],
         )
         .map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reorder_workspaces(
+    state: tauri::State<'_, crate::AppState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || reorder_workspaces_blocking(&db, &ids))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Worktree children follow their parent row, so only top-level workspaces
+/// (parent_id IS NULL) can be pinned.
+fn set_workspace_pinned_blocking(db: &crate::db::Db, id: &str, pinned: bool) -> Result<(), String> {
+    let conn = db.0.lock();
+    let changed = conn
+        .execute(
+            "UPDATE workspaces SET pinned=?2 WHERE id=?1 AND parent_id IS NULL",
+            rusqlite::params![id, pinned],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("workspace not found or is a worktree child".into());
+    }
     Ok(())
+}
+
+/// Async + spawn_blocking like the other workspace writes: a sync command
+/// runs on the main thread and would freeze the window while a background
+/// index pass holds the writer lock.
+#[tauri::command]
+pub async fn set_workspace_pinned(
+    state: tauri::State<'_, crate::AppState>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let db = Arc::clone(&state.db);
+    tauri::async_runtime::spawn_blocking(move || set_workspace_pinned_blocking(&db, &id, pinned))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Sync body of `remove_workspace`. Split out so the identity reclamation
 /// below is reachable from a test without a Tauri `State`.
 fn remove_workspace_blocking(db: &crate::db::Db, id: &str) -> Result<(), String> {
-    let conn = db.0.lock();
-    let path: Option<String> = conn
+    let mut conn = db.0.lock();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let path: Option<String> = tx
         .query_row(
             "SELECT path FROM workspaces WHERE id=?1",
             rusqlite::params![id],
             |r| r.get(0),
         )
         .ok();
-    conn.execute("DELETE FROM workspaces WHERE id=?1", rusqlite::params![id])
+    tx.execute("DELETE FROM workspaces WHERE id=?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     if let Some(path) = path {
         // Same cleanup as delete_session: these identities are scoped to
         // sessions that no longer exist. Remote sessions have no `sessions`
         // row, so the workspace the frame was accepted in is matched directly
         // — without it their identities would never be reclaimed.
-        conn.execute(
+        tx.execute(
             "DELETE FROM accepted_internal_frames
               WHERE workspace_path=?1
                  OR (engine, session_id) IN
@@ -1547,24 +1696,28 @@ fn remove_workspace_blocking(db: &crate::db::Db, id: &str) -> Result<(), String>
             rusqlite::params![path],
         )
         .map_err(|e| e.to_string())?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM sessions WHERE workspace_path=?1",
             rusqlite::params![path],
         )
         .map_err(|e| e.to_string())?;
         // 审批记录不声明 FK(sessions 行可能晚于计划到达),由清理路径级联。
-        crate::engine::plan_review::delete_reviews_for_workspace(&conn, &path)?;
+        crate::engine::plan_review::delete_reviews_for_workspace(&tx, &path)?;
     }
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn remove_workspace(
+pub async fn remove_workspace(
     state: tauri::State<'_, crate::AppState>,
     id: String,
 ) -> Result<(), String> {
-    remove_workspace_blocking(&state.db, &id)?;
-    state.sink.emit_sessions_changed();
+    let db = Arc::clone(&state.db);
+    let sink = Arc::clone(&state.sink);
+    tauri::async_runtime::spawn_blocking(move || remove_workspace_blocking(&db, &id))
+        .await
+        .map_err(|e| e.to_string())??;
+    sink.emit_sessions_changed();
     Ok(())
 }
 
@@ -1627,6 +1780,37 @@ mod tests {
         path
     }
 
+    /// The sidebar list must not queue behind an in-flight index transaction:
+    /// the WAL reader has its own snapshot and mutex.
+    #[test]
+    fn session_list_reads_through_writer_lock() {
+        let home = scratch_dir("list-reader");
+        let db = Arc::new(crate::db::Db::open_at(&home.join("app.db")).unwrap());
+        db.0.lock()
+            .execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title)
+                 VALUES('omp', 'sid-1', '/ws', '/tmp/sid-1.jsonl', 1, 1, 'readable while indexing')",
+                [],
+            )
+            .unwrap();
+
+        let writer = db.0.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_db = Arc::clone(&db);
+        let worker = std::thread::spawn(move || {
+            tx.send(list_sessions_from(&worker_db)).unwrap();
+        });
+        // A read that took the writer mutex would time out here. Drop the
+        // writer before asserting so the old implementation still terminates.
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop(writer);
+        worker.join().unwrap();
+
+        let sessions = result.expect("list_sessions blocked on the writer").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sid-1");
+    }
+
     /// One omp rollout whose assistant turn carries two look-alike frames.
     fn write_session(path: &Path, workspace: &Path, text: &str) {
         let lines = [
@@ -1674,6 +1858,25 @@ mod tests {
             .set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
     }
 
+    /// A load that read the source before a save and finishes after the save
+    /// evicted the cache is served, but never published under a stat key the
+    /// save did not move (the next ordinary load would return pre-save text).
+    #[test]
+    fn parse_overlapping_a_save_is_served_but_not_cached() {
+        let scratch = Scratch::new();
+        let file = scratch.0.join("raced.jsonl");
+        write_session(&file, &scratch.0, "before the save");
+        let (size, mtime_ms) = super::super::stat_signature(&file).unwrap();
+        let key = (file.clone(), size, mtime_ms, String::new());
+        let parsed = parse_session_file("omp", &file, &HashSet::new()).unwrap();
+        let fold = subagent_fold(&parsed.messages);
+        let stale = Arc::new(CachedSession { parsed, fold, footprint: 1 });
+        let generation = PARSED_CACHE_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+        forget_parsed_session(&file); // the save lands while that parse runs
+        let served = publish_parse(key.clone(), &file, Arc::clone(&stale), false, generation);
+        assert!(Arc::ptr_eq(&served, &stale));
+        assert!(!PARSED_CACHE.lock().contains_key(&key));
+    }
     #[test]
     fn force_reload_same_stat_preserves_frames_and_unrelated_cache() {
         let scratch = Scratch::new();
@@ -2139,6 +2342,130 @@ mod tests {
                 .len(),
             1
         );
+
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn workspace_pin_only_applies_to_top_level_rows() {
+        let home = scratch_dir("workspace-pin");
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        {
+            let conn = db.0.lock();
+            conn.execute_batch(
+                "INSERT INTO workspaces(id, path, name) VALUES('p', '/ws/p', 'p');
+                 INSERT INTO workspaces(id, path, name, kind, parent_id)
+                   VALUES('c', '/ws/p-wt', 'c', 'worktree', 'p');",
+            )
+            .unwrap();
+        }
+        set_workspace_pinned_blocking(&db, "p", true).unwrap();
+        // Writing the same value again still matches the row.
+        set_workspace_pinned_blocking(&db, "p", true).unwrap();
+        assert!(set_workspace_pinned_blocking(&db, "c", true).is_err());
+        assert!(set_workspace_pinned_blocking(&db, "missing", true).is_err());
+        let rows = list_workspaces_from(&db).unwrap();
+        assert!(rows.iter().find(|w| w.id == "p").unwrap().pinned);
+        assert!(!rows.iter().find(|w| w.id == "c").unwrap().pinned);
+
+        set_workspace_pinned_blocking(&db, "p", false).unwrap();
+        let rows = list_workspaces_from(&db).unwrap();
+        assert!(!rows.iter().find(|w| w.id == "p").unwrap().pinned);
+        drop(db);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn workspace_removal_and_reorder_commit_atomically() {
+        let home = scratch_dir("workspace-atomic");
+        let ws1 = home.join("ws1");
+        let ws2 = home.join("ws2");
+        std::fs::create_dir_all(&ws1).unwrap();
+        std::fs::create_dir_all(&ws2).unwrap();
+        let db = crate::db::Db::open_at(&home.join("app.db")).unwrap();
+        let ws1_path = ws1.to_string_lossy().to_string();
+        let ws2_path = ws2.to_string_lossy().to_string();
+        {
+            let conn = db.0.lock();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name, sort_order) VALUES('w1', ?1, 'ws1', 0)",
+                rusqlite::params![ws1_path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO workspaces(id, path, name, sort_order) VALUES('w2', ?1, 'ws2', 1)",
+                rusqlite::params![ws2_path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions(engine, session_id, workspace_path, file_path, file_size, file_mtime_ms, title)
+                 VALUES('omp', 's1', ?1, 's1.jsonl', 1, 1, 'session in ws1')",
+                rusqlite::params![ws1_path],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TEMP TRIGGER abort_session_delete
+                 BEFORE DELETE ON sessions
+                 BEGIN
+                     SELECT RAISE(ABORT, 'stop mid workspace removal');
+                 END;",
+                [],
+            )
+            .unwrap();
+        }
+        db.record_accepted_internal_frame_hash("omp", "s1", &"a".repeat(64), &ws1_path)
+            .unwrap();
+
+        assert!(remove_workspace_blocking(&db, "w1").is_err());
+        // Reader snapshot must never see the workspace gone while its sessions
+        // and accepted frame identities remain.
+        assert_eq!(list_workspaces_from(&db).unwrap().len(), 2);
+        assert_eq!(list_sessions_from(&db).unwrap().len(), 1);
+        assert_eq!(
+            db.accepted_internal_frames("omp", "s1").unwrap().0.len(),
+            1
+        );
+
+        {
+            let conn = db.0.lock();
+            conn.execute("DROP TRIGGER abort_session_delete", []).unwrap();
+            conn.execute(
+                "CREATE TEMP TRIGGER abort_second_workspace_reorder
+                 BEFORE UPDATE OF sort_order ON workspaces
+                 WHEN NEW.id = 'w1' AND NEW.sort_order = 1
+                 BEGIN
+                     SELECT RAISE(ABORT, 'stop mid workspace reorder');
+                 END;",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(reorder_workspaces_blocking(&db, &["w2".to_string(), "w1".to_string()]).is_err());
+        let order: Vec<(String, Option<i64>)> = list_workspaces_from(&db)
+            .unwrap()
+            .into_iter()
+            .map(|w| (w.id, w.sort_order))
+            .collect();
+        assert_eq!(order, vec![("w1".to_string(), Some(0)), ("w2".to_string(), Some(1))]);
+
+        {
+            let conn = db.0.lock();
+            conn.execute("DROP TRIGGER abort_second_workspace_reorder", [])
+                .unwrap();
+        }
+        reorder_workspaces_blocking(&db, &["w2".to_string(), "w1".to_string()]).unwrap();
+        let reordered: Vec<String> = list_workspaces_from(&db)
+            .unwrap()
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(reordered, vec!["w2".to_string(), "w1".to_string()]);
+
+        remove_workspace_blocking(&db, "w1").unwrap();
+        assert_eq!(list_workspaces_from(&db).unwrap().len(), 1);
+        assert!(list_sessions_from(&db).unwrap().is_empty());
 
         drop(db);
         std::fs::remove_dir_all(&home).ok();
@@ -2712,6 +3039,53 @@ mod tests {
         assert!(!dir.exists());
     }
 
+    /// Deleting a session must not leave its full transcript behind in the
+    /// editor's previous-version backup; a refused delete keeps it.
+    #[test]
+    fn deleting_a_session_removes_its_editor_backups() {
+        let scratch = Scratch::new();
+        let db = crate::db::Db::open_at(&scratch.0.join("app.db")).unwrap();
+        let transcript = scratch.0.join("2026-10-29_sid-one.jsonl");
+        let backup = scratch.0.join("2026-10-29_sid-one.jsonl.ccgui-backup");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        std::fs::write(&backup, "previous transcript").unwrap();
+        register_history_source(&db, "omp", "sid-one", &transcript);
+        delete_session_blocking(&db, "omp", "sid-one").unwrap();
+        assert!(!transcript.exists());
+        assert!(!backup.exists());
+
+        // OpenCode tree: hidden metadata and aggregate backups beside the session.
+        let project = scratch.0.join("storage/session/proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let meta = project.join("ses_gone.json");
+        std::fs::write(&meta, json!({"id":"ses_gone"}).to_string()).unwrap();
+        let hidden = [project.join(".ses_gone.json.ccgui-backup"), project.join(".ses_gone.ccgui-session.json.ccgui-backup")];
+        for path in &hidden {
+            std::fs::write(path, "previous").unwrap();
+        }
+        let unrelated = project.join(".ses_other.ccgui-session.json.ccgui-backup");
+        std::fs::write(&unrelated, "other session").unwrap();
+        delete_session_disk("opencode", &meta).unwrap();
+        delete_session_backups("opencode", &meta).unwrap();
+        assert!(hidden.iter().all(|path| !path.exists()));
+        assert!(unrelated.exists());
+
+        // OpenCode SQLite: the JSON aggregate beside opencode.db.
+        let address = super::super::opencode_db_session_path(&scratch.0.join("opencode.db"), "ses_db");
+        let aggregate = scratch.0.join("opencode.db.ses_db.json.ccgui-backup");
+        std::fs::write(&aggregate, "previous").unwrap();
+        delete_session_backups("opencode", &address).unwrap();
+        assert!(!aggregate.exists());
+
+        // A delete the layout guard refused leaves the source, so the backup stays.
+        let kept = scratch.0.join("kept.jsonl");
+        let kept_backup = scratch.0.join("kept.jsonl.ccgui-backup");
+        std::fs::write(&kept, "{}\n").unwrap();
+        std::fs::write(&kept_backup, "previous").unwrap();
+        delete_session_backups("omp", &kept).unwrap();
+        assert!(kept_backup.exists());
+    }
+
     /// Unknown engines fail loudly instead of silently skipping the disk
     /// delete (the silent path is how deleted sessions resurrect).
     #[test]
@@ -2786,11 +3160,16 @@ mod tests {
         let sibling_transcript = sibling.join("session.jsonl.zstd");
         std::fs::write(&sibling_transcript, "other session").unwrap();
 
+        for name in ["session.v2.jsonl.zstd.ccgui-backup", "session.v1.jsonl.zstd.ccgui-backup"] {
+            std::fs::write(dir.join(name), "previous transcript").unwrap();
+        }
+
         let output = run_remote_delete_script("dsh", &dir.join("session.v2.jsonl.zstd"));
 
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         for name in generations {
             assert!(!dir.join(name).exists(), "generation remains: {name}");
+            assert!(!dir.join(format!("{name}.ccgui-backup")).exists(), "backup remains: {name}");
         }
         // Nonempty-directory cleanup is best effort, not a transcript failure.
         assert_eq!(std::fs::read_to_string(unrelated).unwrap(), "keep");

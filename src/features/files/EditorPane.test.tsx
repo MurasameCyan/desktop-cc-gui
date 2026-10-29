@@ -2,7 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { EditorView } from "@codemirror/view";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FileContent, SessionMeta } from "@/lib/ipc";
+import type { FileContent, SessionFileDocument, SessionMeta } from "@/lib/ipc";
 import type * as Platform from "@/lib/platform";
 import i18n from "@/lib/i18n";
 
@@ -124,7 +124,7 @@ describe("session editor recovery and wrapping", () => {
 
   it.each([
     { ...session, engine: "dsh", filePath: "/data/session.jsonl.zstd" },
-    { ...session, engine: "agy", filePath: "/data/edited.db" },
+
     { ...session, engine: "opencode", filePath: "/data/opencode.db\u001fedited" },
     { ...session, remote: true, remotePath: "/remote/session.jsonl" },
   ])("does not offer local text editing for $engine structured or remote sources", async (target) => {
@@ -138,6 +138,66 @@ describe("session editor recovery and wrapping", () => {
     expect(button("files.openInDefaultEditor")).toBeNull();
   });
 
+  it("offers the local external editor to repair invalid native JSONL", async () => {
+    await openOversized(session, "invalid native JSONL on line 2: expected value");
+    expect(button("files.openInDefaultEditor")?.disabled).toBe(false);
+    await act(async () => button("files.openInDefaultEditor")!.click());
+    expect(mocks.openSessionFileInDefaultEditor).toHaveBeenCalledWith("omp", "edited");
+  });
+
+  it.each(["zh", "en", "ko"])("keeps the draft and version after a conflict in %s", async (language) => {
+    await i18n.changeLanguage(language);
+    mocks.readSessionFile.mockResolvedValue({ path: session.filePath, name: "edited.jsonl", text: "A", version: "version-A" });
+    await useFilesStore.getState().openSessionFile(session);
+    const key = useFilesStore.getState().activeFilePath!;
+    await act(async () => root.render(<EditorPane path={key} />));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    await act(async () => view.dispatch({ changes: { from: 1, insert: " draft" } }));
+    mocks.writeSessionFile.mockRejectedValueOnce(new Error("SESSION_EDIT_CONFLICT"));
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === i18n.t("files.saveFile"))!;
+    await act(async () => save.click());
+    expect(view.state.doc.toString()).toBe("A draft");
+    expect(container.textContent).toContain(i18n.t("files.sessionEditConflict"));
+    expect(i18n.t("files.sessionEditConflict")).not.toBe("files.sessionEditConflict");
+    expect(useFilesStore.getState().fileStates[key].version).toBe("version-A");
+    await act(async () => useFilesStore.getState().openSessionFile(session));
+    expect(EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)).toBe(view);
+    expect(view.state.doc.toString()).toBe("A draft");
+    expect(mocks.readSessionFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the new version for a second save without replacing edits typed during saving", async () => {
+    mocks.readSessionFile.mockResolvedValue({ path: session.filePath, name: "edited.jsonl", text: "A", version: "v1" });
+    await useFilesStore.getState().openSessionFile(session);
+    const key = useFilesStore.getState().activeFilePath!;
+    await act(async () => root.render(<EditorPane path={key} />));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === i18n.t("files.saveFile"))!;
+    const pending = Promise.withResolvers<SessionFileDocument>();
+    mocks.writeSessionFile.mockReturnValueOnce(pending.promise);
+    await act(async () => view.dispatch({ changes: { from: 1, insert: " first" } }));
+    await act(async () => save.click());
+    await act(async () => view.dispatch({ changes: { from: view.state.doc.length, insert: " second" } }));
+    await act(async () => pending.resolve({ path: session.filePath, name: "edited.jsonl", text: "A first", version: "v2" }));
+    expect(view.state.doc.toString()).toBe("A first second");
+    expect(useFilesStore.getState().dirtyPaths[key]).toBe(true);
+    mocks.writeSessionFile.mockResolvedValueOnce({ path: session.filePath, name: "edited.jsonl", text: "A first second", version: "v3" });
+    await act(async () => save.click());
+    expect(mocks.writeSessionFile).toHaveBeenLastCalledWith("omp", "edited", "A first second", "v2", undefined, undefined);
+    expect(useFilesStore.getState().fileStates[key].version).toBe("v3");
+    expect(useFilesStore.getState().dirtyPaths[key]).toBeUndefined();
+  });
+
+  it("reopens a clean editor with the newly appended turn", async () => {
+    mocks.readSessionFile.mockResolvedValueOnce({ path: session.filePath, name: "edited.jsonl", text: "A", version: "A" })
+      .mockResolvedValueOnce({ path: session.filePath, name: "edited.jsonl", text: "A+B", version: "AB" });
+    await useFilesStore.getState().openSessionFile(session);
+    const key = useFilesStore.getState().activeFilePath!;
+    await act(async () => root.render(<EditorPane path={key} />));
+    await act(async () => useFilesStore.getState().openSessionFile(session));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    expect(view.state.doc.toString()).toBe("A+B");
+  });
   it("does not offer a host editor launch from the browser client", async () => {
     platform.isWeb = true;
     await openOversized();
