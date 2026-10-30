@@ -2279,6 +2279,8 @@ export const zh = {
         "dsh 的 MCP 由插件提供（每台服务一个 dsh-mcp-client 实例），请在 profile 的 cordis 配置里增删",
       jsonc_readonly:
         "该文件是 JSONC（带注释）：写入会丢掉注释，这里只读；请在编辑器里改",
+      needs_workspace:
+        "Claude 的启停按工作区记录（~/.claude.json 里该工作区的 disabledMcpServers）：先打开一个工作区，才能在这里切换",
     },
     support: {
       none: "{{name}} 未内置 MCP：这里不伪造来源。它仍可通过扩展机制接入 MCP。",

@@ -256,6 +256,32 @@ describe("McpSection", () => {
     expect(alphaRow?.querySelector('[title*="只读"]')).toBeTruthy();
   });
 
+  it("tells why a Claude entry is locked when no workspace is open", async () => {
+    // Claude 的启停按工作区记录：没有工作区时后端只给原因码、不给字面文案。
+    api.inventory.mockResolvedValue(
+      payload({
+        engines: [
+          engine("claude", {
+            config: {
+              entries: [
+                { ...claudeUser(), readonlyReason: null, readonlyReasonCode: "needs_workspace" },
+              ],
+              errors: [],
+            },
+          }),
+        ],
+      }),
+    );
+    await renderSection();
+    const alphaRow = [...document.querySelectorAll("li")].find((row) =>
+      row.textContent?.includes("alpha"),
+    );
+    const lock = alphaRow?.lastElementChild;
+    // A bare "只读" leaves the user guessing why the switch is gone.
+    expect(lock?.getAttribute("title")).not.toBe("只读");
+    expect(lock?.getAttribute("title")).toContain("工作区");
+  });
+
   it("switches engines and shows the not-installed notice for Codex", async () => {
     await renderSection();
     await act(async () => {
