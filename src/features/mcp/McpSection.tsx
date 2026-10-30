@@ -113,7 +113,7 @@ function ConfigRow({
         <ProbeStatusChip entry={entry} />
       </button>
       {/* 检测 · 启动方式 · 启用：都直接放在行里，与状态区共用行的 gap-2，间距一致；
-          启用（或只读锁）在最右，与原来的开关同列。 */}
+          启用开关常驻最右（只读来源置灰），与原来的开关同列。 */}
       {probeable(entry) ? (
         <ProbeActionButton entry={entry} workspacePath={workspacePath} />
       ) : null}

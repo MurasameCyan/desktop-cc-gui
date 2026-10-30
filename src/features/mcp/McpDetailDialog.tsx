@@ -64,15 +64,14 @@ export function McpDetailDialog({
             {t("mcp.detail.reveal")}
           </Button>
         ) : null}
-        {entry.writable ? (
-          <Switch
-            size="sm"
-            aria-label={t("mcp.toggle", { name: entry.name })}
-            isSelected={entry.enabled}
-            isDisabled={pending}
-            onChange={onToggle}
-          />
-        ) : null}
+        {/* 只读来源也常驻开关、显示真实状态，置灰不可点；原因写在下面的说明里。 */}
+        <Switch
+          size="sm"
+          aria-label={t("mcp.toggle", { name: entry.name })}
+          isSelected={entry.enabled}
+          isDisabled={pending || !entry.writable}
+          onChange={onToggle}
+        />
       </div>
       {/* 标题行固定，其余一起滚动：工具清单很长时弹窗不能超出视口。 */}
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">

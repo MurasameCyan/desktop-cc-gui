@@ -1,7 +1,8 @@
 /**
  * 条目的两个开关：
  *
- * - 启用：写 CLI 自己的配置，影响所有客户端；只读来源显示锁和原因。
+ * - 启用：写 CLI 自己的配置，影响所有客户端；只读来源也常驻开关、显示真实
+ *   状态，只是置灰不可点，原因在悬停提示里。
  * - 启动方式：只写 ccgui 设置，只影响本应用拉起的引擎进程。按需启动时工具
  *   清单照常给模型（来自缓存），真实 server 到第一次调用才启动。
  *
@@ -12,7 +13,6 @@
  */
 import { useTranslation } from "react-i18next";
 import Hourglass from "lucide-react/dist/esm/icons/hourglass";
-import Lock from "lucide-react/dist/esm/icons/lock";
 import Power from "lucide-react/dist/esm/icons/power";
 import PowerOff from "lucide-react/dist/esm/icons/power-off";
 import Zap from "lucide-react/dist/esm/icons/zap";
@@ -37,7 +37,7 @@ export function launchModeBlockedReason(t: Translate, entry: McpConfigEntry): st
   return null;
 }
 
-/** 行内启用开关；只读来源换成带原因的锁。 */
+/** 行内启用开关：常驻显示真实启停状态；只读来源置灰不可点，悬停给原因。 */
 export function EnableToggle({
   entry,
   pending,
@@ -48,28 +48,26 @@ export function EnableToggle({
   onChange: (enabled: boolean) => void;
 }) {
   const { t } = useTranslation();
-  if (!entry.writable) {
-    const reason = readonlyReasonText(t, entry);
-    return (
-      <span
-        className="flex size-6 shrink-0 items-center justify-center text-text-tertiary"
-        title={reason}
-      >
-        <Lock className="size-3.5" aria-hidden />
-        <span className="sr-only">{reason}</span>
-      </span>
-    );
-  }
+  const readonlyReason = entry.writable ? null : readonlyReasonText(t, entry);
   const Icon = entry.enabled ? Power : PowerOff;
   return (
     <button
       type="button"
       aria-label={t("mcp.toggle", { name: entry.name })}
       aria-pressed={entry.enabled}
-      title={t(entry.enabled ? "mcp.enableHint.on" : "mcp.enableHint.off", { name: entry.name })}
+      // aria-disabled 而不是 disabled：被禁用的按钮收不到悬停，原因提示就出不来。
+      aria-disabled={readonlyReason !== null || undefined}
+      title={
+        readonlyReason ??
+        t(entry.enabled ? "mcp.enableHint.on" : "mcp.enableHint.off", { name: entry.name })
+      }
       disabled={pending}
-      onClick={() => onChange(!entry.enabled)}
-      className={cx(ROW_ICON_BUTTON, entry.enabled ? "text-text-primary" : "text-text-tertiary")}
+      onClick={readonlyReason !== null ? undefined : () => onChange(!entry.enabled)}
+      className={cx(
+        ROW_ICON_BUTTON,
+        entry.enabled ? "text-text-primary" : "text-text-tertiary",
+        readonlyReason !== null && "cursor-not-allowed opacity-40 hover:bg-transparent",
+      )}
     >
       <Icon className="size-3.5" aria-hidden />
     </button>
