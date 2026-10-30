@@ -23,9 +23,9 @@ describe("findTimelineMatches", () => {
       msg(2, "assistant", "bug one, Bug two"),
     ]);
     expect(findTimelineMatches(rows, "bug")).toEqual([
-      { rowIndex: 0 },
-      { rowIndex: 1 },
-      { rowIndex: 1 },
+      { rowIndex: 0, start: 8, end: 11 },
+      { rowIndex: 1, start: 0, end: 3 },
+      { rowIndex: 1, start: 9, end: 12 },
     ]);
   });
 
@@ -39,18 +39,28 @@ describe("findTimelineMatches", () => {
     // One process row folds the thinking + tool steps (row index 1).
     expect(rows.map((row) => row.kind)).toEqual(["msg", "process", "msg"]);
     expect(findTimelineMatches(rows, "refactor")).toEqual([
-      { rowIndex: 0 },
-      { rowIndex: 1 },
+      { rowIndex: 0, start: 0, end: 8 },
+      { rowIndex: 1, start: 13, end: 21 },
     ]);
-    expect(findTimelineMatches(rows, "read_file")).toEqual([{ rowIndex: 1 }]);
+    expect(findTimelineMatches(rows, "read_file")).toEqual([
+      { rowIndex: 1, start: 22, end: 31 },
+    ]);
   });
 
   it("does not overlap occurrences", () => {
     const rows = buildRows([msg(1, "user", "aaaa")]);
     expect(findTimelineMatches(rows, "aa")).toEqual([
-      { rowIndex: 0 },
-      { rowIndex: 0 },
+      { rowIndex: 0, start: 0, end: 2 },
+      { rowIndex: 0, start: 2, end: 4 },
     ]);
+  });
+
+  it("honours case sensitivity, whole words and regexps", () => {
+    const rows = buildRows([msg(1, "assistant", "Bug bug cat concatenate 123")]);
+    expect(findTimelineMatches(rows, "bug", { caseSensitive: true })).toHaveLength(1);
+    expect(findTimelineMatches(rows, "cat", { wholeWord: true })).toHaveLength(1);
+    expect(findTimelineMatches(rows, "\\d+", { regexp: true })).toHaveLength(1);
+    expect(findTimelineMatches(rows, "(", { regexp: true })).toEqual([]);
   });
 });
 

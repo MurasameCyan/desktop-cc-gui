@@ -16,6 +16,12 @@ export interface TextMatch {
   end: number;
 }
 
+export interface TextMatchRange {
+  /** Character offsets into the searched string. */
+  start: number;
+  end: number;
+}
+
 export interface TextSearchOptions {
   caseSensitive?: boolean;
   wholeWord?: boolean;
@@ -44,6 +50,70 @@ function isWholeWord(text: string, start: number, end: number): boolean {
   return !WORD_CHAR.test(codePointBefore(text, start)) && !WORD_CHAR.test(codePointAt(text, end));
 }
 
+interface TextMatcher {
+  exec(text: string): TextMatchRange[];
+}
+
+function createMatcher(query: string, options: TextSearchOptions): TextMatcher | null {
+  const needle = query.trim();
+  if (!needle) return null;
+  if (options.regexp) {
+    let regexp: RegExp;
+    try {
+      regexp = new RegExp(needle, options.caseSensitive ? "g" : "gi");
+    } catch {
+      return null;
+    }
+    return {
+      exec(text) {
+        const matches: TextMatchRange[] = [];
+        regexp.lastIndex = 0;
+        for (let found = regexp.exec(text); found; found = regexp.exec(text)) {
+          const start = found.index;
+          const end = start + found[0].length;
+          if (end === start) {
+            regexp.lastIndex += 1;
+            continue;
+          }
+          if (!options.wholeWord || isWholeWord(text, start, end)) {
+            matches.push({ start, end });
+          }
+        }
+        return matches;
+      },
+    };
+  }
+  const literal = options.caseSensitive ? needle : needle.toLowerCase();
+  return {
+    exec(text) {
+      const haystack = options.caseSensitive ? text : text.toLowerCase();
+      const matches: TextMatchRange[] = [];
+      let from = 0;
+      for (;;) {
+        const at = haystack.indexOf(literal, from);
+        if (at === -1) break;
+        const end = at + literal.length;
+        if (!options.wholeWord || isWholeWord(text, at, end)) {
+          matches.push({ start: at, end });
+        }
+        from = end;
+      }
+      return matches;
+    },
+  };
+}
+
+/** Matches of `query` in a plain string, using the same options as the DOM
+ *  walker (chat timeline rows are plain text, not DOM). */
+export function findStringMatches(
+  text: string,
+  query: string,
+  options: TextSearchOptions = {},
+): TextMatchRange[] {
+  const matcher = createMatcher(query, options);
+  return matcher ? matcher.exec(text) : [];
+}
+
 /** Every occurrence of `query` under `root`, walking text nodes in order.
  *  A blank query yields no matches; an invalid regexp also yields none. */
 export function findTextMatches(
@@ -51,52 +121,18 @@ export function findTextMatches(
   query: string,
   options: TextSearchOptions = {},
 ): TextMatch[] {
-  const needle = query.trim();
-  if (!needle) return [];
+  const matcher = createMatcher(query, options);
+  if (!matcher) return [];
   const doc =
     root.ownerDocument ?? (typeof document !== "undefined" ? document : null);
   if (!doc) return [];
-  const matcher = options.regexp
-    ? (() => {
-        try {
-          return new RegExp(needle, options.caseSensitive ? "g" : "gi");
-        } catch {
-          return null;
-        }
-      })()
-    : null;
-  if (options.regexp && !matcher) return [];
-  const literal = options.caseSensitive ? needle : needle.toLowerCase();
   const matches: TextMatch[] = [];
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node) {
     const text = node.nodeValue ?? "";
-    if (matcher) {
-      matcher.lastIndex = 0;
-      for (let found = matcher.exec(text); found; found = matcher.exec(text)) {
-        const start = found.index;
-        const end = start + found[0].length;
-        if (end === start) {
-          matcher.lastIndex += 1;
-          continue;
-        }
-        if (!options.wholeWord || isWholeWord(text, start, end)) {
-          matches.push({ node: node as Text, start, end });
-        }
-      }
-    } else {
-      const haystack = options.caseSensitive ? text : text.toLowerCase();
-      let from = 0;
-      for (;;) {
-        const at = haystack.indexOf(literal, from);
-        if (at === -1) break;
-        const end = at + literal.length;
-        if (!options.wholeWord || isWholeWord(text, at, end)) {
-          matches.push({ node: node as Text, start: at, end });
-        }
-        from = end;
-      }
+    for (const { start, end } of matcher.exec(text)) {
+      matches.push({ node: node as Text, start, end });
     }
     node = walker.nextNode();
   }

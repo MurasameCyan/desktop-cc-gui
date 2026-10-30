@@ -25,7 +25,7 @@ import {
   FIND_PANEL_CARD_CLASS,
   findToggleClass,
   keepFindInputFocus,
-} from "./find-panel-ui";
+} from "@/components/base/find-panel/find-panel-ui";
 import {
   EDITOR_SEARCH_MATCH_LIMIT,
   EMPTY_EDITOR_SEARCH_MATCH_INFO,

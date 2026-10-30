@@ -15,7 +15,7 @@ import { mermaid } from "@streamdown/mermaid";
 import { cjk } from "@streamdown/cjk";
 import "katex/dist/katex.min.css";
 import { registerShortcutHandler } from "@/features/shortcuts/runtime";
-import { PreviewFindPanel } from "./PreviewFindPanel";
+import { FindOnlyPanel } from "@/components/base/find-panel/find-only-panel";
 import { useFilesStore } from "@/features/files/store";
 import { fileUrl, openExternal } from "@/lib/platform";
 import {
@@ -380,8 +380,9 @@ export function MarkdownPreview({
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {searchOpen && (
-        <PreviewFindPanel
+        <FindOnlyPanel
           inputRef={searchInputRef}
+          placeholder={t("files.markdown.searchPlaceholder")}
           query={query}
           onQueryChange={handleQueryChange}
           caseSensitive={caseSensitive}

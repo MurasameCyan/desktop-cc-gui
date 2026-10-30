@@ -79,8 +79,8 @@ describe("timeline search within bounded process history", () => {
   }
 
   async function search(query: string) {
-    if (!container.querySelector("search input")) await act(async () => searchHarness.handlers.get("chatSearch")!());
-    const input = container.querySelector<HTMLInputElement>("search input")!;
+    if (!container.querySelector('[role="search"] input')) await act(async () => searchHarness.handlers.get("chatSearch")!());
+    const input = container.querySelector<HTMLInputElement>('[role="search"] input')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, query);
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -95,12 +95,12 @@ describe("timeline search within bounded process history", () => {
     expect(container.textContent).toContain("工具 0 目标🙂");
     expect(container.textContent).toContain("1/3");
     expect(container.querySelectorAll("li").length).toBeLessThanOrEqual(40);
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.textContent).toContain("工具 80 目标🙂");
     expect(container.textContent).toContain("2/3");
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.textContent).toContain("工具 499 目标🙂");
-    await click(i18n.t("chat.searchPrevMatch"));
+    await click(i18n.t("files.editorSearch.previousMatch"));
     expect(container.textContent).toContain("工具 80 目标🙂");
     expect(container.querySelectorAll("li").length).toBeLessThanOrEqual(40);
   });
@@ -110,12 +110,12 @@ describe("timeline search within bounded process history", () => {
     await search("工具 80 目标🙂");
     expect(container.textContent).toContain("工具 80 目标🙂");
     await click("工具调用 500 次");
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.querySelector("button[aria-expanded]")!.getAttribute("aria-expanded")).toBe("true");
     expect(container.textContent).toContain("工具 80 目标🙂");
     await search("工具 0 目标🙂");
     expect(container.textContent).toContain("工具 0 目标🙂");
-    await click(i18n.t("chat.searchClose"));
+    await click(i18n.t("files.editorSearch.close"));
     await search("工具 499 目标🙂");
     expect(container.textContent).toContain("工具 499 目标🙂");
   });
@@ -124,13 +124,13 @@ describe("timeline search within bounded process history", () => {
     await renderTimeline(true);
     await search("目标🙂");
     expect(container.textContent).toContain("1/5");
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.textContent).toContain("2/5");
     expect(container.textContent).toContain("工具 0 目标🙂 目标🙂");
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.textContent).toContain("3/5");
     expect(container.textContent).toContain("工具 0 目标🙂 目标🙂");
-    await click(i18n.t("chat.searchNextMatch"));
+    await click(i18n.t("files.editorSearch.nextMatch"));
     expect(container.textContent).toContain("4/5");
     expect(container.textContent).toContain("工具 80 目标🙂");
     expect(container.querySelectorAll("li").length).toBeLessThanOrEqual(40);

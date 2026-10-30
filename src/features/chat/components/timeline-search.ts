@@ -1,4 +1,9 @@
-import { findTextMatches, highlightSupported } from "@/lib/dom-text-search";
+import {
+  findStringMatches,
+  findTextMatches,
+  highlightSupported,
+  type TextSearchOptions,
+} from "@/lib/dom-text-search";
 import type { TimelineRow } from "./timeline-rows";
 
 /**
@@ -17,25 +22,23 @@ export function rowSearchText(row: TimelineRow): string {
 
 export interface TimelineMatch {
   rowIndex: number;
+  /** Offsets into `rowSearchText(row)`, used to find the process item. */
+  start: number;
+  end: number;
 }
 
-/** 大小写不敏感地找出所有命中，按文档顺序每处出现一条（与浏览器查找的
- *  “3/12” 计数一致）。空查询返回空数组。 */
+/** 找出所有命中，按文档顺序每处出现一条（与浏览器查找的 “3/12” 计数
+ *  一致）。默认大小写不敏感；预览式查找可传 case/wholeWord/regexp。
+ *  空查询返回空数组。 */
 export function findTimelineMatches(
   rows: TimelineRow[],
   query: string,
+  options?: TextSearchOptions,
 ): TimelineMatch[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [];
   const matches: TimelineMatch[] = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-    const hay = rowSearchText(rows[rowIndex]).toLowerCase();
-    let from = 0;
-    for (;;) {
-      const at = hay.indexOf(needle, from);
-      if (at === -1) break;
-      matches.push({ rowIndex });
-      from = at + needle.length;
+    for (const range of findStringMatches(rowSearchText(rows[rowIndex]), query, options)) {
+      matches.push({ rowIndex, start: range.start, end: range.end });
     }
   }
   return matches;
@@ -63,12 +66,13 @@ export function paintSearchHighlights(
   root: HTMLElement,
   query: string,
   currentRowIndex: number | null,
+  options?: TextSearchOptions,
 ): void {
   clearSearchHighlights();
   if (!query.trim() || !searchHighlightSupported()) return;
   const all: Range[] = [];
   const current: Range[] = [];
-  for (const match of findTextMatches(root, query)) {
+  for (const match of findTextMatches(root, query, options)) {
     const rowIndex = Number(
       match.node.parentElement?.closest("[data-index]")?.getAttribute("data-index"),
     );

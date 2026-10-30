@@ -14,8 +14,10 @@ import {
   keepFindInputFocus,
 } from "./find-panel-ui";
 
-export interface PreviewFindPanelProps {
+export interface FindOnlyPanelProps {
   inputRef: MutableRefObject<HTMLInputElement | null>;
+  /** Surface-specific placeholder, e.g. "Search conversation". */
+  placeholder: string;
   query: string;
   onQueryChange: (value: string) => void;
   caseSensitive: boolean;
@@ -33,12 +35,13 @@ export interface PreviewFindPanelProps {
 }
 
 /**
- * Find-only version of the editor find card, for rendered read-only previews
- * (Markdown). It shares the visual tokens with `EditorSearchPanel` but has no
- * replace row/chevron: a preview has nothing to replace.
+ * Find-only version of the editor find card, shared by read-only surfaces
+ * (Markdown preview, chat timeline). It keeps the same visual tokens as
+ * `EditorSearchPanel` but has no replace row/chevron.
  */
-export function PreviewFindPanel({
+export function FindOnlyPanel({
   inputRef,
+  placeholder,
   query,
   onQueryChange,
   caseSensitive,
@@ -52,7 +55,7 @@ export function PreviewFindPanel({
   onPrev,
   onNext,
   onClose,
-}: PreviewFindPanelProps) {
+}: FindOnlyPanelProps) {
   const { t } = useTranslation();
   const hasQuery = query.length > 0;
   const noMatches = hasQuery && total === 0;
@@ -83,7 +86,7 @@ export function PreviewFindPanel({
   return (
     <div
       role="search"
-      aria-label={t("files.editorSearch.panelLabel")}
+      aria-label={t("files.editorSearch.find")}
       onKeyDown={handlePanelKeyDown}
       className={cx(FIND_PANEL_CARD_CLASS, FIND_PANEL_ANIMATION_CLASS)}
     >
@@ -97,8 +100,8 @@ export function PreviewFindPanel({
             autoCapitalize="off"
             autoCorrect="off"
             spellCheck={false}
-            placeholder={t("files.editorSearch.find")}
-            aria-label={t("files.editorSearch.find")}
+            placeholder={placeholder}
+            aria-label={placeholder}
             className={FIND_INPUT_CLASS}
           />
           <button

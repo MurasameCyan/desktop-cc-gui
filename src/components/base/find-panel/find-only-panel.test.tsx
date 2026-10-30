@@ -3,14 +3,15 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Side-effect import: initializes the i18next instance useTranslation reads.
 import i18n from "@/lib/i18n";
-import { PreviewFindPanel, type PreviewFindPanelProps } from "./PreviewFindPanel";
+import { FindOnlyPanel, type FindOnlyPanelProps } from "./find-only-panel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function baseProps(): PreviewFindPanelProps {
+function baseProps(): FindOnlyPanelProps {
   const inputRef: MutableRefObject<HTMLInputElement | null> = { current: null };
   return {
     inputRef,
+    placeholder: i18n.t("files.editorSearch.find"),
     query: "needle",
     onQueryChange: vi.fn(),
     caseSensitive: false,
@@ -27,7 +28,7 @@ function baseProps(): PreviewFindPanelProps {
   };
 }
 
-describe("PreviewFindPanel", () => {
+describe("FindOnlyPanel", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -42,9 +43,9 @@ describe("PreviewFindPanel", () => {
     container.remove();
   });
 
-  const renderPanel = (overrides: Partial<PreviewFindPanelProps> = {}) => {
+  const renderPanel = (overrides: Partial<FindOnlyPanelProps> = {}) => {
     const props = { ...baseProps(), ...overrides };
-    act(() => root.render(<PreviewFindPanel {...props} />));
+    act(() => root.render(<FindOnlyPanel {...props} />));
     return props;
   };
 
