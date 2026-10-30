@@ -441,6 +441,8 @@ fn build_entry(
         readonly_reason: spec.readonly_reason.map(str::to_string),
         readonly_reason_code: spec.readonly_reason_code.map(str::to_string),
         version: version.to_string(),
+        launch_mode: super::launch::EAGER.to_string(),
+        launch_mode_unsupported: None,
     }
 }
 
@@ -526,6 +528,8 @@ fn read_codex_toml(path: &Path, source: &str) -> Result<Vec<McpConfigEntry>, Mcp
             readonly_reason: spec.readonly_reason.map(str::to_string),
             readonly_reason_code: spec.readonly_reason_code.map(str::to_string),
             version: version.clone(),
+            launch_mode: super::launch::EAGER.to_string(),
+            launch_mode_unsupported: None,
         };
         entry.env_keys.sort();
         entries.push(entry);

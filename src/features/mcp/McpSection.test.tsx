@@ -11,6 +11,7 @@ import type {
 const api = vi.hoisted(() => ({
   inventory: vi.fn(),
   setEnabled: vi.fn(),
+  setLaunchMode: vi.fn(),
   probe: vi.fn(),
 }));
 
@@ -196,9 +197,11 @@ let root: Root;
 beforeEach(() => {
   api.inventory.mockReset();
   api.setEnabled.mockReset();
+  api.setLaunchMode.mockReset();
   api.probe.mockReset();
   api.inventory.mockResolvedValue(payload());
   api.setEnabled.mockResolvedValue(claudeProject());
+  api.setLaunchMode.mockResolvedValue(undefined);
   api.probe.mockResolvedValue(connectedProbe());
   useMcpProbeStore.setState({ results: {}, pending: {}, runningAll: false, error: null });
   useChatStore.setState({ active: null });
@@ -245,11 +248,11 @@ describe("McpSection", () => {
     // Runtime section explains why it is empty instead of claiming no servers.
     expect(document.body.textContent).toContain("运行时清单");
     expect(document.body.textContent).toContain("没有运行中的会话，无法观测运行时状态");
-    // Read-only entry: no switch, a labelled lock instead.
+    // Read-only entry: no enable button, a labelled lock instead.
     const alphaRow = [...document.querySelectorAll("li")].find((row) =>
       row.textContent?.includes("alpha"),
     );
-    expect(alphaRow?.querySelector("input[type=checkbox]")).toBeNull();
+    expect(alphaRow?.querySelector('button[aria-label="启用 alpha"]')).toBeNull();
     expect(alphaRow?.querySelector('[title*="只读"]')).toBeTruthy();
   });
 
@@ -269,7 +272,10 @@ describe("McpSection", () => {
     const betaRow = [...document.querySelectorAll("li")].find((row) =>
       row.textContent?.includes("beta"),
     );
-    const toggle = betaRow?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    const toggle = betaRow?.querySelector<HTMLButtonElement>('button[aria-label="启用 beta"]');
+    // Icon-only: the state lives in aria-pressed, not in visible text.
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle?.textContent).toBe("");
     await act(async () => {
       toggle?.click();
     });
@@ -513,6 +519,81 @@ describe("McpSection", () => {
       expect(api.probe).toHaveBeenCalledTimes(1);
       expect(api.probe.mock.calls[0][0].name).toBe("alpha");
     });
+  });
+
+  it("never auto-probes an on-demand entry: probing would start the server it defers", async () => {
+    const gamma: McpConfigEntry = { ...claudeUser(), id: "claude_user:gamma", name: "gamma" };
+    api.inventory.mockResolvedValue(
+      payload({
+        engines: [
+          engine("claude", {
+            config: {
+              entries: [{ ...claudeUser(), launchMode: "onDemand" }, gamma],
+              errors: [],
+            },
+          }),
+        ],
+      }),
+    );
+    await renderSection();
+    // gamma (eager) is probed; once that lands the auto-probe pass is over.
+    await vi.waitFor(() => {
+      expect(api.probe).toHaveBeenCalled();
+    });
+    expect(api.probe.mock.calls.map((call) => call[0].name)).toEqual(["gamma"]);
+    // The on-demand row says so instead of looking idle.
+    const alphaRow = [...document.querySelectorAll("li")].find((li) =>
+      li.textContent?.includes("alpha"),
+    );
+    const launch = alphaRow?.querySelector('button[aria-label="alpha 按需启动"]');
+    expect(launch?.getAttribute("aria-pressed")).toBe("true");
+    expect(launch?.textContent).toBe("");
+  });
+
+  it("switches launch mode from the row icon, and a blocked entry explains instead of writing", async () => {
+    api.inventory.mockResolvedValue(
+      payload({
+        engines: [
+          engine("claude", {
+            config: {
+              entries: [
+                claudeUser(),
+                { ...claudeProject(), enabled: true, launchModeUnsupported: "transport" },
+              ],
+              errors: [],
+            },
+          }),
+        ],
+      }),
+    );
+    await renderSection();
+    const alphaLaunch = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="alpha 按需启动"]',
+    );
+    expect(alphaLaunch?.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      alphaLaunch?.click();
+    });
+    expect(api.setLaunchMode).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "claude_user:alpha" }),
+      "onDemand",
+      null,
+    );
+
+    api.setLaunchMode.mockClear();
+    const betaLaunch = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="beta 按需启动"]',
+    );
+    // Still hoverable/focusable so the reason tooltip shows; the click is inert.
+    expect(betaLaunch?.getAttribute("aria-disabled")).toBe("true");
+    expect(betaLaunch?.hasAttribute("disabled")).toBe(false);
+    expect(
+      betaLaunch?.getAttribute("title") || betaLaunch?.getAttribute("aria-description"),
+    ).toContain("只有 stdio 服务能按需启动");
+    await act(async () => {
+      betaLaunch?.click();
+    });
+    expect(api.setLaunchMode).not.toHaveBeenCalled();
   });
 
   it("shows the declared tool count even when the name list is truncated", async () => {
