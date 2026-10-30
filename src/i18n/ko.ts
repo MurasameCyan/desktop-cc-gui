@@ -2171,6 +2171,25 @@ export const ko: Messages = {
   mcp: {
     searchPlaceholder: "서버 이름 검색",
     toggle: "{{name}} 활성화",
+    enableHint: {
+      on: "{{name}}: 설정에서 활성화됨. 클릭하면 비활성화",
+      off: "{{name}}: 설정에서 비활성화됨. 클릭하면 활성화",
+    },
+    launch: {
+      title: "필요할 때 시작",
+      toggle: "{{name}} 필요할 때 시작",
+      onDemandHint: "{{name}}: 필요할 때 시작 (첫 호출 시). 클릭하면 세션과 함께 시작",
+      eagerHint: "{{name}}: 세션과 함께 시작. 클릭하면 필요할 때 시작 (첫 호출 시)",
+      description:
+        "켜면 이 앱이 띄우는 세션은 이 서버를 미리 시작하지 않습니다. 도구 목록은 지난 실행의 캐시로 그대로 모델에 전달되고, 첫 실제 호출 때 서버가 시작됩니다. 이 앱에만 적용되며 CLI 설정은 바꾸지 않습니다.",
+      disabledEntry: "항목이 비활성화되어 있습니다. 활성화해야 시작 방식을 고를 수 있습니다",
+      unsupported: {
+        engine: "이 엔진에는 아직 실행별 MCP 재정의 경로가 없습니다",
+        transport: "stdio 서버만 필요할 때 시작할 수 있습니다. 원격 서버에는 로컬 프로세스가 없습니다",
+        workspace_file:
+          "항목이 작업 공간 .omp/mcp.json에 있어 실행별로 재정의할 수 없습니다. 사용자 수준 mcp.json으로 옮기면 사용할 수 있습니다",
+      },
+    },
     enabled: "설정에서 활성화됨",
     disabled: "설정에서 비활성화됨",
     builtin: "내장",
