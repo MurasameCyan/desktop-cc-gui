@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { EditorSelection, type Extension } from "@codemirror/state";
 import { closeSearchPanel, openSearchPanel } from "@codemirror/search";
@@ -243,7 +243,7 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
     }));
   }, []);
 
-  const closeEditorSearch = useCallback(() => {
+  const closeEditorSearchInternal = useCallback((focusEditor: boolean) => {
     if (!editorSearchOpenRef.current) return false;
     editorSearchOpenRef.current = false;
     setEditorSearchOpen(false);
@@ -255,10 +255,27 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
       // the match highlight nor F3 / Mod-g can act on a dismissed search.
       clearEditorSearchQuery(view);
       view.dispatch({ selection: EditorSelection.single(view.state.selection.main.head) });
-      view.focus();
+      // Switching tabs must not pull focus into the now-hidden editor.
+      if (focusEditor) view.focus();
     }
     return true;
   }, []);
+  const closeEditorSearch = useCallback(
+    () => closeEditorSearchInternal(true),
+    [closeEditorSearchInternal],
+  );
+  const dismissEditorSearch = useCallback(
+    () => closeEditorSearchInternal(false),
+    [closeEditorSearchInternal],
+  );
+
+  // The find card belongs to the active editor. Close it when another tab
+  // becomes active, before the old SurfaceItem turns invisible: its expanded
+  // replace row is a Collapsible, and content kept mounted there used to stay
+  // painted over the newly active file.
+  useLayoutEffect(() => {
+    if (!isActiveTab) dismissEditorSearch();
+  }, [isActiveTab, dismissEditorSearch]);
 
   // Stable source for the CodeMirror keymap, which is built once but must
   // always call the latest callbacks.

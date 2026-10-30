@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { EditorView } from "@codemirror/view";
+import { searchPanelOpen } from "@codemirror/search";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileContent, SessionFileDocument, SessionMeta } from "@/lib/ipc";
 import type * as Platform from "@/lib/platform";
@@ -258,5 +259,45 @@ describe("session editor recovery and wrapping", () => {
     });
     expect(view.state.doc.toString()).toBe(original);
     expect(useFilesStore.getState().dirtyPaths[path]).toBeUndefined();
+  });
+
+  it("closes the find card when another file tab becomes active", async () => {
+    const path = "/repo/data.json";
+    const nextPath = "/repo/note.md";
+    const content: FileContent = { kind: "text", text: '{"a": 1}', dataUrl: null, truncated: false };
+    useFilesStore.setState({
+      openFiles: [path, nextPath],
+      activeFilePath: path,
+      fileStates: {
+        [path]: { path, content, loading: false, error: null, loadNonce: 1, name: "data.json" },
+        [nextPath]: { path: nextPath, content, loading: false, error: null, loadNonce: 1, name: "note.md" },
+      },
+    });
+    await act(async () => root.render(<EditorPane path={path} />));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+
+    await act(async () => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    const panel = container.querySelector<HTMLElement>('[role="search"]');
+    expect(panel).not.toBeNull();
+    expect(panel!.classList.contains("hidden")).toBe(false);
+    expect(searchPanelOpen(view.state)).toBe(true);
+
+    const expand = container.querySelector<HTMLButtonElement>(
+      `button[aria-label="${i18n.t("files.editorSearch.expandReplace")}"]`,
+    );
+    await act(async () => expand!.click());
+    expect(
+      container.querySelector(`input[placeholder="${i18n.t("files.editorSearch.replace")}"]`),
+    ).not.toBeNull();
+
+    // The hidden tab keeps its FileEditor mounted; its expanded replace row
+    // must not stay painted over the newly active file.
+    await act(async () => useFilesStore.setState({ activeFilePath: nextPath }));
+    expect(panel!.classList.contains("hidden")).toBe(true);
+    expect(searchPanelOpen(view.state)).toBe(false);
   });
 });
