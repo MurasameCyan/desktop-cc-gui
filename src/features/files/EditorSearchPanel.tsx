@@ -71,6 +71,7 @@ export interface EditorSearchPanelProps {
   open: boolean;
   showReplace: boolean;
   readOnly: boolean;
+  isMac: boolean;
   focusRequest: EditorSearchFocusRequest;
   /** Current editor text; a change refreshes the match counter while open. */
   documentText: string;
@@ -91,6 +92,7 @@ export function EditorSearchPanel({
   open,
   showReplace,
   readOnly,
+  isMac,
   focusRequest,
   documentText,
   onShowReplaceChange,
@@ -311,9 +313,34 @@ export function EditorSearchPanel({
       event.preventDefault();
       event.stopPropagation();
       onClose();
-    } else if (event.key === "Enter") {
+      return;
+    }
+    if (event.key === "Enter") {
       event.preventDefault();
       goToMatch(event.shiftKey ? "prev" : "next");
+      return;
+    }
+    const key = event.key.toLowerCase();
+    // The editor keymap cannot see keys typed in this input; keep the replace
+    // shortcut working while the find field owns focus.
+    const replaceShortcut = isMac
+      ? event.metaKey && event.altKey && key === "f"
+      : event.ctrlKey && !event.metaKey && !event.altKey && key === "h";
+    if (replaceShortcut) {
+      event.preventDefault();
+      if (readOnly) return;
+      onShowReplaceChange(true);
+      requestAnimationFrame(() => {
+        replaceInputRef.current?.focus();
+        replaceInputRef.current?.select();
+      });
+      return;
+    }
+    // Cmd/Ctrl+F is already handled by the editor keymap when the editor has
+    // focus; with focus in this field it should just reselect the query.
+    if (key === "f" && (event.metaKey || event.ctrlKey) && !event.altKey) {
+      event.preventDefault();
+      findInputRef.current?.select();
     }
   };
 

@@ -461,6 +461,7 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
             open={editorSearchOpen}
             showReplace={editorSearchReplace}
             readOnly={readOnly}
+            isMac={IS_MAC}
             focusRequest={editorSearchFocus}
             documentText={draft}
             onShowReplaceChange={setEditorSearchReplace}

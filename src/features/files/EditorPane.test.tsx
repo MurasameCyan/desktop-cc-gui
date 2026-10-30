@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { EditorView } from "@codemirror/view";
-import { searchPanelOpen } from "@codemirror/search";
+import { SearchQuery, replaceNext, searchPanelOpen, setSearchQuery } from "@codemirror/search";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileContent, SessionFileDocument, SessionMeta } from "@/lib/ipc";
 import type * as Platform from "@/lib/platform";
@@ -325,5 +325,35 @@ describe("session editor recovery and wrapping", () => {
     await act(async () => useFilesStore.setState({ activeFilePath: nextPath }));
     expect(panel!.classList.contains("hidden")).toBe(true);
     expect(searchPanelOpen(view.state)).toBe(false);
+  });
+
+  it("clears the unsaved state after undoing a find/replace edit", async () => {
+    const path = "/repo/replace.ts";
+    const original = "const test = 1;\nconst other = test;\n";
+    const content: FileContent = { kind: "text", text: original, dataUrl: null, truncated: false };
+    useFilesStore.setState({
+      openFiles: [path],
+      activeFilePath: path,
+      fileStates: { [path]: { path, content, loading: false, error: null, loadNonce: 1, name: "replace.ts" } },
+    });
+    await act(async () => root.render(<EditorPane path={path} />));
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+
+    await act(async () => {
+      view.dispatch({ selection: { anchor: 6, head: 10 } });
+      view.dispatch({
+        effects: setSearchQuery.of(new SearchQuery({ search: "test", replace: "TEST" })),
+      });
+    });
+    expect(replaceNext(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const TEST = 1;\nconst other = test;\n");
+
+    await act(async () => {
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    expect(view.state.doc.toString()).toBe(original);
+    expect(useFilesStore.getState().dirtyPaths[path]).toBeUndefined();
   });
 });

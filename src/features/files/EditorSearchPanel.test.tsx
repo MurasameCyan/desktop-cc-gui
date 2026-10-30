@@ -35,7 +35,14 @@ function makeView(doc: string, selection?: { anchor: number; head: number }) {
   openSearchPanel(view);
 }
 
-function renderPanel(options: { showReplace?: boolean; readOnly?: boolean } = {}) {
+function renderPanel(
+  options: {
+    showReplace?: boolean;
+    readOnly?: boolean;
+    onShowReplaceChange?: (show: boolean) => void;
+    onClose?: () => void;
+  } = {},
+) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -46,10 +53,11 @@ function renderPanel(options: { showReplace?: boolean; readOnly?: boolean } = {}
         open
         showReplace={options.showReplace ?? false}
         readOnly={options.readOnly ?? false}
+        isMac={false}
         focusRequest={{ target: "find", token: 1 }}
         documentText={view.state.doc.toString()}
-        onShowReplaceChange={() => {}}
-        onClose={() => {}}
+        onShowReplaceChange={options.onShowReplaceChange ?? (() => {})}
+        onClose={options.onClose ?? (() => {})}
       />,
     ),
   );
@@ -100,6 +108,19 @@ describe("EditorSearchPanel", () => {
     expect(field.value).toBe("one");
     expect(field.selectionStart).toBe(0);
     expect(field.selectionEnd).toBe(3);
+  });
+
+  it("opens the replace row with Ctrl+H while the find input has focus", () => {
+    const onShowReplaceChange = vi.fn();
+    makeView("one two one");
+    renderPanel({ onShowReplaceChange });
+    const find = input(i18n.t("files.editorSearch.find"));
+    act(() =>
+      find.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "h", ctrlKey: true, bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onShowReplaceChange).toHaveBeenCalledWith(true);
   });
 
   it("searches, counts and steps through matches", () => {
