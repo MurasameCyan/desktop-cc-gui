@@ -379,6 +379,9 @@ export const ChatConversation = memo(function ChatConversation({
   const permission = useChatStore((s) => s.permission);
   const setPermission = useChatStore((s) => s.setPermission);
 
+  // Session-scoped, exactly like the draft below: this component instance
+  // outlives tab switches (SplitLayout swaps `active` on the same instance),
+  // so attachments cannot live in its local state.
   const {
     images,
     previews,
@@ -388,7 +391,7 @@ export const ChatConversation = memo(function ChatConversation({
     pasteImages,
     importImageFiles,
     dismissImageError,
-  } = useComposerImages();
+  } = useComposerImages(key, active !== null);
 
   const { displayModels, displayEfforts, displayProviders } = useTabModelDisplay({
     active,

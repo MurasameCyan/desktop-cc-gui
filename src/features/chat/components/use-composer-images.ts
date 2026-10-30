@@ -1,25 +1,30 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "@/lib/ipc";
 import { fileName } from "@/features/files/store";
 import { dataUrlBytes, imageDimensions } from "@/utils/image-meta";
+import { useChatStore } from "../store";
+import {
+  EMPTY_ATTACHMENTS,
+  isEmptyAttachments,
+  type AttachmentPreview,
+  type ComposerAttachments,
+} from "../store/attachments";
 
 /** Extensions routed through the path-based image pipeline; anything else a
  *  user picks becomes an @mention instead of an attachment. */
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp"];
-/** Chip thumbnail plus the metadata shown beside it: pixel dimensions and
- *  file size recovered from the preview data URL (exact base64 math, no
- *  extra stat IPC). Fields appear asynchronously after the preview loads. */
-export interface AttachmentPreview {
-  url: string;
-  name: string;
-  width?: number;
-  height?: number;
-  size?: number;
-}
+
+export type { AttachmentPreview };
 
 /** Composer image attachments: the attached image paths, their chip
- * thumbnails, and clipboard-paste handling.
+ *  thumbnails, and clipboard-paste handling.
+ *
+ * The state lives in the chat store, keyed by sessionKey — NOT in local
+ * useState. One ChatConversation instance serves every session the tab strip
+ * and the split panes show (switching tabs only swaps its `active` prop), so
+ * instance state would hand session A's pictures to session B. Text drafts
+ * are per-key for the same reason; attachments must match.
  *
  * Thumbnail URLs are data URLs from the backend's readFile — the asset
  * protocol scope denies ~/.ccgui-next (app home holds secrets), so asset://
@@ -41,28 +46,69 @@ export interface ComposerImages {
   dismissImageError: () => void;
 }
 
-export function useComposerImages(): ComposerImages {
+/** An attachment dropped in from a file dialog or the OS is only a path until
+ *  its thumbnail lands; the reader fills these in afterwards. */
+function withImages(
+  current: ComposerAttachments,
+  paths: string[],
+): ComposerAttachments {
+  if (paths.length === 0) return current;
+  const seen = new Set(current.images);
+  const added = paths.filter((path) => !seen.has(path));
+  if (added.length === 0) return current;
+  return { ...current, images: [...current.images, ...added], error: null };
+}
+
+export function useComposerImages(
+  sessionKey: string,
+  enabled = true,
+): ComposerImages {
   const { t } = useTranslation();
-  const [images, setImages] = useState<string[]>([]);
-  const [previews, setPreviews] = useState<Record<string, AttachmentPreview>>({});
-  const [imageError, setImageError] = useState<string | null>(null);
+  const attachments = useChatStore(
+    (s) => s.composerAttachments[sessionKey] ?? EMPTY_ATTACHMENTS,
+  );
+  const setComposerAttachments = useChatStore((s) => s.setComposerAttachments);
+
+  /** Read-modify-write of THIS session's slice. The key is captured per
+   *  call: an async paste/import that resolves after the user switched tabs
+   *  still lands on the conversation it was started for. */
+  const update = useCallback(
+    (fn: (current: ComposerAttachments) => ComposerAttachments) => {
+      const current =
+        useChatStore.getState().composerAttachments[sessionKey] ??
+        EMPTY_ATTACHMENTS;
+      const next = fn(current);
+      if (next !== current) setComposerAttachments(sessionKey, next);
+    },
+    [sessionKey, setComposerAttachments],
+  );
+
   /** Drop one attachment and its preview. */
   const removeImage = useCallback((path: string) => {
-    setImages((prev) => prev.filter((p) => p !== path));
-    setPreviews((prev) => {
-      if (!(path in prev)) return prev;
-      const next = { ...prev };
-      delete next[path];
-      return next;
+    update((current) => {
+      if (!current.images.includes(path) && !(path in current.previews)) {
+        return current;
+      }
+      const previews = { ...current.previews };
+      delete previews[path];
+      return {
+        ...current,
+        images: current.images.filter((p) => p !== path),
+        previews,
+      };
     });
-  }, []);
+  }, [update]);
+
   /** Clear all attachments (on submit). */
   const clearImages = useCallback(() => {
-    setImages([]);
-    setPreviews((prev) => (Object.keys(prev).length > 0 ? {} : prev));
-  }, []);
+    update((current) => (isEmptyAttachments(current) ? current : EMPTY_ATTACHMENTS));
+  }, [update]);
+
   /** Dismiss the paste-error banner without clearing attachments. */
-  const dismissImageError = useCallback(() => setImageError(null), []);
+  const dismissImageError = useCallback(() => {
+    update((current) => (current.error === null ? current : { ...current, error: null }));
+  }, [update]);
+
   /** Resolve one attachment's chip thumbnail through readFile (data URL),
    * then fill in size (from the data URL payload) and pixel dimensions (from
    * decoding the image). Unreadable/oversized files simply get no thumbnail —
@@ -74,22 +120,36 @@ export function useComposerImages(): ComposerImages {
         if (content.kind !== "image" || !content.dataUrl) return;
         const url = content.dataUrl;
         const dims = (await imageDimensions(url)) ?? undefined;
-        setPreviews((prev) => ({
-          ...prev,
-          [path]: {
-            url,
-            name,
-            width: dims?.width,
-            height: dims?.height,
-            size: dataUrlBytes(url) ?? undefined,
-          },
-        }));
+        update((current) =>
+          // The attachment may have been removed (or the session cleared)
+          // while the read was in flight: a preview for a gone path would
+          // resurrect it in the map and keep the chip alive in the lightbox.
+          current.images.includes(path)
+            ? {
+                ...current,
+                previews: {
+                  ...current.previews,
+                  [path]: {
+                    url,
+                    name,
+                    width: dims?.width,
+                    height: dims?.height,
+                    size: dataUrlBytes(url) ?? undefined,
+                  },
+                },
+              }
+            : current,
+        );
       })
       .catch(() => {});
-  }, []);
+  }, [update]);
+
   const pasteImages = useCallback(
     (files: File[]) => {
-      setImageError(null);
+      // No active conversation: nothing may land anywhere (the composer is
+      // disabled in that state, so this only guards programmatic callers).
+      if (!enabled || !sessionKey) return;
+      update((current) => (current.error === null ? current : { ...current, error: null }));
       for (const file of files) {
         const ext = file.type.split("/")[1]?.toLowerCase() ?? "png";
         if (!IMAGE_EXTENSIONS.includes(ext)) continue;
@@ -102,17 +162,20 @@ export function useComposerImages(): ComposerImages {
           ipc
             .savePastedImage(base64, ext)
             .then((path) => {
-              setImages((prev) => [...prev, path]);
+              update((current) => withImages(current, [path]));
               loadPreview(path, name);
             })
-            .catch((err) => {
-              setImageError(t("chat.imagePasteFailed", { message: String(err) }));
-            });
+            .catch((err) =>
+              update((current) => ({
+                ...current,
+                error: t("chat.imagePasteFailed", { message: String(err) }),
+              })),
+            );
         };
         reader.readAsDataURL(file);
       }
     },
-    [t, loadPreview],
+    [enabled, sessionKey, t, update, loadPreview],
   );
 
   /** Import user-picked image files: copy them into the app sandbox (picked
@@ -121,37 +184,50 @@ export function useComposerImages(): ComposerImages {
    * without image input. */
   const importImageFiles = useCallback(
     (paths: string[], supported: boolean) => {
-      setImageError(null);
+      if (!enabled || !sessionKey) return;
       if (!supported) {
-        setImageError(t("chat.imagesUnsupported"));
+        update((current) => ({
+          ...current,
+          error: t("chat.imagesUnsupported"),
+        }));
         return;
       }
       ipc
         .importAttachments(paths)
         .then((imported) => {
-          setImages((prev) => {
-            const seen = new Set(prev);
-            const added = imported.filter((p) => !seen.has(p));
-            return added.length > 0 ? [...prev, ...added] : prev;
-          });
+          update((current) => withImages({ ...current, error: null }, imported));
           for (const path of imported) {
             loadPreview(path, fileName(path));
           }
         })
-        .catch((err) => {
-          setImageError(t("chat.imageImportFailed", { message: String(err) }));
-        });
+        .catch((err) =>
+          update((current) => ({
+            ...current,
+            error: t("chat.imageImportFailed", { message: String(err) }),
+          })),
+        );
     },
-    [t, loadPreview],
+    [enabled, sessionKey, t, update, loadPreview],
   );
-  return {
-    images,
-    previews,
-    imageError,
-    removeImage,
-    clearImages,
-    pasteImages,
-    importImageFiles,
-    dismissImageError,
-  };
+
+  return useMemo(
+    () => ({
+      images: attachments.images,
+      previews: attachments.previews,
+      imageError: attachments.error,
+      removeImage,
+      clearImages,
+      pasteImages,
+      importImageFiles,
+      dismissImageError,
+    }),
+    [
+      attachments,
+      removeImage,
+      clearImages,
+      pasteImages,
+      importImageFiles,
+      dismissImageError,
+    ],
+  );
 }

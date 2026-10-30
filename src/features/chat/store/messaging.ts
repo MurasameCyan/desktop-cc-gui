@@ -27,6 +27,7 @@ import {
   untrackRun,
 } from "./stream";
 import { mergeUsage, parseUsage } from "../usage";
+import { moveComposerAttachments } from "./attachments";
 import {
   bindRunLifecycle,
   finishRunLifecycle,
@@ -533,11 +534,20 @@ export function createMessagingActions(
             if (drafts[newKey] === undefined) drafts[newKey] = drafts[key];
             delete drafts[key];
           }
+          // Un-sent attachments ride along too (see the draft note above):
+          // a picture attached before the CLI assigned the session id is
+          // still waiting in the composer of THIS conversation.
+          const composerAttachments = moveComposerAttachments(
+            s.composerAttachments,
+            key,
+            newKey,
+          );
           return {
             bySession,
             openTabs,
             active,
             drafts,
+            composerAttachments,
             streamingByKey: moveStreamingFlag(s.streamingByKey, key, newKey),
             retryingByKey: moveRetryingFlag(s.retryingByKey, key, newKey),
           };

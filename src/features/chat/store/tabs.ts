@@ -8,6 +8,7 @@ import {
   type ActiveSession,
 } from "./persistence";
 import { moveRetryingFlag, moveStreamingFlag } from "./stream";
+import { moveComposerAttachments } from "./attachments";
 import { emitSessionActivated } from "@/features/plugins/runtime/events";
 import { sessionSelection } from "./selection";
 import { dispatchSessionClosed } from "@/features/plugins/runtime/hooks";
@@ -353,6 +354,13 @@ export function createTabActions(
           if (!drafts[newKey]) drafts[newKey] = drafts[oldKey];
           delete drafts[oldKey];
         }
+        // Un-sent attachments belong to the tab being retargeted, exactly like
+        // its draft: the pending tab keeps its pictures across the switch.
+        const composerAttachments = moveComposerAttachments(
+          s.composerAttachments,
+          oldKey,
+          newKey,
+        );
         let openTabs: ActiveSession[];
         let nextActive: ActiveSession;
         if (existing) {
@@ -391,6 +399,7 @@ export function createTabActions(
           active: nextActive,
           bySession,
           drafts,
+          composerAttachments,
           streamingByKey: moveStreamingFlag(s.streamingByKey, oldKey, newKey),
           pendingRuntimeSwitch: {
             sourceEngine: active.engine,
