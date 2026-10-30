@@ -43,6 +43,7 @@ import {
   clearSearchHighlights,
   findTimelineMatches,
   paintSearchHighlights,
+  scrollMatchIntoView,
   searchHighlightSupported,
 } from "./timeline-search";
 
@@ -451,6 +452,13 @@ function useTimelineSearch({
       : 0;
   const currentSearchRow =
     searchMatches.length > 0 ? searchMatches[safeCursor].rowIndex : null;
+  // 当前命中是所在行内的第几处：同一行有多个命中时，行号不变，必须靠它
+  // 找到要滚动到的那个 Range。
+  const currentRowOccurrence = useMemo(() => {
+    if (currentSearchRow === null) return 0;
+    const first = searchMatches.findIndex((match) => match.rowIndex === currentSearchRow);
+    return first < 0 ? 0 : safeCursor - first;
+  }, [currentSearchRow, searchMatches, safeCursor]);
   const currentSearchItem = useMemo(() => {
     if (currentSearchRow === null) return undefined;
     const row = rows[currentSearchRow];
@@ -512,19 +520,42 @@ function useTimelineSearch({
     virtualizer.scrollToIndex(currentSearchRow, { align: "auto" });
   }, [currentSearchRow, processSearchTarget, virtualizer, userPausedRef, atBottomRef]);
   // 命中底色：虚拟列表挂载/卸载与流式增改都会触发重绘；rAF 合帧。
+  // 仅在“跳到另一处命中”时滚动一次：流式重绘不能反复把视口拽回命中。
+  const lastScrolledSearchKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const el = scrollRef.current;
-    if (!searchOpen || !el || !searchHighlightSupported()) return;
+    if (!searchOpen || !el || !searchHighlightSupported()) {
+      lastScrolledSearchKeyRef.current = null;
+      return;
+    }
+    const searchKey = [
+      searchQuery,
+      safeCursor,
+      searchCaseSensitive,
+      searchWholeWord,
+      searchUseRegex,
+    ].join("\u0000");
     let raf = 0;
     const paint = () => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() =>
-        paintSearchHighlights(el, searchQuery, currentSearchRow, {
-          caseSensitive: searchCaseSensitive,
-          wholeWord: searchWholeWord,
-          regexp: searchUseRegex,
-        }),
-      );
+      raf = requestAnimationFrame(() => {
+        const active = paintSearchHighlights(
+          el,
+          searchQuery,
+          currentSearchRow,
+          {
+            caseSensitive: searchCaseSensitive,
+            wholeWord: searchWholeWord,
+            regexp: searchUseRegex,
+          },
+          currentRowOccurrence,
+        );
+        // 行刚被虚拟器挂载时 Range 还不存在；MutationObserver 会再画一次。
+        if (active && lastScrolledSearchKeyRef.current !== searchKey) {
+          lastScrolledSearchKeyRef.current = searchKey;
+          scrollMatchIntoView(el, active);
+        }
+      });
     };
     paint();
     const observer = new MutationObserver(paint);
@@ -542,11 +573,26 @@ function useTimelineSearch({
     searchOpen,
     searchQuery,
     currentSearchRow,
+    currentRowOccurrence,
+    safeCursor,
     searchCaseSensitive,
     searchWholeWord,
     searchUseRegex,
     scrollRef,
   ]);
+  // Esc 关闭不能依赖焦点：点过时间线/按钮后焦点可能已经离开查找框。只在
+  // 对话面可见时监听，并让已经处理过 Esc 的弹层（defaultPrevented）优先。
+  useEffect(() => {
+    if (!searchOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      const el = scrollRef.current;
+      if (!el || getComputedStyle(el).visibility === "hidden") return;
+      setSearchOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [searchOpen, scrollRef]);
   return {
     searchOpen,
     setSearchOpen,

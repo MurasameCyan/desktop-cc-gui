@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@/lib/ipc";
 import { buildRows } from "./timeline-rows";
-import { findTimelineMatches, rowSearchText } from "./timeline-search";
+import {
+  findTimelineMatches,
+  paintSearchHighlights,
+  rowSearchText,
+  scrollMatchIntoView,
+} from "./timeline-search";
 
 const msg = (seq: number, role: string, text: string): Message => ({
   seq,
@@ -71,5 +76,103 @@ describe("rowSearchText", () => {
       msg(2, "tool", "bash"),
     ]);
     expect(rowSearchText(rows[0])).toBe("think\nbash");
+  });
+});
+
+describe("chat search highlights", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function stubHighlightApi() {
+    class FakeHighlight {
+      priority = 0;
+      ranges: Range[];
+      constructor(...ranges: Range[]) {
+        this.ranges = ranges;
+      }
+    }
+    const highlights = new Map<string, FakeHighlight>();
+    vi.stubGlobal("CSS", { highlights });
+    vi.stubGlobal("Highlight", FakeHighlight);
+    return highlights;
+  }
+
+  function makeRoot(html: string) {
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    document.body.appendChild(root);
+    return root;
+  }
+
+  it("marks only the active occurrence in the current row", () => {
+    const highlights = stubHighlightApi();
+    const root = makeRoot(
+      '<div data-index="0"><p>one one one</p></div><div data-index="1"><p>one two</p></div>',
+    );
+    const active = paintSearchHighlights(root, "one", 0, undefined, 1);
+    expect(active?.toString()).toBe("one");
+    expect(highlights.get("ccgui-chat-search-current")?.ranges[0]).toBe(active);
+    // The other two occurrences in row 0 and the one in row 1 stay yellow.
+    expect(highlights.get("ccgui-chat-search")?.ranges).toHaveLength(3);
+    root.remove();
+  });
+
+  it("falls back to the first mounted occurrence when the active page is not rendered", () => {
+    stubHighlightApi();
+    const root = makeRoot('<div data-index="0"><p>one two</p></div>');
+    const active = paintSearchHighlights(root, "one", 0, undefined, 5);
+    expect(active?.toString()).toBe("one");
+    root.remove();
+  });
+});
+
+describe("scrollMatchIntoView", () => {
+  function box(top: number, bottom: number): DOMRect {
+    return {
+      top,
+      bottom,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: bottom - top,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  function fakeRange(rect: DOMRect): Range {
+    const range = document.createRange();
+    range.getBoundingClientRect = () => rect;
+    return range;
+  }
+
+  it("scrolls a match below the view just into view with margin", () => {
+    const scrollEl = document.createElement("div");
+    scrollEl.getBoundingClientRect = () => box(100, 300);
+    scrollMatchIntoView(scrollEl, fakeRange(box(400, 420)));
+    expect(scrollEl.scrollTop).toBe(144); // 420 - 300 + 24
+  });
+
+  it("scrolls a match above the view back with margin", () => {
+    const scrollEl = document.createElement("div");
+    scrollEl.getBoundingClientRect = () => box(100, 300);
+    scrollEl.scrollTop = 200;
+    scrollMatchIntoView(scrollEl, fakeRange(box(90, 110)));
+    expect(scrollEl.scrollTop).toBe(166); // 200 + (90 - 100 - 24)
+  });
+
+  it("leaves an already-visible match alone", () => {
+    const scrollEl = document.createElement("div");
+    scrollEl.getBoundingClientRect = () => box(100, 300);
+    scrollEl.scrollTop = 50;
+    scrollMatchIntoView(scrollEl, fakeRange(box(150, 170)));
+    expect(scrollEl.scrollTop).toBe(50);
+  });
+
+  it("is inert without a container or range", () => {
+    const scrollEl = document.createElement("div");
+    scrollEl.getBoundingClientRect = () => box(100, 300);
+    expect(() => scrollMatchIntoView(null, fakeRange(box(400, 420)))).not.toThrow();
+    expect(() => scrollMatchIntoView(scrollEl, null)).not.toThrow();
   });
 });

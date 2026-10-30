@@ -58,20 +58,27 @@ export function clearSearchHighlights(): void {
   CSS.highlights.delete(HIGHLIGHT_CURRENT);
 }
 
-/** 给滚动容器内已挂载行的文本命中建 Range 并注册高亮。当前命中行内的
- *  Range 进 CURRENT 组（更高优先级，盖过普通底色），其余进 ALL 组。
- *  时间线是虚拟列表，未挂载的行没有 DOM——调用方在虚拟器挂载/流式变更
- *  （MutationObserver）后重绘。 */
+/**
+ * 给滚动容器内已挂载行的文本命中建 Range 并注册高亮。当前行里选中的那
+ * 一处进 CURRENT 组（更高优先级，盖过普通底色），其余命中进 ALL 组。
+ * 返回当前命中对应的 Range，调用方据此把单词本身滚进视口——只按行滚会
+ * 在同一条长消息有多个命中时停在行首。
+ *
+ * 时间线是虚拟列表，未挂载的行没有 DOM——调用方在虚拟器挂载/流式变更
+ * （MutationObserver）后重绘。`currentOccurrence` 是当前行内的第几个命中
+ * （0 基）；该页尚未挂载时回落到当前行的第一个可见命中。
+ */
 export function paintSearchHighlights(
   root: HTMLElement,
   query: string,
   currentRowIndex: number | null,
   options?: TextSearchOptions,
-): void {
+  currentOccurrence = 0,
+): Range | null {
   clearSearchHighlights();
-  if (!query.trim() || !searchHighlightSupported()) return;
+  if (!query.trim() || !searchHighlightSupported()) return null;
   const all: Range[] = [];
-  const current: Range[] = [];
+  const currentRowRanges: Range[] = [];
   for (const match of findTextMatches(root, query, options)) {
     const rowIndex = Number(
       match.node.parentElement?.closest("[data-index]")?.getAttribute("data-index"),
@@ -79,13 +86,41 @@ export function paintSearchHighlights(
     const range = new Range();
     range.setStart(match.node, match.start);
     range.setEnd(match.node, match.end);
-    (rowIndex === currentRowIndex ? current : all).push(range);
+    if (rowIndex === currentRowIndex) currentRowRanges.push(range);
+    else all.push(range);
+  }
+  const active = currentRowRanges[currentOccurrence] ?? currentRowRanges[0] ?? null;
+  if (active) {
+    for (const range of currentRowRanges) {
+      if (range !== active) all.push(range);
+    }
+  } else {
+    all.push(...currentRowRanges);
   }
   if (all.length > 0) CSS.highlights.set(HIGHLIGHT_ALL, new Highlight(...all));
-  if (current.length > 0) {
-    const highlight = new Highlight(...current);
+  if (active) {
+    const highlight = new Highlight(active);
     // 同一段文本同时命中两组时，当前组必须画在上层。
     highlight.priority = 1;
     CSS.highlights.set(HIGHLIGHT_CURRENT, highlight);
+  }
+  return active;
+}
+
+/** 命中滚入视口时上下各留的白（px）；已在视口内则不动。 */
+const SCROLL_MARGIN = 24;
+
+/** 只把命中滚到可见为止，与浏览器查找一致；不改变滚动容器的其他祖先。 */
+export function scrollMatchIntoView(
+  scrollEl: HTMLElement | null,
+  range: Range | null,
+): void {
+  if (!scrollEl || !range) return;
+  const rect = range.getBoundingClientRect();
+  const box = scrollEl.getBoundingClientRect();
+  if (rect.top < box.top + SCROLL_MARGIN) {
+    scrollEl.scrollTop += rect.top - box.top - SCROLL_MARGIN;
+  } else if (rect.bottom > box.bottom - SCROLL_MARGIN) {
+    scrollEl.scrollTop += rect.bottom - box.bottom + SCROLL_MARGIN;
   }
 }

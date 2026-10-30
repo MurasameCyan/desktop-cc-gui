@@ -120,6 +120,18 @@ describe("timeline search within bounded process history", () => {
     expect(container.textContent).toContain("工具 499 目标🙂");
   });
 
+  it("closes the find panel on Escape even when focus is outside it", async () => {
+    await renderTimeline();
+    await search("目标🙂");
+    expect(container.querySelector('[role="search"]')).not.toBeNull();
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(container.querySelector('[role="search"]')).toBeNull();
+  });
+
   it("maps occurrences rather than item counts after matches in an earlier row", async () => {
     await renderTimeline(true);
     await search("目标🙂");
