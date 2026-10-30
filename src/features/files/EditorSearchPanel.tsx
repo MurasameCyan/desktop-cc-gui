@@ -4,7 +4,6 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { EditorSelection } from "@codemirror/state";
@@ -18,6 +17,15 @@ import X from "lucide-react/dist/esm/icons/x";
 import { Button } from "@/components/base/buttons/button";
 import { Collapsible } from "@/components/application/collapsible/collapsible";
 import { cx } from "@/utils/cx";
+import {
+  FIND_FIELD_CLASS,
+  FIND_ICON_BUTTON_CLASS,
+  FIND_INPUT_CLASS,
+  FIND_PANEL_ANIMATION_CLASS,
+  FIND_PANEL_CARD_CLASS,
+  findToggleClass,
+  keepFindInputFocus,
+} from "./find-panel-ui";
 import {
   EDITOR_SEARCH_MATCH_LIMIT,
   EMPTY_EDITOR_SEARCH_MATCH_INFO,
@@ -68,20 +76,6 @@ export interface EditorSearchPanelProps {
   documentText: string;
   onShowReplaceChange: (show: boolean) => void;
   onClose: () => void;
-}
-
-const ICON_BUTTON_CLASS =
-  "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-foreground-icon-tertiary outline-none transition-colors duration-150 ease hover:bg-background-secondary-hover hover:text-foreground-icon-primary focus-visible:ring-2 focus-visible:ring-border-focus-ring disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-foreground-icon-tertiary motion-reduce:transition-none";
-
-const FIELD_CLASS =
-  "flex h-7 min-w-0 flex-1 items-center rounded-md border border-border-button-default bg-background-primary-default focus-within:border-border-focus-ring focus-within:ring-1 focus-within:ring-border-focus-ring";
-
-const INPUT_CLASS =
-  "editor-search-input h-full min-w-0 flex-1 bg-transparent px-2 text-body-2-regular text-text-primary outline-none placeholder:text-text-tertiary";
-
-/** Keeps focus in the find field while a toolbar button is pressed. */
-function keepInputFocus(event: ReactMouseEvent<HTMLButtonElement>) {
-  event.preventDefault();
 }
 
 /**
@@ -362,31 +356,23 @@ export function EditorSearchPanel({
       ? `${matchInfo.index}/${matchInfo.total}${matchInfo.truncated ? "+" : ""}`
       : t("files.editorSearch.noResults");
 
-  const toggleClass = (active: boolean) =>
-    cx(
-      "flex h-5 min-w-6 shrink-0 cursor-pointer items-center justify-center rounded px-1 text-caption-1-medium outline-none transition-colors duration-150 ease focus-visible:ring-2 focus-visible:ring-border-focus-ring motion-reduce:transition-none",
-      active
-        ? "bg-background-tertiary-default text-text-primary"
-        : "text-text-tertiary hover:bg-background-secondary-hover hover:text-text-secondary",
-    );
-
   return (
     <div
       role="search"
       aria-label={t("files.editorSearch.panelLabel")}
       onKeyDown={handlePanelKeyDown}
       className={cx(
-        "absolute top-2 right-3 z-20 flex w-[460px] max-w-[calc(100%-1.5rem)] flex-col gap-1 rounded-lg border border-border-button-default bg-background-primary-default p-1.5 text-text-primary shadow-lg",
-        open ? "animate-editor-search-in motion-reduce:animate-none" : "hidden",
+        FIND_PANEL_CARD_CLASS,
+        open ? FIND_PANEL_ANIMATION_CLASS : "hidden",
       )}
     >
       <div className="flex items-center gap-1">
         {!readOnly && (
           <button
             type="button"
-            className={ICON_BUTTON_CLASS}
+            className={FIND_ICON_BUTTON_CLASS}
             onClick={() => onShowReplaceChange(!showReplace)}
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             aria-expanded={showReplace}
             aria-label={t(
               showReplace
@@ -408,7 +394,7 @@ export function EditorSearchPanel({
             />
           </button>
         )}
-        <div className={FIELD_CLASS}>
+        <div className={FIND_FIELD_CLASS}>
           <input
             ref={findInputRef}
             value={searchText}
@@ -426,13 +412,13 @@ export function EditorSearchPanel({
             spellCheck={false}
             placeholder={t("files.editorSearch.find")}
             aria-label={t("files.editorSearch.find")}
-            className={INPUT_CLASS}
+            className={FIND_INPUT_CLASS}
           />
           <button
             type="button"
-            className={toggleClass(caseSensitive)}
+            className={findToggleClass(caseSensitive)}
             onClick={() => setCaseSensitive((value) => !value)}
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             aria-pressed={caseSensitive}
             aria-label={t("files.editorSearch.caseSensitive")}
             title={t("files.editorSearch.caseSensitive")}
@@ -441,9 +427,9 @@ export function EditorSearchPanel({
           </button>
           <button
             type="button"
-            className={toggleClass(wholeWord)}
+            className={findToggleClass(wholeWord)}
             onClick={() => setWholeWord((value) => !value)}
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             aria-pressed={wholeWord}
             aria-label={t("files.editorSearch.wholeWord")}
             title={t("files.editorSearch.wholeWord")}
@@ -452,9 +438,9 @@ export function EditorSearchPanel({
           </button>
           <button
             type="button"
-            className={cx(toggleClass(useRegex), "mr-1 font-mono")}
+            className={cx(findToggleClass(useRegex), "mr-1 font-mono")}
             onClick={() => setUseRegex((value) => !value)}
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             aria-pressed={useRegex}
             aria-label={t("files.editorSearch.regex")}
             title={t("files.editorSearch.regex")}
@@ -474,9 +460,9 @@ export function EditorSearchPanel({
         </span>
         <button
           type="button"
-          className={ICON_BUTTON_CLASS}
+          className={FIND_ICON_BUTTON_CLASS}
           onClick={selectAllMatches}
-          onMouseDown={keepInputFocus}
+          onMouseDown={keepFindInputFocus}
           disabled={!hasQuery || matchInfo.total === 0}
           aria-label={t("files.editorSearch.selectAllMatches")}
           title={t("files.editorSearch.selectAllMatches")}
@@ -485,9 +471,9 @@ export function EditorSearchPanel({
         </button>
         <button
           type="button"
-          className={ICON_BUTTON_CLASS}
+          className={FIND_ICON_BUTTON_CLASS}
           onClick={() => goToMatch("prev")}
-          onMouseDown={keepInputFocus}
+          onMouseDown={keepFindInputFocus}
           disabled={!hasQuery || matchInfo.total === 0}
           aria-label={t("files.editorSearch.previousMatch")}
           title={t("files.editorSearch.previousMatch")}
@@ -496,9 +482,9 @@ export function EditorSearchPanel({
         </button>
         <button
           type="button"
-          className={ICON_BUTTON_CLASS}
+          className={FIND_ICON_BUTTON_CLASS}
           onClick={() => goToMatch("next")}
-          onMouseDown={keepInputFocus}
+          onMouseDown={keepFindInputFocus}
           disabled={!hasQuery || matchInfo.total === 0}
           aria-label={t("files.editorSearch.nextMatch")}
           title={t("files.editorSearch.nextMatch")}
@@ -507,9 +493,9 @@ export function EditorSearchPanel({
         </button>
         <button
           type="button"
-          className={ICON_BUTTON_CLASS}
+          className={FIND_ICON_BUTTON_CLASS}
           onClick={onClose}
-          onMouseDown={keepInputFocus}
+          onMouseDown={keepFindInputFocus}
           aria-label={t("files.editorSearch.close")}
           title={t("files.editorSearch.close")}
         >
@@ -519,7 +505,7 @@ export function EditorSearchPanel({
       <Collapsible open={showReplace && !readOnly} seconds={0.15}>
         <div className="flex items-center gap-1 pt-0.5">
           <span className="size-6 shrink-0" aria-hidden />
-          <div className={FIELD_CLASS}>
+          <div className={FIND_FIELD_CLASS}>
             <input
               ref={replaceInputRef}
               value={replaceText}
@@ -536,13 +522,13 @@ export function EditorSearchPanel({
               spellCheck={false}
               placeholder={t("files.editorSearch.replace")}
               aria-label={t("files.editorSearch.replace")}
-              className={INPUT_CLASS}
+              className={FIND_INPUT_CLASS}
             />
           </div>
           <Button
             variant="secondary"
             size="xs"
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             disabled={!canReplace}
             onClick={replaceCurrent}
           >
@@ -551,7 +537,7 @@ export function EditorSearchPanel({
           <Button
             variant="secondary"
             size="xs"
-            onMouseDown={keepInputFocus}
+            onMouseDown={keepFindInputFocus}
             disabled={!canReplace}
             onClick={replaceEvery}
           >

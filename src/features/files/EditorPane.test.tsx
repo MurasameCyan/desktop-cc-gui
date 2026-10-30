@@ -261,6 +261,32 @@ describe("session editor recovery and wrapping", () => {
     expect(useFilesStore.getState().dirtyPaths[path]).toBeUndefined();
   });
 
+  it.each(["LICENSE", "main.ts", "data.json"])(
+    "uses the new find card instead of CodeMirror's native panel for %s",
+    async (name) => {
+      const path = `/repo/${name}`;
+      const content: FileContent = { kind: "text", text: "needle\nneedle\n", dataUrl: null, truncated: false };
+      useFilesStore.setState({
+        openFiles: [path],
+        activeFilePath: path,
+        fileStates: { [path]: { path, content, loading: false, error: null, loadNonce: 1, name } },
+      });
+      await act(async () => root.render(<EditorPane path={path} />));
+      const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+
+      await act(async () => {
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true, bubbles: true, cancelable: true }),
+        );
+      });
+
+      expect(container.querySelector(".cm-panel.cm-search")).toBeNull();
+      const panel = container.querySelector<HTMLElement>('[role="search"]');
+      expect(panel).not.toBeNull();
+      expect(panel!.classList.contains("hidden")).toBe(false);
+    },
+  );
+
   it("closes the find card when another file tab becomes active", async () => {
     const path = "/repo/data.json";
     const nextPath = "/repo/note.md";

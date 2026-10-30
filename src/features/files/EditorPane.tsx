@@ -274,7 +274,11 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
   // replace row is a Collapsible, and content kept mounted there used to stay
   // painted over the newly active file.
   useLayoutEffect(() => {
-    if (!isActiveTab) dismissEditorSearch();
+    if (isActiveTab) return;
+    dismissEditorSearch();
+    // The preview find bar belongs to this tab too; do not bring it back
+    // when the tab is activated again.
+    setPreviewSearchOpen(false);
   }, [isActiveTab, dismissEditorSearch]);
 
   // Stable source for the CodeMirror keymap, which is built once but must
