@@ -2192,7 +2192,8 @@ export const ko: Messages = {
       shared_project_file: "공유 프로젝트 .mcp.json: CLI마다 자체 규칙을 적용하므로 읽기 전용입니다(이 페이지에는 파일 자체의 필드를 표시합니다)",
       grok_project_toggle: "Grok의 프로젝트 토글은 사용자 수준의 disabled_mcp_servers 목록도 다시 씁니다. 일부만 수정되는 일을 막기 위해 읽기 전용입니다",
       dsh_plugin: "dsh는 플러그인으로 MCP를 제공합니다(서버마다 dsh-mcp-client 인스턴스 하나). 프로필의 cordis 설정에서 추가하거나 제거하세요",
-      jsonc_readonly: "이 파일은 주석이 있는 JSONC입니다. 쓰면 주석이 사라지므로 여기서는 읽기 전용입니다. 편집기에서 수정하세요"
+      jsonc_readonly: "이 파일은 주석이 있는 JSONC입니다. 쓰면 주석이 사라지므로 여기서는 읽기 전용입니다. 편집기에서 수정하세요",
+      needs_workspace: "Claude는 활성화 여부를 작업 공간별로 기록합니다(~/.claude.json에서 해당 작업 공간의 disabledMcpServers). 여기서 전환하려면 먼저 작업 공간을 여세요"
     },
     support: {
       none: "{{name}}에는 MCP가 포함되어 있지 않아 임의의 소스를 만들지 않습니다. 확장 기능으로 MCP를 추가할 수는 있습니다.",

@@ -2334,6 +2334,8 @@ export const en: Messages = {
         "dsh serves MCP through plugins (one dsh-mcp-client instance per server); add or remove them in the profile's cordis config",
       jsonc_readonly:
         "This file is JSONC (it carries comments): writing would drop them, so it is read-only here — edit it in your editor",
+      needs_workspace:
+        "Claude records enable/disable per workspace (that workspace's disabledMcpServers in ~/.claude.json): open a workspace to switch it here",
     },
     support: {
       none: "{{name}} does not ship MCP: no source is invented for it. Its extension mechanism can still add MCP.",
