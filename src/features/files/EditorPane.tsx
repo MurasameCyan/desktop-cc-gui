@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import type { Extension } from "@codemirror/state";
+import { EditorSelection, type Extension } from "@codemirror/state";
+import { closeSearchPanel, openSearchPanel } from "@codemirror/search";
 import { LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import ExternalLink from "lucide-react/dist/esm/icons/external-link";
@@ -10,10 +11,16 @@ import { errorText } from "@/lib/errors";
 import { Button } from "@/components/base/buttons/button";
 import { useActionFeedback } from "@/components/base/action-feedback";
 import { CenteredSpinner, EmptyState } from "@/components/base/empty-state";
-import { isWeb } from "@/lib/platform";
+import { IS_MAC, isWeb } from "@/lib/platform";
 import { fileName, useFilesStore } from "./store";
 import type { OpenFileState } from "./store";
 import { BinaryFileView, ImageFileView } from "./EditorFallbackViews";
+import { EditorSearchPanel, type EditorSearchFocusRequest } from "./EditorSearchPanel";
+import {
+  clearEditorSearchQuery,
+  createEditorSearchExtensions,
+  type EditorSearchKeymapActions,
+} from "./editor-search";
 import { FileEditorHeader } from "./FileEditorHeader";
 import { HtmlPreview } from "./HtmlPreview";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -202,13 +209,85 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
   // preview drops it so switching back to read mode starts clean.
   const [previewSearchOpen, setPreviewSearchOpen] = useState(false);
   const [langExt, setLangExt] = useState<Extension[]>([]);
-  const extensions = useMemo(
-    () => wordWrap ? [CM_LINE_SELECTION, ...langExt, EditorView.lineWrapping] : [CM_LINE_SELECTION, ...langExt],
-    [langExt, wordWrap],
-  );
   // Truncated files are partial (editing + saving would clobber the tail);
   // remote-readOnly files are complete but unwritable — both stay read-only.
   const readOnly = content.truncated || content.readOnly === true;
+
+  // Editor find/replace: React owns the visible card, CodeMirror owns the
+  // search state, match highlighting and navigation commands. The native
+  // panel is replaced by a hidden element (see editor-search.ts).
+  const [editorView, setEditorView] = useState<EditorView | null>(null);
+  const [editorSearchOpen, setEditorSearchOpen] = useState(false);
+  const [editorSearchReplace, setEditorSearchReplace] = useState(false);
+  const [editorSearchFocus, setEditorSearchFocus] = useState<EditorSearchFocusRequest>({
+    target: "find",
+    token: 0,
+  });
+  const editorSearchOpenRef = useRef(false);
+  const readOnlyRef = useRef(readOnly);
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  });
+
+  const openEditorSearch = useCallback((view: EditorView, replace: boolean) => {
+    if (replace && readOnlyRef.current) return;
+    // Opening the CodeMirror panel state also enables cm-searchMatch
+    // highlighting; the panel element itself is the hidden span.
+    openSearchPanel(view);
+    editorSearchOpenRef.current = true;
+    setEditorSearchOpen(true);
+    setEditorSearchReplace(replace);
+    setEditorSearchFocus((current) => ({
+      target: replace ? "replace" : "find",
+      token: current.token + 1,
+    }));
+  }, []);
+
+  const closeEditorSearch = useCallback(() => {
+    if (!editorSearchOpenRef.current) return false;
+    editorSearchOpenRef.current = false;
+    setEditorSearchOpen(false);
+    setEditorSearchReplace(false);
+    const view = editorRef.current;
+    if (view?.dom.isConnected) {
+      closeSearchPanel(view);
+      // Clear the query and collapse the selection like dbx does, so neither
+      // the match highlight nor F3 / Mod-g can act on a dismissed search.
+      clearEditorSearchQuery(view);
+      view.dispatch({ selection: EditorSelection.single(view.state.selection.main.head) });
+      view.focus();
+    }
+    return true;
+  }, []);
+
+  // Stable source for the CodeMirror keymap, which is built once but must
+  // always call the latest callbacks.
+  const searchActionsRef = useRef<EditorSearchKeymapActions>({
+    openFind: (view) => {
+      openEditorSearch(view, false);
+      return true;
+    },
+    openReplace: (view) => {
+      // Consume the shortcut in read-only files without offering mutation.
+      if (readOnlyRef.current) return true;
+      openEditorSearch(view, true);
+      return true;
+    },
+    close: () => closeEditorSearch(),
+  });
+  const searchExtensions = useMemo(
+    () => createEditorSearchExtensions(searchActionsRef, IS_MAC),
+    [],
+  );
+  const extensions = useMemo(
+    () => [
+      CM_LINE_SELECTION,
+      ...langExt,
+      ...searchExtensions,
+      ...(wordWrap ? [EditorView.lineWrapping] : []),
+    ],
+    [langExt, wordWrap, searchExtensions],
+  );
   const dirty = !readOnly && draft !== savedText;
 
   // Publish dirty state so the tab strip can dot the tab and confirm closes.
@@ -219,8 +298,11 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
 
   const handleViewModeChange = useCallback((mode: EditorViewMode) => {
     setPreviewSearchOpen(false);
+    // Close before the CodeMirror view unmounts, otherwise the open-panel
+    // state and match highlights would be dropped without a teardown.
+    closeEditorSearch();
     setViewMode(mode);
-  }, []);
+  }, [closeEditorSearch]);
 
   // 刷新走 §4.1 转圈 → 对号：iframe 重挂载没有可等待的完成事件，对号 = 重新
   // 加载指令已下发（与内置浏览器的刷新语义一致）。
@@ -338,17 +420,32 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
           />
         )
       ) : (
-        <CodeMirror
-          className="min-h-0 flex-1 overflow-hidden [&_.cm-editor]:h-full"
-          height="100%"
-          value={draft}
-          onCreateEditor={(view) => { editorRef.current = view; }}
-          onChange={setDraft}
-          extensions={extensions}
-          theme={dark ? "dark" : "light"}
-          readOnly={readOnly || (entry?.session !== undefined && saving)}
-          basicSetup={CM_BASIC_SETUP}
-        />
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          <CodeMirror
+            className="min-h-0 flex-1 overflow-hidden [&_.cm-editor]:h-full"
+            height="100%"
+            value={draft}
+            onCreateEditor={(view) => {
+              editorRef.current = view;
+              setEditorView(view);
+            }}
+            onChange={setDraft}
+            extensions={extensions}
+            theme={dark ? "dark" : "light"}
+            readOnly={readOnly || (entry?.session !== undefined && saving)}
+            basicSetup={CM_BASIC_SETUP}
+          />
+          <EditorSearchPanel
+            view={editorView}
+            open={editorSearchOpen}
+            showReplace={editorSearchReplace}
+            readOnly={readOnly}
+            focusRequest={editorSearchFocus}
+            documentText={draft}
+            onShowReplaceChange={setEditorSearchReplace}
+            onClose={closeEditorSearch}
+          />
+        </div>
       )}
     </div>
   );
