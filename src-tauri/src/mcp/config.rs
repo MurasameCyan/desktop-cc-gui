@@ -279,11 +279,7 @@ fn read_claude_json(
 /// 项目键可能是规范化路径（Claude Code 用 realpath 作键）：先按原样查，
 /// 再试 canonicalize，避免符号链接路径读不到 local 配置。
 fn project_entry<'a>(projects: &'a Map<String, Value>, workspace: &str) -> Option<&'a Value> {
-    if let Some(entry) = projects.get(workspace) {
-        return Some(entry);
-    }
-    let canonical = std::fs::canonicalize(workspace).ok()?;
-    projects.get(canonical.to_string_lossy().as_ref())
+    workspace_key(projects, workspace).and_then(|key| projects.get(&key))
 }
 
 fn disabled_names(value: Option<&Value>) -> Vec<String> {
@@ -869,14 +865,39 @@ fn set_claude_disabled_in(
     crate::settings::atomic_write(path, &text).map_err(McpError::internal)
 }
 
-/// 项目键可能是规范化路径（Claude Code 用 realpath 作键）。
+/// 找出 `projects` 里对应 `workspace` 的那个键（返回文件里的原样键，写回时不改名）。
+/// 两边写法不同：Claude Code 在 Windows 上存 `S:/a/b`，本应用传来的工作区经
+/// `ensure_allowed` 规范化后是 `\\?\S:\a\b`。比较前统一去掉 `\\?\` 前缀、分隔符
+/// 换成 `/`、去尾部分隔符，Windows 上再忽略大小写；仍对不上时用 canonicalize
+/// 兜底（符号链接）。
 fn workspace_key(projects: &Map<String, Value>, workspace: &str) -> Option<String> {
     if projects.contains_key(workspace) {
         return Some(workspace.to_string());
     }
-    let canonical = std::fs::canonicalize(workspace).ok()?;
-    let key = canonical.to_string_lossy().into_owned();
-    projects.contains_key(&key).then_some(key)
+    let find = |target: &str| {
+        let wanted = comparable_path(target);
+        projects.keys().find(|key| comparable_path(key) == wanted).cloned()
+    };
+    find(workspace).or_else(|| {
+        let canonical = std::fs::canonicalize(workspace).ok()?;
+        find(&canonical.to_string_lossy())
+    })
+}
+
+/// 只用于比较的路径形式：不落盘、不回写。
+fn comparable_path(path: &str) -> String {
+    let path = path
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_string());
+    let unified = path.replace('\\', "/");
+    let trimmed = unified.trim_end_matches('/');
+    let trimmed = if trimmed.is_empty() { unified.as_str() } else { trimmed };
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Claude 项目级：服务定义留在 `.mcp.json`，启停写入
@@ -1249,6 +1270,35 @@ mod tests {
         );
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn claude_project_keys_match_across_windows_path_spellings() {
+        // Claude Code 在 Windows 上存 `S:/a/b`；本应用的工作区经 ensure_allowed
+        // 后是 `\\?\S:\a\b`。两者必须指向同一个项目键，否则启停永远报「没有这个
+        // 项目的记录」。返回的是文件里的原样键，写回时不改名。
+        let projects: Map<String, Value> = serde_json::from_str(
+            r#"{ "S:/AIWorker/Proj": {}, "/home/u/ws": {} }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_key(&projects, r"\\?\S:\AIWorker\Proj").as_deref(),
+            Some("S:/AIWorker/Proj")
+        );
+        assert_eq!(
+            workspace_key(&projects, r"S:\AIWorker\Proj\").as_deref(),
+            Some("S:/AIWorker/Proj")
+        );
+        assert_eq!(workspace_key(&projects, "/home/u/ws/").as_deref(), Some("/home/u/ws"));
+        assert!(workspace_key(&projects, r"S:\AIWorker\Other").is_none());
+        assert!(project_entry(&projects, r"\\?\S:\AIWorker\Proj").is_some());
+        if cfg!(windows) {
+            // Windows 路径不分大小写。
+            assert_eq!(
+                workspace_key(&projects, r"\\?\s:\aiworker\proj").as_deref(),
+                Some("S:/AIWorker/Proj")
+            );
+        }
     }
 
     #[test]
