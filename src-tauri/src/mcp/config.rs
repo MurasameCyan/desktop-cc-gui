@@ -636,6 +636,18 @@ pub(super) fn write_enabled(
         return Err(McpError::invalid("MCP server name must not be empty"));
     }
 
+    // 新引擎来源由 sources::write_enabled 自己拿 WRITE_LOCK；这把锁不可重入，
+    // 先拿再转交会让 grok / opencode / omp 的开关永远卡住。
+    if !matches!(
+        source,
+        SOURCE_CODEX_USER
+            | SOURCE_CODEX_PROJECT
+            | SOURCE_CLAUDE_PROJECT
+            | SOURCE_CLAUDE_USER
+            | SOURCE_CLAUDE_LOCAL
+    ) {
+        return super::sources::write_enabled(source, name, enabled, expected_version, workspace);
+    }
     let _guard = WRITE_LOCK.lock();
     match source {
         SOURCE_CODEX_USER => {
@@ -668,7 +680,7 @@ pub(super) fn write_enabled(
             set_claude_disabled_in(&path, workspace, name, enabled, expected_version)?;
             reread_entry(&path, source, name, Some(Path::new(workspace)))
         }
-        _ => super::sources::write_enabled(source, name, enabled, expected_version, workspace),
+        _ => unreachable!("new-engine sources returned above"),
     }
 }
 
@@ -1358,5 +1370,29 @@ mod tests {
         assert_eq!(error.code, "invalid_input");
         let error = write_enabled("codex_project:alpha", true, "", None).unwrap_err();
         assert_eq!(error.code, "invalid_input");
+    }
+
+    #[test]
+    fn new_engine_toggle_through_the_command_path_does_not_deadlock() {
+        // mcp_set_enabled → config::write_enabled → sources::write_enabled：外层
+        // 若先拿 WRITE_LOCK，内层再拿就死锁。放到线程里限时，卡住时测试报错而不是挂起。
+        let _guard = crate::paths::HOME_ENV_LOCK.lock();
+        let dir = TempDir::new("omp-toggle-command-path");
+        let path = dir.path().join("mcp.json");
+        let original = "{\n  \"mcpServers\": {\n    \"alpha\": { \"command\": \"npx\" }\n  }\n}\n";
+        std::fs::write(&path, original).unwrap();
+        std::env::set_var("OMP_CODING_AGENT_DIR", dir.path());
+        let version = file_hash(original.as_bytes());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(write_enabled("omp_user:alpha", false, &version, None));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("toggle deadlocked on WRITE_LOCK");
+        std::env::remove_var("OMP_CODING_AGENT_DIR");
+        assert!(!result.unwrap().enabled);
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"]["alpha"]["enabled"], serde_json::json!(false));
     }
 }
