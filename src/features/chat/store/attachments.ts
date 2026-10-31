@@ -8,6 +8,10 @@
  * conversation it was attached in — never to the component instance. The
  * hook used to hold this in local useState, which leaked A's chips into B.
  *
+ * With no tab open the composer is still editable and writes to the unbound
+ * key ("", like `UNBOUND_DRAFT_KEY`); startNewChat hands that slice to the
+ * chat it opens.
+ *
  * Leaf module: no store imports, so tabs / messaging / engine-events can
  * migrate and drop this state beside the drafts they already move, without a
  * runtime cycle back into the store.
@@ -94,6 +98,87 @@ export function moveComposerAttachments(
     error: to.error ?? from.error,
   };
   return next;
+}
+
+/** One key change of a conversation (pending tab → native id, engine
+ *  retarget, the no-tab composer opening its first chat), numbered in the
+ *  order the store applied it. */
+export interface ComposerAttachmentMove {
+  from: string;
+  to: string;
+  seq: number;
+}
+
+/**
+ * Recent key changes, kept for uploads still in flight. A paste or import
+ * notes `seq` when it starts; when the file lands it replays only the moves
+ * made after that point. Writing to the key captured at start is not enough:
+ * the tab may have adopted its native id meanwhile, and the old pending key
+ * then belongs to the next new chat (one pending tab per workspace + engine),
+ * which would inherit the picture.
+ */
+export interface ComposerAttachmentMoves {
+  seq: number;
+  log: ComposerAttachmentMove[];
+}
+
+export const NO_ATTACHMENT_MOVES: ComposerAttachmentMoves = { seq: 0, log: [] };
+
+/** An upload lives for one IPC round trip, so it only ever replays the last
+ *  few moves; the cap only bounds the record. */
+const ATTACHMENT_MOVE_LOG_LIMIT = 32;
+
+/** Append fromKey → toKey to the move log (a same-key move is no move).
+ *  Tolerates a missing log like moveComposerAttachments tolerates a missing
+ *  record: engine-event tests drive the handlers with partial store shapes. */
+export function recordAttachmentMove(
+  moves: ComposerAttachmentMoves | undefined,
+  fromKey: string,
+  toKey: string,
+): ComposerAttachmentMoves {
+  const base = moves ?? NO_ATTACHMENT_MOVES;
+  if (fromKey === toKey) return base;
+  const seq = base.seq + 1;
+  const log = [...base.log, { from: fromKey, to: toKey, seq }];
+  return { seq, log: log.slice(-ATTACHMENT_MOVE_LOG_LIMIT) };
+}
+
+/** Where an upload that started under `key` at move `since` must land:
+ *  follow, in order, each later move of the key it is currently on. */
+export function resolveAttachmentKey(
+  moves: ComposerAttachmentMoves | undefined,
+  key: string,
+  since: number,
+): string {
+  let current = key;
+  for (const move of moves?.log ?? []) {
+    if (move.seq > since && move.from === current) current = move.to;
+  }
+  return current;
+}
+
+/** The store slices a key change touches. */
+export interface ComposerAttachmentState {
+  composerAttachments: ComposerAttachmentsByKey;
+  composerAttachmentMoves: ComposerAttachmentMoves;
+}
+
+/** Move a conversation's attachments to its new key and record the move —
+ *  even when nothing has landed yet, so a picture still being saved follows
+ *  the tab instead of waiting on the old key. */
+export function moveComposerState(
+  s: Partial<ComposerAttachmentState>,
+  fromKey: string,
+  toKey: string,
+): ComposerAttachmentState {
+  return {
+    composerAttachments: moveComposerAttachments(s.composerAttachments, fromKey, toKey),
+    composerAttachmentMoves: recordAttachmentMove(
+      s.composerAttachmentMoves,
+      fromKey,
+      toKey,
+    ),
+  };
 }
 
 /** Drop attachments for keys whose sessions are gone (delete / archive /

@@ -18,7 +18,7 @@ import {
 } from "@/lib/notifications";
 import { planRevisionStatus, turnAwaitsUser, turnReplyText } from "./turn-notice";
 import { migrateSessionContributions } from "./session-contributions";
-import { moveComposerAttachments } from "./attachments";
+import { moveComposerState } from "./attachments";
 import { migrateAutoCompactSettings } from "../auto-compact-context";
 import {
   EMPTY_SESSION,
@@ -1014,12 +1014,9 @@ function onSession(
     }
     // Pending attachments follow their tab the same way the draft does: the
     // composer reads the native key afterwards, so chips left under `new:`
-    // would vanish from the very conversation that sent them.
-    const composerAttachments = moveComposerAttachments(
-      s.composerAttachments,
-      fromKey,
-      newKey,
-    );
+    // would vanish from the very conversation that sent them. The recorded
+    // move also redirects a picture that is still being saved.
+    const attachments = moveComposerState(s, fromKey, newKey);
     const streamingByKey = moveStreamingFlag(s.streamingByKey, fromKey, newKey);
     const retryingByKey = moveRetryingFlag(s.retryingByKey, fromKey, newKey);
     const activeNext =
@@ -1032,7 +1029,7 @@ function onSession(
     return {
       bySession,
       drafts,
-      composerAttachments,
+      ...attachments,
       streamingByKey,
       retryingByKey,
       active: activeNext,

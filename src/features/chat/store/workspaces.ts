@@ -132,6 +132,8 @@ export function createWorkspaceActions(
           ...Object.keys(current.bySession),
           ...Object.keys(current.drafts),
           ...Object.keys(current.unseen),
+          // A pending chat may hold only pictures: no draft, no session yet.
+          ...Object.keys(current.composerAttachments),
         ]) {
           if (key.startsWith("new:") && key.endsWith(`:${removedPath}`)) {
             dead.add(key);

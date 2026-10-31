@@ -381,7 +381,8 @@ export const ChatConversation = memo(function ChatConversation({
 
   // Session-scoped, exactly like the draft below: this component instance
   // outlives tab switches (SplitLayout swaps `active` on the same instance),
-  // so attachments cannot live in its local state.
+  // so attachments cannot live in its local state. With no tab open `key` is
+  // the unbound "" — pasted pictures wait there for the first new chat.
   const {
     images,
     previews,
@@ -391,7 +392,7 @@ export const ChatConversation = memo(function ChatConversation({
     pasteImages,
     importImageFiles,
     dismissImageError,
-  } = useComposerImages(key, active !== null);
+  } = useComposerImages(key);
 
   const { displayModels, displayEfforts, displayProviders } = useTabModelDisplay({
     active,

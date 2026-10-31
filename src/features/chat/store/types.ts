@@ -10,7 +10,11 @@ import type {
 import type { EffortLevel } from "@/components/application/ai-chat/cli-menu";
 import type { ComposerPermission } from "@/components/application/ai-chat/permission-menu";
 import type { ActiveSession } from "./persistence";
-import type { ComposerAttachmentsByKey, ComposerAttachments } from "./attachments";
+import type {
+  ComposerAttachmentMoves,
+  ComposerAttachments,
+  ComposerAttachmentsByKey,
+} from "./attachments";
 import type { SessionContributions } from "./session-contributions";
 import type { QueueMoveDirection, SessionState } from "./stream";
 
@@ -100,6 +104,10 @@ export interface ChatStore {
    * the split panes show: attachments belong to the conversation, not to the
    * component. In-memory only (pasted-image files are swept at startup). */
   composerAttachments: ComposerAttachmentsByKey;
+  /** Recent key changes of conversations (pending → native id, engine
+   * retarget, no-tab composer → first chat): a picture still being saved
+   * when its tab changed key lands on the new key, not the old one. */
+  composerAttachmentMoves: ComposerAttachmentMoves;
   /** File-tree "+" click asking the active composer to insert an @path
    * mention; nonce re-fires for the same path. */
   pendingMention: { path: string; nonce: number } | null;

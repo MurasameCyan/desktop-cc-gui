@@ -27,7 +27,7 @@ import {
   untrackRun,
 } from "./stream";
 import { mergeUsage, parseUsage } from "../usage";
-import { moveComposerAttachments } from "./attachments";
+import { moveComposerState } from "./attachments";
 import {
   bindRunLifecycle,
   finishRunLifecycle,
@@ -536,18 +536,20 @@ export function createMessagingActions(
           }
           // Un-sent attachments ride along too (see the draft note above):
           // a picture attached before the CLI assigned the session id is
-          // still waiting in the composer of THIS conversation.
-          const composerAttachments = moveComposerAttachments(
-            s.composerAttachments,
-            key,
-            newKey,
-          );
+          // still waiting in the composer of THIS conversation — or still
+          // being saved, which the recorded move redirects. Only when this
+          // set is the migration: if the session event beat this response,
+          // onSession already moved them, and recording the move again would
+          // pull a picture pasted since into the next new chat (same key)
+          // over to this session.
+          const attachments =
+            s.bySession[key] !== undefined ? moveComposerState(s, key, newKey) : {};
           return {
             bySession,
             openTabs,
             active,
             drafts,
-            composerAttachments,
+            ...attachments,
             streamingByKey: moveStreamingFlag(s.streamingByKey, key, newKey),
             retryingByKey: moveRetryingFlag(s.retryingByKey, key, newKey),
           };

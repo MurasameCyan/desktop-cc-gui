@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@/lib/i18n";
 import { ChatConversation } from "./components/ChatConversation";
 import { useChatStore } from "./store";
+import { NO_ATTACHMENT_MOVES } from "./store/attachments";
 import { sessionKey, type ActiveSession } from "./store/persistence";
 import { EMPTY_SESSION } from "./store/stream";
 
@@ -111,7 +112,7 @@ describe("composer attachments are scoped to their session", () => {
 
   /** Tab switch with the same ChatConversation instance, exactly how
    *  SplitLayout hands a different `active` to one mounted conversation. */
-  function render(active: ActiveSession) {
+  function render(active: ActiveSession | null) {
     act(() =>
       root.render(
         <ChatConversation
@@ -154,6 +155,8 @@ describe("composer attachments are scoped to their session", () => {
         [KEY_B]: { ...EMPTY_SESSION },
       },
       drafts: {},
+      composerAttachments: {},
+      composerAttachmentMoves: NO_ATTACHMENT_MOVES,
     });
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -163,7 +166,14 @@ describe("composer attachments are scoped to their session", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
-    useChatStore.setState({ active: null, openTabs: [], bySession: {}, drafts: {} });
+    useChatStore.setState({
+      active: null,
+      openTabs: [],
+      bySession: {},
+      drafts: {},
+      composerAttachments: {},
+      composerAttachmentMoves: NO_ATTACHMENT_MOVES,
+    });
   });
 
   it("does not carry a pasted image into another session", async () => {
@@ -183,6 +193,21 @@ describe("composer attachments are scoped to their session", () => {
     expect(footerState.images).toEqual([]);
 
     render(A);
+    expect(footerState.images).toEqual(["/sandbox/paste-a.png"]);
+  });
+
+  it("hands a picture pasted with no tab open to the first new chat", async () => {
+    // Like the unbound draft: the composer stays editable with no tab, and
+    // what the user pasted there belongs to the session they open next.
+    useChatStore.setState({ active: null, openTabs: [], activeEngine: "claude" });
+    render(null);
+    await pastePng();
+
+    act(() => useChatStore.getState().startNewChat(WS));
+    const opened = useChatStore.getState().active;
+    expect(opened?.sessionId).toBeNull();
+    render(opened!);
+
     expect(footerState.images).toEqual(["/sandbox/paste-a.png"]);
   });
 
