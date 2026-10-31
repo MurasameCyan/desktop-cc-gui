@@ -15,7 +15,11 @@ import { IS_MAC, isWeb } from "@/lib/platform";
 import { fileName, useFilesStore } from "./store";
 import type { OpenFileState } from "./store";
 import { BinaryFileView, ImageFileView } from "./EditorFallbackViews";
-import { EditorSearchPanel, type EditorSearchFocusRequest } from "./EditorSearchPanel";
+import {
+  EditorSearchPanel,
+  type EditorSearchDirection,
+  type EditorSearchFocusRequest,
+} from "./EditorSearchPanel";
 import {
   clearEditorSearchQuery,
   createEditorSearchExtensions,
@@ -224,6 +228,7 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
     token: 0,
   });
   const editorSearchOpenRef = useRef(false);
+  const editorSearchNavigateRef = useRef<((direction: EditorSearchDirection) => void) | null>(null);
   const readOnlyRef = useRef(readOnly);
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -251,10 +256,15 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
     const view = editorRef.current;
     if (view?.dom.isConnected) {
       closeSearchPanel(view);
-      // Clear the query and collapse the selection like dbx does, so neither
-      // the match highlight nor F3 / Mod-g can act on a dismissed search.
+      // Clear the query and collapse a single selection to its head like dbx
+      // does, so the match highlight does not outlive the dismissed search.
+      // Cursors from "select all matches" are kept: closing the card first
+      // and then typing is how they get edited.
       clearEditorSearchQuery(view);
-      view.dispatch({ selection: EditorSelection.single(view.state.selection.main.head) });
+      const { selection } = view.state;
+      if (selection.ranges.length === 1) {
+        view.dispatch({ selection: EditorSelection.single(selection.main.head) });
+      }
       // Switching tabs must not pull focus into the now-hidden editor.
       if (focusEditor) view.focus();
     }
@@ -281,6 +291,20 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
     setPreviewSearchOpen(false);
   }, [isActiveTab, dismissEditorSearch]);
 
+  // F3 / Mod-G: step through the card (keeps its counter current), or open it
+  // when it is closed.
+  const stepEditorSearch = useCallback(
+    (view: EditorView, direction: EditorSearchDirection) => {
+      if (!editorSearchOpenRef.current) {
+        openEditorSearch(view, false);
+        return true;
+      }
+      editorSearchNavigateRef.current?.(direction);
+      return true;
+    },
+    [openEditorSearch],
+  );
+
   // Stable source for the CodeMirror keymap, which is built once but must
   // always call the latest callbacks.
   const searchActionsRef = useRef<EditorSearchKeymapActions>({
@@ -294,6 +318,8 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
       openEditorSearch(view, true);
       return true;
     },
+    findNext: (view) => stepEditorSearch(view, "next"),
+    findPrevious: (view) => stepEditorSearch(view, "prev"),
     close: () => closeEditorSearch(),
   });
   const searchExtensions = useMemo(
@@ -466,6 +492,7 @@ function FileEditor({ path, content, wordWrap, onToggleWordWrap }: {
             documentText={draft}
             onShowReplaceChange={setEditorSearchReplace}
             onClose={closeEditorSearch}
+            navigateRef={editorSearchNavigateRef}
           />
         </div>
       )}

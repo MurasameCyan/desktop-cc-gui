@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorState } from "@codemirror/state";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import {
   collectEditorSearchMatches,
   createEditorSearchQuery,
@@ -8,8 +8,19 @@ import {
   editorSearchKeyBindings,
   editorSearchMatchInfo,
   editorSearchReplaceKey,
+  selectEditorSearchMatchFromCursor,
   type EditorSearchKeymapActions,
 } from "./editor-search";
+
+function keymapActions(): EditorSearchKeymapActions {
+  return {
+    openFind: vi.fn(() => true),
+    openReplace: vi.fn(() => true),
+    findNext: vi.fn(() => true),
+    findPrevious: vi.fn(() => true),
+    close: vi.fn(() => false),
+  };
+}
 
 function stateOf(doc: string, selection?: { anchor: number; head?: number }) {
   return EditorState.create({ doc, selection });
@@ -107,6 +118,62 @@ describe("collectEditorSearchMatches", () => {
   });
 });
 
+describe("selectEditorSearchMatchFromCursor", () => {
+  function viewOf(doc: string, selection?: { anchor: number; head?: number }) {
+    return new EditorView({ state: EditorState.create({ doc, selection }) });
+  }
+  const selected = (view: EditorView) => [
+    view.state.selection.main.from,
+    view.state.selection.main.to,
+  ];
+
+  it("keeps the match that starts at the selection (typing f -> fo)", () => {
+    const view = viewOf("foo foo foo", { anchor: 0, head: 1 });
+    expect(selectEditorSearchMatchFromCursor(view, queryOf("fo"))).toBe(true);
+    expect(selected(view)).toEqual([0, 2]);
+    view.destroy();
+  });
+
+  it("keeps a selected word that seeded the query", () => {
+    const view = viewOf("alpha foo beta foo", { anchor: 6, head: 9 });
+    expect(selectEditorSearchMatchFromCursor(view, queryOf("foo"))).toBe(true);
+    expect(selected(view)).toEqual([6, 9]);
+    view.destroy();
+  });
+
+  it("wraps to the document's first match when none starts at or after the cursor", () => {
+    const view = viewOf("foo bar", { anchor: 1 });
+    expect(selectEditorSearchMatchFromCursor(view, queryOf("foo"))).toBe(true);
+    expect(selected(view)).toEqual([0, 3]);
+    view.destroy();
+  });
+
+  it("agrees with the counted matches instead of starting mid-text", () => {
+    // From offset 1, a raw scan would return the overlapping "aa" at [1,3],
+    // which is not one of the counted (and highlighted) matches.
+    const overlap = viewOf("aaaa", { anchor: 1 });
+    expect(selectEditorSearchMatchFromCursor(overlap, queryOf("aa"))).toBe(true);
+    expect(selected(overlap)).toEqual([2, 4]);
+    overlap.destroy();
+
+    // A multiline regexp cursor treats its start offset as "^".
+    const anchored = viewOf("  x foo\nfoo", { anchor: 4 });
+    expect(
+      selectEditorSearchMatchFromCursor(anchored, queryOf("^\\s*foo", { regexp: true })),
+    ).toBe(true);
+    expect(selected(anchored)).toEqual([8, 11]);
+    anchored.destroy();
+  });
+
+  it("leaves the selection alone without a match or with an invalid query", () => {
+    const view = viewOf("foo bar", { anchor: 2 });
+    expect(selectEditorSearchMatchFromCursor(view, queryOf("zzz"))).toBe(false);
+    expect(selectEditorSearchMatchFromCursor(view, queryOf("(", { regexp: true }))).toBe(false);
+    expect(selected(view)).toEqual([2, 2]);
+    view.destroy();
+  });
+});
+
 describe("hidden search panel", () => {
   it("stays in the top panel group so it contributes no scroll margin", () => {
     // A hidden *bottom* panel makes CodeMirror treat the scroller height as a
@@ -132,28 +199,43 @@ describe("editor search shortcuts", () => {
   });
 
   it("routes Mod-F and the platform replace key to the panel actions", () => {
-    const actions: EditorSearchKeymapActions = {
-      openFind: vi.fn(() => true),
-      openReplace: vi.fn(() => true),
-      close: vi.fn(() => false),
-    };
+    const actions = keymapActions();
     const bindings = editorSearchKeyBindings(actions, false);
-    expect(bindings.map((binding) => binding.key)).toEqual(["Mod-f", "Mod-h", "Escape"]);
+    expect(bindings.map((binding) => binding.key)).toEqual([
+      "Mod-f",
+      "Mod-h",
+      "F3",
+      "Mod-g",
+      "Escape",
+    ]);
     expect(bindings[0].run?.({} as EditorView)).toBe(true);
     expect(bindings[1].run?.({} as EditorView)).toBe(true);
     expect(actions.openFind).toHaveBeenCalledTimes(1);
     expect(actions.openReplace).toHaveBeenCalledTimes(1);
-    expect(bindings[2].run?.({} as EditorView)).toBe(false);
+    expect(bindings[4].run?.({} as EditorView)).toBe(false);
     expect(actions.close).toHaveBeenCalledTimes(1);
   });
 
+  it("routes F3 / Mod-G (Shift for previous) to the panel actions", () => {
+    const actions = keymapActions();
+    const bindings = editorSearchKeyBindings(actions, false);
+    for (const binding of bindings.filter((b) => b.key === "F3" || b.key === "Mod-g")) {
+      expect(binding.preventDefault).toBe(true);
+      binding.run?.({} as EditorView);
+      binding.shift?.({} as EditorView);
+    }
+    expect(actions.findNext).toHaveBeenCalledTimes(2);
+    expect(actions.findPrevious).toHaveBeenCalledTimes(2);
+  });
+
   it("binds Alt+Cmd+F as the replace fallback on macOS", () => {
-    const actions: EditorSearchKeymapActions = {
-      openFind: vi.fn(() => true),
-      openReplace: vi.fn(() => true),
-      close: vi.fn(() => false),
-    };
-    const bindings = editorSearchKeyBindings(actions, true);
-    expect(bindings.map((binding) => binding.key)).toEqual(["Mod-f", "Alt-Mod-f", "Escape"]);
+    const bindings = editorSearchKeyBindings(keymapActions(), true);
+    expect(bindings.map((binding) => binding.key)).toEqual([
+      "Mod-f",
+      "Alt-Mod-f",
+      "F3",
+      "Mod-g",
+      "Escape",
+    ]);
   });
 });

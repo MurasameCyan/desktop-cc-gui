@@ -66,7 +66,13 @@ export function clearSearchHighlights(): void {
  *
  * 时间线是虚拟列表，未挂载的行没有 DOM——调用方在虚拟器挂载/流式变更
  * （MutationObserver）后重绘。`currentOccurrence` 是当前行内的第几个命中
- * （0 基）；该页尚未挂载时回落到当前行的第一个可见命中。
+ * （0 基）；不传 `currentRowTotal` 时，该页尚未挂载就回落到当前行的第一个
+ * 可见命中。
+ *
+ * `currentRowTotal` 是数据层在当前行数到的命中数。计数按原文（Markdown
+ * 源码、折叠的过程条目）算，高亮按渲染出的 DOM 算：链接网址、未展开的
+ * 条目会让两边对不上，这时按序号挑 Range 会挑错词（“下一个”往回跳）。
+ * 对不上就整行标为当前、不返回 Range，只保留按行定位。
  */
 export function paintSearchHighlights(
   root: HTMLElement,
@@ -74,6 +80,7 @@ export function paintSearchHighlights(
   currentRowIndex: number | null,
   options?: TextSearchOptions,
   currentOccurrence = 0,
+  currentRowTotal?: number,
 ): Range | null {
   clearSearchHighlights();
   if (!query.trim() || !searchHighlightSupported()) return null;
@@ -88,6 +95,17 @@ export function paintSearchHighlights(
     range.setEnd(match.node, match.end);
     if (rowIndex === currentRowIndex) currentRowRanges.push(range);
     else all.push(range);
+  }
+  const countsAgree =
+    currentRowTotal === undefined || currentRowRanges.length === currentRowTotal;
+  if (!countsAgree) {
+    if (all.length > 0) CSS.highlights.set(HIGHLIGHT_ALL, new Highlight(...all));
+    if (currentRowRanges.length > 0) {
+      const highlight = new Highlight(...currentRowRanges);
+      highlight.priority = 1;
+      CSS.highlights.set(HIGHLIGHT_CURRENT, highlight);
+    }
+    return null;
   }
   const active = currentRowRanges[currentOccurrence] ?? currentRowRanges[0] ?? null;
   if (active) {

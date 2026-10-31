@@ -55,6 +55,8 @@ describe("editor search CodeMirror integration", () => {
     const actions: EditorSearchKeymapActions = {
       openFind: vi.fn(() => true),
       openReplace: vi.fn(() => true),
+      findNext: vi.fn(() => true),
+      findPrevious: vi.fn(() => true),
       close: vi.fn(() => false),
     };
     const view = makeView("alpha beta", actions);
@@ -67,6 +69,8 @@ describe("editor search CodeMirror integration", () => {
     const actions: EditorSearchKeymapActions = {
       openFind: vi.fn(() => true),
       openReplace: vi.fn(() => true),
+      findNext: vi.fn(() => true),
+      findPrevious: vi.fn(() => true),
       close: vi.fn(() => false),
     };
     const view = makeView("one two one", actions);
@@ -99,10 +103,39 @@ describe("editor search CodeMirror integration", () => {
     const actions: EditorSearchKeymapActions = {
       openFind: vi.fn(() => true),
       openReplace: vi.fn(() => true),
+      findNext: vi.fn(() => true),
+      findPrevious: vi.fn(() => true),
       close,
     };
     const view = makeView("alpha", actions);
     press(view, "Escape");
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes F3 / Mod-G to the card instead of a search behind the hidden panel", () => {
+    const actions: EditorSearchKeymapActions = {
+      openFind: vi.fn(() => true),
+      openReplace: vi.fn(() => true),
+      findNext: vi.fn(() => true),
+      findPrevious: vi.fn(() => true),
+      close: vi.fn(() => false),
+    };
+    const view = makeView("alpha foo beta foo", actions);
+    view.dispatch({ selection: { anchor: 6, head: 9 } });
+
+    press(view, "F3");
+    press(view, "g", { ctrlKey: true });
+    press(view, "F3", { shiftKey: true });
+    // Browsers report key "G" with Shift; CodeMirror resolves Shift-Mod-g
+    // through the key code, which jsdom only sets when given.
+    press(view, "G", { ctrlKey: true, shiftKey: true, keyCode: 71 });
+
+    expect(actions.findNext).toHaveBeenCalledTimes(2);
+    expect(actions.findPrevious).toHaveBeenCalledTimes(2);
+    // CodeMirror's own F3 would have opened the hidden panel with the
+    // selection as query, painting highlights with no card on screen.
+    expect(searchPanelOpen(view.state)).toBe(false);
+    expect(getSearchQuery(view.state).search).toBe("");
+    expect(view.state.selection.main.from).toBe(6);
   });
 });

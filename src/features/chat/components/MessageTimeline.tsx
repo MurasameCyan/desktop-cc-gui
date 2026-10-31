@@ -453,11 +453,15 @@ function useTimelineSearch({
   const currentSearchRow =
     searchMatches.length > 0 ? searchMatches[safeCursor].rowIndex : null;
   // 当前命中是所在行内的第几处：同一行有多个命中时，行号不变，必须靠它
-  // 找到要滚动到的那个 Range。
-  const currentRowOccurrence = useMemo(() => {
-    if (currentSearchRow === null) return 0;
+  // 找到要滚动到的那个 Range。行内总数用来核对 DOM 上画出的命中是否一一
+  // 对应（见 paintSearchHighlights）。
+  const { occurrence: currentRowOccurrence, total: currentRowTotal } = useMemo(() => {
+    if (currentSearchRow === null) return { occurrence: 0, total: 0 };
     const first = searchMatches.findIndex((match) => match.rowIndex === currentSearchRow);
-    return first < 0 ? 0 : safeCursor - first;
+    if (first < 0) return { occurrence: 0, total: 0 };
+    let end = first;
+    while (end < searchMatches.length && searchMatches[end].rowIndex === currentSearchRow) end++;
+    return { occurrence: safeCursor - first, total: end - first };
   }, [currentSearchRow, searchMatches, safeCursor]);
   const currentSearchItem = useMemo(() => {
     if (currentSearchRow === null) return undefined;
@@ -528,7 +532,10 @@ function useTimelineSearch({
       lastScrolledSearchKeyRef.current = null;
       return;
     }
+    // searchRevision bumps on every query change and next/prev, so returning
+    // to an earlier match (or stepping a single match) scrolls again.
     const searchKey = [
+      searchRevision,
       searchQuery,
       safeCursor,
       searchCaseSensitive,
@@ -549,11 +556,21 @@ function useTimelineSearch({
             regexp: searchUseRegex,
           },
           currentRowOccurrence,
+          currentRowTotal,
         );
         // 行刚被虚拟器挂载时 Range 还不存在；MutationObserver 会再画一次。
-        if (active && lastScrolledSearchKeyRef.current !== searchKey) {
-          lastScrolledSearchKeyRef.current = searchKey;
-          scrollMatchIntoView(el, active);
+        if (lastScrolledSearchKeyRef.current !== searchKey) {
+          if (active) {
+            lastScrolledSearchKeyRef.current = searchKey;
+            scrollMatchIntoView(el, active);
+          } else if (
+            currentSearchRow !== null &&
+            el.querySelector(`[data-index="${currentSearchRow}"]`)
+          ) {
+            // 行已挂载却定位不到具体词（DOM 与数据计数对不上）：这一跳只按行
+            // 定位，也记为已处理，之后流式重绘让计数对上时不再晚到地抢视口。
+            lastScrolledSearchKeyRef.current = searchKey;
+          }
         }
       });
     };
@@ -574,7 +591,9 @@ function useTimelineSearch({
     searchQuery,
     currentSearchRow,
     currentRowOccurrence,
+    currentRowTotal,
     safeCursor,
+    searchRevision,
     searchCaseSensitive,
     searchWholeWord,
     searchUseRegex,

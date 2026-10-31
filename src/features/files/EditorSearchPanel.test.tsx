@@ -6,7 +6,7 @@ import { EditorView } from "@codemirror/view";
 import { openSearchPanel } from "@codemirror/search";
 // Side-effect import: initializes the i18next instance useTranslation reads.
 import i18n from "@/lib/i18n";
-import { EditorSearchPanel } from "./EditorSearchPanel";
+import { EditorSearchPanel, type EditorSearchDirection } from "./EditorSearchPanel";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,8 +39,10 @@ function renderPanel(
   options: {
     showReplace?: boolean;
     readOnly?: boolean;
+    isMac?: boolean;
     onShowReplaceChange?: (show: boolean) => void;
     onClose?: () => void;
+    navigateRef?: { current: ((direction: EditorSearchDirection) => void) | null };
   } = {},
 ) {
   container = document.createElement("div");
@@ -53,11 +55,12 @@ function renderPanel(
         open
         showReplace={options.showReplace ?? false}
         readOnly={options.readOnly ?? false}
-        isMac={false}
+        isMac={options.isMac ?? false}
         focusRequest={{ target: "find", token: 1 }}
         documentText={view.state.doc.toString()}
         onShowReplaceChange={options.onShowReplaceChange ?? (() => {})}
         onClose={options.onClose ?? (() => {})}
+        navigateRef={options.navigateRef}
       />,
     ),
   );
@@ -81,6 +84,16 @@ function button(label: string) {
   const element = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
   if (!element) throw new Error(`button not found: ${label}`);
   return element;
+}
+
+function selectedRange() {
+  return [view.state.selection.main.from, view.state.selection.main.to];
+}
+
+function keyDown(target: HTMLElement, init: KeyboardEventInit) {
+  act(() => {
+    target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  });
 }
 
 function statusText() {
@@ -108,6 +121,104 @@ describe("EditorSearchPanel", () => {
     expect(field.value).toBe("one");
     expect(field.selectionStart).toBe(0);
     expect(field.selectionEnd).toBe(3);
+  });
+
+  it("keeps the selected word current when the query is seeded from it", () => {
+    makeView("alpha foo beta foo", { anchor: 6, head: 9 });
+    renderPanel();
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(selectedRange()).toEqual([6, 9]);
+    expect(statusText()).toBe("1/2");
+  });
+
+  it("does not skip the current match while the query is typed letter by letter", () => {
+    makeView("foo foo foo");
+    renderPanel();
+    const find = input(i18n.t("files.editorSearch.find"));
+
+    // Pauses longer than the debounce, as in normal typing.
+    for (const value of ["f", "fo", "foo"]) {
+      typeInto(find, value);
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+    }
+
+    expect(selectedRange()).toEqual([0, 3]);
+    expect(statusText()).toBe("1/3");
+  });
+
+  it("opens the replace row with Option+Cmd+F on macOS, which WebKit reports as \"ƒ\"", () => {
+    const onShowReplaceChange = vi.fn();
+    makeView("one two one");
+    renderPanel({ isMac: true, onShowReplaceChange });
+    const find = input(i18n.t("files.editorSearch.find"));
+    // Values measured in a real WKWebView; with Shift it reports key "Ï".
+    keyDown(find, { key: "Ï", code: "KeyF", keyCode: 70, metaKey: true, altKey: true, shiftKey: true });
+    expect(onShowReplaceChange).not.toHaveBeenCalled();
+    keyDown(find, { key: "ƒ", code: "KeyF", keyCode: 70, metaKey: true, altKey: true });
+    expect(onShowReplaceChange).toHaveBeenCalledWith(true);
+  });
+
+  it("keeps the current match when a toggle still matches it", () => {
+    makeView("one ONE one");
+    renderPanel();
+    typeInto(input(i18n.t("files.editorSearch.find")), "one");
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    act(() => button(i18n.t("files.editorSearch.nextMatch")).click());
+    act(() => button(i18n.t("files.editorSearch.nextMatch")).click());
+    expect(selectedRange()).toEqual([8, 11]);
+
+    act(() => button(i18n.t("files.editorSearch.caseSensitive")).click());
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(selectedRange()).toEqual([8, 11]);
+    expect(statusText()).toBe("2/2");
+  });
+
+  it("steps with F3 / Ctrl+G inside the card and keeps the counter current", () => {
+    makeView("one two one three one");
+    renderPanel();
+    const find = input(i18n.t("files.editorSearch.find"));
+    typeInto(find, "one");
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(statusText()).toBe("1/3");
+
+    keyDown(find, { key: "F3" });
+    expect(statusText()).toBe("2/3");
+    keyDown(find, { key: "g", ctrlKey: true });
+    expect(statusText()).toBe("3/3");
+    keyDown(find, { key: "F3", shiftKey: true });
+    expect(statusText()).toBe("2/3");
+  });
+
+  it("exposes stepping to the editor keymap through navigateRef", () => {
+    const navigateRef: { current: ((direction: EditorSearchDirection) => void) | null } = {
+      current: null,
+    };
+    makeView("one two one");
+    renderPanel({ navigateRef });
+    typeInto(input(i18n.t("files.editorSearch.find")), "one");
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(statusText()).toBe("1/2");
+
+    act(() => navigateRef.current?.("next"));
+    expect(statusText()).toBe("2/2");
+    expect(selectedRange()).toEqual([8, 11]);
+
+    act(() => root.unmount());
+    expect(navigateRef.current).toBeNull();
+    root = createRoot(container);
   });
 
   it("opens the replace row with Ctrl+H while the find input has focus", () => {

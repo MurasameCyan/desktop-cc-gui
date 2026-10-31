@@ -116,6 +116,32 @@ describe("chat search highlights", () => {
     root.remove();
   });
 
+  it("does not guess the active word when the row's DOM and data counts differ", () => {
+    const highlights = stubHighlightApi();
+    // Raw markdown holds three "foo" (one inside the link URL); the rendered
+    // bubble shows two. Picking by index would paint the wrong word.
+    const rows = buildRows([msg(1, "assistant", "See [docs](https://x.dev/foo). Then foo, and foo.")]);
+    const total = findTimelineMatches(rows, "foo").length;
+    expect(total).toBe(3);
+    const root = makeRoot('<div data-index="0"><p>See <a>docs</a>. Then foo, and foo.</p></div>');
+
+    const active = paintSearchHighlights(root, "foo", 0, undefined, 2, total);
+
+    expect(active).toBeNull();
+    // The whole row is marked current instead (row-level, as before word scrolling).
+    expect(highlights.get("ccgui-chat-search-current")?.ranges).toHaveLength(2);
+    expect(highlights.has("ccgui-chat-search")).toBe(false);
+    root.remove();
+  });
+
+  it("picks the active word when the row's DOM and data counts agree", () => {
+    stubHighlightApi();
+    const root = makeRoot('<div data-index="0"><p>one <b>one</b> one</p></div>');
+    const active = paintSearchHighlights(root, "one", 0, undefined, 1, 3);
+    expect(active?.startContainer.parentElement?.tagName).toBe("B");
+    root.remove();
+  });
+
   it("falls back to the first mounted occurrence when the active page is not rendered", () => {
     stubHighlightApi();
     const root = makeRoot('<div data-index="0"><p>one two</p></div>');

@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { EditorSelection } from "@codemirror/state";
@@ -33,6 +34,7 @@ import {
   createEditorSearchQuery,
   dispatchEditorSearchQuery,
   editorSearchMatchInfo,
+  selectEditorSearchMatchFromCursor,
   type EditorSearchMatchInfo,
   type EditorSearchQueryOptions,
 } from "./editor-search";
@@ -60,6 +62,8 @@ function cancelIdle(handle: number) {
   }
 }
 
+export type EditorSearchDirection = "next" | "prev";
+
 export interface EditorSearchFocusRequest {
   target: "find" | "replace";
   /** Bumped on every open request so focusing the already-open panel works. */
@@ -77,6 +81,9 @@ export interface EditorSearchPanelProps {
   documentText: string;
   onShowReplaceChange: (show: boolean) => void;
   onClose: () => void;
+  /** Filled with this panel's match stepping so editor-side F3 / Mod-G move
+   *  through the same query and keep the counter current. */
+  navigateRef?: MutableRefObject<((direction: EditorSearchDirection) => void) | null>;
 }
 
 /**
@@ -97,6 +104,7 @@ export function EditorSearchPanel({
   documentText,
   onShowReplaceChange,
   onClose,
+  navigateRef,
 }: EditorSearchPanelProps) {
   const { t } = useTranslation();
   const [searchText, setSearchText] = useState("");
@@ -160,7 +168,7 @@ export function EditorSearchPanel({
         timerRef.current = null;
         idleRef.current = requestIdle(() => {
           idleRef.current = null;
-          if (autoSelect && query.valid) findNext(view);
+          if (autoSelect) selectEditorSearchMatchFromCursor(view, query);
           setMatchInfo(editorSearchMatchInfo(view.state, query));
         });
       }, delay);
@@ -261,13 +269,22 @@ export function EditorSearchPanel({
 
   useEffect(() => () => clearTimers(), [clearTimers]);
 
-  const goToMatch = (direction: "next" | "prev") => {
+  const goToMatch = (direction: EditorSearchDirection) => {
     if (!view) return;
     const query = createEditorSearchQuery(queryOptions());
     if (!query.valid) return;
     const moved = direction === "next" ? findNext(view) : findPrevious(view);
     if (moved) setMatchInfo(editorSearchMatchInfo(view.state, query));
   };
+  // Assigned after every commit so the editor keymap always steps with the
+  // query currently in the field.
+  useEffect(() => {
+    if (!navigateRef) return;
+    navigateRef.current = goToMatch;
+    return () => {
+      navigateRef.current = null;
+    };
+  });
 
   const replaceCurrent = () => {
     if (!view || readOnly) return;
@@ -322,10 +339,12 @@ export function EditorSearchPanel({
     }
     const key = event.key.toLowerCase();
     // The editor keymap cannot see keys typed in this input; keep the replace
-    // shortcut working while the find field owns focus.
+    // shortcut working while the find field owns focus. On macOS Option turns
+    // F into "ƒ" (WKWebView reports key "ƒ", keyCode 70), so fall back to the
+    // key code like CodeMirror's own keymap does.
     const replaceShortcut = isMac
-      ? event.metaKey && event.altKey && key === "f"
-      : event.ctrlKey && !event.metaKey && !event.altKey && key === "h";
+      ? event.metaKey && event.altKey && !event.shiftKey && (key === "f" || event.keyCode === 70)
+      : event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && key === "h";
     if (replaceShortcut) {
       event.preventDefault();
       if (readOnly) return;
@@ -356,10 +375,20 @@ export function EditorSearchPanel({
   };
 
   const handlePanelKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Escape") return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    // F3 / Mod-G step through matches from anywhere in the card, like the
+    // same keys in the editor.
+    const mod = isMac ? event.metaKey : event.ctrlKey;
+    const stepKey =
+      event.key === "F3" || (mod && !event.altKey && event.key.toLowerCase() === "g");
+    if (!stepKey) return;
     event.preventDefault();
-    event.stopPropagation();
-    onClose();
+    goToMatch(event.shiftKey ? "prev" : "next");
   };
 
   const handleReplaceTextChange = (value: string) => {
