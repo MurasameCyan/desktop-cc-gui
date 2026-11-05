@@ -30,12 +30,16 @@ export function changelogEntryFor(version: string): ChangelogEntry | undefined {
 export const CHANGELOG_DATA: ChangelogEntry[] = [
   {
     version: "1.2.2",
-    date: "2026-11-04",
+    date: "2026-11-05",
     content: {
       zh: `修复
+- **输入框折叠后保留草稿**：折叠与展开不再卸载编辑节点，保留正文、文件标签、选区和撤销历史；初始折叠及折叠期间的草稿切换、预填和清空在展开后显示最新内容，隐藏更新不干扰前台其他编辑器的选区。
+- **历史补全不再用过期建议覆盖输入**：修改正文后立即隐藏旧建议，Tab 接受前校验当前正文和历史开关；失效建议不消费 Tab。正常补全、历史管理和上下键召回保持不变。
 - **保留 CLI 原生请求身份**：Codex 初始化改用不覆盖请求身份的握手，不再把 User-Agent、originator 或 UA 后缀改成 CC GUI；版本、平台信息和请求头由已安装的 Codex 自己生成。共享 ACP 初始化不再传入可选的 CC GUI 客户端信息，文件访问、提问和计划审批能力声明不变。
 - **已有会话保持原样**：不迁移或修改历史记录。旧 Codex 会话续聊的 User-Agent 恢复原生值，但 CLI 仍可能沿用历史中保存的 originator；若服务商因此拒绝请求，请新建会话。`,
       en: `Fixes
+- **Composer drafts survive collapse**: collapsing and expanding no longer unmount the editor, preserving text, file tags, selection and undo history. Initially collapsed and externally updated drafts show the latest content on expansion, without disturbing another foreground editor's selection while hidden.
+- **Stale history completions cannot overwrite new input**: changing the draft immediately hides the previous suggestion, and Tab checks the current editor text and history setting before accepting it. Rejected suggestions leave Tab available for navigation. Normal completion, history management and arrow-key recall remain unchanged.
 - **Preserve native CLI request identity**: Codex initialization now uses a non-originating handshake instead of replacing the User-Agent, originator or UA suffix with CC GUI branding. The installed CLI generates its own version, platform information and request headers. Shared ACP initialization no longer sends optional CC GUI client information; file access, question and plan-approval capabilities are unchanged.
 - **Existing sessions are preserved**: no history migration or edits. Resumed Codex sessions use the native User-Agent, but the CLI may retain an originator stored in their history. Start a new session if a provider rejects that historical originator.`,
     },
