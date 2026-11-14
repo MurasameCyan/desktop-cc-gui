@@ -32,10 +32,22 @@ export const CHANGELOG_DATA: ChangelogEntry[] = [
     version: "1.2.4",
     date: "2026-11-14",
     content: {
-      zh: `修复
+      zh: `新功能
+- **中转登录部署**：设置 → 远程访问 → 外网访问的部署按钮改为下拉菜单，依次为「一键部署 / 登录部署 / 下载源码」。保留原 API Token 部署和源码下载，新增官方 Wrangler 浏览器授权；首次自动准备独立的 Node/Wrangler，无需手动安装。单账户自动继续，多账户选择目标，首次使用可设置 workers.dev 子域，已有 Worker 需确认覆盖和更换密钥。部署后自动保存并回填 URL/KEY。
+- **CI 测试隔离**：状态条的 UI/会话恢复测试改用独立 IPC 夹具，避免真实 WebSocket 重连在测试环境销毁后触发异常；生产通信逻辑和现有行为断言保持不变。
+- **临时授权保护**：登录资料使用独占占用标记；正常退出等待本次任务清理，重启只回收已失去占用的新格式目录，不删除其他实例的活跃登录或无法判定归属的旧格式目录。Windows 凭证目录及其子项仅授予当前用户访问。普通文件读取、搜索、复制、剪贴板导出、预览、附件与插件目录资源不能访问中转工具及认证目录，包含便携模式。
+- **授权与失败处理**：一次登录仅供一次部署任务使用，不跨任务或重启复用；不读取用户现有 Wrangler 凭据或系统凭据库，授权 Token 不通过登录接口进入前端。结束后尝试撤销本次授权并清理本地临时文件；本地清理不等于 Cloudflare 已确认撤销，也不退出浏览器中的 Cloudflare 会话。上传前可取消；上传开始后由后端完成保存与清理，离开设置页不丢失新密钥。上传成功但保存或地址启用失败时，仍回填新 URL/KEY 并明确报错，不误报成功。登录部署仅限桌面端。
+
+修复
 - **输入框折叠后保留草稿**：折叠与展开不再卸载编辑节点，保留正文、文件标签、选区和撤销历史；隐藏期间 IME 提交的文件引用展开后生成可删除标签。键盘通过手柄展开后可直接继续编辑，不抢占其他编辑器的焦点或选区；隐藏期间外部更新、切换与清空的草稿在主动编辑时恢复最新光标位置。
 - **历史补全不再用过期建议覆盖输入**：真正改变正文后立即隐藏旧建议，Tab 接受前校验当前正文和历史开关；失效建议不消费 Tab。内部 CRLF / CR 与 LF 使用同一换行规则，草稿不会多出空行，已显示的合法建议可以接受；仅改变大小写（包括同批输入后按 Tab）仍可补全。历史管理、容量、排序和上下键召回保持不变。`,
-      en: `Fixes
+      en: `Features
+- **Deploy a relay through browser login**: Settings → Remote access → Internet access now offers an ordered dropdown: Deploy / Login & deploy / Download source. Existing API Token deployment and source export remain available. Official Wrangler authorization uses an automatically prepared, private Node/Wrangler runtime. One account proceeds automatically; multiple accounts require a choice, a missing workers.dev subdomain prompts for setup, and replacing an existing Worker requires explicit consent. The relay URL/key are saved and filled in automatically.
+- **CI test isolation**: status-strip UI/session-restoration tests now use isolated IPC fixtures, preventing real WebSocket reconnect callbacks after test-environment teardown. Production transport behavior and existing behavioral assertions are unchanged.
+- **Temporary credential protection**: exclusive leases distinguish active logins from abandoned profiles. Normal exit waits for task cleanup; startup recovers abandoned marked profiles without deleting another instance's active login or guessing ownership of legacy unmarked directories. Windows credential directories inherit current-user-only access. Generic file reads, search, copy, clipboard export, previews, attachments and plugin directory assets cannot access relay tools or credentials, including portable mode.
+- **Authorization and failure handling**: one login serves one deployment task and is never reused across tasks or restarts. Existing Wrangler credentials and the OS credential store are untouched; login IPC never returns OAuth tokens. Completion attempts revocation and removes local credentials; local cleanup does not confirm Cloudflare revocation or log the browser out of Cloudflare. Cancellation is available before upload; once uploading, the backend owns persistence and cleanup even if settings are closed. Post-upload save or activation failures retain the new URL/key and report the error instead of showing success. Login deployment is desktop-only.
+
+Fixes
 - **Composer drafts survive collapse**: collapsing and expanding no longer unmount the editor, preserving text, file tags, selection and undo history. File references committed by IME while hidden become removable tags on expansion. Expanding with the keyboard grip restores editing focus without taking focus or selection from another editor; externally updated, switched or cleared hidden drafts restore the latest caret when editing resumes.
 - **Stale history completions cannot overwrite new input**: a genuinely changed query immediately hides the previous suggestion, and Tab checks the live text and history setting before accepting it. Rejected suggestions leave Tab available for navigation. Internal CRLF, CR and LF use the same newline rules, avoiding extra blank lines and allowing displayed suggestions to be accepted. Case-only changes remain valid, including input and Tab in one batch. History management, capacity, ranking and arrow-key recall remain unchanged.`,
     },
