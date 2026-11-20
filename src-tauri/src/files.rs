@@ -1577,12 +1577,12 @@ mod tests {
             ).unwrap();
             db.add_granted_root(&tools.to_string_lossy()).unwrap();
             assert!(list_dir_blocking(db, &tools.to_string_lossy(), None).is_err());
-            assert!(read_file_blocking(db, &secret.to_string_lossy()).is_err());
+            assert!(read_file_blocking(db, &secret.to_string_lossy(), None).is_err());
             assert!(ensure_allowed(&tools.join("new/deep/file").to_string_lossy(), db).is_err());
             assert!(grant_root_in(db, &tools.join("new/deep/file").to_string_lossy()).is_err());
             assert!(!tools.join("new").exists());
             assert_eq!(
-                read_file_blocking(db, &ordinary.to_string_lossy()).unwrap().text.as_deref(),
+                read_file_blocking(db, &ordinary.to_string_lossy(), None).unwrap().text.as_deref(),
                 Some("ordinary-fixture")
             );
             assert!(ensure_allowed(&home.join("workspace/new/deep/file").to_string_lossy(), db).is_ok());
@@ -1632,7 +1632,7 @@ mod tests {
         with_relay_fixture(|db, home, _, _| {
             let alias = home.join("workspace").join("tools-alias");
             assert!(crate::plugins::test_support::create_dir_link(&alias, &home.join("relay-tools")));
-            assert!(read_file_blocking(db, &alias.join("legacy.toml").to_string_lossy()).is_err());
+            assert!(read_file_blocking(db, &alias.join("legacy.toml").to_string_lossy(), None).is_err());
             assert!(ensure_allowed(&alias.join("uncreated/deep/file").to_string_lossy(), db).is_err());
             let root = home.join("workspace");
             assert!(!list_dir_blocking(db, &root.to_string_lossy(), None).unwrap().iter().any(|entry| entry.name == "tools-alias"));
