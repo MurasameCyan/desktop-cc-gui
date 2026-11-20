@@ -6,13 +6,22 @@ import i18n from "@/lib/i18n";
 import { Composer, StatusBar, type ComposerInputHandle } from "./ai-chat-composer";
 import { getProxyQuickToggleAction } from "./proxy-toggle";
 import { ipc, type AppSettings } from "@/lib/ipc";
-import * as events from "@/lib/events";
 import { extractText, FILE_TAG_CLASS, getCaretOffset } from "./file-tags";
 import {
   clearPromptHistory,
   recordPrompt,
   setPromptHistoryEnabled,
 } from "@/features/chat/prompt-history";
+
+// The IPC settings subscription runs at import time, before per-test spies.
+// Keep this UI suite offline while preserving the real typed IPC wrappers.
+vi.mock("@/lib/transport", () => ({
+  isWeb: false,
+  invoke: vi.fn(async (command: string) => {
+    throw new Error(`Unexpected IPC command in composer UI test: ${command}`);
+  }),
+  listen: vi.fn(async () => () => {}),
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -554,9 +563,6 @@ describe("代理快捷开关文案", () => {
   // proxyOff/proxyTipOff 曾被误删而组件仍引用它们，纯函数测试发现不了——
   // 只有真的渲染这个状态才能钉住。代理开关挂在 StatusBar 上。
   it("已配置但关闭时显示中文开关文案，而不是词条编号", async () => {
-    // This component test has no desktop bridge; do not leave a reconnect
-    // timer running after jsdom is torn down.
-    vi.spyOn(events, "listenSettingsChanged").mockResolvedValue(() => {});
     vi.spyOn(ipc, "getAppSettings").mockResolvedValue({
       systemProxyEnabled: false,
       systemProxyUrl: "http://127.0.0.1:7890",
