@@ -217,7 +217,8 @@ describe("#1521 text reference acceptance", () => {
 
   it.each(["closed", "open editor", "preview", "shortened"])("locates reloaded history in a %s file", async (scenario) => {
     await loadHistory(QUOTE);
-    transport.readFile.mockResolvedValue(file(scenario === "shortened" ? "only remaining line" : "top\nnew two\nnew three\nlast"));
+    const currentText = scenario === "shortened" ? "only remaining line" : "top\nnew two\nnew three\nlast";
+    transport.readFile.mockResolvedValue(file(currentText));
     if (scenario === "preview" || scenario === "open editor") {
       await act(async () => useFilesStore.getState().openFile(FILE));
       expect(container.querySelector(".cm-editor")).toBeNull();
@@ -232,11 +233,11 @@ describe("#1521 text reference acceptance", () => {
       await act(async () => button(HEADER)!.click());
       expect(useFilesStore.getState().fileStates[FILE]?.loading).toBe(true);
       expect(container.querySelector(".cm-editor")).toBeNull();
-      await act(async () => finishRead(file("top\nnew two\nnew three\nlast")));
+      await act(async () => finishRead(file(currentText)));
     } else {
       await act(async () => button(HEADER)!.click());
     }
-    expect(transport.readFile).toHaveBeenCalledExactlyOnceWith(FILE);
+    expect(editor().state.doc.toString()).toBe(currentText);
     expect(useFilesStore.getState().activeFilePath).toBe(FILE);
     expect(selectedText()).toBe(scenario === "shortened" ? "only remaining line" : "new two\nnew three");
     expect(container.textContent).toContain(">     unsaved");
